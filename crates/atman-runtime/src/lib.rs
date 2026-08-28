@@ -43,6 +43,7 @@ pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
 pub mod permission;
+pub mod permission_audit;
 pub mod projection;
 pub mod provider;
 pub mod providers;

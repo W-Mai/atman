@@ -106,6 +106,9 @@ fn build_workflow_of_size(target: usize) -> WorkflowGraph {
     WorkflowGraph {
         turn_id: TurnId::now(),
         root: vec![root],
+        permission_requests: Default::default(),
+        permission_groups: Default::default(),
+        resolved_permission_groups: Default::default(),
     }
 }
 

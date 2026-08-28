@@ -83,6 +83,15 @@ pub enum TranscriptEntry {
         node_id: Option<String>,
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
+    PermissionRequest {
+        identity: crate::workflow::WorkflowPermissionIdentity,
+        payload: Box<crate::permission_audit::PermissionRequestAudit>,
+        state: crate::workflow::WorkflowPermissionState,
+    },
+    PermissionGroup {
+        payload: crate::permission_audit::PermissionGroupAudit,
+        resolved: bool,
+    },
     TerminalFinalState {
         handle: String,
         screen: crate::tools::term::TerminalScreen,
@@ -202,6 +211,58 @@ pub fn apply_attachment_patches(msg: &mut Message, patches: &[AttachmentPatch]) 
     }
 }
 
+fn legacy_permission_payload(
+    value: &serde_json::Value,
+    run_id: event::FlowRunId,
+    tool_use_id: String,
+    actor_label: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> crate::permission_audit::PermissionRequestAudit {
+    use crate::permission_audit::{
+        PermissionAuditTarget, PermissionPolicyReference, PermissionProjectionActor,
+        PermissionProvenanceSummary, PermissionRequestAudit,
+    };
+
+    PermissionRequestAudit {
+        request_id: None,
+        session_id: "legacy:unknown".into(),
+        requesting_run_id: run_id.clone(),
+        parent_run_id: None,
+        root_run_id: run_id,
+        tool_use_id,
+        tool: value["tool_name"]
+            .as_str()
+            .unwrap_or("unknown legacy tool")
+            .into(),
+        tier: crate::tool::Tier::Zero,
+        provenance: PermissionProvenanceSummary {
+            cwd: None,
+            path: None,
+            path_origin: Some("legacy_unknown".into()),
+            workspace_id: None,
+            workspace_root: None,
+            repository_root: None,
+            network: false,
+            risks: Default::default(),
+            targets: Vec::new(),
+        },
+        target: PermissionAuditTarget::User,
+        group_ids: Vec::new(),
+        policy: PermissionPolicyReference {
+            snapshot_id: "legacy:unknown".into(),
+            rule_id: "legacy approval event; policy unavailable".into(),
+        },
+        escalation_path: Vec::new(),
+        decision_id: None,
+        actor: Some(PermissionProjectionActor::UnknownLegacy {
+            label: actor_label.into(),
+        }),
+        scope: None,
+        reason: value["reason"].as_str().map(String::from),
+        at,
+    }
+}
+
 pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, SessionOpenError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -259,6 +320,15 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
     let mut out = Vec::new();
     let mut msg_indices: Vec<usize> = Vec::new();
     let mut msg_seqs: Vec<u64> = Vec::new();
+    let mut pending_permissions: std::collections::BTreeMap<
+        crate::workflow::WorkflowPermissionIdentity,
+        crate::permission_audit::PermissionRequestAudit,
+    > = std::collections::BTreeMap::new();
+    let mut legacy_pending: std::collections::HashMap<
+        (String, String),
+        Vec<crate::workflow::WorkflowPermissionIdentity>,
+    > = std::collections::HashMap::new();
+    let mut canonical_permissions = std::collections::HashSet::new();
     for v in &values {
         let ty = v["type"].as_str().unwrap_or("");
         match ty {
@@ -464,6 +534,151 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     ts,
                 });
             }
+            "tool_pending_approval" | "tool_approved" | "tool_denied" => {
+                let Some(run_id) = v["run_id"]
+                    .as_str()
+                    .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+                    .map(event::FlowRunId)
+                else {
+                    continue;
+                };
+                let tool_use_id = v["tool_use_id"].as_str().unwrap_or_default().to_string();
+                if tool_use_id.is_empty() {
+                    continue;
+                }
+                let seq = v["seq"].as_u64().unwrap_or(0);
+                let correlation = (run_id.0.to_string(), tool_use_id.clone());
+                if canonical_permissions.contains(&correlation) {
+                    continue;
+                }
+                let identity = if ty == "tool_pending_approval" {
+                    let identity = crate::workflow::WorkflowPermissionIdentity::Legacy {
+                        seq,
+                        run_id: run_id.0.to_string(),
+                        tool_use_id: tool_use_id.clone(),
+                    };
+                    legacy_pending
+                        .entry(correlation.clone())
+                        .or_default()
+                        .push(identity.clone());
+                    identity
+                } else {
+                    legacy_pending
+                        .get_mut(&correlation)
+                        .and_then(Vec::pop)
+                        .unwrap_or_else(|| crate::workflow::WorkflowPermissionIdentity::Legacy {
+                            seq,
+                            run_id: run_id.0.to_string(),
+                            tool_use_id: tool_use_id.clone(),
+                        })
+                };
+                let state = match ty {
+                    "tool_pending_approval" => crate::workflow::WorkflowPermissionState::Pending,
+                    "tool_approved" => crate::workflow::WorkflowPermissionState::Approved,
+                    "tool_denied" => crate::workflow::WorkflowPermissionState::Denied,
+                    _ => unreachable!(),
+                };
+                let actor_label = match ty {
+                    "tool_pending_approval" => "legacy approval actor unavailable",
+                    "tool_approved" => "legacy approver unavailable",
+                    "tool_denied" => "legacy denier unavailable",
+                    _ => unreachable!(),
+                };
+                let at = parse_ts(v).unwrap_or_else(chrono::Utc::now);
+                let payload = if state.is_pending() {
+                    legacy_permission_payload(v, run_id, tool_use_id, actor_label, at)
+                } else if let Some(pending) = pending_permissions.get(&identity) {
+                    let mut payload = pending.clone();
+                    payload.actor = Some(
+                        crate::permission_audit::PermissionProjectionActor::UnknownLegacy {
+                            label: actor_label.into(),
+                        },
+                    );
+                    payload.reason = v["reason"].as_str().map(String::from);
+                    payload.at = at;
+                    payload
+                } else {
+                    legacy_permission_payload(v, run_id, tool_use_id, actor_label, at)
+                };
+                if state.is_pending() {
+                    pending_permissions.insert(identity.clone(), payload.clone());
+                } else {
+                    pending_permissions.remove(&identity);
+                }
+                out.push(TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload: Box::new(payload),
+                    state,
+                });
+            }
+            "permission_request_created"
+            | "permission_request_targeted"
+            | "permission_request_deferred"
+            | "permission_request_approved"
+            | "permission_request_denied"
+            | "permission_request_cancelled"
+            | "unrestricted_execution" => {
+                let Some(payload) = v.get("payload").and_then(|payload| {
+                    serde_json::from_value::<crate::permission_audit::PermissionRequestAudit>(
+                        payload.clone(),
+                    )
+                    .ok()
+                }) else {
+                    continue;
+                };
+                let state = match ty {
+                    "permission_request_created"
+                    | "permission_request_targeted"
+                    | "permission_request_deferred" => {
+                        crate::workflow::WorkflowPermissionState::Pending
+                    }
+                    "permission_request_approved" => {
+                        crate::workflow::WorkflowPermissionState::Approved
+                    }
+                    "permission_request_denied" => crate::workflow::WorkflowPermissionState::Denied,
+                    "permission_request_cancelled" => {
+                        crate::workflow::WorkflowPermissionState::Cancelled
+                    }
+                    "unrestricted_execution" => {
+                        crate::workflow::WorkflowPermissionState::Unrestricted
+                    }
+                    _ => unreachable!(),
+                };
+                let Some(request_id) = payload.request_id.clone() else {
+                    continue;
+                };
+                canonical_permissions.insert((
+                    payload.requesting_run_id.0.to_string(),
+                    payload.tool_use_id.clone(),
+                ));
+                let identity =
+                    crate::workflow::WorkflowPermissionIdentity::Canonical { request_id };
+                if state.is_pending() {
+                    pending_permissions.insert(identity.clone(), payload.clone());
+                } else {
+                    pending_permissions.remove(&identity);
+                }
+                out.push(TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload: Box::new(payload),
+                    state,
+                });
+            }
+            "permission_group_created"
+            | "permission_group_updated"
+            | "permission_group_resolved" => {
+                if let Some(payload) = v.get("payload").and_then(|payload| {
+                    serde_json::from_value::<crate::permission_audit::PermissionGroupAudit>(
+                        payload.clone(),
+                    )
+                    .ok()
+                }) {
+                    out.push(TranscriptEntry::PermissionGroup {
+                        payload,
+                        resolved: ty == "permission_group_resolved",
+                    });
+                }
+            }
             "terminal_final_state" => {
                 let handle = v["handle"].as_str().unwrap_or("").to_string();
                 if let Some(screen) = v.get("screen")
@@ -483,6 +698,18 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             _ => {}
         }
     }
+    out.extend(
+        pending_permissions
+            .into_iter()
+            .map(|(identity, mut payload)| {
+                payload.reason = Some("interrupted at end of persisted history".into());
+                TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload: Box::new(payload),
+                    state: crate::workflow::WorkflowPermissionState::Interrupted,
+                }
+            }),
+    );
     Ok(out)
 }
 
@@ -683,6 +910,36 @@ mod tests {
         }
     }
 
+    fn canonical_permission_payload(
+        run_id: FlowRunId,
+        tool_use_id: &str,
+        actor: crate::permission_audit::PermissionProjectionActor,
+    ) -> crate::permission_audit::PermissionRequestAudit {
+        crate::permission_audit::PermissionRequestAudit {
+            request_id: Some(crate::permission::PermissionRequestId(Uuid::now_v7())),
+            session_id: "session".into(),
+            requesting_run_id: run_id.clone(),
+            parent_run_id: None,
+            root_run_id: run_id,
+            tool_use_id: tool_use_id.into(),
+            tool: "fs.read".into(),
+            tier: crate::tool::Tier::Two,
+            provenance: Default::default(),
+            target: crate::permission_audit::PermissionAuditTarget::User,
+            group_ids: Vec::new(),
+            policy: crate::permission_audit::PermissionPolicyReference {
+                snapshot_id: "snapshot".into(),
+                rule_id: "rule".into(),
+            },
+            escalation_path: Vec::new(),
+            decision_id: Some(format!("decision-{tool_use_id}")),
+            actor: Some(actor),
+            scope: None,
+            reason: None,
+            at: chrono::Utc::now(),
+        }
+    }
+
     #[test]
     fn replay_excludes_subagent_messages() {
         let root = FlowRunId(Uuid::now_v7());
@@ -758,5 +1015,207 @@ mod tests {
         let messages = super::MessageProjection::to_messages(envelopes.as_slice());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text_concat(), "orphan");
+    }
+
+    #[test]
+    fn s8_immediate_canonical_decisions_suppress_paired_legacy_identities() {
+        use crate::permission_audit::PermissionProjectionActor;
+        use crate::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let run = FlowRunId(Uuid::now_v7());
+        let cases = [
+            (
+                "auto",
+                "permission_request_approved",
+                "tool_approved",
+                PermissionProjectionActor::Policy {
+                    policy_version: "snapshot".into(),
+                    rule_id: "auto".into(),
+                },
+                WorkflowPermissionState::Approved,
+            ),
+            (
+                "grant",
+                "permission_request_approved",
+                "tool_approved",
+                PermissionProjectionActor::User {
+                    session_id: "session".into(),
+                    principal_id: Some("grant-owner".into()),
+                },
+                WorkflowPermissionState::Approved,
+            ),
+            (
+                "denied",
+                "permission_request_denied",
+                "tool_denied",
+                PermissionProjectionActor::Policy {
+                    policy_version: "snapshot".into(),
+                    rule_id: "deny".into(),
+                },
+                WorkflowPermissionState::Denied,
+            ),
+            (
+                "unrestricted",
+                "unrestricted_execution",
+                "tool_approved",
+                PermissionProjectionActor::Policy {
+                    policy_version: "snapshot".into(),
+                    rule_id: "unrestricted".into(),
+                },
+                WorkflowPermissionState::Unrestricted,
+            ),
+        ];
+        let mut lines = Vec::new();
+        for (index, (tool_use_id, canonical_type, legacy_type, actor, _)) in
+            cases.iter().enumerate()
+        {
+            let payload = canonical_permission_payload(run.clone(), tool_use_id, actor.clone());
+            let seq = (index * 2 + 1) as u64;
+            lines.push(
+                serde_json::json!({"type":canonical_type,"seq":seq,"payload":payload}).to_string(),
+            );
+            lines.push(
+                serde_json::json!({"type":legacy_type,"seq":seq + 1,"run_id":run.0.to_string(),"tool_use_id":tool_use_id,"decided_by":"legacy-adapter","reason":"legacy denial"})
+                    .to_string(),
+            );
+        }
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let entries = super::replay_transcript_from(&path).unwrap();
+        let permissions = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                super::TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload,
+                    state,
+                } => Some((identity, payload, state)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(permissions.len(), cases.len());
+        for ((identity, payload, state), (tool_use_id, _, _, actor, expected_state)) in
+            permissions.into_iter().zip(cases)
+        {
+            assert!(matches!(
+                identity,
+                WorkflowPermissionIdentity::Canonical { .. }
+            ));
+            assert_eq!(payload.tool_use_id, tool_use_id);
+            assert_eq!(payload.actor.as_ref(), Some(&actor));
+            assert_eq!(*state, expected_state);
+        }
+    }
+
+    #[test]
+    fn legacy_approval_replay_correlates_repeated_exact_tool_lifecycles() {
+        use crate::permission_audit::PermissionProjectionActor;
+        use crate::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let run = Uuid::now_v7().to_string();
+        let lines = [
+            serde_json::json!({"type":"tool_pending_approval","seq":10,"run_id":run,"tool_use_id":"same","tool_name":"fs.write","args_preview":"{}","level":"approve"}),
+            serde_json::json!({"type":"tool_approved","seq":11,"run_id":run,"tool_use_id":"same","decided_by":"user"}),
+            serde_json::json!({"type":"tool_pending_approval","seq":12,"run_id":run,"tool_use_id":"same","tool_name":"fs.edit","args_preview":"{}","level":"approve"}),
+            serde_json::json!({"type":"tool_denied","seq":13,"run_id":run,"tool_use_id":"same","reason":"no"}),
+            serde_json::json!({"type":"tool_approved","seq":14,"run_id":run,"tool_use_id":"orphan","decided_by":"user"}),
+        ];
+        std::fs::write(
+            &path,
+            lines
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let entries = super::replay_transcript_from(&path).unwrap();
+        let finals = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                super::TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload,
+                    state,
+                } if !state.is_pending() => Some((identity, payload, state)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finals.len(), 3);
+        assert_eq!(
+            finals[0].0,
+            &WorkflowPermissionIdentity::Legacy {
+                seq: 10,
+                run_id: run.clone(),
+                tool_use_id: "same".into(),
+            }
+        );
+        assert_eq!(finals[0].1.tool, "fs.write");
+        assert_eq!(*finals[0].2, WorkflowPermissionState::Approved);
+        assert_eq!(
+            finals[1].0,
+            &WorkflowPermissionIdentity::Legacy {
+                seq: 12,
+                run_id: run.clone(),
+                tool_use_id: "same".into(),
+            }
+        );
+        assert_eq!(finals[1].1.tool, "fs.edit");
+        assert_eq!(*finals[1].2, WorkflowPermissionState::Denied);
+        assert_eq!(
+            finals[2].0,
+            &WorkflowPermissionIdentity::Legacy {
+                seq: 14,
+                run_id: run,
+                tool_use_id: "orphan".into(),
+            }
+        );
+        assert!(finals.iter().all(|(_, payload, _)| {
+            payload.request_id.is_none()
+                && matches!(
+                    payload.actor,
+                    Some(PermissionProjectionActor::UnknownLegacy { .. })
+                )
+        }));
+    }
+
+    #[test]
+    fn unresolved_legacy_pending_replays_as_interrupted_with_origin_identity() {
+        use crate::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let run = Uuid::now_v7().to_string();
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"tool_pending_approval","seq":21,"run_id":run,"tool_use_id":"pending","tool_name":"bash.spawn","args_preview":"{}","level":"approve"}).to_string(),
+        ).unwrap();
+
+        let entries = super::replay_transcript_from(&path).unwrap();
+        let (identity, payload) = entries
+            .iter()
+            .find_map(|entry| match entry {
+                super::TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload,
+                    state: WorkflowPermissionState::Interrupted,
+                } => Some((identity, payload)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            identity,
+            &WorkflowPermissionIdentity::Legacy {
+                seq: 21,
+                run_id: run,
+                tool_use_id: "pending".into(),
+            }
+        );
+        assert_eq!(payload.tool, "bash.spawn");
     }
 }

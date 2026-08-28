@@ -473,6 +473,30 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     *ts,
                 );
             }
+            TranscriptEntry::PermissionRequest {
+                identity,
+                payload,
+                state,
+            } => {
+                let run_id = payload.requesting_run_id.0.to_string();
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
+                if let Some(OutputItem::WorkflowPanel { graph, .. }) = out.get_mut(panel_idx) {
+                    graph.apply_permission_request_with_identity(identity.clone(), payload, *state);
+                }
+            }
+            TranscriptEntry::PermissionGroup { payload, resolved } => {
+                let run_id = payload.owner_run_id.0.to_string();
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
+                if let Some(OutputItem::WorkflowPanel { graph, .. }) = out.get_mut(panel_idx) {
+                    graph.apply_permission_group(payload, *resolved);
+                }
+            }
             TranscriptEntry::TerminalFinalState { handle, screen } => {
                 for item in out.iter_mut() {
                     if let OutputItem::Terminal {
@@ -520,6 +544,30 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             // Rebuild workflow_graph from transcript entries belonging to this
             // sub-agent (identified by transitive closure of spawned flows).
             for entry in entries {
+                match entry {
+                    TranscriptEntry::PermissionRequest {
+                        identity,
+                        payload,
+                        state,
+                    } if find_spawned_root(&payload.requesting_run_id.0.to_string())
+                        == Some(root_id.clone()) =>
+                    {
+                        workflow_graph.apply_permission_request_with_identity(
+                            identity.clone(),
+                            payload,
+                            *state,
+                        );
+                        continue;
+                    }
+                    TranscriptEntry::PermissionGroup { payload, resolved }
+                        if find_spawned_root(&payload.owner_run_id.0.to_string())
+                            == Some(root_id.clone()) =>
+                    {
+                        workflow_graph.apply_permission_group(payload, *resolved);
+                        continue;
+                    }
+                    _ => {}
+                }
                 let (frame, ts) = match entry {
                     TranscriptEntry::FlowStart {
                         run_id,
@@ -654,12 +702,23 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     }
     // A restored session cannot have a flow still running.
     for item in out.iter_mut() {
-        if let OutputItem::WorkflowPanel { ended_at: e, .. } = item {
+        if let OutputItem::WorkflowPanel {
+            graph, ended_at: e, ..
+        } = item
+        {
+            graph.interrupt_pending_permissions();
             if e.is_none() {
                 *e = Some(Instant::now());
             }
         }
-        if let OutputItem::SubAgentActivity { done, status, .. } = item {
+        if let OutputItem::SubAgentActivity {
+            done,
+            status,
+            workflow_graph,
+            ..
+        } = item
+        {
+            workflow_graph.interrupt_pending_permissions();
             if !*done {
                 *done = true;
                 *status = "interrupted".into();

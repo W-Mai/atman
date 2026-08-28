@@ -78,6 +78,9 @@ pub fn build_boot_graph() -> WorkflowGraph {
     WorkflowGraph {
         turn_id: TurnId::now(),
         root,
+        permission_requests: Default::default(),
+        permission_groups: Default::default(),
+        resolved_permission_groups: Default::default(),
     }
 }
 

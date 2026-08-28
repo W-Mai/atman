@@ -273,6 +273,42 @@ pub enum Event {
         tool_use_id: String,
         reason: String,
     },
+    PermissionRequestCreated {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestTargeted {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestDeferred {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestApproved {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestDenied {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestCancelled {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionGroupCreated {
+        payload: crate::permission_audit::PermissionGroupAudit,
+    },
+    PermissionGroupUpdated {
+        payload: crate::permission_audit::PermissionGroupAudit,
+    },
+    PermissionGroupResolved {
+        payload: crate::permission_audit::PermissionGroupAudit,
+    },
+    PermissionGrantCreated {
+        payload: crate::permission_audit::PermissionGrantAudit,
+    },
+    PermissionGrantExpired {
+        payload: crate::permission_audit::PermissionGrantAudit,
+    },
+    UnrestrictedExecution {
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
     /// Persisted when a terminal's reader loop exits (normal exit or kill).
     /// Carries the last screen state so TUI restore can show it instead of
     /// the empty placeholder from the spawn-time ToolResultMsg.

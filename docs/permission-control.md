@@ -165,6 +165,14 @@ Controlled execution requires a complete trusted invocation context. Missing bro
 
 A strict sandbox denial is final for that invocation. The runtime never converts it into an unrestricted retry.
 
+## Audit events
+
+Permission lifecycle changes are projected to both the persisted event log and the live stream. The public event families cover request creation, targeting, deferral, approval, denial, and cancellation; group creation, update, and resolution; grant creation and expiry; and unrestricted execution.
+
+Each record includes its stable request or grant identity, Flow ancestry, policy reference, authority actor, scope, reason, and a bounded provenance summary. The summary includes resolved resource targets needed for audit without copying tool arguments or arbitrary payloads.
+
+Records produced by one broker operation are emitted only after the operation commits. Failed atomic batches emit no partial records, and a successful approval is emitted immediately before its corresponding persistent grant. Lifecycle cleanup records identify a system component rather than inheriting the original decision actor.
+
 ## Configuration reference
 
 A complete Eager configuration can look like this:

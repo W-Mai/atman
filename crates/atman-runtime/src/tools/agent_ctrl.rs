@@ -148,7 +148,11 @@ impl crate::watch::Watchable for FlowEntry {
 /// Observes flow terminal transitions while the lifecycle arbitration is held, so
 /// subsystems keyed by run liveness can be updated inside the same linearization point.
 pub(crate) trait FlowTerminalObserver: Send + Sync {
-    fn flow_became_terminal(&self, session_id: &str, run_id: &FlowRunId);
+    fn flow_became_terminal(
+        &self,
+        session_id: &str,
+        run_id: &FlowRunId,
+    ) -> Option<Box<dyn FnOnce() + Send>>;
 }
 
 #[derive(Default)]
@@ -385,12 +389,15 @@ impl FlowRegistry {
     }
 
     pub fn mark_terminal(&self, run_id: &FlowRunId) {
-        self.with_lifecycle_arbitration(|| self.mark_terminal_locked(run_id));
+        let completions = self.with_lifecycle_arbitration(|| self.mark_terminal_locked(run_id));
+        for completion in completions {
+            completion();
+        }
     }
 
-    fn mark_terminal_locked(&self, run_id: &FlowRunId) {
+    fn mark_terminal_locked(&self, run_id: &FlowRunId) -> Vec<Box<dyn FnOnce() + Send>> {
         let Some(identity) = self.lookup_run(run_id) else {
-            return;
+            return Vec::new();
         };
         *identity.execution_state.lock().unwrap() =
             crate::flow_authority::FlowExecutionState::Terminal;
@@ -402,9 +409,10 @@ impl FlowRegistry {
                 .filter_map(std::sync::Weak::upgrade)
                 .collect()
         };
-        for observer in observers {
-            observer.flow_became_terminal(&identity.session_id, run_id);
-        }
+        observers
+            .into_iter()
+            .filter_map(|observer| observer.flow_became_terminal(&identity.session_id, run_id))
+            .collect()
     }
 
     pub fn lifecycle_guard(self: &Arc<Self>, run_id: &FlowRunId) -> FlowLifecycleGuard {

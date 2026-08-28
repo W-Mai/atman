@@ -388,6 +388,8 @@ fn item_content_hash(
             5u8.hash(&mut h);
             turn_index.hash(&mut h);
             graph.root.len().hash(&mut h);
+            format!("{:?}", graph.permission_requests).hash(&mut h);
+            format!("{:?}", graph.permission_groups).hash(&mut h);
             expanded_nodes.len().hash(&mut h);
             panel_expanded.hash(&mut h);
             started_at.hash(&mut h);
@@ -2620,6 +2622,95 @@ fn format_workflow_stats_footer(
     Line::from(Span::styled(bottom_text, border_style))
 }
 
+fn permission_summary(graph: &atman_runtime::workflow::WorkflowGraph) -> Option<String> {
+    use atman_runtime::workflow::WorkflowPermissionState;
+    let mut counts = [0usize; 6];
+    for request in graph.permission_requests.values() {
+        let index = match request.state {
+            WorkflowPermissionState::Pending => 0,
+            WorkflowPermissionState::Approved => 1,
+            WorkflowPermissionState::Denied => 2,
+            WorkflowPermissionState::Cancelled => 3,
+            WorkflowPermissionState::Interrupted => 4,
+            WorkflowPermissionState::Unrestricted => 5,
+        };
+        counts[index] += 1;
+    }
+    if counts.iter().all(|count| *count == 0) && graph.permission_groups.is_empty() {
+        return None;
+    }
+    let labels = [
+        "pending",
+        "approved",
+        "denied",
+        "cancelled",
+        "interrupted",
+        "unrestricted",
+    ];
+    let mut parts = counts
+        .into_iter()
+        .zip(labels)
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}"))
+        .collect::<Vec<_>>();
+    if !graph.permission_groups.is_empty() {
+        parts.push(format!("{} groups", graph.permission_groups.len()));
+    }
+    Some(format!("permissions · {}", parts.join(" · ")))
+}
+
+fn append_permission_details(
+    lines: &mut Vec<Line<'static>>,
+    graph: &atman_runtime::workflow::WorkflowGraph,
+) {
+    use atman_runtime::workflow::permission_preview;
+    if graph.permission_requests.is_empty() && graph.permission_groups.is_empty() {
+        return;
+    }
+    let t = crate::theme::theme();
+    lines.push(Line::from(Span::styled(
+        " permissions",
+        Style::default()
+            .fg(t.accent.into())
+            .add_modifier(Modifier::BOLD),
+    )));
+    for request in graph.permission_requests.values() {
+        lines.push(Line::from(Span::styled(
+            format!("  {:?} · {}", request.state, request.payload.tool),
+            Style::default().fg(t.tinted_fg.into()),
+        )));
+        if let Some(detail) = permission_preview(&request.payload) {
+            for detail_line in detail.lines() {
+                lines.push(Line::from(Span::raw(format!("    {detail_line}"))));
+            }
+        }
+    }
+    for group in graph.permission_groups.values() {
+        let resolved = group
+            .request_ids
+            .iter()
+            .filter(|id| {
+                graph
+                    .permission_requests
+                    .get(
+                        &atman_runtime::workflow::WorkflowPermissionIdentity::Canonical {
+                            request_id: (*id).clone(),
+                        },
+                    )
+                    .is_some_and(|request| !request.state.is_pending())
+            })
+            .count();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  group · {} · {resolved}/{} resolved",
+                group.label,
+                group.request_ids.len()
+            ),
+            Style::default().fg(t.tinted_fg.into()),
+        )));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_workflow_panel(
     graph: &atman_runtime::workflow::WorkflowGraph,
@@ -2693,6 +2784,13 @@ pub fn render_workflow_panel_with_regions(
         );
     }
     let mut lines = vec![header];
+    if let Some(summary) = permission_summary(graph) {
+        lines.push(Line::from(Span::styled(
+            format!("  {summary}"),
+            Style::default().fg(t.tinted_fg.into()),
+        )));
+    }
+    append_permission_details(&mut lines, graph);
     let mut regions: Vec<NodeRegion> = Vec::new();
     // Register header click region so the expanded panel can be collapsed
     // by clicking the header (path_key="" triggers toggle_workflow_panel_expansion).
@@ -4492,6 +4590,9 @@ mod tests {
                 approval: None,
                 llm_stats: None,
             }],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
         };
         let item = OutputItem::WorkflowPanel {
             turn_index: 0,
@@ -5362,6 +5463,9 @@ mod tests {
         let graph = WorkflowGraph {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
             render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
@@ -5388,6 +5492,9 @@ mod tests {
         let graph = WorkflowGraph {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
             render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
@@ -5415,6 +5522,9 @@ mod tests {
         let graph = WorkflowGraph {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
         };
         let (lines, regions) =
             render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
@@ -5446,6 +5556,9 @@ mod tests {
         let graph = WorkflowGraph {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
             render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);

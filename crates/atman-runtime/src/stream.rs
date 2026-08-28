@@ -145,6 +145,54 @@ pub enum StreamFrame {
         tool_use_id: String,
         reason: String,
     },
+    PermissionRequestCreated {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestTargeted {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestDeferred {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestApproved {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestDenied {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionRequestCancelled {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
+    PermissionGroupCreated {
+        run_id: String,
+        payload: crate::permission_audit::PermissionGroupAudit,
+    },
+    PermissionGroupUpdated {
+        run_id: String,
+        payload: crate::permission_audit::PermissionGroupAudit,
+    },
+    PermissionGroupResolved {
+        run_id: String,
+        payload: crate::permission_audit::PermissionGroupAudit,
+    },
+    PermissionGrantCreated {
+        run_id: String,
+        payload: crate::permission_audit::PermissionGrantAudit,
+    },
+    PermissionGrantExpired {
+        run_id: String,
+        payload: crate::permission_audit::PermissionGrantAudit,
+    },
+    UnrestrictedExecution {
+        run_id: String,
+        payload: crate::permission_audit::PermissionRequestAudit,
+    },
     TerminalChunk {
         handle: String,
         bytes: Vec<u8>,
@@ -218,7 +266,22 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
         | StreamFrame::FlowNodeEnd { run_id, .. }
         | StreamFrame::FlowDone { run_id, .. }
         | StreamFrame::FlowGraph { run_id, .. }
-        | StreamFrame::ToolNode { run_id, .. } => Some(run_id.as_str()),
+        | StreamFrame::ToolNode { run_id, .. }
+        | StreamFrame::ToolPendingApproval { run_id, .. }
+        | StreamFrame::ToolApproved { run_id, .. }
+        | StreamFrame::ToolDenied { run_id, .. }
+        | StreamFrame::PermissionRequestCreated { run_id, .. }
+        | StreamFrame::PermissionRequestTargeted { run_id, .. }
+        | StreamFrame::PermissionRequestDeferred { run_id, .. }
+        | StreamFrame::PermissionRequestApproved { run_id, .. }
+        | StreamFrame::PermissionRequestDenied { run_id, .. }
+        | StreamFrame::PermissionRequestCancelled { run_id, .. }
+        | StreamFrame::PermissionGroupCreated { run_id, .. }
+        | StreamFrame::PermissionGroupUpdated { run_id, .. }
+        | StreamFrame::PermissionGroupResolved { run_id, .. }
+        | StreamFrame::PermissionGrantCreated { run_id, .. }
+        | StreamFrame::PermissionGrantExpired { run_id, .. }
+        | StreamFrame::UnrestrictedExecution { run_id, .. } => Some(run_id.as_str()),
         StreamFrame::AssistantMsg {
             flow_run_id: Some(rid),
             ..

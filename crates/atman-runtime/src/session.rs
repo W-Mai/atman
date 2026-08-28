@@ -684,12 +684,19 @@ impl PersistedContextState {
 /// Builds the flow registry and its permission broker as one unit. The broker
 /// authenticates requesters against this exact registry, so both must be the
 /// same Arc for every session constructor.
-fn new_permission_pipeline() -> (
+fn new_permission_pipeline(
+    sink: &EventSink,
+    stream: &broadcast::Sender<StreamFrame>,
+) -> (
     std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
     std::sync::Arc<crate::permission::PermissionBroker>,
 ) {
     let flow_registry = std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
     let broker = crate::permission::PermissionBroker::shared(std::sync::Arc::clone(&flow_registry));
+    broker.set_audit_projector(crate::permission_audit::PermissionAuditProjector::new(
+        sink.clone(),
+        stream.clone(),
+    ));
     (flow_registry, broker)
 }
 
@@ -792,7 +799,7 @@ impl Session {
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
-        let (flow_registry, permission_broker) = new_permission_pipeline();
+        let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
         Ok(Self {
             id,
             dir,
@@ -954,7 +961,7 @@ impl Session {
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
-        let (flow_registry, permission_broker) = new_permission_pipeline();
+        let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
         Ok(Self {
             id,
             dir,
@@ -1017,7 +1024,7 @@ impl Session {
         let sink = EventSink::new();
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
-        let (flow_registry, permission_broker) = new_permission_pipeline();
+        let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -2106,7 +2113,67 @@ fn extract_mermaid_blocks(msg: &crate::message::Message) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use tempfile::TempDir;
+
+    fn permission_authority() -> crate::flow_authority::EffectiveAuthority {
+        use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind};
+        crate::flow_authority::EffectiveAuthority {
+            execution_policy: ExecutionPolicy::Controlled,
+            allowed_tiers: [true; 5],
+            allowed_risks: BTreeSet::from([
+                RiskKind::Network,
+                RiskKind::WorkspaceExternal,
+                RiskKind::Irreversible,
+                RiskKind::FilesystemWrite,
+                RiskKind::ProcessSpawn,
+                RiskKind::RepositoryMutation,
+            ]),
+            tier_ceiling: [PolicyAction::Auto; 5],
+            risk_ceiling: [PolicyAction::Auto; 6],
+            shell: true,
+            permission_management: true,
+            workspace_root: None,
+        }
+    }
+
+    fn submit_session_permission(session: &Session) -> crate::permission::PermissionRequestId {
+        let identity = session
+            .flow_registry
+            .register_root(
+                session.id().to_string(),
+                crate::event::FlowRunId::now(),
+                permission_authority(),
+            )
+            .unwrap();
+        let intent = crate::permission::PermissionIntent {
+            tool_use_id: "session-constructor-call".into(),
+            tool_name: "bash.spawn".into(),
+            tier: crate::tool::Tier::Two,
+            risks: BTreeSet::new(),
+            args_digest: "sha256:session-constructor".into(),
+            preview: None,
+            provenance: crate::permission::ResourceProvenance::none(),
+        };
+        let policy = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Steady,
+            ..crate::trust::TrustConfig::default()
+        };
+        let crate::permission::SubmissionOutcome::Pending(pending) = session
+            .permission_broker
+            .submit(
+                Some(&identity.session_id),
+                Some(&identity.run_id),
+                intent,
+                false,
+                &policy,
+            )
+            .unwrap()
+        else {
+            panic!("expected pending session permission");
+        };
+        pending.request.request_id.clone()
+    }
 
     fn write_events(dir: &Path, lines: &[&str]) {
         let path = dir.join("events.jsonl");
@@ -2277,6 +2344,100 @@ mod tests {
                 .permission_broker
                 .is_for_registry(&session_a.flow_registry)
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_persistent_session_persists_permission_before_matching_stream_frame() {
+        let root = TempDir::new().unwrap();
+        let session = Session::open(root.path()).unwrap();
+        let mut stream = session.stream_subscribe();
+
+        let request_id = submit_session_permission(&session);
+
+        assert!(session.sink().snapshot().iter().any(|event| matches!(
+            event,
+            crate::event::Event::PermissionRequestCreated { payload }
+                if payload.request_id.as_ref() == Some(&request_id)
+        )));
+        session.flush_writer().await;
+        let persisted = std::fs::read_to_string(session.dir().join("events.jsonl")).unwrap();
+        let request_id_text = request_id.to_string();
+        assert!(persisted.lines().any(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            value["type"] == "permission_request_created"
+                && value["payload"]["request_id"].as_str() == Some(request_id_text.as_str())
+        }));
+        assert!(matches!(
+            stream.try_recv().unwrap(),
+            StreamFrame::PermissionRequestCreated { payload, .. }
+                if payload.request_id.as_ref() == Some(&request_id)
+        ));
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reopened_and_ephemeral_sessions_install_permission_projectors() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        created.shutdown().await;
+        drop(created);
+
+        let reopened = Session::open_existing(root.path(), &sid).unwrap();
+        let mut reopened_stream = reopened.stream_subscribe();
+        let reopened_id = submit_session_permission(&reopened);
+        assert!(reopened.sink().snapshot().iter().any(|event| matches!(
+            event,
+            crate::event::Event::PermissionRequestCreated { payload }
+                if payload.request_id.as_ref() == Some(&reopened_id)
+        )));
+        assert!(matches!(
+            reopened_stream.try_recv().unwrap(),
+            StreamFrame::PermissionRequestCreated { payload, .. }
+                if payload.request_id.as_ref() == Some(&reopened_id)
+        ));
+        reopened.shutdown().await;
+
+        let ephemeral = Session::open_ephemeral();
+        let mut ephemeral_stream = ephemeral.stream_subscribe();
+        let ephemeral_id = submit_session_permission(&ephemeral);
+        assert!(ephemeral.sink().snapshot().iter().any(|event| matches!(
+            event,
+            crate::event::Event::PermissionRequestCreated { payload }
+                if payload.request_id.as_ref() == Some(&ephemeral_id)
+        )));
+        assert!(matches!(
+            ephemeral_stream.try_recv().unwrap(),
+            StreamFrame::PermissionRequestCreated { payload, .. }
+                if payload.request_id.as_ref() == Some(&ephemeral_id)
+        ));
+    }
+
+    #[tokio::test]
+    async fn reopening_session_does_not_hydrate_permission_broker_state() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        submit_session_permission(&created);
+        created.flush_writer().await;
+        created.shutdown().await;
+        drop(created);
+
+        let reopened = Session::open_existing(root.path(), &sid).unwrap();
+        assert!(reopened.permission_broker.list().is_empty());
+        assert!(reopened.permission_broker.grants().is_empty());
+        let actor = reopened
+            .flow_registry
+            .register_root(sid, crate::event::FlowRunId::now(), permission_authority())
+            .unwrap();
+        assert!(
+            reopened
+                .permission_broker
+                .visible_group_list(&actor)
+                .unwrap()
+                .is_empty()
+        );
+        reopened.shutdown().await;
     }
 
     #[test]

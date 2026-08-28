@@ -2972,6 +2972,18 @@ fn render_stream_frame(
         | StreamFrame::ToolPendingApproval { .. }
         | StreamFrame::ToolApproved { .. }
         | StreamFrame::ToolDenied { .. }
+        | StreamFrame::PermissionRequestCreated { .. }
+        | StreamFrame::PermissionRequestTargeted { .. }
+        | StreamFrame::PermissionRequestDeferred { .. }
+        | StreamFrame::PermissionRequestApproved { .. }
+        | StreamFrame::PermissionRequestDenied { .. }
+        | StreamFrame::PermissionRequestCancelled { .. }
+        | StreamFrame::PermissionGroupCreated { .. }
+        | StreamFrame::PermissionGroupUpdated { .. }
+        | StreamFrame::PermissionGroupResolved { .. }
+        | StreamFrame::PermissionGrantCreated { .. }
+        | StreamFrame::PermissionGrantExpired { .. }
+        | StreamFrame::UnrestrictedExecution { .. }
         | StreamFrame::TerminalChunk { .. }
         | StreamFrame::TerminalExited { .. }
         | StreamFrame::BashChunk { .. }

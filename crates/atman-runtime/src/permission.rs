@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -297,6 +297,7 @@ pub struct PermissionRequest {
     pub root_run_id: FlowRunId,
     pub intent: PermissionIntent,
     pub requirement: AuthorityRequirement,
+    pub policy_reference: crate::permission_audit::PermissionPolicyReference,
     pub state: PermissionRequestState,
     pub escalation_path: Vec<EscalationHop>,
     pub requested_at: DateTime<Utc>,
@@ -541,7 +542,18 @@ struct BrokerState {
     requests: HashMap<PermissionRequestId, RequestEntry>,
     grants: Vec<PermissionGrant>,
     groups: HashMap<PermissionGroupId, PermissionGroup>,
+    resolved_group_audits: BTreeSet<PermissionGroupId>,
+    next_audit_bundle: u64,
+    pending_audit_bundles: BTreeMap<u64, Vec<crate::permission_audit::PermissionAuditRecord>>,
 }
+
+#[derive(Default)]
+struct AuditDispatcher {
+    next_bundle: u64,
+}
+
+#[cfg(test)]
+type AuditDispatchHook = Arc<dyn Fn(u64) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct FlowDecisionAuthority {
@@ -571,6 +583,10 @@ pub struct PermissionBroker {
     broker_id: Uuid,
     flows: Arc<FlowRegistry>,
     state: Mutex<BrokerState>,
+    audit: Mutex<Option<crate::permission_audit::PermissionAuditProjector>>,
+    audit_dispatcher: Mutex<AuditDispatcher>,
+    #[cfg(test)]
+    audit_dispatch_hook: Mutex<Option<AuditDispatchHook>>,
     /// Keeps the registry-observed cleanup hook alive for exactly this broker's lifetime.
     observer: Mutex<Option<Arc<dyn crate::tools::agent_ctrl::FlowTerminalObserver>>>,
 }
@@ -582,10 +598,14 @@ struct TerminalCleanup {
 }
 
 impl crate::tools::agent_ctrl::FlowTerminalObserver for TerminalCleanup {
-    fn flow_became_terminal(&self, session_id: &str, run_id: &FlowRunId) {
-        if let Some(broker) = self.broker.upgrade() {
-            broker.handle_terminal_locked(session_id, run_id);
-        }
+    fn flow_became_terminal(
+        &self,
+        session_id: &str,
+        run_id: &FlowRunId,
+    ) -> Option<Box<dyn FnOnce() + Send>> {
+        let broker = self.broker.upgrade()?;
+        broker.handle_terminal_locked(session_id, run_id);
+        Some(Box::new(move || broker.dispatch_audit_bundles()))
     }
 }
 
@@ -599,8 +619,120 @@ impl PermissionBroker {
             broker_id: Uuid::now_v7(),
             flows,
             state: Mutex::new(BrokerState::default()),
+            audit: Mutex::new(None),
+            audit_dispatcher: Mutex::new(AuditDispatcher::default()),
+            #[cfg(test)]
+            audit_dispatch_hook: Mutex::new(None),
             observer: Mutex::new(None),
         }
+    }
+
+    pub fn set_audit_projector(
+        &self,
+        projector: crate::permission_audit::PermissionAuditProjector,
+    ) {
+        self.audit.lock().unwrap().replace(projector);
+    }
+
+    fn group_is_resolved(state: &BrokerState, group: &PermissionGroup) -> bool {
+        group.request_ids.iter().all(|request_id| {
+            state.requests.get(request_id).is_some_and(|entry| {
+                !matches!(entry.request.state, PermissionRequestState::Pending { .. })
+            })
+        })
+    }
+
+    fn unresolved_groups_for_requests(
+        state: &BrokerState,
+        request_ids: &BTreeSet<PermissionRequestId>,
+    ) -> BTreeSet<PermissionGroupId> {
+        state
+            .groups
+            .values()
+            .filter(|group| {
+                !group.request_ids.is_disjoint(request_ids)
+                    && !Self::group_is_resolved(state, group)
+            })
+            .map(|group| group.group_id.clone())
+            .collect()
+    }
+
+    fn append_resolved_group_audits(
+        state: &mut BrokerState,
+        candidate_group_ids: &BTreeSet<PermissionGroupId>,
+        records: &mut Vec<crate::permission_audit::PermissionAuditRecord>,
+        at: DateTime<Utc>,
+    ) {
+        for group_id in candidate_group_ids {
+            if state.resolved_group_audits.contains(group_id) {
+                continue;
+            }
+            let Some(group) = state.groups.get(group_id) else {
+                continue;
+            };
+            if !Self::group_is_resolved(state, group) {
+                continue;
+            }
+            if let Some(audit) =
+                crate::permission_audit::PermissionGroupAudit::from_group(group, at)
+            {
+                records.push(crate::permission_audit::PermissionAuditRecord::GroupResolved(audit));
+                state.resolved_group_audits.insert(group_id.clone());
+            }
+        }
+    }
+
+    fn enqueue_audit_bundle(
+        state: &mut BrokerState,
+        records: Vec<crate::permission_audit::PermissionAuditRecord>,
+    ) -> u64 {
+        let sequence = state.next_audit_bundle;
+        state.next_audit_bundle += 1;
+        assert!(
+            state
+                .pending_audit_bundles
+                .insert(sequence, records)
+                .is_none(),
+            "audit bundle sequence is unique"
+        );
+        sequence
+    }
+
+    fn dispatch_audit_bundles(&self) {
+        let mut dispatcher = self.audit_dispatcher.lock().unwrap();
+        loop {
+            let records = self
+                .state
+                .lock()
+                .unwrap()
+                .pending_audit_bundles
+                .remove(&dispatcher.next_bundle);
+            let Some(records) = records else {
+                break;
+            };
+            dispatcher.next_bundle += 1;
+            let projector = self.audit.lock().unwrap().clone();
+            if let Some(projector) = projector {
+                for record in records {
+                    projector.emit(record);
+                }
+            }
+        }
+    }
+
+    fn dispatch_audit_bundle(&self, _sequence: u64) {
+        #[cfg(test)]
+        let hook = self.audit_dispatch_hook.lock().unwrap().clone();
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            hook(_sequence);
+        }
+        self.dispatch_audit_bundles();
+    }
+
+    #[cfg(test)]
+    fn set_audit_dispatch_hook(&self, hook: AuditDispatchHook) {
+        self.audit_dispatch_hook.lock().unwrap().replace(hook);
     }
 
     /// Wires terminal-driven cleanup. Only shared brokers can observe the registry,
@@ -699,9 +831,11 @@ impl PermissionBroker {
         // Liveness checks and the pending insert must observe the same lifecycle
         // snapshot, otherwise a run could go terminal between them and leave an
         // orphan pending request that terminal cleanup already walked past.
-        self.flows.with_lifecycle_arbitration(|| {
+        let (outcome, sequence) = self.flows.with_lifecycle_arbitration(|| {
             self.submit_to_locked(session_id, run_id, intent, shell, context, policy)
-        })
+        })?;
+        self.dispatch_audit_bundle(sequence);
+        Ok(outcome)
     }
 
     fn submit_to_locked(
@@ -712,7 +846,7 @@ impl PermissionBroker {
         shell: bool,
         context: SubmissionContext,
         policy: &TrustConfig,
-    ) -> Result<SubmissionOutcome, PermissionError> {
+    ) -> Result<(SubmissionOutcome, u64), PermissionError> {
         let requirement = AuthorityRequirement::from_intent(&intent, shell);
         let identity =
             self.authenticate_requester(session_id, run_id, &requirement, &intent.provenance)?;
@@ -728,7 +862,6 @@ impl PermissionBroker {
             intent.risks.iter().copied(),
         );
         let mut state = self.state.lock().unwrap();
-        self.remove_terminal_grants(&mut state);
         let request_id = PermissionRequestId::now();
         let now = Utc::now();
         let immediate = if execution_policy == ExecutionPolicy::Unrestricted {
@@ -772,6 +905,11 @@ impl PermissionBroker {
             requesting_run_id: identity.run_id.clone(),
             parent_run_id: identity.parent_run_id.clone(),
             root_run_id: identity.root_run_id.clone(),
+            policy_reference: crate::permission_audit::PermissionPolicyReference::capture(
+                policy,
+                intent.tier,
+                &intent.risks,
+            ),
             intent,
             requirement,
             state: request_state,
@@ -784,6 +922,7 @@ impl PermissionBroker {
             }],
             requested_at: now,
         };
+        let audits = submission_audits(&request, immediate.as_ref(), now);
         if let Some(authorization) = immediate {
             state.requests.insert(
                 request_id,
@@ -793,12 +932,14 @@ impl PermissionBroker {
                     target_tx: None,
                 },
             );
-            return Ok(SubmissionOutcome::Immediate(Box::new(
-                ImmediateSubmission {
+            let sequence = Self::enqueue_audit_bundle(&mut state, audits);
+            return Ok((
+                SubmissionOutcome::Immediate(Box::new(ImmediateSubmission {
                     request,
                     authorization,
-                },
-            )));
+                })),
+                sequence,
+            ));
         }
 
         let (responder, resolution) = oneshot::channel();
@@ -814,11 +955,15 @@ impl PermissionBroker {
                 target_tx: Some(target_tx),
             },
         );
-        Ok(SubmissionOutcome::Pending(Box::new(PendingPermission {
-            request,
-            resolution,
-            target_changes,
-        })))
+        let sequence = Self::enqueue_audit_bundle(&mut state, audits);
+        Ok((
+            SubmissionOutcome::Pending(Box::new(PendingPermission {
+                request,
+                resolution,
+                target_changes,
+            })),
+            sequence,
+        ))
     }
 
     pub fn resolve(
@@ -833,9 +978,11 @@ impl PermissionBroker {
         // commit makes terminal-vs-approve a single linearization point: either this
         // decision commits before the run is terminal, or terminal cleanup runs first
         // and this call observes a cancelled request.
-        self.flows.with_lifecycle_arbitration(|| {
+        let (outcome, sequence) = self.flows.with_lifecycle_arbitration(|| {
             self.resolve_locked(request_id, authority, action, grant_scope, reason)
-        })
+        })?;
+        self.dispatch_audit_bundle(sequence);
+        Ok(outcome)
     }
 
     fn resolve_locked(
@@ -845,16 +992,30 @@ impl PermissionBroker {
         action: PermissionAction,
         grant_scope: Option<GrantScope>,
         reason: Option<String>,
-    ) -> Result<ResolveOutcome, PermissionError> {
+    ) -> Result<(ResolveOutcome, u64), PermissionError> {
         let mut state = self.state.lock().unwrap();
-        self.resolve_locked_state(
+        let request_ids = BTreeSet::from([request_id.clone()]);
+        let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_ids);
+        let outcome = self.resolve_locked_state(
             &mut state,
             request_id,
             authority,
             action,
             grant_scope,
             reason,
-        )
+        )?;
+        let decision = match &outcome {
+            ResolveOutcome::Resolved(decision) | ResolveOutcome::Deferred(decision) => decision,
+        };
+        let mut audits = resolution_audits_from_state(&state, request_id, decision);
+        Self::append_resolved_group_audits(
+            &mut state,
+            &candidate_groups,
+            &mut audits,
+            decision.decided_at,
+        );
+        let sequence = Self::enqueue_audit_bundle(&mut state, audits);
+        Ok((outcome, sequence))
     }
 
     fn prepare_resolution(
@@ -944,7 +1105,9 @@ impl PermissionBroker {
             if matches!(prepared.target, ApprovalTarget::User) {
                 cancel_entry(
                     entry,
+                    "permission.user_defer",
                     reason.unwrap_or_else(|| "user deferred without a fallback".into()),
+                    decision.decided_at,
                 );
             } else {
                 let next_target = prepared
@@ -1034,7 +1197,12 @@ impl PermissionBroker {
             None | Some(FlowExecutionState::Terminal)
         ) {
             let reason = "requesting flow is terminal".to_owned();
-            cancel_entry(state.requests.get_mut(request_id).unwrap(), reason);
+            cancel_entry(
+                state.requests.get_mut(request_id).unwrap(),
+                "permission.requester_terminal",
+                reason,
+                Utc::now(),
+            );
             state.grants.retain(|grant| {
                 grant.session_id != request.session_id
                     || grant.requesting_run_id != request.requesting_run_id
@@ -1078,7 +1246,7 @@ impl PermissionBroker {
                 }
             ) {
                 let reason = reason.unwrap_or_else(|| "user deferred without a fallback".into());
-                cancel_entry(entry, reason);
+                cancel_entry(entry, "permission.user_defer", reason, decision.decided_at);
                 return Ok(ResolveOutcome::Deferred(decision));
             }
             let requester = self
@@ -1157,24 +1325,29 @@ impl PermissionBroker {
         request_id: &PermissionRequestId,
         expected_target: &FlowRunId,
     ) -> Result<bool, PermissionError> {
-        self.flows.with_lifecycle_arbitration(|| {
-            self.defer_unavailable_target_locked(
+        let (deferred, sequence) = self.flows.with_lifecycle_arbitration(|| {
+            let mut state = self.state.lock().unwrap();
+            let (deferred, audits) = self.defer_unavailable_target_state(
+                &mut state,
                 request_id,
                 expected_target,
                 "permission.parent_timeout",
                 "ancestor offer timed out",
-            )
-        })
+            )?;
+            Ok((deferred, Self::enqueue_audit_bundle(&mut state, audits)))
+        })?;
+        self.dispatch_audit_bundle(sequence);
+        Ok(deferred)
     }
 
-    fn defer_unavailable_target_locked(
+    fn defer_unavailable_target_state(
         &self,
+        state: &mut BrokerState,
         request_id: &PermissionRequestId,
         expected_target: &FlowRunId,
         component: &str,
         reason: &str,
-    ) -> Result<bool, PermissionError> {
-        let mut state = self.state.lock().unwrap();
+    ) -> Result<(bool, Vec<crate::permission_audit::PermissionAuditRecord>), PermissionError> {
         let entry = state
             .requests
             .get_mut(request_id)
@@ -1184,7 +1357,7 @@ impl PermissionBroker {
             PermissionRequestState::Pending { target: ApprovalTarget::Flow(run_id) }
                 if run_id == expected_target
         ) {
-            return Ok(false);
+            return Ok((false, Vec::new()));
         }
         let requester = self
             .flows
@@ -1219,7 +1392,15 @@ impl PermissionBroker {
         if let Some(target_tx) = &entry.target_tx {
             let _ = target_tx.send(next_target);
         }
-        Ok(true)
+        let audit = request_audit_from_state(state, request_id, None, now)
+            .expect("deferred request exists");
+        Ok((
+            true,
+            vec![
+                crate::permission_audit::PermissionAuditRecord::RequestDeferred(audit.clone()),
+                crate::permission_audit::PermissionAuditRecord::RequestTargeted(audit),
+            ],
+        ))
     }
 
     pub fn cancel(
@@ -1227,29 +1408,50 @@ impl PermissionBroker {
         request_id: &PermissionRequestId,
         reason: impl Into<String>,
     ) -> Result<(), PermissionError> {
-        let mut state = self.state.lock().unwrap();
-        let entry = state
-            .requests
-            .get_mut(request_id)
-            .ok_or(PermissionError::RequestNotFound)?;
-        if entry.request.state.is_terminal() || entry.responder.is_none() {
-            return Err(PermissionError::AlreadyResolved);
-        }
-        cancel_entry(entry, reason.into());
+        let sequence = {
+            let mut state = self.state.lock().unwrap();
+            let at = Utc::now();
+            let request_ids = BTreeSet::from([request_id.clone()]);
+            let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_ids);
+            let entry = state
+                .requests
+                .get_mut(request_id)
+                .ok_or(PermissionError::RequestNotFound)?;
+            if entry.request.state.is_terminal() || entry.responder.is_none() {
+                return Err(PermissionError::AlreadyResolved);
+            }
+            cancel_entry(entry, "permission.user_cancel", reason.into(), at);
+            let audit = request_audit_from_state(&state, request_id, None, at)
+                .expect("cancelled request exists");
+            let mut audits =
+                vec![crate::permission_audit::PermissionAuditRecord::RequestCancelled(audit)];
+            Self::append_resolved_group_audits(&mut state, &candidate_groups, &mut audits, at);
+            Self::enqueue_audit_bundle(&mut state, audits)
+        };
+        self.dispatch_audit_bundle(sequence);
         Ok(())
     }
 
     pub fn cancel_for_run(&self, session_id: &str, run_id: &FlowRunId, reason: &str) -> usize {
-        self.flows
-            .with_lifecycle_arbitration(|| self.cancel_for_run_locked(session_id, run_id, reason))
+        let (cancelled, sequence) = self.flows.with_lifecycle_arbitration(|| {
+            let mut state = self.state.lock().unwrap();
+            let (cancelled, audits) =
+                self.cancel_for_run_state(&mut state, session_id, run_id, reason);
+            (cancelled, Self::enqueue_audit_bundle(&mut state, audits))
+        });
+        self.dispatch_audit_bundle(sequence);
+        cancelled
     }
 
-    fn handle_terminal_locked(&self, session_id: &str, run_id: &FlowRunId) {
-        self.cancel_for_run_locked(session_id, run_id, "requesting flow is terminal");
-        let request_ids: Vec<_> = self
-            .state
-            .lock()
-            .unwrap()
+    fn handle_terminal_locked(&self, session_id: &str, run_id: &FlowRunId) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        let (_, mut audits) = self.cancel_for_run_state(
+            &mut state,
+            session_id,
+            run_id,
+            "requesting flow is terminal",
+        );
+        let request_ids: Vec<_> = state
             .requests
             .iter()
             .filter(|(_, entry)| {
@@ -1262,45 +1464,88 @@ impl PermissionBroker {
             .map(|(request_id, _)| request_id.clone())
             .collect();
         for request_id in request_ids {
-            let _ = self.defer_unavailable_target_locked(
+            if let Ok((_, deferred_audits)) = self.defer_unavailable_target_state(
+                &mut state,
                 &request_id,
                 run_id,
                 "permission.target_terminal",
                 "target flow became terminal",
-            );
-        }
-    }
-
-    /// Cancels a run's pending requests and revokes its grants. Callers must already
-    /// hold the lifecycle arbitration; this only takes the broker state lock.
-    fn cancel_for_run_locked(&self, session_id: &str, run_id: &FlowRunId, reason: &str) -> usize {
-        let mut state = self.state.lock().unwrap();
-        let mut cancelled = 0;
-        for entry in state.requests.values_mut() {
-            if entry.request.session_id == session_id
-                && entry.request.requesting_run_id == *run_id
-                && !entry.request.state.is_terminal()
-                && entry.responder.is_some()
-            {
-                cancel_entry(entry, reason.to_owned());
-                cancelled += 1;
+            ) {
+                audits.extend(deferred_audits);
             }
         }
-        state
-            .grants
-            .retain(|grant| grant.session_id != session_id || grant.requesting_run_id != *run_id);
-        cancelled
+        Self::enqueue_audit_bundle(&mut state, audits)
+    }
+
+    fn cancel_for_run_state(
+        &self,
+        state: &mut BrokerState,
+        session_id: &str,
+        run_id: &FlowRunId,
+        reason: &str,
+    ) -> (usize, Vec<crate::permission_audit::PermissionAuditRecord>) {
+        let now = Utc::now();
+        let request_ids: Vec<_> = state
+            .requests
+            .iter()
+            .filter(|(_, entry)| {
+                entry.request.session_id == session_id
+                    && entry.request.requesting_run_id == *run_id
+                    && !entry.request.state.is_terminal()
+                    && entry.responder.is_some()
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        let request_id_set = request_ids.iter().cloned().collect();
+        let candidate_groups = Self::unresolved_groups_for_requests(state, &request_id_set);
+        for request_id in &request_ids {
+            cancel_entry(
+                state.requests.get_mut(request_id).expect("request exists"),
+                "permission.run_cleanup",
+                reason.to_owned(),
+                now,
+            );
+        }
+        let audits = request_ids
+            .iter()
+            .map(|request_id| {
+                request_audit_from_state(state, request_id, None, now)
+                    .expect("cancelled request exists")
+            })
+            .collect::<Vec<_>>();
+        let mut expired_grants = Vec::new();
+        state.grants.retain(|grant| {
+            let remove = grant.session_id == session_id && grant.requesting_run_id == *run_id;
+            if remove {
+                expired_grants.push(grant.clone());
+            }
+            !remove
+        });
+        let cancelled = audits.len();
+        let mut records = audits
+            .into_iter()
+            .map(crate::permission_audit::PermissionAuditRecord::RequestCancelled)
+            .collect::<Vec<_>>();
+        records.extend(expired_grants.into_iter().map(|grant| {
+            crate::permission_audit::PermissionAuditRecord::GrantExpired(
+                crate::permission_audit::PermissionGrantAudit::from_grant_with_actor(
+                    &grant,
+                    crate::permission_audit::PermissionProjectionActor::System {
+                        component: "permission.run_cleanup".into(),
+                    },
+                    Some(reason.to_owned()),
+                    now,
+                ),
+            )
+        }));
+        Self::append_resolved_group_audits(state, &candidate_groups, &mut records, now);
+        (cancelled, records)
     }
 
     pub fn expire_terminal(&self, reason: &str) -> usize {
-        self.flows
-            .with_lifecycle_arbitration(|| self.expire_terminal_locked(reason))
-    }
-
-    fn expire_terminal_locked(&self, reason: &str) -> usize {
-        let terminal_runs: HashSet<_> = {
-            let state = self.state.lock().unwrap();
-            state
+        let (expired, sequence) = self.flows.with_lifecycle_arbitration(|| {
+            let mut state = self.state.lock().unwrap();
+            let terminal_runs: HashSet<_> = state
                 .requests
                 .values()
                 .filter(|entry| {
@@ -1316,26 +1561,55 @@ impl PermissionBroker {
                         entry.request.requesting_run_id.clone(),
                     )
                 })
-                .collect()
-        };
-        terminal_runs
-            .iter()
-            .map(|(session_id, run_id)| self.cancel_for_run_locked(session_id, run_id, reason))
-            .sum()
+                .collect();
+            let mut expired = 0;
+            let mut audits = Vec::new();
+            for (session_id, run_id) in &terminal_runs {
+                let (run_expired, run_audits) =
+                    self.cancel_for_run_state(&mut state, session_id, run_id, reason);
+                expired += run_expired;
+                audits.extend(run_audits);
+            }
+            (expired, Self::enqueue_audit_bundle(&mut state, audits))
+        });
+        self.dispatch_audit_bundle(sequence);
+        expired
     }
 
     pub fn expire_before(&self, deadline: DateTime<Utc>, reason: &str) -> usize {
-        let mut state = self.state.lock().unwrap();
-        let mut expired = 0;
-        for entry in state.requests.values_mut() {
-            if entry.request.requested_at <= deadline
-                && !entry.request.state.is_terminal()
-                && entry.responder.is_some()
-            {
-                cancel_entry(entry, reason.to_owned());
-                expired += 1;
+        let (expired, sequence) = {
+            let mut state = self.state.lock().unwrap();
+            let now = Utc::now();
+            let request_ids: Vec<_> = state
+                .requests
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.request.requested_at <= deadline
+                        && !entry.request.state.is_terminal()
+                        && entry.responder.is_some()
+                })
+                .map(|(request_id, _)| request_id.clone())
+                .collect();
+            let request_id_set = request_ids.iter().cloned().collect();
+            let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_id_set);
+            for request_id in &request_ids {
+                cancel_entry(
+                    state.requests.get_mut(request_id).expect("request exists"),
+                    "permission.expiry",
+                    reason.to_owned(),
+                    now,
+                );
             }
-        }
+            let mut audits = request_ids
+                .iter()
+                .filter_map(|request_id| request_audit_from_state(&state, request_id, None, now))
+                .map(crate::permission_audit::PermissionAuditRecord::RequestCancelled)
+                .collect::<Vec<_>>();
+            let expired = audits.len();
+            Self::append_resolved_group_audits(&mut state, &candidate_groups, &mut audits, now);
+            (expired, Self::enqueue_audit_bundle(&mut state, audits))
+        };
+        self.dispatch_audit_bundle(sequence);
         expired
     }
 
@@ -1414,10 +1688,14 @@ impl PermissionBroker {
         }
         let mut state = self.state.lock().unwrap();
         if request_ids.iter().any(|request_id| {
-            state
-                .requests
-                .get(request_id)
-                .is_none_or(|entry| !self.visible_to(actor, &entry.request))
+            state.requests.get(request_id).is_none_or(|entry| {
+                !(self.visible_to(actor, &entry.request)
+                    || entry.request.state.is_terminal()
+                        && entry.request.session_id == actor.session_id
+                        && self
+                            .flows
+                            .is_strict_ancestor(&actor.run_id, &entry.request.requesting_run_id))
+            })
         }) {
             return Err(PermissionError::ActorNotAuthorized);
         }
@@ -1430,6 +1708,20 @@ impl PermissionBroker {
             revision: 0,
         };
         state.groups.insert(group.group_id.clone(), group.clone());
+        let mut records =
+            crate::permission_audit::PermissionGroupAudit::from_group(&group, group.created_at)
+                .map(crate::permission_audit::PermissionAuditRecord::GroupCreated)
+                .into_iter()
+                .collect();
+        Self::append_resolved_group_audits(
+            &mut state,
+            &BTreeSet::from([group.group_id.clone()]),
+            &mut records,
+            group.created_at,
+        );
+        let sequence = Self::enqueue_audit_bundle(&mut state, records);
+        drop(state);
+        self.dispatch_audit_bundle(sequence);
         Ok(group)
     }
 
@@ -1487,7 +1779,22 @@ impl PermissionBroker {
         if group.request_ids.len() != previous_len {
             group.revision += 1;
         }
-        Ok(group.clone())
+        let group = group.clone();
+        let at = Utc::now();
+        let mut records = crate::permission_audit::PermissionGroupAudit::from_group(&group, at)
+            .map(crate::permission_audit::PermissionAuditRecord::GroupUpdated)
+            .into_iter()
+            .collect();
+        Self::append_resolved_group_audits(
+            &mut state,
+            &BTreeSet::from([group.group_id.clone()]),
+            &mut records,
+            at,
+        );
+        let sequence = Self::enqueue_audit_bundle(&mut state, records);
+        drop(state);
+        self.dispatch_audit_bundle(sequence);
+        Ok(group)
     }
 
     fn expand_selector(
@@ -1564,90 +1871,81 @@ impl PermissionBroker {
         mode: BatchMode,
         expected_group_revision: Option<u64>,
     ) -> Result<Vec<BatchResolution>, PermissionError> {
-        if mode == BatchMode::Atomic {
-            return self.flows.with_lifecycle_arbitration(|| {
-                self.authenticate_control_actor(actor)?;
-                let authority = DecisionAuthority::Flow(self.flow_authority(Arc::clone(actor))?);
-                let mut state = self.state.lock().unwrap();
-                let ids =
-                    self.expand_selector(&state, actor, &selector, expected_group_revision)?;
-                let prepared = ids
-                    .iter()
-                    .map(|id| {
-                        self.prepare_resolution(
-                            &state,
-                            id,
-                            &authority,
-                            action,
-                            grant_scope.as_ref(),
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(ids
-                    .into_iter()
-                    .zip(prepared)
-                    .map(|(request_id, prepared)| {
-                        let outcome = self.commit_prepared_resolution(
-                            &mut state,
-                            prepared,
-                            action,
-                            grant_scope.clone(),
-                            reason.clone(),
-                        );
-                        BatchResolution {
-                            request_id,
-                            outcome: batch_outcome(action, outcome),
-                        }
-                    })
-                    .collect())
-            });
-        }
-        self.authenticate_control_actor(actor)?;
-        let authority = DecisionAuthority::Flow(self.flow_authority(Arc::clone(actor))?);
-        let ids = {
-            let state = self.state.lock().unwrap();
-            self.expand_selector(&state, actor, &selector, expected_group_revision)?
-        };
-        let mut results = Vec::with_capacity(ids.len());
-        for id in ids {
-            let outcome =
-                match self.resolve(&id, &authority, action, grant_scope.clone(), reason.clone()) {
-                    Ok(ResolveOutcome::Resolved(decision))
-                    | Ok(ResolveOutcome::Deferred(decision)) => match action {
-                        PermissionAction::Approve => BatchRequestOutcome::Approved(decision),
-                        PermissionAction::Deny => BatchRequestOutcome::Denied(decision),
-                        PermissionAction::Defer => BatchRequestOutcome::Deferred(decision),
-                    },
-                    Err(PermissionError::AlreadyResolved) => {
-                        BatchRequestOutcome::SkippedAlreadyResolved
-                    }
-                    Err(PermissionError::ActorNotAuthorized) => {
-                        BatchRequestOutcome::RejectedNotAncestor
-                    }
-                    Err(PermissionError::GrantExceedsAuthority) => {
-                        BatchRequestOutcome::RejectedOverAuthority
-                    }
-                    Err(PermissionError::RequestNotFound) => BatchRequestOutcome::RejectedNotFound,
-                    Err(PermissionError::ActorNotRunning) => {
-                        BatchRequestOutcome::RejectedNotRunning
-                    }
-                    Err(PermissionError::IdentityMismatch) => BatchRequestOutcome::RejectedStale,
-                    Err(PermissionError::PermissionManagementRequired) => {
-                        BatchRequestOutcome::RejectedPermissionManagementRequired
-                    }
-                    Err(PermissionError::UnsupportedGrantScope) => {
-                        BatchRequestOutcome::RejectedUnsupportedGrantScope
-                    }
-                    Err(PermissionError::NoEscalationTarget) => {
-                        BatchRequestOutcome::RejectedNoEscalationTarget
-                    }
-                    Err(error) => BatchRequestOutcome::Rejected(error),
+        let (results, sequence) = self.flows.with_lifecycle_arbitration(|| {
+            self.authenticate_control_actor(actor)?;
+            let authority = DecisionAuthority::Flow(self.flow_authority(Arc::clone(actor))?);
+            let mut state = self.state.lock().unwrap();
+            let ids = self.expand_selector(&state, actor, &selector, expected_group_revision)?;
+            let request_ids = ids.iter().cloned().collect();
+            let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_ids);
+            let mut prepared = if mode == BatchMode::Atomic {
+                Some(
+                    ids.iter()
+                        .map(|id| {
+                            self.prepare_resolution(
+                                &state,
+                                id,
+                                &authority,
+                                action,
+                                grant_scope.as_ref(),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter(),
+                )
+            } else {
+                None
+            };
+            let mut results = Vec::with_capacity(ids.len());
+            let mut audits = Vec::new();
+            for request_id in ids {
+                let outcome = if let Some(prepared) = &mut prepared {
+                    Ok(self.commit_prepared_resolution(
+                        &mut state,
+                        prepared
+                            .next()
+                            .expect("one prepared resolution per request"),
+                        action,
+                        grant_scope.clone(),
+                        reason.clone(),
+                    ))
+                } else {
+                    self.resolve_locked_state(
+                        &mut state,
+                        &request_id,
+                        &authority,
+                        action,
+                        grant_scope.clone(),
+                        reason.clone(),
+                    )
                 };
-            results.push(BatchResolution {
-                request_id: id,
-                outcome,
-            });
-        }
+                let batch = match outcome {
+                    Ok(outcome) => {
+                        let decision = match &outcome {
+                            ResolveOutcome::Resolved(decision)
+                            | ResolveOutcome::Deferred(decision) => decision,
+                        };
+                        audits.extend(resolution_audits_from_state(&state, &request_id, decision));
+                        batch_outcome(action, outcome)
+                    }
+                    Err(error) if mode == BatchMode::BestEffort => batch_error_outcome(error),
+                    Err(error) => return Err(error),
+                };
+                results.push(BatchResolution {
+                    request_id,
+                    outcome: batch,
+                });
+            }
+            Self::append_resolved_group_audits(
+                &mut state,
+                &candidate_groups,
+                &mut audits,
+                Utc::now(),
+            );
+            let sequence = Self::enqueue_audit_bundle(&mut state, audits);
+            Ok((results, sequence))
+        })?;
+        self.dispatch_audit_bundle(sequence);
         Ok(results)
     }
 
@@ -1668,7 +1966,19 @@ impl PermissionBroker {
         if !group.request_ids.is_empty() {
             return Err(PermissionError::GroupNotEmpty);
         }
-        Ok(state.groups.remove(group_id).expect("group exists"))
+        let group = state.groups.get(group_id).expect("group exists").clone();
+        let mut records = Vec::new();
+        Self::append_resolved_group_audits(
+            &mut state,
+            &BTreeSet::from([group_id.clone()]),
+            &mut records,
+            Utc::now(),
+        );
+        state.groups.remove(group_id).expect("group exists");
+        let sequence = Self::enqueue_audit_bundle(&mut state, records);
+        drop(state);
+        self.dispatch_audit_bundle(sequence);
+        Ok(group)
     }
 
     fn authenticate_visibility_actor(
@@ -1711,8 +2021,7 @@ impl PermissionBroker {
     ) -> Option<PermissionGrant> {
         let requirement = AuthorityRequirement::from_intent(intent, shell);
         self.flows.with_lifecycle_arbitration(|| {
-            let mut state = self.state.lock().unwrap();
-            self.remove_terminal_grants(&mut state);
+            let state = self.state.lock().unwrap();
             matching_grant(&state.grants, identity, intent, &requirement)
         })
     }
@@ -1880,15 +2189,141 @@ impl PermissionBroker {
             }
         }
     }
+}
 
-    fn remove_terminal_grants(&self, state: &mut BrokerState) {
-        state.grants.retain(|grant| {
-            !matches!(
-                self.flows.execution_state(&grant.requesting_run_id),
-                None | Some(FlowExecutionState::Terminal)
-            )
+fn request_audit_from_state(
+    state: &BrokerState,
+    request_id: &PermissionRequestId,
+    decision: Option<&PermissionDecision>,
+    at: DateTime<Utc>,
+) -> Option<crate::permission_audit::PermissionRequestAudit> {
+    let request = &state.requests.get(request_id)?.request;
+    let group_ids = state
+        .groups
+        .values()
+        .filter(|group| group.request_ids.contains(request_id))
+        .map(|group| group.group_id.clone())
+        .collect();
+    Some(
+        crate::permission_audit::PermissionRequestAudit::from_request(
+            request, group_ids, decision, at,
+        ),
+    )
+}
+
+fn submission_audits(
+    request: &PermissionRequest,
+    authorization: Option<&ImmediateAuthorization>,
+    at: DateTime<Utc>,
+) -> Vec<crate::permission_audit::PermissionAuditRecord> {
+    let decision = authorization.map(|authorization| PermissionDecision {
+        decision_id: match &request.state {
+            PermissionRequestState::Approved { decision_id }
+            | PermissionRequestState::Denied { decision_id } => decision_id.clone(),
+            _ => unreachable!("immediate request is terminal"),
+        },
+        request_id: request.request_id.clone(),
+        actor: match authorization {
+            ImmediateAuthorization::Granted { grant } => grant.actor.clone(),
+            _ => DecisionActor::Policy {
+                policy_version: request.policy_reference.snapshot_id.clone(),
+                rule_id: request.policy_reference.rule_id.clone(),
+            },
+        },
+        action: if matches!(authorization, ImmediateAuthorization::Denied { .. }) {
+            PermissionAction::Deny
+        } else {
+            PermissionAction::Approve
+        },
+        grant_scope: match authorization {
+            ImmediateAuthorization::Granted { grant } => Some(grant.scope.clone()),
+            _ => None,
+        },
+        reason: match authorization {
+            ImmediateAuthorization::Denied { reason } => Some(reason.clone()),
+            _ => None,
+        },
+        decided_at: at,
+    });
+    let audit = crate::permission_audit::PermissionRequestAudit::from_request(
+        request,
+        Vec::new(),
+        decision.as_ref(),
+        at,
+    );
+    let mut records = vec![
+        crate::permission_audit::PermissionAuditRecord::RequestCreated(audit.clone()),
+        crate::permission_audit::PermissionAuditRecord::RequestTargeted(audit.clone()),
+    ];
+    if let Some(authorization) = authorization {
+        records.push(match authorization {
+            ImmediateAuthorization::Denied { .. } => {
+                crate::permission_audit::PermissionAuditRecord::RequestDenied(audit)
+            }
+            ImmediateAuthorization::Unrestricted => {
+                crate::permission_audit::PermissionAuditRecord::UnrestrictedExecution(audit)
+            }
+            _ => crate::permission_audit::PermissionAuditRecord::RequestApproved(audit),
         });
     }
+    records
+}
+
+fn resolution_audits_from_state(
+    state: &BrokerState,
+    request_id: &PermissionRequestId,
+    decision: &PermissionDecision,
+) -> Vec<crate::permission_audit::PermissionAuditRecord> {
+    let Some(entry) = state.requests.get(request_id) else {
+        return Vec::new();
+    };
+    let Some(audit) =
+        request_audit_from_state(state, request_id, Some(decision), decision.decided_at)
+    else {
+        return Vec::new();
+    };
+    let cancelled = matches!(
+        entry.request.state,
+        PermissionRequestState::Cancelled { .. }
+    );
+    let grant = state
+        .grants
+        .iter()
+        .find(|grant| grant.request_id == *request_id && grant.granted_at == decision.decided_at);
+    let mut records = vec![match decision.action {
+        PermissionAction::Approve => {
+            crate::permission_audit::PermissionAuditRecord::RequestApproved(audit)
+        }
+        PermissionAction::Deny => {
+            crate::permission_audit::PermissionAuditRecord::RequestDenied(audit)
+        }
+        PermissionAction::Defer if cancelled => {
+            crate::permission_audit::PermissionAuditRecord::RequestCancelled(audit)
+        }
+        PermissionAction::Defer => {
+            crate::permission_audit::PermissionAuditRecord::RequestDeferred(audit)
+        }
+    }];
+    if decision.action == PermissionAction::Defer
+        && !cancelled
+        && let Some(mut targeted) =
+            request_audit_from_state(state, request_id, None, decision.decided_at)
+    {
+        targeted.actor = None;
+        records.push(crate::permission_audit::PermissionAuditRecord::RequestTargeted(targeted));
+    }
+    if let Some(grant) = grant {
+        records.push(
+            crate::permission_audit::PermissionAuditRecord::GrantCreated(
+                crate::permission_audit::PermissionGrantAudit::from_grant(
+                    grant,
+                    decision.reason.clone(),
+                    decision.decided_at,
+                ),
+            ),
+        );
+    }
+    records
 }
 
 fn batch_outcome(action: PermissionAction, outcome: ResolveOutcome) -> BatchRequestOutcome {
@@ -1902,7 +2337,39 @@ fn batch_outcome(action: PermissionAction, outcome: ResolveOutcome) -> BatchRequ
     }
 }
 
-fn cancel_entry(entry: &mut RequestEntry, reason: String) {
+fn batch_error_outcome(error: PermissionError) -> BatchRequestOutcome {
+    match error {
+        PermissionError::AlreadyResolved => BatchRequestOutcome::SkippedAlreadyResolved,
+        PermissionError::ActorNotAuthorized => BatchRequestOutcome::RejectedNotAncestor,
+        PermissionError::GrantExceedsAuthority => BatchRequestOutcome::RejectedOverAuthority,
+        PermissionError::RequestNotFound => BatchRequestOutcome::RejectedNotFound,
+        PermissionError::ActorNotRunning => BatchRequestOutcome::RejectedNotRunning,
+        PermissionError::IdentityMismatch => BatchRequestOutcome::RejectedStale,
+        PermissionError::PermissionManagementRequired => {
+            BatchRequestOutcome::RejectedPermissionManagementRequired
+        }
+        PermissionError::UnsupportedGrantScope => {
+            BatchRequestOutcome::RejectedUnsupportedGrantScope
+        }
+        PermissionError::NoEscalationTarget => BatchRequestOutcome::RejectedNoEscalationTarget,
+        error => BatchRequestOutcome::Rejected(error),
+    }
+}
+
+fn cancel_entry(entry: &mut RequestEntry, component: &str, reason: String, at: DateTime<Utc>) {
+    let target = match &entry.request.state {
+        PermissionRequestState::Pending { target } => target.clone(),
+        _ => ApprovalTarget::User,
+    };
+    entry.request.escalation_path.push(EscalationHop {
+        target,
+        actor: Some(DecisionActor::System {
+            component: component.into(),
+        }),
+        action: None,
+        reason: Some(reason.clone()),
+        at,
+    });
     entry.request.state = PermissionRequestState::Cancelled {
         reason: reason.clone(),
     };
@@ -2064,6 +2531,7 @@ fn authority_contains(
 mod tests {
     use super::*;
     use crate::flow_authority::{ChildWorkspaceAuthority, EffectiveAuthority, InvocationKind};
+    use crate::stream::StreamFrame;
     use crate::trust::{EscalationPolicy, TrustMode};
 
     fn authority(permission_management: bool) -> EffectiveAuthority {
@@ -2213,6 +2681,21 @@ mod tests {
             submission.request.state,
             PermissionRequestState::Pending { .. }
         ));
+    }
+
+    fn attach_audit(broker: &PermissionBroker) -> tokio::sync::broadcast::Receiver<StreamFrame> {
+        let (stream, receiver) = tokio::sync::broadcast::channel(64);
+        broker.set_audit_projector(crate::permission_audit::PermissionAuditProjector::new(
+            crate::event::EventSink::new(),
+            stream,
+        ));
+        receiver
+    }
+
+    fn drain_audit(
+        receiver: &mut tokio::sync::broadcast::Receiver<StreamFrame>,
+    ) -> Vec<StreamFrame> {
+        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
     }
 
     #[test]
@@ -2826,6 +3309,167 @@ mod tests {
     }
 
     #[test]
+    fn s8_deterministic_approve_terminal_interleavings_preserve_state_and_audit_order() {
+        enum Schedule {
+            ApproveThenTerminal,
+            TerminalThenApprove,
+        }
+        for schedule in [Schedule::ApproveThenTerminal, Schedule::TerminalThenApprove] {
+            let flows = Arc::new(FlowRegistry::default());
+            let requester = register_root(&flows, "session", false);
+            let broker = PermissionBroker::shared(Arc::clone(&flows));
+            let mut audit = attach_audit(&broker);
+            let pending = submit_to_user(&broker, &requester);
+            drain_audit(&mut audit);
+            let request_id = pending.request.request_id.clone();
+            let scope = GrantScope::ChildRunSameTool {
+                run_id: requester.run_id.clone(),
+                tool_name: pending.request.intent.tool_name.clone(),
+            };
+            let (first_done_tx, first_done_rx) = std::sync::mpsc::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+
+            let approver = {
+                let broker = Arc::clone(&broker);
+                let authority = user_decision(&broker, "session");
+                let first_done_tx = first_done_tx.clone();
+                let approve_first = matches!(schedule, Schedule::ApproveThenTerminal);
+                std::thread::spawn(move || {
+                    if !approve_first {
+                        continue_rx.recv().unwrap();
+                    }
+                    let outcome = broker.resolve(
+                        &request_id,
+                        &authority,
+                        PermissionAction::Approve,
+                        Some(scope),
+                        Some("accepted".into()),
+                    );
+                    if approve_first {
+                        first_done_tx.send(()).unwrap();
+                    }
+                    outcome
+                })
+            };
+            let terminator = {
+                let flows = Arc::clone(&flows);
+                let run_id = requester.run_id.clone();
+                let first_done_tx = first_done_tx;
+                let approve_first = matches!(schedule, Schedule::ApproveThenTerminal);
+                std::thread::spawn(move || {
+                    if approve_first {
+                        first_done_rx.recv().unwrap();
+                    }
+                    flows.mark_terminal(&run_id);
+                    if !approve_first {
+                        first_done_tx.send(()).unwrap();
+                        continue_tx.send(()).unwrap();
+                    }
+                })
+            };
+
+            let approval = approver.join().unwrap();
+            terminator.join().unwrap();
+            assert!(broker.grants().is_empty());
+            let frames = drain_audit(&mut audit);
+            match schedule {
+                Schedule::ApproveThenTerminal => {
+                    assert!(matches!(approval, Ok(ResolveOutcome::Resolved(_))));
+                    assert!(matches!(
+                        pending.resolution.blocking_recv().unwrap(),
+                        PermissionResolution::Decision(_)
+                    ));
+                    assert!(matches!(
+                        broker.get(&pending.request.request_id).unwrap().state,
+                        PermissionRequestState::Approved { .. }
+                    ));
+                    assert!(matches!(
+                        frames.as_slice(),
+                        [
+                            StreamFrame::PermissionRequestApproved { .. },
+                            StreamFrame::PermissionGrantCreated { .. },
+                            StreamFrame::PermissionGrantExpired { .. }
+                        ]
+                    ));
+                }
+                Schedule::TerminalThenApprove => {
+                    assert!(matches!(approval, Err(PermissionError::AlreadyResolved)));
+                    assert!(matches!(
+                        pending.resolution.blocking_recv().unwrap(),
+                        PermissionResolution::Cancelled { .. }
+                    ));
+                    assert!(matches!(
+                        broker.get(&pending.request.request_id).unwrap().state,
+                        PermissionRequestState::Cancelled { .. }
+                    ));
+                    assert!(matches!(
+                        frames.as_slice(),
+                        [StreamFrame::PermissionRequestCancelled { .. }]
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn s8_audit_dispatch_preserves_linearized_bundle_order_when_callers_arrive_out_of_order() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = Arc::new(PermissionBroker::new(flows));
+        let mut audit = attach_audit(&broker);
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        broker.set_audit_dispatch_hook({
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Arc::new(move |sequence| {
+                if sequence == 0 {
+                    entered.wait();
+                    release.wait();
+                }
+            })
+        });
+
+        let first = {
+            let broker = Arc::clone(&broker);
+            let requester = Arc::clone(&requester);
+            std::thread::spawn(move || submit_to_user(&broker, &requester))
+        };
+        entered.wait();
+        let second = submit_to_user(&broker, &requester);
+        release.wait();
+        let first = first.join().unwrap();
+
+        let frames = drain_audit(&mut audit);
+        let expected = [
+            first.request.request_id.clone(),
+            first.request.request_id,
+            second.request.request_id.clone(),
+            second.request.request_id,
+        ];
+        let actual = frames
+            .iter()
+            .map(|frame| match frame {
+                StreamFrame::PermissionRequestCreated { payload, .. }
+                | StreamFrame::PermissionRequestTargeted { payload, .. } => {
+                    payload.request_id.clone().unwrap()
+                }
+                _ => panic!("unexpected frame: {frame:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(matches!(
+            frames.as_slice(),
+            [
+                StreamFrame::PermissionRequestCreated { .. },
+                StreamFrame::PermissionRequestTargeted { .. },
+                StreamFrame::PermissionRequestCreated { .. },
+                StreamFrame::PermissionRequestTargeted { .. }
+            ]
+        ));
+    }
+
+    #[test]
     fn terminal_observer_does_not_keep_broker_alive() {
         let flows = Arc::new(FlowRegistry::default());
         let requester = register_root(&flows, "session", false);
@@ -3023,11 +3667,13 @@ mod tests {
         let root = register_root(&flows, "session", true);
         let requester = child(&flows, &root);
         let broker = PermissionBroker::new(Arc::clone(&flows));
+        let mut audit = attach_audit(&broker);
         let SubmissionOutcome::Pending(pending) =
             submit_to_flow(&broker, &requester, root.clone()).unwrap()
         else {
             panic!("expected pending");
         };
+        drain_audit(&mut audit);
         let authority = DecisionAuthority::Flow(broker.flow_authority(root.clone()).unwrap());
         assert!(matches!(
             broker.resolve(
@@ -3048,6 +3694,18 @@ mod tests {
             PermissionRequestState::Pending {
                 target: ApprovalTarget::User
             }
+        ));
+        let frames = drain_audit(&mut audit);
+        assert!(matches!(
+            frames.as_slice(),
+            [
+                StreamFrame::PermissionRequestDeferred { payload: deferred, .. },
+                StreamFrame::PermissionRequestTargeted { payload: targeted, .. }
+            ] if deferred.actor == Some(crate::permission_audit::PermissionProjectionActor::Flow {
+                session_id: root.session_id.clone(),
+                run_id: root.run_id.clone(),
+            }) && targeted.actor.is_none()
+                && targeted.target == crate::permission_audit::PermissionAuditTarget::User
         ));
     }
 
@@ -3089,11 +3747,13 @@ mod tests {
         let middle = child(&flows, &root);
         let requester = child(&flows, &middle);
         let broker = PermissionBroker::shared(Arc::clone(&flows));
+        let mut audit = attach_audit(&broker);
         let SubmissionOutcome::Pending(pending) =
             submit_to_flow(&broker, &requester, middle.clone()).unwrap()
         else {
             panic!("expected pending");
         };
+        drain_audit(&mut audit);
         flows.mark_terminal(&middle.run_id);
         assert_eq!(
             pending.target_changes.borrow().clone(),
@@ -3105,6 +3765,47 @@ mod tests {
                 target: ApprovalTarget::Flow(root.run_id.clone())
             }
         );
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [
+                StreamFrame::PermissionRequestDeferred { payload: deferred, .. },
+                StreamFrame::PermissionRequestTargeted { payload: targeted, .. }
+            ] if deferred.request_id == targeted.request_id
+                && targeted.target == crate::permission_audit::PermissionAuditTarget::Flow {
+                    run_id: root.run_id.clone(),
+                }
+        ));
+    }
+
+    #[test]
+    fn s8_timeout_defer_emits_deferred_then_targeted_from_real_broker() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let middle = child(&flows, &root);
+        let requester = child(&flows, &middle);
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, middle.clone()).unwrap()
+        else {
+            panic!("expected pending");
+        };
+        drain_audit(&mut audit);
+        assert!(
+            broker
+                .defer_timed_out_target(&pending.request.request_id, &middle.run_id)
+                .unwrap()
+        );
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [
+                StreamFrame::PermissionRequestDeferred { payload: deferred, .. },
+                StreamFrame::PermissionRequestTargeted { payload: targeted, .. }
+            ] if deferred.request_id == targeted.request_id
+                && targeted.target == crate::permission_audit::PermissionAuditTarget::Flow {
+                    run_id: root.run_id.clone(),
+                }
+        ));
     }
 
     #[test]
@@ -3998,6 +4699,512 @@ mod tests {
     }
 
     #[test]
+    fn s8_broker_group_emissions_keep_request_finals_before_single_resolved_transition() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requesters = [
+            child(&flows, &root),
+            child(&flows, &root),
+            child(&flows, &root),
+        ];
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+        let pending = requesters.each_ref().map(|requester| {
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow(&broker, requester, Arc::clone(&root)).unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            *pending
+        });
+        drain_audit(&mut audit);
+        let ids = pending
+            .each_ref()
+            .map(|pending| pending.request.request_id.clone());
+        let group = broker
+            .create_group(&root, BTreeSet::from(ids.clone()), "review".into())
+            .unwrap();
+        broker
+            .ungroup_requests(&root, &group.group_id, &BTreeSet::from([ids[2].clone()]))
+            .unwrap();
+        let current = broker
+            .visible_group_get(&root, &group.group_id)
+            .unwrap()
+            .unwrap();
+        broker
+            .resolve_batch(
+                &root,
+                PermissionSelector::Group(group.group_id.clone()),
+                PermissionAction::Approve,
+                None,
+                Some("accepted".into()),
+                BatchMode::Atomic,
+                Some(current.revision),
+            )
+            .unwrap();
+
+        let frames = drain_audit(&mut audit);
+        assert!(matches!(
+            frames.as_slice(),
+            [
+                StreamFrame::PermissionGroupCreated { .. },
+                StreamFrame::PermissionGroupUpdated { .. },
+                StreamFrame::PermissionRequestApproved { .. },
+                StreamFrame::PermissionRequestApproved { .. },
+                StreamFrame::PermissionGroupResolved { .. }
+            ]
+        ));
+        let final_ids = frames[2..4]
+            .iter()
+            .map(|frame| match frame {
+                StreamFrame::PermissionRequestApproved { payload, .. } => {
+                    payload.request_id.clone().unwrap()
+                }
+                _ => unreachable!(),
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(final_ids, BTreeSet::from([ids[0].clone(), ids[1].clone()]));
+        assert!(matches!(
+            broker.get(&ids[2]).unwrap().state,
+            PermissionRequestState::Pending { .. }
+        ));
+
+        broker
+            .resolve_batch(
+                &root,
+                PermissionSelector::Group(group.group_id),
+                PermissionAction::Approve,
+                None,
+                None,
+                BatchMode::BestEffort,
+                Some(current.revision),
+            )
+            .unwrap();
+        assert!(drain_audit(&mut audit).is_empty());
+    }
+
+    #[test]
+    fn s8_empty_group_delete_emits_terminal_snapshot_and_live_replay_remove_it() {
+        use crate::projection::message_window::{TranscriptEntry, replay_transcript_from};
+        use crate::workflow::WorkflowGraph;
+
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        drain_audit(&mut audit);
+        let request_id = pending.request.request_id;
+        let group = broker
+            .create_group(
+                &root,
+                BTreeSet::from([request_id.clone()]),
+                "delete-empty".into(),
+            )
+            .unwrap();
+        broker
+            .ungroup_requests(&root, &group.group_id, &BTreeSet::from([request_id]))
+            .unwrap();
+        let deleted = broker.delete_empty_group(&root, &group.group_id).unwrap();
+        assert!(deleted.request_ids.is_empty());
+        assert!(
+            broker
+                .visible_group_get(&root, &group.group_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let frames = drain_audit(&mut audit);
+        assert!(matches!(
+            frames.as_slice(),
+            [
+                StreamFrame::PermissionGroupCreated { .. },
+                StreamFrame::PermissionGroupUpdated { payload: updated, .. },
+                StreamFrame::PermissionGroupResolved { payload: resolved, .. }
+            ] if updated.request_ids.is_empty()
+                && resolved.request_ids.is_empty()
+                && resolved.revision == updated.revision
+        ));
+        let mut live = WorkflowGraph::new(crate::event::TurnId::now());
+        for frame in &frames {
+            live.apply_stream_frame(frame);
+        }
+        assert!(!live.permission_groups.contains_key(&group.group_id));
+
+        let lines = frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                let (kind, payload) = match frame {
+                    StreamFrame::PermissionGroupCreated { payload, .. } => {
+                        ("permission_group_created", payload)
+                    }
+                    StreamFrame::PermissionGroupUpdated { payload, .. } => {
+                        ("permission_group_updated", payload)
+                    }
+                    StreamFrame::PermissionGroupResolved { payload, .. } => {
+                        ("permission_group_resolved", payload)
+                    }
+                    _ => unreachable!(),
+                };
+                serde_json::json!({"type": kind, "seq": index + 1, "payload": payload}).to_string()
+            })
+            .collect::<Vec<_>>();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let mut replay = WorkflowGraph::new(crate::event::TurnId::now());
+        for entry in replay_transcript_from(&path).unwrap() {
+            if let TranscriptEntry::PermissionGroup { payload, resolved } = entry {
+                replay.apply_permission_group(&payload, resolved);
+            }
+        }
+        assert_eq!(replay.permission_groups, live.permission_groups);
+        assert!(!replay.permission_groups.contains_key(&group.group_id));
+    }
+
+    #[test]
+    fn s8_batch_resolve_versus_ungroup_uses_one_locked_membership_snapshot() {
+        enum Schedule {
+            BatchThenUngroup,
+            UngroupThenBatch,
+        }
+        for schedule in [Schedule::BatchThenUngroup, Schedule::UngroupThenBatch] {
+            let flows = Arc::new(FlowRegistry::default());
+            let root = register_root(&flows, "session", true);
+            let requester = child(&flows, &root);
+            let broker = Arc::new(PermissionBroker::new(flows));
+            let mut audit = attach_audit(&broker);
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            drain_audit(&mut audit);
+            let request_id = pending.request.request_id.clone();
+            let group = broker
+                .create_group(
+                    &root,
+                    BTreeSet::from([request_id.clone()]),
+                    "batch-linearized".into(),
+                )
+                .unwrap();
+            drain_audit(&mut audit);
+            let (first_done_tx, first_done_rx) = std::sync::mpsc::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+            let batch_first = matches!(schedule, Schedule::BatchThenUngroup);
+            let resolver = {
+                let broker = Arc::clone(&broker);
+                let root = Arc::clone(&root);
+                let group_id = group.group_id.clone();
+                let first_done_tx = first_done_tx.clone();
+                std::thread::spawn(move || {
+                    if !batch_first {
+                        continue_rx.recv().unwrap();
+                    }
+                    let result = broker.resolve_batch(
+                        &root,
+                        PermissionSelector::Group(group_id),
+                        PermissionAction::Approve,
+                        None,
+                        None,
+                        BatchMode::Atomic,
+                        None,
+                    );
+                    if batch_first {
+                        first_done_tx.send(()).unwrap();
+                    }
+                    result
+                })
+            };
+            let ungrouper = {
+                let broker = Arc::clone(&broker);
+                let root = Arc::clone(&root);
+                let group_id = group.group_id.clone();
+                let request_id = request_id.clone();
+                std::thread::spawn(move || {
+                    if batch_first {
+                        first_done_rx.recv().unwrap();
+                    }
+                    broker
+                        .ungroup_requests(&root, &group_id, &BTreeSet::from([request_id]))
+                        .unwrap();
+                    if !batch_first {
+                        first_done_tx.send(()).unwrap();
+                        continue_tx.send(()).unwrap();
+                    }
+                })
+            };
+            let resolutions = resolver.join().unwrap().unwrap();
+            ungrouper.join().unwrap();
+            let frames = drain_audit(&mut audit);
+
+            match schedule {
+                Schedule::BatchThenUngroup => {
+                    assert_eq!(resolutions.len(), 1);
+                    assert!(matches!(
+                        broker.get(&request_id).unwrap().state,
+                        PermissionRequestState::Approved { .. }
+                    ));
+                    let StreamFrame::PermissionRequestApproved { payload, .. } = &frames[0] else {
+                        panic!("expected approved frame");
+                    };
+                    assert_eq!(payload.group_ids, vec![group.group_id.clone()]);
+                    assert!(matches!(
+                        frames.as_slice(),
+                        [
+                            StreamFrame::PermissionRequestApproved { .. },
+                            StreamFrame::PermissionGroupResolved { .. },
+                            StreamFrame::PermissionGroupUpdated { .. }
+                        ]
+                    ));
+                }
+                Schedule::UngroupThenBatch => {
+                    assert!(resolutions.is_empty());
+                    assert!(matches!(
+                        broker.get(&request_id).unwrap().state,
+                        PermissionRequestState::Pending { .. }
+                    ));
+                    assert!(matches!(
+                        frames.as_slice(),
+                        [
+                            StreamFrame::PermissionGroupUpdated { payload, .. },
+                            StreamFrame::PermissionGroupResolved { .. }
+                        ] if payload.request_ids.is_empty()
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn s8_non_group_terminal_paths_emit_one_resolved_after_request_finals() {
+        use crate::workflow::WorkflowGraph;
+
+        enum Path {
+            RequestIdsBatch,
+            UserCancel,
+            RunCleanup,
+        }
+        for path in [Path::RequestIdsBatch, Path::UserCancel, Path::RunCleanup] {
+            let flows = Arc::new(FlowRegistry::default());
+            let root = register_root(&flows, "session", true);
+            let requester = child(&flows, &root);
+            let broker = PermissionBroker::new(flows);
+            let mut audit = attach_audit(&broker);
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            drain_audit(&mut audit);
+            let request_id = pending.request.request_id.clone();
+            let group = broker
+                .create_group(
+                    &root,
+                    BTreeSet::from([request_id.clone()]),
+                    "non-group-terminal".into(),
+                )
+                .unwrap();
+            drain_audit(&mut audit);
+
+            match path {
+                Path::RequestIdsBatch => {
+                    broker
+                        .resolve_batch(
+                            &root,
+                            PermissionSelector::RequestIds(vec![request_id]),
+                            PermissionAction::Approve,
+                            None,
+                            None,
+                            BatchMode::Atomic,
+                            None,
+                        )
+                        .unwrap();
+                }
+                Path::UserCancel => broker.cancel(&request_id, "cancelled").unwrap(),
+                Path::RunCleanup => {
+                    assert_eq!(
+                        broker.cancel_for_run("session", &requester.run_id, "terminal"),
+                        1
+                    );
+                }
+            }
+
+            let frames = drain_audit(&mut audit);
+            assert_eq!(
+                frames
+                    .iter()
+                    .filter(|frame| matches!(frame, StreamFrame::PermissionGroupResolved { .. }))
+                    .count(),
+                1
+            );
+            assert!(matches!(
+                frames.last(),
+                Some(StreamFrame::PermissionGroupResolved { payload, .. })
+                    if payload.group_id == group.group_id
+            ));
+            assert!(matches!(
+                frames.first(),
+                Some(
+                    StreamFrame::PermissionRequestApproved { .. }
+                        | StreamFrame::PermissionRequestCancelled { .. }
+                )
+            ));
+            let mut live = WorkflowGraph::new(crate::event::TurnId::now());
+            live.apply_permission_group(
+                &crate::permission_audit::PermissionGroupAudit::from_group(
+                    &group,
+                    group.created_at,
+                )
+                .unwrap(),
+                false,
+            );
+            for frame in &frames {
+                live.apply_stream_frame(frame);
+            }
+            assert!(!live.permission_groups.contains_key(&group.group_id));
+        }
+
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        drain_audit(&mut audit);
+        let request_id = pending.request.request_id.clone();
+        broker.cancel(&request_id, "already terminal").unwrap();
+        drain_audit(&mut audit);
+        let group = broker
+            .create_group(&root, BTreeSet::from([request_id]), "terminal-only".into())
+            .unwrap();
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [
+                StreamFrame::PermissionGroupCreated { payload: created, .. },
+                StreamFrame::PermissionGroupResolved { payload: resolved, .. }
+            ] if created.group_id == group.group_id && resolved.group_id == group.group_id
+        ));
+    }
+
+    #[test]
+    fn s8_resolve_versus_ungroup_linearization_controls_final_membership_snapshot() {
+        enum Schedule {
+            ResolveThenUngroup,
+            UngroupThenResolve,
+        }
+        for schedule in [Schedule::ResolveThenUngroup, Schedule::UngroupThenResolve] {
+            let flows = Arc::new(FlowRegistry::default());
+            let root = register_root(&flows, "session", true);
+            let requester = child(&flows, &root);
+            let broker = Arc::new(PermissionBroker::new(flows));
+            let mut audit = attach_audit(&broker);
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            drain_audit(&mut audit);
+            let request_id = pending.request.request_id.clone();
+            let group = broker
+                .create_group(
+                    &root,
+                    BTreeSet::from([request_id.clone()]),
+                    "linearized".into(),
+                )
+                .unwrap();
+            drain_audit(&mut audit);
+            let (first_done_tx, first_done_rx) = std::sync::mpsc::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+            let resolve_first = matches!(schedule, Schedule::ResolveThenUngroup);
+            let resolver = {
+                let broker = Arc::clone(&broker);
+                let root = Arc::clone(&root);
+                let request_id = request_id.clone();
+                let first_done_tx = first_done_tx.clone();
+                std::thread::spawn(move || {
+                    if !resolve_first {
+                        continue_rx.recv().unwrap();
+                    }
+                    let outcome = broker.resolve(
+                        &request_id,
+                        &DecisionAuthority::Flow(broker.flow_authority(root).unwrap()),
+                        PermissionAction::Approve,
+                        None,
+                        None,
+                    );
+                    if resolve_first {
+                        first_done_tx.send(()).unwrap();
+                    }
+                    outcome
+                })
+            };
+            let ungrouper = {
+                let broker = Arc::clone(&broker);
+                let root = Arc::clone(&root);
+                let group_id = group.group_id.clone();
+                let request_id = request_id.clone();
+                std::thread::spawn(move || {
+                    if resolve_first {
+                        first_done_rx.recv().unwrap();
+                    }
+                    broker
+                        .ungroup_requests(&root, &group_id, &BTreeSet::from([request_id]))
+                        .unwrap();
+                    if !resolve_first {
+                        first_done_tx.send(()).unwrap();
+                        continue_tx.send(()).unwrap();
+                    }
+                })
+            };
+            assert!(resolver.join().unwrap().is_ok());
+            ungrouper.join().unwrap();
+            let frames = drain_audit(&mut audit);
+            let final_payload = frames
+                .iter()
+                .find_map(|frame| match frame {
+                    StreamFrame::PermissionRequestApproved { payload, .. } => Some(payload),
+                    _ => None,
+                })
+                .unwrap();
+            match schedule {
+                Schedule::ResolveThenUngroup => {
+                    assert_eq!(final_payload.group_ids, vec![group.group_id.clone()]);
+                    assert!(matches!(
+                        frames.as_slice(),
+                        [
+                            StreamFrame::PermissionRequestApproved { .. },
+                            StreamFrame::PermissionGroupResolved { .. },
+                            StreamFrame::PermissionGroupUpdated { .. }
+                        ]
+                    ));
+                }
+                Schedule::UngroupThenResolve => {
+                    assert!(final_payload.group_ids.is_empty());
+                    assert!(matches!(
+                        frames.as_slice(),
+                        [
+                            StreamFrame::PermissionGroupUpdated { .. },
+                            StreamFrame::PermissionGroupResolved { .. },
+                            StreamFrame::PermissionRequestApproved { .. }
+                        ]
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn atomic_batch_invalid_target_member_leaves_every_request_unchanged() {
         let flows = Arc::new(FlowRegistry::default());
         let root = register_root(&flows, "session", true);
@@ -4055,6 +5262,7 @@ mod tests {
             };
             *pending
         });
+        let mut audit = attach_audit(&broker);
         *requesters[1].execution_state.lock().unwrap() = FlowExecutionState::Terminal;
         let ids = pending
             .each_ref()
@@ -4071,6 +5279,7 @@ mod tests {
             ),
             Err(PermissionError::ActorNotRunning)
         ));
+        assert!(drain_audit(&mut audit).is_empty());
         for id in ids {
             let request = broker.get(&id).unwrap();
             assert!(matches!(
@@ -4084,6 +5293,87 @@ mod tests {
                     .all(|hop| hop.actor.is_none())
             );
         }
+    }
+
+    #[test]
+    fn cancellation_audit_attributes_the_system_component() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+        let pending = submit_to_user(&broker, &requester);
+        drain_audit(&mut audit);
+
+        broker
+            .cancel(&pending.request.request_id, "operator cancelled")
+            .unwrap();
+
+        let frames = drain_audit(&mut audit);
+        let [StreamFrame::PermissionRequestCancelled { payload, .. }] = frames.as_slice() else {
+            panic!("expected one cancellation audit");
+        };
+        assert_eq!(
+            payload.actor,
+            Some(crate::permission_audit::PermissionProjectionActor::System {
+                component: "permission.user_cancel".into(),
+            })
+        );
+        assert_eq!(payload.reason.as_deref(), Some("operator cancelled"));
+    }
+
+    #[test]
+    fn approval_audit_precedes_its_persistent_grant() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+        let pending = submit_to_user(&broker, &requester);
+        drain_audit(&mut audit);
+
+        broker
+            .resolve(
+                &pending.request.request_id,
+                &user_decision(&broker, &requester.session_id),
+                PermissionAction::Approve,
+                Some(GrantScope::ChildRunSameTool {
+                    run_id: requester.run_id.clone(),
+                    tool_name: pending.request.intent.tool_name.clone(),
+                }),
+                Some("approved".into()),
+            )
+            .unwrap();
+
+        let frames = drain_audit(&mut audit);
+        assert!(matches!(
+            frames.as_slice(),
+            [
+                StreamFrame::PermissionRequestApproved { .. },
+                StreamFrame::PermissionGrantCreated { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn terminal_cleanup_emits_after_the_lifecycle_transition() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::shared(Arc::clone(&flows));
+        let mut audit = attach_audit(&broker);
+        submit_to_user(&broker, &requester);
+        drain_audit(&mut audit);
+
+        flows.mark_terminal(&requester.run_id);
+
+        let frames = drain_audit(&mut audit);
+        let [StreamFrame::PermissionRequestCancelled { payload, .. }] = frames.as_slice() else {
+            panic!("expected synchronous terminal cancellation audit");
+        };
+        assert_eq!(
+            payload.actor,
+            Some(crate::permission_audit::PermissionProjectionActor::System {
+                component: "permission.run_cleanup".into(),
+            })
+        );
     }
 
     #[test]

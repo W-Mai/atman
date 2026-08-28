@@ -469,6 +469,18 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::ToolPendingApproval { .. } => "tool_pending_approval",
         Event::ToolApproved { .. } => "tool_approved",
         Event::ToolDenied { .. } => "tool_denied",
+        Event::PermissionRequestCreated { .. } => "permission_request_created",
+        Event::PermissionRequestTargeted { .. } => "permission_request_targeted",
+        Event::PermissionRequestDeferred { .. } => "permission_request_deferred",
+        Event::PermissionRequestApproved { .. } => "permission_request_approved",
+        Event::PermissionRequestDenied { .. } => "permission_request_denied",
+        Event::PermissionRequestCancelled { .. } => "permission_request_cancelled",
+        Event::PermissionGroupCreated { .. } => "permission_group_created",
+        Event::PermissionGroupUpdated { .. } => "permission_group_updated",
+        Event::PermissionGroupResolved { .. } => "permission_group_resolved",
+        Event::PermissionGrantCreated { .. } => "permission_grant_created",
+        Event::PermissionGrantExpired { .. } => "permission_grant_expired",
+        Event::UnrestrictedExecution { .. } => "unrestricted_execution",
         Event::TerminalFinalState { .. } => "terminal_final_state",
         Event::MermaidDiagram { .. } => "mermaid_diagram",
     }
@@ -539,6 +551,23 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         | Event::ToolPendingApproval { run_id, .. }
         | Event::ToolApproved { run_id, .. }
         | Event::ToolDenied { run_id, .. } => (None, Some(run_id.0.to_string())),
+        Event::PermissionRequestCreated { payload }
+        | Event::PermissionRequestTargeted { payload }
+        | Event::PermissionRequestDeferred { payload }
+        | Event::PermissionRequestApproved { payload }
+        | Event::PermissionRequestDenied { payload }
+        | Event::PermissionRequestCancelled { payload }
+        | Event::UnrestrictedExecution { payload } => {
+            (None, Some(payload.requesting_run_id.0.to_string()))
+        }
+        Event::PermissionGroupCreated { payload }
+        | Event::PermissionGroupUpdated { payload }
+        | Event::PermissionGroupResolved { payload } => {
+            (None, Some(payload.owner_run_id.0.to_string()))
+        }
+        Event::PermissionGrantCreated { payload } | Event::PermissionGrantExpired { payload } => {
+            (None, Some(payload.requesting_run_id.0.to_string()))
+        }
         Event::AttachmentDegraded {
             turn_id,
             flow_run_id,

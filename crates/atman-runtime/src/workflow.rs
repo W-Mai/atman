@@ -1,12 +1,58 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, FlowNodeStatus, FlowStatus, TurnId};
+use crate::permission::{PermissionGroupId, PermissionRequestId};
+use crate::permission_audit::{PermissionGroupAudit, PermissionRequestAudit};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowGraph {
     pub turn_id: TurnId,
     pub root: Vec<WorkflowNode>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub permission_requests: BTreeMap<WorkflowPermissionIdentity, WorkflowPermissionRequest>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub permission_groups: BTreeMap<PermissionGroupId, PermissionGroupAudit>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub resolved_permission_groups: BTreeSet<PermissionGroupId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowPermissionIdentity {
+    Canonical {
+        request_id: PermissionRequestId,
+    },
+    Legacy {
+        seq: u64,
+        run_id: String,
+        tool_use_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowPermissionRequest {
+    pub payload: PermissionRequestAudit,
+    pub state: WorkflowPermissionState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowPermissionState {
+    Pending,
+    Approved,
+    Denied,
+    Cancelled,
+    Interrupted,
+    Unrestricted,
+}
+
+impl WorkflowPermissionState {
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Pending)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +145,9 @@ impl WorkflowGraph {
         Self {
             turn_id,
             root: Vec::new(),
+            permission_requests: BTreeMap::new(),
+            permission_groups: BTreeMap::new(),
+            resolved_permission_groups: BTreeSet::new(),
         }
     }
 
@@ -291,6 +340,7 @@ impl WorkflowGraph {
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
+                    self.refresh_permission_tool_approvals();
                 }
             }
             Event::AssistantMsg { .. } => {}
@@ -371,6 +421,30 @@ impl WorkflowGraph {
                     });
                 }
             }
+            Event::PermissionRequestCreated { payload }
+            | Event::PermissionRequestTargeted { payload }
+            | Event::PermissionRequestDeferred { payload } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Pending);
+            }
+            Event::PermissionRequestApproved { payload } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Approved);
+            }
+            Event::PermissionRequestDenied { payload } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Denied);
+            }
+            Event::PermissionRequestCancelled { payload } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Cancelled);
+            }
+            Event::UnrestrictedExecution { payload } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Unrestricted);
+            }
+            Event::PermissionGroupCreated { payload }
+            | Event::PermissionGroupUpdated { payload } => {
+                self.apply_permission_group(payload, false);
+            }
+            Event::PermissionGroupResolved { payload } => {
+                self.apply_permission_group(payload, true);
+            }
             _ => {}
         }
     }
@@ -381,6 +455,119 @@ impl WorkflowGraph {
 
     pub fn find_node_mut(&mut self, id: &str) -> Option<&mut WorkflowNode> {
         find_node_mut(&mut self.root, id)
+    }
+
+    pub fn descendant_pending_permissions(&self, flow_node_id: &str) -> usize {
+        let Some(node) = find_node(&self.root, flow_node_id) else {
+            return 0;
+        };
+        let mut run_ids = Vec::new();
+        collect_flow_run_ids(node, &mut run_ids);
+        self.permission_requests
+            .values()
+            .filter(|request| {
+                request.state.is_pending()
+                    && run_ids.contains(&request.payload.requesting_run_id.0.to_string())
+            })
+            .count()
+    }
+
+    pub fn interrupt_pending_permissions(&mut self) {
+        for request in self.permission_requests.values_mut() {
+            if request.state.is_pending() {
+                request.state = WorkflowPermissionState::Interrupted;
+                request.payload.reason = Some("interrupted at end of persisted history".into());
+            }
+        }
+        self.refresh_permission_tool_approvals();
+    }
+
+    pub fn apply_permission_request(
+        &mut self,
+        payload: &PermissionRequestAudit,
+        state: WorkflowPermissionState,
+    ) {
+        let Some(request_id) = payload.request_id.clone() else {
+            return;
+        };
+        self.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical { request_id },
+            payload,
+            state,
+        );
+        self.refresh_permission_tool_approvals();
+    }
+
+    pub fn apply_permission_request_with_identity(
+        &mut self,
+        identity: WorkflowPermissionIdentity,
+        payload: &PermissionRequestAudit,
+        state: WorkflowPermissionState,
+    ) {
+        self.permission_requests.insert(
+            identity,
+            WorkflowPermissionRequest {
+                payload: payload.clone(),
+                state,
+            },
+        );
+        self.refresh_permission_tool_approvals();
+    }
+
+    pub fn apply_permission_group(&mut self, payload: &PermissionGroupAudit, resolved: bool) {
+        if resolved {
+            self.permission_groups.remove(&payload.group_id);
+            self.resolved_permission_groups
+                .insert(payload.group_id.clone());
+        } else if !self.resolved_permission_groups.contains(&payload.group_id) {
+            self.permission_groups
+                .insert(payload.group_id.clone(), payload.clone());
+        }
+    }
+
+    fn refresh_permission_tool_approvals(&mut self) {
+        let mut exact: BTreeMap<(String, String), &WorkflowPermissionRequest> = BTreeMap::new();
+        for request in self.permission_requests.values() {
+            let key = (
+                request.payload.requesting_run_id.0.to_string(),
+                request.payload.tool_use_id.clone(),
+            );
+            exact
+                .entry(key)
+                .and_modify(|current| {
+                    if (!current.state.is_pending() && request.state.is_pending())
+                        || (current.state.is_pending() == request.state.is_pending()
+                            && request.payload.at > current.payload.at)
+                    {
+                        *current = request;
+                    }
+                })
+                .or_insert(request);
+        }
+        for ((run_id, tool_use_id), request) in exact {
+            let id = tool_node_id(&run_id, &tool_use_id);
+            let Some(node) = find_node_mut(&mut self.root, &id) else {
+                continue;
+            };
+            node.approval = Some(match request.state {
+                WorkflowPermissionState::Pending => ApprovalState::Pending {
+                    level: format!("{:?}", request.payload.tier).to_lowercase(),
+                    preview: None,
+                },
+                WorkflowPermissionState::Approved | WorkflowPermissionState::Unrestricted => {
+                    ApprovalState::Approved
+                }
+                WorkflowPermissionState::Denied
+                | WorkflowPermissionState::Cancelled
+                | WorkflowPermissionState::Interrupted => ApprovalState::Denied {
+                    reason: request
+                        .payload
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "permission denied".into()),
+                },
+            });
+        }
     }
 
     pub fn apply_stream_frame(&mut self, frame: &crate::stream::StreamFrame) {
@@ -587,6 +774,7 @@ impl WorkflowGraph {
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
+                    self.refresh_permission_tool_approvals();
                 }
             }
             StreamFrame::ToolUseDone {
@@ -680,6 +868,30 @@ impl WorkflowGraph {
                     });
                 }
             }
+            StreamFrame::PermissionRequestCreated { payload, .. }
+            | StreamFrame::PermissionRequestTargeted { payload, .. }
+            | StreamFrame::PermissionRequestDeferred { payload, .. } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Pending);
+            }
+            StreamFrame::PermissionRequestApproved { payload, .. } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Approved);
+            }
+            StreamFrame::PermissionRequestDenied { payload, .. } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Denied);
+            }
+            StreamFrame::PermissionRequestCancelled { payload, .. } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Cancelled);
+            }
+            StreamFrame::UnrestrictedExecution { payload, .. } => {
+                self.apply_permission_request(payload, WorkflowPermissionState::Unrestricted);
+            }
+            StreamFrame::PermissionGroupCreated { payload, .. }
+            | StreamFrame::PermissionGroupUpdated { payload, .. } => {
+                self.apply_permission_group(payload, false);
+            }
+            StreamFrame::PermissionGroupResolved { payload, .. } => {
+                self.apply_permission_group(payload, true);
+            }
             _ => {}
         }
     }
@@ -725,6 +937,52 @@ fn scope_id(run_id: &str, node_id: &str) -> String {
 
 fn tool_node_id(run_id: &str, tool_use_id: &str) -> String {
     format!("tool:{run_id}:{tool_use_id}")
+}
+
+fn collect_flow_run_ids(node: &WorkflowNode, out: &mut Vec<String>) {
+    match &node.kind {
+        WorkflowNodeKind::Flow { run_id, .. } | WorkflowNodeKind::Subflow { run_id, .. } => {
+            out.push(run_id.clone());
+        }
+        _ => {}
+    }
+    for child in &node.children {
+        collect_flow_run_ids(child, out);
+    }
+}
+
+pub fn permission_preview(payload: &PermissionRequestAudit) -> Option<String> {
+    let mut lines = vec![format!("intent: {} ({:?})", payload.tool, payload.tier)];
+    let provenance = &payload.provenance;
+    if let Some(path) = &provenance.path {
+        lines.push(format!("path: {path}"));
+    }
+    if let Some(cwd) = &provenance.cwd {
+        lines.push(format!("cwd: {cwd}"));
+    }
+    if let Some(workspace) = &provenance.workspace_root {
+        lines.push(format!("workspace: {workspace}"));
+    }
+    if provenance.network {
+        lines.push("network: true".into());
+    }
+    if !provenance.risks.is_empty() {
+        lines.push(format!(
+            "risks: {}",
+            provenance
+                .risks
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !provenance.targets.is_empty() {
+        lines.push(format!("targets: {}", provenance.targets.join(", ")));
+    }
+    lines.push(format!("policy: {}", payload.policy.snapshot_id));
+    lines.push(format!("rule: {}", payload.policy.rule_id));
+    Some(lines.join("\n"))
 }
 
 fn find_tool_node_by_tool_use_id<'a>(
@@ -795,6 +1053,7 @@ mod tests {
     use super::*;
     use crate::event::{FlowRunId, FlowStatus};
     use crate::nodegraph::NodeKind;
+    use std::collections::BTreeSet;
 
     fn flow_start(run_id: FlowRunId, name: &str) -> Event {
         Event::FlowStart {
@@ -833,6 +1092,64 @@ mod tests {
             status,
             output_preview: None,
         }
+    }
+
+    fn request_id() -> PermissionRequestId {
+        PermissionRequestId(uuid::Uuid::now_v7())
+    }
+
+    fn permission_payload(
+        request_id: PermissionRequestId,
+        requesting_run_id: FlowRunId,
+        root_run_id: FlowRunId,
+        tool_use_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PermissionRequestAudit {
+        PermissionRequestAudit {
+            request_id: Some(request_id),
+            session_id: "session".into(),
+            requesting_run_id,
+            parent_run_id: None,
+            root_run_id,
+            tool_use_id: tool_use_id.into(),
+            tool: "fs.read".into(),
+            tier: crate::tool::Tier::Two,
+            provenance: crate::permission_audit::PermissionProvenanceSummary {
+                cwd: None,
+                path: None,
+                path_origin: None,
+                workspace_id: None,
+                workspace_root: None,
+                repository_root: None,
+                network: false,
+                risks: BTreeSet::new(),
+                targets: Vec::new(),
+            },
+            target: crate::permission_audit::PermissionAuditTarget::User,
+            group_ids: Vec::new(),
+            policy: crate::permission_audit::PermissionPolicyReference {
+                snapshot_id: "snapshot".into(),
+                rule_id: "rule".into(),
+            },
+            escalation_path: Vec::new(),
+            decision_id: None,
+            actor: None,
+            scope: None,
+            reason: None,
+            at,
+        }
+    }
+
+    fn add_tool(graph: &mut WorkflowGraph, run_id: &FlowRunId, tool_use_id: &str) {
+        graph.apply_event(&flow_start(run_id.clone(), "agent_loop"));
+        graph.apply_event(&stmt_start(run_id.clone(), "dispatch_all", None));
+        graph.apply_event(&Event::ToolNode {
+            run_id: run_id.clone(),
+            parent_node_id: "dispatch_all".into(),
+            tool_use_id: tool_use_id.into(),
+            tool_name: "fs.read".into(),
+            args_preview: String::new(),
+        });
     }
 
     #[test]
@@ -1009,6 +1326,526 @@ mod tests {
                 .unwrap()
                 .status,
             NodeStatus::Running
+        );
+    }
+
+    #[test]
+    fn permission_tool_approval_correlates_by_exact_run_and_tool() {
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        let run_a = FlowRunId::now();
+        let run_b = FlowRunId::now();
+        add_tool(&mut graph, &run_a, "shared");
+        add_tool(&mut graph, &run_b, "shared");
+        let payload = permission_payload(
+            request_id(),
+            run_a.clone(),
+            run_a.clone(),
+            "shared",
+            Utc::now(),
+        );
+        graph.apply_event(&Event::PermissionRequestCreated { payload });
+
+        assert!(matches!(
+            graph
+                .find_node(&tool_node_id(&run_a.0.to_string(), "shared"))
+                .unwrap()
+                .approval,
+            Some(ApprovalState::Pending { .. })
+        ));
+        assert_eq!(
+            graph
+                .find_node(&tool_node_id(&run_b.0.to_string(), "shared"))
+                .unwrap()
+                .approval,
+            None
+        );
+    }
+
+    #[test]
+    fn permission_arriving_before_tool_refreshes_when_tool_is_added() {
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        let run_id = FlowRunId::now();
+        let payload = permission_payload(
+            request_id(),
+            run_id.clone(),
+            run_id.clone(),
+            "late-tool",
+            Utc::now(),
+        );
+        graph.apply_event(&Event::PermissionRequestCreated { payload });
+        add_tool(&mut graph, &run_id, "late-tool");
+        assert!(matches!(
+            graph
+                .find_node(&tool_node_id(&run_id.0.to_string(), "late-tool"))
+                .unwrap()
+                .approval,
+            Some(ApprovalState::Pending { .. })
+        ));
+    }
+
+    #[test]
+    fn canonical_and_legacy_permission_lifecycles_count_and_interrupt_independently() {
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        let root = FlowRunId::now();
+        let child = FlowRunId::now();
+        graph.apply_event(&flow_start(root.clone(), "root"));
+        graph.apply_event(&stmt_start(root.clone(), "spawn", None));
+        graph.apply_event(&subflow_start(
+            child.clone(),
+            root.clone(),
+            "spawn",
+            "child",
+        ));
+        let now = Utc::now();
+        let canonical_id = request_id();
+        let canonical = permission_payload(
+            canonical_id.clone(),
+            child.clone(),
+            root.clone(),
+            "canonical",
+            now,
+        );
+        let legacy = permission_payload(
+            request_id(),
+            child.clone(),
+            root.clone(),
+            "legacy",
+            now + chrono::Duration::seconds(1),
+        );
+        graph.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical {
+                request_id: canonical_id.clone(),
+            },
+            &canonical,
+            WorkflowPermissionState::Pending,
+        );
+        graph.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Legacy {
+                seq: 7,
+                run_id: child.0.to_string(),
+                tool_use_id: "legacy".into(),
+            },
+            &legacy,
+            WorkflowPermissionState::Pending,
+        );
+        assert_eq!(graph.descendant_pending_permissions(&root.0.to_string()), 2);
+
+        let mut approved = canonical.clone();
+        approved.actor = Some(crate::permission_audit::PermissionProjectionActor::Flow {
+            session_id: "session".into(),
+            run_id: root.clone(),
+        });
+        approved.reason = Some("approved by parent".into());
+        graph.apply_event(&Event::PermissionRequestApproved { payload: approved });
+        assert_eq!(graph.descendant_pending_permissions(&root.0.to_string()), 1);
+        assert_eq!(
+            graph
+                .permission_requests
+                .get(&WorkflowPermissionIdentity::Canonical {
+                    request_id: canonical_id,
+                })
+                .unwrap()
+                .state,
+            WorkflowPermissionState::Approved
+        );
+
+        graph.interrupt_pending_permissions();
+        assert_eq!(graph.descendant_pending_permissions(&root.0.to_string()), 0);
+        assert!(graph.permission_requests.values().any(|request| {
+            request.state == WorkflowPermissionState::Interrupted
+                && request.payload.tool_use_id == "legacy"
+        }));
+    }
+
+    #[test]
+    fn permission_event_and_stream_reducers_converge_on_canonical_state() {
+        let run_id = FlowRunId::now();
+        let request_id = request_id();
+        let created = permission_payload(
+            request_id,
+            run_id.clone(),
+            run_id.clone(),
+            "tool",
+            Utc::now(),
+        );
+        let mut approved = created.clone();
+        approved.actor = Some(crate::permission_audit::PermissionProjectionActor::User {
+            session_id: "session".into(),
+            principal_id: Some("operator".into()),
+        });
+        approved.reason = Some("accepted".into());
+        approved.at += chrono::Duration::seconds(1);
+
+        let mut from_events = WorkflowGraph::new(TurnId::now());
+        from_events.apply_event(&Event::PermissionRequestCreated {
+            payload: created.clone(),
+        });
+        from_events.apply_event(&Event::PermissionRequestApproved {
+            payload: approved.clone(),
+        });
+        let mut from_stream = WorkflowGraph::new(TurnId::now());
+        from_stream.apply_stream_frame(&crate::stream::StreamFrame::PermissionRequestCreated {
+            run_id: run_id.0.to_string(),
+            payload: created,
+        });
+        from_stream.apply_stream_frame(&crate::stream::StreamFrame::PermissionRequestApproved {
+            run_id: run_id.0.to_string(),
+            payload: approved,
+        });
+
+        assert_eq!(
+            from_events.permission_requests,
+            from_stream.permission_requests
+        );
+        let request = from_events.permission_requests.values().next().unwrap();
+        assert_eq!(request.state, WorkflowPermissionState::Approved);
+        assert_eq!(request.payload.reason.as_deref(), Some("accepted"));
+        assert!(matches!(
+            request.payload.actor,
+            Some(crate::permission_audit::PermissionProjectionActor::User { .. })
+        ));
+    }
+
+    #[test]
+    fn s8_canonical_jsonl_replay_converges_with_event_and_stream_reducers() {
+        use crate::permission::PermissionGroupId;
+        use crate::permission_audit::{PermissionGroupAudit, PermissionProjectionActor};
+        use crate::projection::message_window::{TranscriptEntry, replay_transcript_from};
+        use crate::stream::StreamFrame;
+
+        let root = FlowRunId::now();
+        let child = FlowRunId::now();
+        let now = Utc::now();
+        let approved_id = request_id();
+        let unrestricted_id = request_id();
+        let interrupted_id = request_id();
+        let mut approved = permission_payload(
+            approved_id.clone(),
+            child.clone(),
+            root.clone(),
+            "approved",
+            now,
+        );
+        approved.parent_run_id = Some(root.clone());
+        let mut approved_final = approved.clone();
+        approved_final.actor = Some(PermissionProjectionActor::User {
+            session_id: "session".into(),
+            principal_id: Some("operator".into()),
+        });
+        approved_final.reason = Some("accepted".into());
+        approved_final.at += chrono::Duration::seconds(2);
+        let mut unrestricted = permission_payload(
+            unrestricted_id,
+            child.clone(),
+            root.clone(),
+            "unrestricted",
+            now,
+        );
+        unrestricted.parent_run_id = Some(root.clone());
+        unrestricted.actor = Some(PermissionProjectionActor::Policy {
+            policy_version: "snapshot".into(),
+            rule_id: "unrestricted".into(),
+        });
+        let mut interrupted = permission_payload(
+            interrupted_id,
+            child.clone(),
+            root.clone(),
+            "interrupted",
+            now,
+        );
+        interrupted.parent_run_id = Some(root.clone());
+        let group = PermissionGroupAudit {
+            group_id: PermissionGroupId(uuid::Uuid::now_v7()),
+            owner_run_id: root.clone(),
+            label: "acceptance".into(),
+            request_ids: vec![approved_id.clone()],
+            revision: 1,
+            at: now,
+        };
+
+        let mut created_json = serde_json::to_value(&approved).unwrap();
+        created_json.as_object_mut().unwrap().remove("provenance");
+        let lines = [
+            serde_json::json!({"type":"permission_request_created","seq":1,"payload":created_json}).to_string(),
+            "{\"type\":\"permission_request_targeted\",\"payload\":".into(),
+            serde_json::json!({"type":"permission_request_targeted","seq":2,"payload":approved}).to_string(),
+            serde_json::json!({"type":"tool_pending_approval","seq":3,"run_id":child.0.to_string(),"tool_use_id":"approved","tool_name":"fs.read","args_preview":"{}","level":"approve"}).to_string(),
+            serde_json::json!({"type":"permission_group_created","seq":4,"payload":group}).to_string(),
+            serde_json::json!({"type":"permission_request_approved","seq":5,"payload":approved_final}).to_string(),
+            serde_json::json!({"type":"tool_approved","seq":6,"run_id":child.0.to_string(),"tool_use_id":"approved","decided_by":"broker"}).to_string(),
+            serde_json::json!({"type":"permission_group_resolved","seq":7,"payload":group}).to_string(),
+            serde_json::json!({"type":"unrestricted_execution","seq":8,"payload":unrestricted}).to_string(),
+            serde_json::json!({"type":"tool_approved","seq":9,"run_id":child.0.to_string(),"tool_use_id":"unrestricted","decided_by":"unrestricted"}).to_string(),
+            serde_json::json!({"type":"permission_request_created","seq":10,"payload":interrupted}).to_string(),
+            serde_json::json!({"type":"tool_pending_approval","seq":11,"run_id":child.0.to_string(),"tool_use_id":"interrupted","tool_name":"fs.read","args_preview":"{}","level":"approve"}).to_string(),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let transcript = replay_transcript_from(&path).unwrap();
+
+        let mut from_history = WorkflowGraph::new(TurnId::now());
+        let mut from_events = WorkflowGraph::new(TurnId::now());
+        let mut from_stream = WorkflowGraph::new(TurnId::now());
+        for graph in [&mut from_history, &mut from_events, &mut from_stream] {
+            graph.apply_event(&flow_start(root.clone(), "root"));
+            graph.apply_event(&stmt_start(root.clone(), "spawn", None));
+            graph.apply_event(&subflow_start(
+                child.clone(),
+                root.clone(),
+                "spawn",
+                "child",
+            ));
+            graph.apply_event(&stmt_start(child.clone(), "dispatch_all", None));
+            for tool in ["approved", "unrestricted", "interrupted"] {
+                graph.apply_event(&Event::ToolNode {
+                    run_id: child.clone(),
+                    parent_node_id: "dispatch_all".into(),
+                    tool_use_id: tool.into(),
+                    tool_name: "fs.read".into(),
+                    args_preview: String::new(),
+                });
+            }
+        }
+        for entry in &transcript {
+            match entry {
+                TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload,
+                    state,
+                } => {
+                    from_history.apply_permission_request_with_identity(
+                        identity.clone(),
+                        payload,
+                        *state,
+                    );
+                }
+                TranscriptEntry::PermissionGroup { payload, resolved } => {
+                    from_history.apply_permission_group(payload, *resolved);
+                }
+                _ => {}
+            }
+        }
+        let events = [
+            Event::PermissionRequestCreated {
+                payload: approved.clone(),
+            },
+            Event::PermissionRequestTargeted {
+                payload: approved.clone(),
+            },
+            Event::PermissionGroupCreated {
+                payload: group.clone(),
+            },
+            Event::PermissionRequestApproved {
+                payload: approved_final.clone(),
+            },
+            Event::PermissionGroupResolved {
+                payload: group.clone(),
+            },
+            Event::UnrestrictedExecution {
+                payload: unrestricted.clone(),
+            },
+            Event::PermissionRequestCreated {
+                payload: interrupted.clone(),
+            },
+        ];
+        for event in &events {
+            from_events.apply_event(event);
+        }
+        from_events.interrupt_pending_permissions();
+        let run_id = child.0.to_string();
+        let frames = [
+            StreamFrame::PermissionRequestCreated {
+                run_id: run_id.clone(),
+                payload: approved.clone(),
+            },
+            StreamFrame::PermissionRequestTargeted {
+                run_id: run_id.clone(),
+                payload: approved,
+            },
+            StreamFrame::PermissionGroupCreated {
+                run_id: root.0.to_string(),
+                payload: group.clone(),
+            },
+            StreamFrame::PermissionRequestApproved {
+                run_id: run_id.clone(),
+                payload: approved_final,
+            },
+            StreamFrame::PermissionGroupResolved {
+                run_id: root.0.to_string(),
+                payload: group,
+            },
+            StreamFrame::UnrestrictedExecution {
+                run_id: run_id.clone(),
+                payload: unrestricted,
+            },
+            StreamFrame::PermissionRequestCreated {
+                run_id,
+                payload: interrupted,
+            },
+        ];
+        for frame in &frames {
+            from_stream.apply_stream_frame(frame);
+        }
+        from_stream.interrupt_pending_permissions();
+
+        assert_eq!(
+            from_history.permission_requests,
+            from_events.permission_requests
+        );
+        assert_eq!(
+            from_history.permission_requests,
+            from_stream.permission_requests
+        );
+        assert_eq!(
+            from_history.permission_groups,
+            from_events.permission_groups
+        );
+        assert_eq!(
+            from_history.permission_groups,
+            from_stream.permission_groups
+        );
+        fn without_timestamps(mut nodes: Vec<WorkflowNode>) -> Vec<WorkflowNode> {
+            fn clear(nodes: &mut [WorkflowNode]) {
+                for node in nodes {
+                    node.started_at = None;
+                    node.ended_at = None;
+                    clear(&mut node.children);
+                }
+            }
+            clear(&mut nodes);
+            nodes
+        }
+        assert_eq!(
+            without_timestamps(from_history.root.clone()),
+            without_timestamps(from_events.root.clone())
+        );
+        assert_eq!(
+            without_timestamps(from_history.root.clone()),
+            without_timestamps(from_stream.root.clone())
+        );
+        assert_eq!(
+            from_history.descendant_pending_permissions(&root.0.to_string()),
+            0
+        );
+        assert_eq!(from_history.permission_requests.len(), 3);
+        assert!(
+            from_history
+                .permission_requests
+                .keys()
+                .all(|identity| matches!(identity, WorkflowPermissionIdentity::Canonical { .. }))
+        );
+        assert!(from_history.permission_requests.contains_key(
+            &WorkflowPermissionIdentity::Canonical {
+                request_id: approved_id
+            }
+        ));
+        assert!(from_history.permission_requests.values().any(|request| {
+            request.state == WorkflowPermissionState::Interrupted
+                && request.payload.reason.as_deref()
+                    == Some("interrupted at end of persisted history")
+        }));
+    }
+
+    #[test]
+    fn s8_resolved_group_tombstones_prevent_live_stream_and_replay_resurrection() {
+        use crate::permission::PermissionGroupId;
+        use crate::permission_audit::PermissionGroupAudit;
+        use crate::projection::message_window::{TranscriptEntry, replay_transcript_from};
+        use crate::stream::StreamFrame;
+
+        let owner = FlowRunId::now();
+        let groups = [
+            PermissionGroupAudit {
+                group_id: PermissionGroupId(uuid::Uuid::now_v7()),
+                owner_run_id: owner.clone(),
+                label: "resolved before ungroup".into(),
+                request_ids: vec![request_id()],
+                revision: 1,
+                at: Utc::now(),
+            },
+            PermissionGroupAudit {
+                group_id: PermissionGroupId(uuid::Uuid::now_v7()),
+                owner_run_id: owner.clone(),
+                label: "terminal-only".into(),
+                request_ids: Vec::new(),
+                revision: 1,
+                at: Utc::now(),
+            },
+        ];
+        let mut from_events = WorkflowGraph::new(TurnId::now());
+        let mut from_stream = WorkflowGraph::new(TurnId::now());
+        let mut lines = Vec::new();
+        let mut seq = 1_u64;
+        for group in &groups {
+            let mut updated = group.clone();
+            updated.request_ids.clear();
+            updated.revision += 1;
+
+            for event in [
+                Event::PermissionGroupCreated {
+                    payload: group.clone(),
+                },
+                Event::PermissionGroupResolved {
+                    payload: group.clone(),
+                },
+                Event::PermissionGroupUpdated {
+                    payload: updated.clone(),
+                },
+            ] {
+                from_events.apply_event(&event);
+            }
+            for frame in [
+                StreamFrame::PermissionGroupCreated {
+                    run_id: owner.0.to_string(),
+                    payload: group.clone(),
+                },
+                StreamFrame::PermissionGroupResolved {
+                    run_id: owner.0.to_string(),
+                    payload: group.clone(),
+                },
+                StreamFrame::PermissionGroupUpdated {
+                    run_id: owner.0.to_string(),
+                    payload: updated.clone(),
+                },
+            ] {
+                from_stream.apply_stream_frame(&frame);
+            }
+            for (kind, payload) in [
+                ("permission_group_created", group),
+                ("permission_group_resolved", group),
+                ("permission_group_updated", &updated),
+            ] {
+                lines
+                    .push(serde_json::json!({"type":kind,"seq":seq,"payload":payload}).to_string());
+                seq += 1;
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let mut from_history = WorkflowGraph::new(TurnId::now());
+        for entry in replay_transcript_from(&path).unwrap() {
+            if let TranscriptEntry::PermissionGroup { payload, resolved } = entry {
+                from_history.apply_permission_group(&payload, resolved);
+            }
+        }
+
+        for graph in [&from_events, &from_stream, &from_history] {
+            assert!(graph.permission_groups.is_empty());
+            assert_eq!(graph.resolved_permission_groups.len(), groups.len());
+            assert!(
+                groups
+                    .iter()
+                    .all(|group| graph.resolved_permission_groups.contains(&group.group_id))
+            );
+        }
+        let restored: WorkflowGraph =
+            serde_json::from_value(serde_json::to_value(&from_events).unwrap()).unwrap();
+        assert_eq!(
+            restored.resolved_permission_groups,
+            from_events.resolved_permission_groups
         );
     }
 

@@ -301,28 +301,7 @@ pub struct AppState {
     last_lag_count: u64,
 }
 
-pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
-    match frame {
-        StreamFrame::FlowStart { run_id, .. }
-        | StreamFrame::FlowNodeStart { run_id, .. }
-        | StreamFrame::FlowNodeEnd { run_id, .. }
-        | StreamFrame::FlowDone { run_id, .. }
-        | StreamFrame::FlowGraph { run_id, .. }
-        | StreamFrame::ToolNode { run_id, .. } => Some(run_id.as_str()),
-        StreamFrame::AssistantMsg {
-            flow_run_id: Some(rid),
-            ..
-        }
-        | StreamFrame::ToolResultMsg {
-            flow_run_id: Some(rid),
-            ..
-        }
-        | StreamFrame::LlmCallStats {
-            run_id: Some(rid), ..
-        } => Some(rid.as_str()),
-        _ => None,
-    }
-}
+pub use atman_runtime::stream::frame_run_id;
 
 impl AppState {
     pub fn new(session_id: String, goal: Option<String>) -> Self {
@@ -1292,7 +1271,19 @@ impl AppState {
             | StreamFrame::ToolResultMsg { .. }
             | StreamFrame::ToolPendingApproval { .. }
             | StreamFrame::ToolApproved { .. }
-            | StreamFrame::ToolDenied { .. }) => {
+            | StreamFrame::ToolDenied { .. }
+            | StreamFrame::PermissionRequestCreated { .. }
+            | StreamFrame::PermissionRequestTargeted { .. }
+            | StreamFrame::PermissionRequestDeferred { .. }
+            | StreamFrame::PermissionRequestApproved { .. }
+            | StreamFrame::PermissionRequestDenied { .. }
+            | StreamFrame::PermissionRequestCancelled { .. }
+            | StreamFrame::PermissionGroupCreated { .. }
+            | StreamFrame::PermissionGroupUpdated { .. }
+            | StreamFrame::PermissionGroupResolved { .. }
+            | StreamFrame::PermissionGrantCreated { .. }
+            | StreamFrame::PermissionGrantExpired { .. }
+            | StreamFrame::UnrestrictedExecution { .. }) => {
                 match &frame {
                     StreamFrame::FlowNodeStart {
                         run_id,
@@ -1886,6 +1877,116 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s8_permission_frames_route_to_root_and_spawned_workflow_owners() {
+        use atman_runtime::event::FlowRunId;
+        use atman_runtime::permission::PermissionRequestId;
+        use atman_runtime::permission_audit::{
+            PermissionAuditTarget, PermissionPolicyReference, PermissionProvenanceSummary,
+            PermissionRequestAudit,
+        };
+        use atman_runtime::tool::Tier;
+        use chrono::Utc;
+
+        fn payload(run_id: &str, tool_use_id: &str) -> PermissionRequestAudit {
+            let run_id = FlowRunId(uuid::Uuid::parse_str(run_id).unwrap());
+            PermissionRequestAudit {
+                request_id: Some(PermissionRequestId::now()),
+                session_id: "session".into(),
+                requesting_run_id: run_id.clone(),
+                parent_run_id: None,
+                root_run_id: run_id,
+                tool_use_id: tool_use_id.into(),
+                tool: "fs.read".into(),
+                tier: Tier::Two,
+                provenance: PermissionProvenanceSummary::default(),
+                target: PermissionAuditTarget::User,
+                group_ids: Vec::new(),
+                policy: PermissionPolicyReference {
+                    snapshot_id: "snapshot".into(),
+                    rule_id: "rule".into(),
+                },
+                escalation_path: Vec::new(),
+                decision_id: None,
+                actor: None,
+                scope: None,
+                reason: None,
+                at: Utc::now(),
+            }
+        }
+
+        let root = uuid::Uuid::now_v7().to_string();
+        let spawned = uuid::Uuid::now_v7().to_string();
+        let descendant = uuid::Uuid::now_v7().to_string();
+        let mut app = AppState::new("session".into(), None);
+        app.apply_stream_frame(StreamFrame::FlowStart {
+            run_id: root.clone(),
+            flow_name: "root".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "agent-1".into(),
+            goal: "research".into(),
+            child_run_id: spawned.clone(),
+            model: "model".into(),
+        });
+        app.apply_stream_frame(StreamFrame::FlowStart {
+            run_id: descendant.clone(),
+            flow_name: "research_loop".into(),
+            parent_run_id: Some(spawned),
+            parent_node_id: None,
+        });
+        let root_payload = payload(&root, "root-tool");
+        let child_payload = payload(&descendant, "child-tool");
+        app.apply_stream_frame(StreamFrame::PermissionRequestCreated {
+            run_id: root,
+            payload: root_payload.clone(),
+        });
+        app.apply_stream_frame(StreamFrame::PermissionRequestCreated {
+            run_id: descendant,
+            payload: child_payload.clone(),
+        });
+
+        let root_graph = app
+            .items
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .unwrap();
+        let child_graph = app
+            .items
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::SubAgentActivity { workflow_graph, .. } => Some(workflow_graph),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(root_graph.permission_requests.len(), 1);
+        assert_eq!(child_graph.permission_requests.len(), 1);
+        assert!(root_graph.permission_requests.values().any(|request| {
+            request.payload == root_payload && request.payload.policy.rule_id == "rule"
+        }));
+        assert!(child_graph.permission_requests.values().any(|request| {
+            request.payload == child_payload
+                && request.payload.provenance == PermissionProvenanceSummary::default()
+        }));
+        assert!(
+            root_graph
+                .permission_requests
+                .values()
+                .all(|request| { request.payload.tool_use_id != "child-tool" })
+        );
+        assert!(
+            child_graph
+                .permission_requests
+                .values()
+                .all(|request| { request.payload.tool_use_id != "root-tool" })
+        );
+    }
 
     #[test]
     fn toggle_mouse_capture_flips_state() {
