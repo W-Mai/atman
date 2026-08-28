@@ -29,6 +29,8 @@ flow agent_loop(iteration: int) -> string {
             "memory.recent_turns", "memory.history.search", "memory.history.read",
             "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
             "plan.write", "plan.read", "plan.tick",
+            "permission.list", "permission.get", "permission.group", "permission.ungroup",
+            "permission.approve", "permission.deny", "permission.defer", "permission.batch",
             "agent.spawn",
             "form.ask",
             "preview.push",

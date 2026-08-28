@@ -22,6 +22,18 @@ pub struct PermissionDeny;
 pub struct PermissionDefer;
 pub struct PermissionBatch;
 
+#[cfg(test)]
+pub(crate) const PERMISSION_TOOL_NAMES: &[&str] = &[
+    "permission.list",
+    "permission.get",
+    "permission.group",
+    "permission.ungroup",
+    "permission.approve",
+    "permission.deny",
+    "permission.defer",
+    "permission.batch",
+];
+
 fn broker_and_actor<'a>(
     ctx: &'a ToolCtx,
     name: &str,
@@ -816,16 +828,7 @@ mod tests {
     fn all_permission_tools_are_registered_on_the_control_plane() {
         let registry = crate::tool::ToolRegistry::new();
         crate::tools::register_tier_zero(&registry);
-        for name in [
-            "permission.list",
-            "permission.get",
-            "permission.group",
-            "permission.ungroup",
-            "permission.approve",
-            "permission.deny",
-            "permission.defer",
-            "permission.batch",
-        ] {
+        for &name in PERMISSION_TOOL_NAMES {
             let tool = registry
                 .get(name)
                 .unwrap_or_else(|| panic!("missing {name}"));

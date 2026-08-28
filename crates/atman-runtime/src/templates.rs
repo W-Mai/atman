@@ -252,6 +252,8 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "memory.recent_turns", "memory.history.search", "memory.history.read",
                 "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
                 "plan.write", "plan.read", "plan.tick",
+                "permission.list", "permission.get", "permission.group", "permission.ungroup",
+                "permission.approve", "permission.deny", "permission.defer", "permission.batch",
                 "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
                 "form.ask",
                 "help.show",
@@ -576,6 +578,19 @@ mod tests {
             file.flows.iter().any(|f| f.name.name == "agent"),
             "agent flow must exist"
         );
+    }
+
+    #[test]
+    fn agent_templates_allow_all_permission_tools() {
+        let example = include_str!("../../../examples/agent.at");
+        for name in crate::tools::permission::PERMISSION_TOOL_NAMES {
+            let quoted = format!("\"{name}\"");
+            assert!(AGENT_AT.contains(&quoted), "AGENT_AT must allow {name}");
+            assert!(
+                example.contains(&quoted),
+                "examples/agent.at must allow {name}"
+            );
+        }
     }
 
     #[test]
