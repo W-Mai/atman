@@ -143,6 +143,7 @@ async fn defer_after_ancestor_timeout(
     broker.defer_timed_out_target(request_id, target_run_id)
 }
 
+#[cfg(test)]
 fn settle_broker_request(
     ctx: &ToolCtx,
     request_id: &crate::permission::PermissionRequestId,
@@ -270,7 +271,6 @@ pub async fn request_approval_with_additional_risks(
             reason: format!("{name}: blocked — missing run identity"),
         };
     };
-    let effective_level = level;
     let args_preview: String = format!("{:?}", call_args.named)
         .chars()
         .take(4000)
@@ -295,8 +295,6 @@ pub async fn request_approval_with_additional_risks(
         preview: preview.clone(),
         provenance,
     };
-    // The broker owns the policy decision; the legacy queue below is still the
-    // only surface that renders a prompt, so a Pending outcome is handed to it.
     let brokered = match submit_to_broker(ctx, intent, tier) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -305,7 +303,6 @@ pub async fn request_approval_with_additional_risks(
             };
         }
     };
-    let mut approved_request_id = None;
     let pending_permission = match brokered {
         crate::permission::SubmissionOutcome::Immediate(immediate) => {
             use crate::permission::ImmediateAuthorization;
@@ -435,130 +432,53 @@ pub async fn request_approval_with_additional_risks(
             crate::session::ApprovalDecision::Deny { reason } => ApprovalOutcome::Deny { reason },
         };
     }
-    let Some(approval) = &ctx.approval else {
-        if let Some(pending) = pending_permission.as_ref() {
-            let reason = "no approval transport under controlled execution".to_string();
-            if let Some(broker) = ctx.permission_broker.as_ref() {
-                let _ = broker.cancel(&pending.request.request_id, reason.clone());
-            }
-            return ApprovalOutcome::Deny {
-                reason: format!("{name}: blocked — {reason}"),
-            };
-        }
+    let Some(pending) = pending_permission else {
         return ApprovalOutcome::Deny {
-            reason: format!("{name}: blocked — no approval transport under controlled execution"),
+            reason: format!("{name}: blocked — permission request transport unavailable"),
         };
     };
-    if pending_permission.is_some() && !approval.has_subscribers() {
-        if let Some(pending) = pending_permission.as_ref() {
-            let reason = "no approval consumer".to_string();
-            if let Err(error) = ctx
-                .permission_broker
-                .as_ref()
-                .expect("pending permission requires a broker")
-                .cancel(&pending.request.request_id, reason.clone())
-                && error != crate::permission::PermissionError::AlreadyResolved
-            {
-                crate::notify!(warn, "permission cancel failed: {error}");
-            }
-            let decision = crate::session::ApprovalDecision::Deny {
-                reason: reason.clone(),
-            };
-            emit_approval_result(ctx, &run_id, id, &decision, "system");
-            return ApprovalOutcome::Deny { reason };
+    let broker = ctx
+        .permission_broker
+        .as_ref()
+        .expect("pending permission requires a broker");
+    if !broker.has_clients() {
+        let reason = "no permission client".to_string();
+        if let Err(error) = broker.cancel(&pending.request.request_id, reason.clone())
+            && error != crate::permission::PermissionError::AlreadyResolved
+        {
+            crate::notify!(warn, "permission cancel failed: {error}");
         }
+        let decision = crate::session::ApprovalDecision::Deny {
+            reason: reason.clone(),
+        };
+        emit_approval_result(ctx, &run_id, id, &decision, "system");
+        return ApprovalOutcome::Deny { reason };
     }
-    let pending = crate::session::PendingApproval {
-        tool_use_id: id.to_string(),
-        tool_name: name.to_string(),
-        args_preview: args_preview.clone(),
-        preview: preview.clone(),
-        level: effective_level,
-        run_id: run_id.clone(),
-        emitted_at: chrono::Utc::now(),
-    };
-    let (ticket, rx) = approval.request_tracked(pending);
-    if let Some(sink) = ctx.events.as_ref() {
-        sink.emit(crate::event::Event::ToolPendingApproval {
-            run_id: run_id.clone(),
-            tool_use_id: id.to_string(),
-            tool_name: name.to_string(),
-            args_preview: args_preview.clone(),
-            level: level_str(level).into(),
-            preview: preview.clone(),
-        });
-    }
-    if let Some(tx) = &ctx.stream_tx {
-        let _ = tx.send(crate::stream::StreamFrame::ToolPendingApproval {
-            run_id: run_id.0.to_string(),
-            tool_use_id: id.to_string(),
-            tool_name: name.to_string(),
-            args_preview,
-            level: level_str(level).into(),
-            preview: preview.clone(),
-        });
-    }
-    let decision = match pending_permission {
-        // Both sides can settle this call: the user answers the queued prompt, or the
-        // broker cancels (flow went terminal). Whichever lands first wins, and the
-        // loser is cleaned up so no orphan prompt or unresolved request is left.
-        Some(pending) => {
-            let request_id = pending.request.request_id.clone();
-            approved_request_id = Some(request_id.clone());
-            let mut resolution = pending.resolution;
-            tokio::select! {
-                biased;
-                queued = rx => {
-                    let decision = queued.unwrap_or(crate::session::ApprovalDecision::Deny {
-                        reason: "approval channel dropped".into(),
-                    });
-                    settle_broker_request(ctx, &request_id, decision)
-                }
-                brokered = &mut resolution => match brokered {
-                    Ok(crate::permission::PermissionResolution::Cancelled { reason }) => {
-                        if let Some(ticket) = ticket {
-                            approval.cancel(ticket, reason.clone());
-                        }
-                        crate::session::ApprovalDecision::Deny { reason }
-                    }
-                    Ok(crate::permission::PermissionResolution::Decision(decision)) => {
-                        let approved =
-                            decision.action == crate::permission::PermissionAction::Approve;
-                        if let Some(ticket) = ticket {
-                            approval.cancel(ticket, "resolved by permission broker".to_string());
-                        }
-                        if approved {
-                            crate::session::ApprovalDecision::Approve
-                        } else {
-                            crate::session::ApprovalDecision::Deny {
-                                reason: decision
-                                    .reason
-                                    .unwrap_or_else(|| "denied by permission broker".into()),
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        if let Some(ticket) = ticket {
-                            approval.cancel(ticket, "permission request dropped");
-                        }
-                        crate::session::ApprovalDecision::Deny {
-                            reason: "permission request dropped".into(),
-                        }
-                    },
-                },
+    let request_id = pending.request.request_id.clone();
+    let decision = match pending.resolution.await {
+        Ok(crate::permission::PermissionResolution::Decision(decision))
+            if decision.action == crate::permission::PermissionAction::Approve =>
+        {
+            crate::session::ApprovalDecision::Approve
+        }
+        Ok(crate::permission::PermissionResolution::Decision(decision)) => {
+            crate::session::ApprovalDecision::Deny {
+                reason: decision
+                    .reason
+                    .unwrap_or_else(|| "denied by permission broker".into()),
             }
         }
-        None => rx.await.unwrap_or(crate::session::ApprovalDecision::Deny {
-            reason: "approval channel dropped".into(),
-        }),
+        Ok(crate::permission::PermissionResolution::Cancelled { reason }) => {
+            crate::session::ApprovalDecision::Deny { reason }
+        }
+        Err(_) => crate::session::ApprovalDecision::Deny {
+            reason: "permission request dropped".into(),
+        },
     };
     emit_approval_result(ctx, &run_id, id, &decision, "user");
     match decision {
         crate::session::ApprovalDecision::Approve => ApprovalOutcome::Approve {
-            authorization: Box::new(permit(
-                approved_request_id.expect("approved broker request has an id"),
-                true,
-            )),
+            authorization: Box::new(permit(request_id, true)),
         },
         crate::session::ApprovalDecision::Deny { reason } => ApprovalOutcome::Deny { reason },
     }
@@ -601,6 +521,7 @@ mod tests {
     fn ctx_with_broker(trust: TrustConfig) -> (ToolCtx, Arc<ApprovalRegistry>, Arc<FlowRegistry>) {
         let flows = Arc::new(FlowRegistry::new());
         let broker = PermissionBroker::shared(Arc::clone(&flows));
+        std::mem::forget(broker.register_client());
         let run_id = FlowRunId::now();
         let identity = flows
             .register_root(
@@ -618,6 +539,51 @@ mod tests {
         ctx.flow_run_id = Some(run_id);
         ctx.trust = Some(trust);
         (ctx, approval, flows)
+    }
+
+    fn ctx_without_permission_client(trust: TrustConfig) -> ToolCtx {
+        let flows = Arc::new(FlowRegistry::new());
+        let broker = PermissionBroker::shared(Arc::clone(&flows));
+        let run_id = FlowRunId::now();
+        let identity = flows
+            .register_root(
+                "sess".into(),
+                run_id.clone(),
+                EffectiveAuthority::root(&trust, true, None),
+            )
+            .unwrap();
+        let mut ctx = ToolCtx::new()
+            .with_permission_broker(broker)
+            .with_flow_registry(flows)
+            .with_trust(trust)
+            .with_anchors(None, Some(run_id), None);
+        ctx.flow_identity = Some(identity);
+        ctx
+    }
+
+    fn resolve_as_user(
+        broker: &Arc<PermissionBroker>,
+        request_id: crate::permission::PermissionRequestId,
+        action: crate::permission::PermissionAction,
+        reason: Option<String>,
+    ) {
+        let expected = std::collections::HashMap::from([(
+            request_id.clone(),
+            broker.get(&request_id).unwrap().revision,
+        )]);
+        broker
+            .user_resolve(
+                "sess",
+                Some("test-user".into()),
+                vec![request_id],
+                &expected,
+                None,
+                action,
+                (action == crate::permission::PermissionAction::Approve)
+                    .then_some(crate::permission::GrantScope::CurrentCall),
+                reason,
+            )
+            .unwrap();
     }
 
     fn deny_tier2() -> TrustConfig {
@@ -798,7 +764,7 @@ mod tests {
             .unwrap();
         let broker = PermissionBroker::shared(Arc::clone(&flows));
         let approval = Arc::new(ApprovalRegistry::new());
-        let mut approval_watch = approval.subscribe();
+        let _client = broker.register_client();
         let mut ctx = ToolCtx::new()
             .with_approval(Arc::clone(&approval))
             .with_permission_broker(Arc::clone(&broker))
@@ -831,12 +797,23 @@ mod tests {
                 target: crate::permission::ApprovalTarget::User
             }
         ));
-        assert!(approval_watch.changed().await.is_ok());
-        assert_eq!(approval.list_pending().len(), 1);
-        assert!(approval.decide(
-            "ancestor-timeout",
-            crate::session::ApprovalDecision::Approve
-        ));
+        let expected = std::collections::HashMap::from([(
+            request_id.clone(),
+            broker.get(&request_id).unwrap().revision,
+        )]);
+        broker
+            .user_resolve(
+                "sess",
+                Some("test-user".into()),
+                vec![request_id],
+                &expected,
+                None,
+                crate::permission::PermissionAction::Approve,
+                Some(crate::permission::GrantScope::CurrentCall),
+                None,
+            )
+            .unwrap();
+        assert!(approval.list_pending().is_empty());
         assert!(matches!(
             request.await.unwrap(),
             ApprovalOutcome::Approve { .. }
@@ -950,7 +927,7 @@ mod tests {
             mode: TrustMode::Steady,
             ..TrustConfig::default()
         };
-        let (ctx, approval, _flows) = ctx_with_broker(trust);
+        let ctx = ctx_without_permission_client(trust);
         let broker = ctx.permission_broker.clone().unwrap();
         let gate = tokio::spawn({
             let ctx = ctx.clone();
@@ -974,7 +951,49 @@ mod tests {
         };
         let outcome = gate.await.unwrap();
         assert!(matches!(outcome, ApprovalOutcome::Deny { .. }));
-        assert!(approval.list_pending().is_empty());
+        assert!(matches!(
+            broker.get(&request_id).map(|request| request.state),
+            Some(crate::permission::PermissionRequestState::Cancelled { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn last_permission_client_disconnect_cancels_waiting_invocation() {
+        let trust = TrustConfig {
+            mode: TrustMode::Steady,
+            ..TrustConfig::default()
+        };
+        let ctx = ctx_without_permission_client(trust);
+        let broker = ctx.permission_broker.clone().unwrap();
+        let first = broker.register_client();
+        let second = broker.register_client();
+        let gate = tokio::spawn({
+            let ctx = ctx.clone();
+            async move {
+                request_approval(
+                    &ctx,
+                    "client-disconnect",
+                    "probe.tool",
+                    &ToolArgs::default(),
+                    ApprovalLevel::Approve,
+                    Some(&Tier2Tool),
+                )
+                .await
+            }
+        });
+        let request_id = loop {
+            if let Some(request) = broker.list().first() {
+                break request.request_id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        drop(first);
+        assert!(matches!(
+            broker.get(&request_id).map(|request| request.state),
+            Some(crate::permission::PermissionRequestState::Pending { .. })
+        ));
+        drop(second);
+        assert!(matches!(gate.await.unwrap(), ApprovalOutcome::Deny { .. }));
         assert!(matches!(
             broker.get(&request_id).map(|request| request.state),
             Some(crate::permission::PermissionRequestState::Cancelled { .. })
@@ -1025,7 +1044,6 @@ mod tests {
             ..TrustConfig::default()
         };
         let (ctx, approval, _flows) = ctx_with_broker(trust);
-        let _approval_updates = approval.subscribe();
         let broker = ctx.permission_broker.clone().unwrap();
         let gate = tokio::spawn({
             let ctx = ctx.clone();
@@ -1047,14 +1065,13 @@ mod tests {
             }
             tokio::task::yield_now().await;
         };
-        while !approval.decide(
-            "tu_deny",
-            crate::session::ApprovalDecision::Deny {
-                reason: "operator denied".into(),
-            },
-        ) {
-            tokio::task::yield_now().await;
-        }
+        resolve_as_user(
+            &broker,
+            request_id.clone(),
+            crate::permission::PermissionAction::Deny,
+            Some("operator denied".into()),
+        );
+        assert!(approval.list_pending().is_empty());
 
         let outcome = gate.await.unwrap();
         assert!(matches!(
@@ -1067,16 +1084,13 @@ mod tests {
         ));
     }
 
-    /// A user answer on the legacy queue must settle the broker request too,
-    /// otherwise pending requests would leak for the life of the run.
     #[tokio::test]
-    async fn queue_decision_settles_broker_request() {
+    async fn broker_user_decision_settles_waiting_invocation() {
         let trust = TrustConfig {
             mode: TrustMode::Steady,
             ..TrustConfig::default()
         };
         let (ctx, approval, _flows) = ctx_with_broker(trust);
-        let _approval_updates = approval.subscribe();
         let broker = ctx.permission_broker.clone().unwrap();
         let gate = tokio::spawn({
             let ctx = ctx.clone();
@@ -1098,10 +1112,13 @@ mod tests {
             }
             tokio::task::yield_now().await;
         };
-        assert_eq!(approval.list_pending().len(), 1);
-        while !approval.decide("tu2", crate::session::ApprovalDecision::Approve) {
-            tokio::task::yield_now().await;
-        }
+        assert!(approval.list_pending().is_empty());
+        resolve_as_user(
+            &broker,
+            request_id.clone(),
+            crate::permission::PermissionAction::Approve,
+            None,
+        );
         let outcome = gate.await.unwrap();
         let ApprovalOutcome::Approve { authorization } = outcome else {
             panic!("expected approval");
@@ -1120,7 +1137,6 @@ mod tests {
             ..TrustConfig::default()
         };
         let (mut ctx, approval, _flows) = ctx_with_broker(trust);
-        let _updates = approval.subscribe();
         ctx.fs_access = crate::fs_access::FsAccessPolicy {
             mode: crate::fs_access::FsAccessMode::ReadOnly,
             workspace: None,
@@ -1149,11 +1165,20 @@ mod tests {
                 .await
             }
         });
-        while approval.list_pending().is_empty() {
+        let broker = ctx.permission_broker.clone().unwrap();
+        let request_id = loop {
+            if let Some(request) = broker.list().first() {
+                break request.request_id.clone();
+            }
             tokio::task::yield_now().await;
-        }
-        assert_eq!(approval.list_pending().len(), 1);
-        assert!(approval.decide("write-1", crate::session::ApprovalDecision::Approve));
+        };
+        assert!(approval.list_pending().is_empty());
+        resolve_as_user(
+            &broker,
+            request_id,
+            crate::permission::PermissionAction::Approve,
+            None,
+        );
         let ApprovalOutcome::Approve { authorization } = gate.await.unwrap() else {
             panic!("expected approval");
         };

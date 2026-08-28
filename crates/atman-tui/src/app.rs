@@ -167,6 +167,21 @@ pub struct ToastNote {
     pub fade_started: Option<std::time::Instant>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingPermission {
+    pub request_id: atman_runtime::permission::PermissionRequestId,
+    pub revision: u64,
+    pub payload: atman_runtime::permission_audit::PermissionRequestAudit,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPermissionGroup {
+    pub group_id: atman_runtime::permission::PermissionGroupId,
+    pub revision: u64,
+    pub payload: atman_runtime::permission_audit::PermissionGroupAudit,
+    pub expanded: bool,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: Vec<OutputItem>,
@@ -188,7 +203,14 @@ pub struct AppState {
     pub context: atman_runtime::ContextSnapshot,
     pub todos: Vec<atman_runtime::memory::todo::Todo>,
     pub plans: Vec<atman_runtime::memory::plan::Plan>,
-    pub pending_approvals: Vec<atman_runtime::session::PendingApproval>,
+    pub pending_permissions: std::collections::BTreeMap<
+        atman_runtime::permission::PermissionRequestId,
+        PendingPermission,
+    >,
+    pub pending_permission_groups: std::collections::BTreeMap<
+        atman_runtime::permission::PermissionGroupId,
+        PendingPermissionGroup,
+    >,
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
     pub yank_mode: bool,
     pub yank_index: usize,
@@ -225,6 +247,8 @@ pub struct AppState {
     pub hints_dismissed: bool,
     pub animation_frame: u32,
     pub deny_arm: Option<std::time::Instant>,
+    pub approval_scope_index: u8,
+    pub selected_permission_group: Option<atman_runtime::permission::PermissionGroupId>,
     pub items_version: u64,
     pub wm_visual_version: u64,
     pub expanded_version: u64,
@@ -1107,7 +1131,64 @@ impl AppState {
         }
     }
 
+    fn apply_permission_projection(&mut self, frame: &StreamFrame) {
+        use atman_runtime::stream::StreamFrame;
+
+        match frame {
+            StreamFrame::PermissionRequestCreated { payload, .. }
+            | StreamFrame::PermissionRequestTargeted { payload, .. }
+            | StreamFrame::PermissionRequestDeferred { payload, .. } => {
+                if !matches!(
+                    payload.target,
+                    atman_runtime::permission_audit::PermissionAuditTarget::User
+                ) {
+                    return;
+                }
+                if let Some(request_id) = payload.request_id.clone() {
+                    self.pending_permissions.insert(
+                        request_id.clone(),
+                        PendingPermission {
+                            request_id,
+                            revision: payload.revision,
+                            payload: payload.clone(),
+                        },
+                    );
+                }
+            }
+            StreamFrame::PermissionRequestApproved { payload, .. }
+            | StreamFrame::PermissionRequestDenied { payload, .. }
+            | StreamFrame::PermissionRequestCancelled { payload, .. } => {
+                if let Some(request_id) = &payload.request_id {
+                    self.pending_permissions.remove(request_id);
+                }
+            }
+            StreamFrame::PermissionGroupCreated { payload, .. }
+            | StreamFrame::PermissionGroupUpdated { payload, .. } => {
+                self.pending_permission_groups.insert(
+                    payload.group_id.clone(),
+                    PendingPermissionGroup {
+                        group_id: payload.group_id.clone(),
+                        revision: payload.revision,
+                        payload: payload.clone(),
+                        expanded: self
+                            .pending_permission_groups
+                            .get(&payload.group_id)
+                            .is_some_and(|group| group.expanded),
+                    },
+                );
+            }
+            StreamFrame::PermissionGroupResolved { payload, .. } => {
+                self.pending_permission_groups.remove(&payload.group_id);
+                if self.selected_permission_group.as_ref() == Some(&payload.group_id) {
+                    self.selected_permission_group = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
+        self.apply_permission_projection(&frame);
         match frame {
             StreamFrame::ThinkingChunk { text, run_id, .. } => {
                 if let Some(rid) = &run_id
@@ -1893,6 +1974,7 @@ mod tests {
             let run_id = FlowRunId(uuid::Uuid::parse_str(run_id).unwrap());
             PermissionRequestAudit {
                 request_id: Some(PermissionRequestId::now()),
+                revision: 1,
                 session_id: "session".into(),
                 requesting_run_id: run_id.clone(),
                 parent_run_id: None,
@@ -1986,6 +2068,18 @@ mod tests {
                 .values()
                 .all(|request| { request.payload.tool_use_id != "root-tool" })
         );
+        assert_eq!(app.pending_permissions.len(), 2);
+        let root_id = root_payload.request_id.clone().unwrap();
+        assert_eq!(app.pending_permissions[&root_id].revision, 1);
+
+        let mut approved = root_payload;
+        approved.revision = 2;
+        app.apply_stream_frame(StreamFrame::PermissionRequestApproved {
+            run_id: approved.requesting_run_id.to_string(),
+            payload: approved,
+        });
+        assert!(!app.pending_permissions.contains_key(&root_id));
+        assert_eq!(app.pending_permissions.len(), 1);
     }
 
     #[test]

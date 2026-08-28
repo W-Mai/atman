@@ -739,6 +739,7 @@ impl WindowManager {
             }
             PaletteEntryId::SetTrustMode => {
                 self.modals.trust_mode_picker_open = true;
+                self.modals.trust_draft = Some(app.trust.clone());
             }
             PaletteEntryId::AutoNameSession => {
                 if let Some(tx) = control_tx {

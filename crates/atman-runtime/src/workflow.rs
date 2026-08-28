@@ -1107,6 +1107,7 @@ mod tests {
     ) -> PermissionRequestAudit {
         PermissionRequestAudit {
             request_id: Some(request_id),
+            revision: 1,
             session_id: "session".into(),
             requesting_run_id,
             parent_run_id: None,

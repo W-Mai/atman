@@ -166,13 +166,31 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let show_sidebar = !startup_active && !intro_active;
     let sidebar_effective_collapsed = app.sidebar_collapsed;
     let status_height: u16 = 1;
-    let pending_count = app.pending_approvals.len();
+    let grouped_request_ids: std::collections::BTreeSet<_> = app
+        .pending_permission_groups
+        .values()
+        .flat_map(|group| group.payload.request_ids.iter().cloned())
+        .collect();
+    let standalone_canonical = app
+        .pending_permissions
+        .keys()
+        .filter(|id| !grouped_request_ids.contains(*id))
+        .count();
+    let pending_count = app.pending_permissions.len();
+    let visible_rows = standalone_canonical;
     let approvals_rows: u16 = if pending_count == 0 {
         0
     } else {
-        let items = pending_count.min(9) as u16;
-        let overflow = if pending_count > 9 { 1 } else { 0 };
-        items + overflow + 2
+        let items = visible_rows.min(9) as u16;
+        let overflow = if visible_rows > 9 { 1 } else { 0 };
+        let groups = app.pending_permission_groups.len() as u16;
+        let expanded_members = app
+            .pending_permission_groups
+            .values()
+            .filter(|group| group.expanded)
+            .map(|group| group.payload.request_ids.len() as u16)
+            .sum::<u16>();
+        items + overflow + groups + expanded_members + 2
     };
     let injection_rows: u16 = if app.pending_injections.is_empty() {
         0
@@ -450,7 +468,15 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if let Some(area) = approvals_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
-        approval_bar::render(f, area, &app.pending_approvals);
+        let canonical: Vec<_> = app.pending_permissions.values().cloned().collect();
+        let groups: Vec<_> = app.pending_permission_groups.values().cloned().collect();
+        approval_bar::render(
+            f,
+            area,
+            &canonical,
+            &groups,
+            app.selected_permission_group.as_ref(),
+        );
     }
     // Render injection queue above approvals bar / input box.
     let injections_rect = if injection_rows > 0 {

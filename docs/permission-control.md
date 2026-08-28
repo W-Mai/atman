@@ -97,7 +97,7 @@ A tool's provenance may include these risks:
 - `process_spawn` — the operation starts a process.
 - `repository_mutation` — the operation changes repository state.
 
-`workspace_external` and `outside_workspace` risk configuration describe a real resource boundary. They are not a legacy `outside` switch. The obsolete `[trust].outside` field is rejected instead of being silently ignored.
+`workspace_external` and `outside_workspace` risk configuration describe a real resource boundary. They are not a legacy `outside` switch. The obsolete `[trust].outside` field is rejected instead of being silently ignored. Migrate it to the structured risk override that matches the resource, such as `workspace_external` or `network`; there is no global workspace-only permission switch.
 
 ## Daemon authentication and session ownership
 

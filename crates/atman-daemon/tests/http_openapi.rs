@@ -44,6 +44,15 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
     assert!(paths.contains_key("/rpc"), "paths keys: {paths:?}");
     assert!(paths.contains_key("/events"));
     assert!(paths.contains_key("/openapi.json"));
+    let description = doc["info"]["description"].as_str().unwrap();
+    for method in [
+        "list_permission_requests",
+        "create_permission_group",
+        "resolve_permission_requests",
+    ] {
+        assert!(description.contains(method), "missing RPC method {method}");
+    }
+    assert!(paths["/events"]["get"]["responses"].get("403").is_some());
 
     let schemas = doc["components"]["schemas"]
         .as_object()

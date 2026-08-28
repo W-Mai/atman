@@ -99,14 +99,12 @@ pub enum TuiControl {
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
     HardStop,
-    ApproveTool(String),
-    DenyTool {
-        tool_use_id: String,
-        reason: String,
-    },
-    ApproveAllPending,
-    DenyAllPending {
-        reason: String,
+    ResolvePermission {
+        selector: atman_runtime::permission::PermissionSelector,
+        expected_revision: u64,
+        action: atman_runtime::permission::PermissionAction,
+        grant_scope: Option<atman_runtime::permission::GrantScope>,
+        reason: Option<String>,
     },
     CompactNow,
     AutoNameSession,
@@ -255,8 +253,6 @@ pub struct TuiHandle {
     pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
     pub todos_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
     pub plans_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
-    pub approvals_rx:
-        Option<tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
     pub trust_rx: Option<tokio::sync::watch::Receiver<atman_runtime::trust::TrustConfig>>,
     pub compact_review_rx:
         Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
@@ -268,12 +264,14 @@ pub struct TuiHandle {
     pub onboarding_recommended: bool,
     pub trust: atman_runtime::trust::TrustConfig,
     pub task_registry: Option<atman_runtime::TaskRegistry>,
+    pub permission_client: Option<atman_runtime::permission::PermissionClientGuard>,
     /// Toasts collected during boot, to be pushed to app on start.
     pub boot_toasts: Vec<app::ToastNote>,
 }
 
 impl TuiHandle {
     pub fn from_session(session: std::sync::Arc<atman_runtime::Session>) -> Self {
+        let permission_client = session.permission_broker().register_client();
         Self {
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
@@ -296,7 +294,6 @@ impl TuiHandle {
             attach_rx: Some(session.subscribe_attach()),
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
-            approvals_rx: Some(session.subscribe_pending_approvals()),
             trust_rx: Some(session.subscribe_trust()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
@@ -307,6 +304,7 @@ impl TuiHandle {
             onboarding_recommended: false,
             trust: atman_runtime::trust::TrustConfig::default(),
             task_registry: None,
+            permission_client: Some(permission_client),
             boot_toasts: Vec::new(),
         }
     }

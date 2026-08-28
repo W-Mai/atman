@@ -32,6 +32,7 @@ pub struct LiveSession {
 struct LiveSessionEntry {
     live: Option<LiveSession>,
     broker: Option<std::sync::Arc<atman_runtime::Session>>,
+    permission_client: Option<atman_runtime::permission::PermissionClientGuard>,
     owner_principal: Option<String>,
 }
 
@@ -144,6 +145,7 @@ impl DaemonState {
             .or_insert(LiveSessionEntry {
                 live: Some(entry),
                 broker: None,
+                permission_client: None,
                 owner_principal: None,
             });
     }
@@ -154,13 +156,16 @@ impl DaemonState {
         session: std::sync::Arc<atman_runtime::Session>,
         owner_principal: impl Into<String>,
     ) {
+        let permission_client = session.permission_broker().register_client();
         let mut live = self.live.lock().unwrap();
         let entry = live.entry(id).or_insert(LiveSessionEntry {
             live: None,
             broker: None,
+            permission_client: None,
             owner_principal: None,
         });
         entry.broker = Some(session);
+        entry.permission_client = Some(permission_client);
         entry.owner_principal = Some(owner_principal.into());
     }
 
@@ -183,6 +188,7 @@ impl DaemonState {
     pub fn deregister_broker(&self, id: &SessionId) {
         if let Some(entry) = self.live.lock().unwrap().get_mut(id) {
             entry.broker = None;
+            entry.permission_client = None;
             entry.owner_principal = None;
         }
     }

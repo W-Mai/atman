@@ -34,6 +34,7 @@ pub struct ModalManager {
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
     pub theme_picker_open: bool,
     pub trust_mode_picker_open: bool,
+    pub trust_draft: Option<atman_runtime::trust::TrustConfig>,
 }
 
 impl ModalManager {
@@ -774,6 +775,7 @@ impl ModalManager {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{List, ListItem, ListState};
 
+        let draft = self.trust_draft.as_ref().unwrap_or(&app.trust);
         let modes = atman_runtime::trust::TrustMode::all();
         let items: Vec<ListItem> = modes
             .iter()
@@ -793,13 +795,68 @@ impl ModalManager {
                 } else {
                     ""
                 };
+                let matrix = if m == atman_runtime::trust::TrustMode::Reckless {
+                    "T0–T4: unrestricted".to_owned()
+                } else {
+                    let config = atman_runtime::trust::TrustConfig {
+                        mode: m,
+                        ..draft.clone()
+                    };
+                    let tiers = [
+                        atman_runtime::tool::Tier::Zero,
+                        atman_runtime::tool::Tier::One,
+                        atman_runtime::tool::Tier::Two,
+                        atman_runtime::tool::Tier::Three,
+                        atman_runtime::tool::Tier::Four,
+                    ];
+                    let actions = tiers
+                        .iter()
+                        .map(|tier| format!("{:?}", config.resolve_tier(*tier)))
+                        .collect::<Vec<_>>();
+                    let risks = [
+                        (
+                            "x",
+                            config.resolve_risk(atman_runtime::trust::RiskKind::WorkspaceExternal),
+                        ),
+                        (
+                            "n",
+                            config.resolve_risk(atman_runtime::trust::RiskKind::Network),
+                        ),
+                        (
+                            "i",
+                            config.resolve_risk(atman_runtime::trust::RiskKind::Irreversible),
+                        ),
+                        (
+                            "w",
+                            config.resolve_risk(atman_runtime::trust::RiskKind::FilesystemWrite),
+                        ),
+                        (
+                            "p",
+                            config.resolve_risk(atman_runtime::trust::RiskKind::ProcessSpawn),
+                        ),
+                        (
+                            "r",
+                            config.resolve_risk(atman_runtime::trust::RiskKind::RepositoryMutation),
+                        ),
+                    ];
+                    let risk_summary = risks
+                        .iter()
+                        .map(|(key, action)| format!("{key}:{action:?}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        "T0–T4 {} · risks {risk_summary} · escalation {}",
+                        actions.join("/"),
+                        config.escalation.label()
+                    )
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", d.emoji), Style::default().fg(color)),
                     Span::styled(
                         format!("{:<14}", d.name),
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(format!("  {}  {}", d.description, marker)),
+                    Span::raw(format!("  {} · {}  {}", d.description, matrix, marker)),
                 ]))
             })
             .collect();
@@ -824,6 +881,7 @@ impl ModalManager {
     ) {
         let modes = atman_runtime::trust::TrustMode::all();
         let max = modes.len();
+        let draft = self.trust_draft.get_or_insert_with(|| app.trust.clone());
         match action {
             crate::keys::KeyAction::Escape => {
                 self.trust_mode_picker_open = false;
@@ -834,15 +892,73 @@ impl ModalManager {
             crate::keys::KeyAction::HistoryDown | crate::keys::KeyAction::CursorRight => {
                 app.picker_selected = (app.picker_selected + 1) % max;
             }
+            crate::keys::KeyAction::Char(c @ '0'..='4')
+                if modes[app.picker_selected.min(max - 1)]
+                    == atman_runtime::trust::TrustMode::Eager =>
+            {
+                let tier = match c {
+                    '0' => atman_runtime::tool::Tier::Zero,
+                    '1' => atman_runtime::tool::Tier::One,
+                    '2' => atman_runtime::tool::Tier::Two,
+                    '3' => atman_runtime::tool::Tier::Three,
+                    _ => atman_runtime::tool::Tier::Four,
+                };
+                let current = draft.resolve_tier(tier);
+                let slot = match tier {
+                    atman_runtime::tool::Tier::Zero => &mut draft.tiers.eager.tier0,
+                    atman_runtime::tool::Tier::One => &mut draft.tiers.eager.tier1,
+                    atman_runtime::tool::Tier::Two => &mut draft.tiers.eager.tier2,
+                    atman_runtime::tool::Tier::Three => &mut draft.tiers.eager.tier3,
+                    atman_runtime::tool::Tier::Four => &mut draft.tiers.eager.tier4,
+                };
+                *slot = Some(next_policy_action(current));
+                if let Some(tx) = tx {
+                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                }
+            }
+            crate::keys::KeyAction::Char(c @ ('n' | 'w' | 'i' | 'x' | 'p' | 'r'))
+                if modes[app.picker_selected.min(max - 1)]
+                    == atman_runtime::trust::TrustMode::Eager =>
+            {
+                let risk = match c {
+                    'n' => atman_runtime::trust::RiskKind::Network,
+                    'w' => atman_runtime::trust::RiskKind::FilesystemWrite,
+                    'i' => atman_runtime::trust::RiskKind::Irreversible,
+                    'x' => atman_runtime::trust::RiskKind::WorkspaceExternal,
+                    'p' => atman_runtime::trust::RiskKind::ProcessSpawn,
+                    _ => atman_runtime::trust::RiskKind::RepositoryMutation,
+                };
+                let current = draft.resolve_risk(risk);
+                let slot = match c {
+                    'n' => &mut draft.risks.eager.network,
+                    'w' => &mut draft.risks.eager.filesystem_write,
+                    'i' => &mut draft.risks.eager.irreversible,
+                    'x' => &mut draft.risks.eager.outside_workspace,
+                    'p' => &mut draft.risks.eager.process_spawn,
+                    _ => &mut draft.risks.eager.repository_mutation,
+                };
+                *slot = Some(next_policy_action(current));
+                if let Some(tx) = tx {
+                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                }
+            }
+            crate::keys::KeyAction::Char('e')
+                if modes[app.picker_selected.min(max - 1)]
+                    == atman_runtime::trust::TrustMode::Eager =>
+            {
+                draft.escalation = draft.escalation.next();
+                if let Some(tx) = tx {
+                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                }
+            }
             crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char('\r') => {
                 let new_mode = modes[app.picker_selected.min(max - 1)];
                 let prev = app.trust.mode;
                 self.trust_mode_picker_open = false;
                 if new_mode != prev {
-                    let mut trust = app.trust.clone();
-                    trust.mode = new_mode;
+                    draft.mode = new_mode;
                     if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::UpdateTrust(trust));
+                        let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
                     }
                     let display = app.trust.theme.display(new_mode);
                     if let Some(warning) = new_mode.warning(&display) {
@@ -857,6 +973,16 @@ impl ModalManager {
 }
 
 // ── Helpers ──
+
+fn next_policy_action(
+    action: atman_runtime::trust::PolicyAction,
+) -> atman_runtime::trust::PolicyAction {
+    match action {
+        atman_runtime::trust::PolicyAction::Auto => atman_runtime::trust::PolicyAction::Ask,
+        atman_runtime::trust::PolicyAction::Ask => atman_runtime::trust::PolicyAction::Deny,
+        atman_runtime::trust::PolicyAction::Deny => atman_runtime::trust::PolicyAction::Auto,
+    }
+}
 
 fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
     Rect {

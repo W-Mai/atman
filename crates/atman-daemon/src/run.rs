@@ -30,6 +30,18 @@ pub struct SpawnedRun {
     pub run_id: ProtoRunId,
 }
 
+struct RegistryCleanup {
+    state: Arc<DaemonState>,
+    session_id: ProtoSessionId,
+}
+
+impl Drop for RegistryCleanup {
+    fn drop(&mut self) {
+        self.state.deregister_broker(&self.session_id);
+        self.state.deregister_live(&self.session_id);
+    }
+}
+
 pub fn reconcile_workspaces(
     project_root: &Path,
     daemon_generation: &str,
@@ -131,6 +143,10 @@ impl RunLauncher {
         let spawn_result = std::thread::Builder::new()
             .name(format!("atman-run-{}", sid_proto))
             .spawn(move || {
+                let _cleanup = RegistryCleanup {
+                    state: state_for_task.clone(),
+                    session_id: sid_for_task.clone(),
+                };
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -394,6 +410,46 @@ mod tests {
         git(tmp.path(), &["add", "README.md"]);
         git(tmp.path(), &["commit", "-q", "-m", "initial"]);
         tmp
+    }
+
+    #[test]
+    fn registry_cleanup_guard_removes_entries_during_unwind() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = ProtoSessionId(session.id().0);
+        state.register_broker(session_id.clone(), session, "test-principal");
+        state.register_live(
+            session_id.clone(),
+            LiveSession {
+                run_id: ProtoRunId(uuid::Uuid::now_v7()),
+                flow_name: "panic-test".into(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+        );
+        assert!(
+            state
+                .authorized_live_session(&session_id, "test-principal")
+                .is_some()
+        );
+
+        let unwind = std::panic::catch_unwind({
+            let state = Arc::clone(&state);
+            let session_id = session_id.clone();
+            move || {
+                let _cleanup = RegistryCleanup { state, session_id };
+                panic!("simulate flow-thread panic");
+            }
+        });
+        assert!(unwind.is_err());
+        assert!(state.live_session(&session_id).is_none());
+        assert!(
+            state
+                .authorized_live_session(&session_id, "test-principal")
+                .is_none()
+        );
     }
 
     #[test]

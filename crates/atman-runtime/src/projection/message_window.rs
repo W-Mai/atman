@@ -225,6 +225,7 @@ fn legacy_permission_payload(
 
     PermissionRequestAudit {
         request_id: None,
+        revision: 0,
         session_id: "legacy:unknown".into(),
         requesting_run_id: run_id.clone(),
         parent_run_id: None,
@@ -917,6 +918,7 @@ mod tests {
     ) -> crate::permission_audit::PermissionRequestAudit {
         crate::permission_audit::PermissionRequestAudit {
             request_id: Some(crate::permission::PermissionRequestId(Uuid::now_v7())),
+            revision: 1,
             session_id: "session".into(),
             requesting_run_id: run_id.clone(),
             parent_run_id: None,

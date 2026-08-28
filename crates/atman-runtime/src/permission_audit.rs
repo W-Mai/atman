@@ -183,6 +183,8 @@ impl From<&GrantScope> for PermissionAuditScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PermissionRequestAudit {
     pub request_id: Option<PermissionRequestId>,
+    #[serde(default)]
+    pub revision: u64,
     pub session_id: String,
     pub requesting_run_id: FlowRunId,
     pub parent_run_id: Option<FlowRunId>,
@@ -221,6 +223,7 @@ impl PermissionRequestAudit {
         };
         Self {
             request_id: Some(request.request_id.clone()),
+            revision: request.revision,
             session_id: request.session_id.clone(),
             requesting_run_id: request.requesting_run_id.clone(),
             parent_run_id: request.parent_run_id.clone(),
@@ -508,6 +511,7 @@ mod tests {
     fn request(run_id: &FlowRunId) -> PermissionRequestAudit {
         PermissionRequestAudit {
             request_id: Some(PermissionRequestId::now()),
+            revision: 1,
             session_id: "session".into(),
             requesting_run_id: run_id.clone(),
             parent_run_id: None,

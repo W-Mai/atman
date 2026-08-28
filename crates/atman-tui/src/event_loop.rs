@@ -72,9 +72,6 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.plans_rx.as_ref() {
         app.app.plans = rx.borrow().clone();
     }
-    if let Some(rx) = handle.approvals_rx.as_ref() {
-        app.app.pending_approvals = rx.borrow().clone();
-    }
     if let Some(rx) = handle.trust_rx.as_ref() {
         let theme = app.app.trust.theme;
         app.app.trust = rx.borrow().clone();
@@ -1289,11 +1286,6 @@ pub(crate) async fn run_frames(
                     }
                 }
             }
-            _ = wait_approvals_change(handle.approvals_rx.as_mut()) => {
-                if let Some(rx) = handle.approvals_rx.as_mut() {
-                    app.app.pending_approvals = rx.borrow().clone();
-                }
-            }
             _ = wait_trust_change(handle.trust_rx.as_mut()) => {
                 if let Some(rx) = handle.trust_rx.as_mut() {
                     let theme = app.app.trust.theme;
@@ -1521,17 +1513,6 @@ pub(crate) async fn wait_todos_change(
 
 pub(crate) async fn wait_plans_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
-) {
-    match rx {
-        Some(r) => {
-            let _ = r.changed().await;
-        }
-        None => std::future::pending().await,
-    }
-}
-
-pub(crate) async fn wait_approvals_change(
-    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
 ) {
     match rx {
         Some(r) => {

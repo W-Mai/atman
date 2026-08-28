@@ -1670,40 +1670,57 @@ async fn cmd_repl_once(
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
                     atman_tui::TuiControl::HardStop => {
                         session_for_ctrl.cancel_flow();
-                        session_for_ctrl.approval().decide_all(
-                            atman_runtime::session::ApprovalDecision::Deny {
-                                reason: "flow cancelled".into(),
-                            },
-                        );
                         let _ = session_for_ctrl.enqueue_injection_with_level(
                             "stop",
                             atman_runtime::injection::InjectionLevel::L4HardStop,
                             None,
                         );
                     }
-                    atman_tui::TuiControl::ApproveTool(id) => {
-                        session_for_ctrl
-                            .approval()
-                            .decide(&id, atman_runtime::session::ApprovalDecision::Approve);
-                    }
-                    atman_tui::TuiControl::DenyTool {
-                        tool_use_id,
+                    atman_tui::TuiControl::ResolvePermission {
+                        selector,
+                        expected_revision,
+                        action,
+                        grant_scope,
                         reason,
                     } => {
-                        session_for_ctrl.approval().decide(
-                            &tool_use_id,
-                            atman_runtime::session::ApprovalDecision::Deny { reason },
-                        );
-                    }
-                    atman_tui::TuiControl::ApproveAllPending => {
-                        session_for_ctrl
-                            .approval()
-                            .decide_all(atman_runtime::session::ApprovalDecision::Approve);
-                    }
-                    atman_tui::TuiControl::DenyAllPending { reason } => {
-                        session_for_ctrl
-                            .approval()
-                            .decide_all(atman_runtime::session::ApprovalDecision::Deny { reason });
+                        let result = match selector {
+                            atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
+                                let expected = ids
+                                    .iter()
+                                    .cloned()
+                                    .map(|id| (id, expected_revision))
+                                    .collect();
+                                session_for_ctrl.permission_broker().user_resolve(
+                                    &session_for_ctrl.id().to_string(),
+                                    Some("local-tui-user".into()),
+                                    ids,
+                                    &expected,
+                                    None,
+                                    action,
+                                    grant_scope,
+                                    reason,
+                                )
+                            }
+                            atman_runtime::permission::PermissionSelector::Group(group_id) => {
+                                session_for_ctrl.permission_broker().user_resolve(
+                                    &session_for_ctrl.id().to_string(),
+                                    Some("local-tui-user".into()),
+                                    Vec::new(),
+                                    &std::collections::HashMap::new(),
+                                    Some((group_id, expected_revision)),
+                                    action,
+                                    grant_scope,
+                                    reason,
+                                )
+                            }
+                            _ => Err(
+                                atman_runtime::permission::PermissionError::GroupRevisionConflict,
+                            ),
+                        };
+                        if let Err(error) = result {
+                            reporter_for_ctrl
+                                .error(format!("permission decision rejected: {error}"));
+                        }
                     }
                     atman_tui::TuiControl::AutoNameSession => {
                         match atman_runtime::session_naming::force_generate_session_name(
@@ -2334,7 +2351,6 @@ async fn cmd_repl_once(
             attach_rx: Some(session.subscribe_attach()),
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
-            approvals_rx: Some(session.subscribe_pending_approvals()),
             trust_rx: Some(session.subscribe_trust()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
@@ -2345,6 +2361,7 @@ async fn cmd_repl_once(
             onboarding_recommended: atman_runtime::model_registry::is_first_run(),
             trust: session.trust_config(),
             task_registry: executor.tool_ctx.task_registry.clone(),
+            permission_client: Some(session.permission_broker().register_client()),
             boot_toasts: boot_notifications
                 .into_iter()
                 .map(|n| {
@@ -3117,11 +3134,6 @@ async fn consume_interjection_input(
     }
     if trimmed == "!stop" {
         session.cancel_flow();
-        session
-            .approval()
-            .decide_all(atman_runtime::session::ApprovalDecision::Deny {
-                reason: "flow cancelled".into(),
-            });
         let _ = session.enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None);
         reporter.info("[atman] stop requested; flow will abort at next node boundary");
         return true;
@@ -3194,11 +3206,6 @@ async fn consume_interjection_input(
     match cls.level {
         InjectionLevel::L4HardStop => {
             session.cancel_flow();
-            session
-                .approval()
-                .decide_all(atman_runtime::session::ApprovalDecision::Deny {
-                    reason: "flow cancelled".into(),
-                });
             let _ = session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L4HardStop,
@@ -4577,31 +4584,50 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
     handle.control_tx = Some(ctrl_tx);
     let ctrl_session = session.clone();
     let ctrl_task = tokio::spawn(async move {
-        use atman_runtime::session::ApprovalDecision;
         while let Some(msg) = ctrl_rx.recv().await {
             match msg {
-                atman_tui::TuiControl::ApproveTool(id) => {
-                    ctrl_session
-                        .approval()
-                        .decide(&id, ApprovalDecision::Approve);
-                }
-                atman_tui::TuiControl::DenyTool {
-                    tool_use_id,
+                atman_tui::TuiControl::ResolvePermission {
+                    selector,
+                    expected_revision,
+                    action,
+                    grant_scope,
                     reason,
                 } => {
-                    ctrl_session
-                        .approval()
-                        .decide(&tool_use_id, ApprovalDecision::Deny { reason });
-                }
-                atman_tui::TuiControl::ApproveAllPending => {
-                    ctrl_session
-                        .approval()
-                        .decide_all(ApprovalDecision::Approve);
-                }
-                atman_tui::TuiControl::DenyAllPending { reason } => {
-                    ctrl_session
-                        .approval()
-                        .decide_all(ApprovalDecision::Deny { reason });
+                    let result = match selector {
+                        atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
+                            let expected = ids
+                                .iter()
+                                .cloned()
+                                .map(|id| (id, expected_revision))
+                                .collect();
+                            ctrl_session.permission_broker().user_resolve(
+                                &ctrl_session.id().to_string(),
+                                Some("local-tui-preview".into()),
+                                ids,
+                                &expected,
+                                None,
+                                action,
+                                grant_scope,
+                                reason,
+                            )
+                        }
+                        atman_runtime::permission::PermissionSelector::Group(group_id) => {
+                            ctrl_session.permission_broker().user_resolve(
+                                &ctrl_session.id().to_string(),
+                                Some("local-tui-preview".into()),
+                                Vec::new(),
+                                &std::collections::HashMap::new(),
+                                Some((group_id, expected_revision)),
+                                action,
+                                grant_scope,
+                                reason,
+                            )
+                        }
+                        _ => Err(atman_runtime::permission::PermissionError::GroupRevisionConflict),
+                    };
+                    if let Err(error) = result {
+                        atman_runtime::notify!(error, "permission decision rejected: {error}");
+                    }
                 }
                 atman_tui::TuiControl::FormSubmit { form_id, answer } => {
                     ctrl_session.forms().submit(&form_id, answer);
@@ -4836,9 +4862,13 @@ async fn preview_scene_chat(session: std::sync::Arc<Session>) {
 async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) {
     use atman_runtime::event::FlowRunId;
     use atman_runtime::nodegraph::NodeKind;
-    use atman_runtime::session::PendingApproval;
+    use atman_runtime::permission::PermissionRequestId;
+    use atman_runtime::permission_audit::{
+        PermissionAuditTarget, PermissionPolicyReference, PermissionProvenanceSummary,
+        PermissionRequestAudit,
+    };
     use atman_runtime::stream::StreamFrame;
-    use atman_runtime::tool::ApprovalLevel;
+    use atman_runtime::tool::Tier;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let tx = session.stream_tx();
     let run_id = FlowRunId::now().0.to_string();
@@ -4848,7 +4878,6 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
         parent_run_id: None,
         parent_node_id: None,
     });
-    let reg = session.approval();
     let demos: &[(&str, &str, &str)] = &[
         (
             "bash",
@@ -4890,23 +4919,37 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             tool: (*tool).into(),
             args_preview: (*args).into(),
         });
-        let _ = tx.send(StreamFrame::ToolPendingApproval {
+        let flow_run_id = FlowRunId(uuid::Uuid::parse_str(&run_id).unwrap());
+        let _ = tx.send(StreamFrame::PermissionRequestCreated {
             run_id: run_id.clone(),
-            tool_use_id: tool_use_id.clone(),
-            tool_name: (*tool).into(),
-            args_preview: (*args).into(),
-            level: "dangerous".into(),
-            preview: Some((*preview).into()),
+            payload: PermissionRequestAudit {
+                request_id: Some(PermissionRequestId::now()),
+                revision: 1,
+                session_id: session.id().to_string(),
+                requesting_run_id: flow_run_id.clone(),
+                parent_run_id: None,
+                root_run_id: flow_run_id,
+                tool_use_id,
+                tool: (*tool).into(),
+                tier: Tier::Four,
+                provenance: PermissionProvenanceSummary {
+                    targets: vec![(*args).into()],
+                    ..PermissionProvenanceSummary::default()
+                },
+                target: PermissionAuditTarget::User,
+                group_ids: Vec::new(),
+                policy: PermissionPolicyReference {
+                    snapshot_id: "preview".into(),
+                    rule_id: "preview".into(),
+                },
+                escalation_path: Vec::new(),
+                decision_id: None,
+                actor: None,
+                scope: None,
+                reason: Some((*preview).into()),
+                at: chrono::Utc::now(),
+            },
         });
-        drop(reg.request(PendingApproval {
-            tool_use_id,
-            tool_name: (*tool).into(),
-            args_preview: (*args).into(),
-            preview: Some((*preview).into()),
-            level: ApprovalLevel::Dangerous,
-            run_id: FlowRunId::now(),
-            emitted_at: chrono::Utc::now(),
-        }));
     }
 }
 
