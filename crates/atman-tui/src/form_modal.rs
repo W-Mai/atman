@@ -307,17 +307,36 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 height: 1,
             },
         );
-        let mut lines = vec![
-            Line::from(Span::styled(
-                kind.prompt().to_owned(),
+        let mut lines = if self.phase == FormPhase::FinalConfirm {
+            vec![Line::from(Span::styled(
+                "  Submit all answers?",
                 Style::default()
                     .fg(t.tinted_fg.into())
                     .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-        ];
+            ))]
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    kind.prompt().to_owned(),
+                    Style::default()
+                        .fg(t.tinted_fg.into())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ]
+        };
         if self.phase == FormPhase::FinalConfirm {
-            lines.push(Line::from("  Submit all answers?  [ Yes ]   No"));
+            let yes = if self.confirm_focus == 0 {
+                "[ Yes ]"
+            } else {
+                "  Yes  "
+            };
+            let no = if self.confirm_focus == 1 {
+                "[ No ]"
+            } else {
+                "  No  "
+            };
+            lines.push(Line::from(format!("  {yes}   {no}")));
         } else {
             match kind {
                 FormKind::Confirm { .. } => lines.push(Line::from("  [ Yes ]   No")),
@@ -408,12 +427,27 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             {
                 Some(self.reject())
             }
-            KeyAction::Tab => {
+            KeyAction::Tab if self.phase == FormPhase::Editing => {
                 self.move_question(1);
                 None
             }
-            KeyAction::BackTab => {
+            KeyAction::BackTab if self.phase == FormPhase::FinalConfirm => {
+                self.phase = FormPhase::Editing;
+                self.current_index = self.questions().len().saturating_sub(1);
+                self.reset_question_state();
+                self.scroll = 0;
+                None
+            }
+            KeyAction::BackTab if self.phase == FormPhase::Editing => {
                 self.move_question(-1);
+                None
+            }
+            KeyAction::CursorLeft if self.phase == FormPhase::FinalConfirm => {
+                self.confirm_focus = 0;
+                None
+            }
+            KeyAction::CursorRight if self.phase == FormPhase::FinalConfirm => {
+                self.confirm_focus = 1;
                 None
             }
             KeyAction::HistoryUp | KeyAction::Char('k') => {
