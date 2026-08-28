@@ -161,6 +161,9 @@ pub mod methods {
     pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
+    pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
+    pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
+    pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
     pub const PING: &str = "ping";
 }
 
@@ -227,6 +230,103 @@ pub struct ResolvePromptRequest {
     pub prompt_id: PromptId,
     #[schema(value_type = Object)]
     pub answer: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListPermissionRequestsRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreatePermissionGroupRequest {
+    pub session_id: SessionId,
+    pub request_ids: Vec<Uuid>,
+    pub expected_request_revisions: std::collections::BTreeMap<Uuid, u64>,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRpcAction {
+    Approve,
+    Deny,
+    Defer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRpcScope {
+    CurrentCall,
+    ChildRunSameTool {
+        run_id: FlowRunId,
+        tool_name: String,
+    },
+    ChildRunSamePathRule {
+        run_id: FlowRunId,
+        tool_name: String,
+        workspace_relative_path: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum PermissionRpcSelector {
+    Requests {
+        request_ids: Vec<Uuid>,
+        expected_request_revisions: std::collections::BTreeMap<Uuid, u64>,
+    },
+    Group {
+        group_id: Uuid,
+        expected_group_revision: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResolvePermissionRequestsRequest {
+    pub session_id: SessionId,
+    pub selector: PermissionRpcSelector,
+    pub action: PermissionRpcAction,
+    #[serde(default)]
+    pub scope: Option<PermissionRpcScope>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermissionRequestView {
+    pub request_id: Uuid,
+    pub session_id: String,
+    pub requesting_run_id: FlowRunId,
+    pub tool: String,
+    pub tier: String,
+    pub state: String,
+    pub target: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermissionGroupView {
+    pub group_id: Uuid,
+    pub label: String,
+    pub request_ids: Vec<Uuid>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListPermissionRequestsResponse {
+    pub requests: Vec<PermissionRequestView>,
+    pub groups: Vec<PermissionGroupView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PermissionResolutionView {
+    pub request_id: Uuid,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResolvePermissionRequestsResponse {
+    pub resolutions: Vec<PermissionResolutionView>,
 }
 
 #[cfg(test)]

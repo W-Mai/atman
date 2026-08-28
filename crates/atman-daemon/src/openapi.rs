@@ -1,5 +1,6 @@
 use atman_proto::{
-    CancelRunRequest, GetEventsRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    CancelRunRequest, CreatePermissionGroupRequest, GetEventsRequest, JsonRpcError, JsonRpcRequest,
+    JsonRpcResponse, ListPermissionRequestsRequest, ResolvePermissionRequestsRequest,
     ResolvePromptRequest, RunFlowRequest, RunFlowResponse, SessionSummary,
 };
 use utoipa::OpenApi;
@@ -29,6 +30,7 @@ fn rpc_endpoint() {}
     responses(
         (status = 200, description = "SSE stream (text/event-stream). Payload is a JSON-serialized atman_runtime::event::Event per line."),
         (status = 401, description = "Missing or invalid bearer token"),
+        (status = 403, description = "Authenticated principal is not authorized for the session"),
     ),
     security(("bearer_token" = [])),
     tag = "events",
@@ -52,7 +54,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: ping, list_sessions, run_flow, cancel_run, resolve_prompt. \
+Methods dispatched at POST /rpc: ping, list_sessions, run_flow, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
 SSE event stream at GET /events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, openapi_endpoint),
@@ -65,6 +67,14 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         CancelRunRequest,
         ResolvePromptRequest,
         GetEventsRequest,
+        ListPermissionRequestsRequest,
+        CreatePermissionGroupRequest,
+        ResolvePermissionRequestsRequest,
+        atman_proto::ListPermissionRequestsResponse,
+        atman_proto::PermissionRequestView,
+        atman_proto::PermissionGroupView,
+        atman_proto::ResolvePermissionRequestsResponse,
+        atman_proto::PermissionResolutionView,
         SessionSummary,
         atman_proto::SessionStatus,
         atman_proto::SessionId,

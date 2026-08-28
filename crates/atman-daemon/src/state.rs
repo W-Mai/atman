@@ -16,16 +16,23 @@ struct PendingPrompt {
 pub struct DaemonState {
     data_dir: PathBuf,
     daemon_generation: String,
-    live: Mutex<HashMap<SessionId, LiveSession>>,
+    live: Mutex<HashMap<SessionId, LiveSessionEntry>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
 }
 
+#[derive(Clone)]
 pub struct LiveSession {
     pub run_id: FlowRunId,
     pub flow_name: String,
     pub cancel: CancellationToken,
     pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+struct LiveSessionEntry {
+    live: Option<LiveSession>,
+    broker: Option<std::sync::Arc<atman_runtime::Session>>,
+    owner_principal: Option<String>,
 }
 
 impl DaemonState {
@@ -131,16 +138,71 @@ impl DaemonState {
     }
 
     pub fn register_live(&self, id: SessionId, entry: LiveSession) {
-        self.live.lock().unwrap().insert(id, entry);
+        let mut live = self.live.lock().unwrap();
+        live.entry(id)
+            .and_modify(|current| current.live = Some(entry.clone()))
+            .or_insert(LiveSessionEntry {
+                live: Some(entry),
+                broker: None,
+                owner_principal: None,
+            });
+    }
+
+    pub fn register_broker(
+        &self,
+        id: SessionId,
+        session: std::sync::Arc<atman_runtime::Session>,
+        owner_principal: impl Into<String>,
+    ) {
+        let mut live = self.live.lock().unwrap();
+        let entry = live.entry(id).or_insert(LiveSessionEntry {
+            live: None,
+            broker: None,
+            owner_principal: None,
+        });
+        entry.broker = Some(session);
+        entry.owner_principal = Some(owner_principal.into());
+    }
+
+    pub fn authorized_live_session(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Option<std::sync::Arc<atman_runtime::Session>> {
+        let live = self.live.lock().unwrap();
+        let entry = live.get(id)?;
+        (entry.live.is_some() && entry.owner_principal.as_deref() == Some(principal))
+            .then(|| entry.broker.clone())
+            .flatten()
+    }
+
+    pub fn owns_live_session(&self, id: &SessionId, principal: &str) -> bool {
+        self.authorized_live_session(id, principal).is_some()
+    }
+
+    pub fn deregister_broker(&self, id: &SessionId) {
+        if let Some(entry) = self.live.lock().unwrap().get_mut(id) {
+            entry.broker = None;
+            entry.owner_principal = None;
+        }
     }
 
     pub fn deregister_live(&self, id: &SessionId) {
         self.live.lock().unwrap().remove(id);
     }
 
+    pub fn live_session(&self, id: &SessionId) -> Option<std::sync::Arc<atman_runtime::Session>> {
+        self.live
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|entry| entry.live.is_some())
+            .and_then(|entry| entry.broker.clone())
+    }
+
     pub fn cancel_run(&self, run_id: &FlowRunId) -> bool {
         let live = self.live.lock().unwrap();
-        for entry in live.values() {
+        for entry in live.values().filter_map(|entry| entry.live.as_ref()) {
             if &entry.run_id == run_id {
                 entry.cancel.cancel();
                 return true;
@@ -197,7 +259,12 @@ impl DaemonState {
         let live_ids: HashMap<SessionId, chrono::DateTime<chrono::Utc>> = {
             let live = self.live.lock().unwrap();
             live.iter()
-                .map(|(sid, entry)| (sid.clone(), entry.started_at))
+                .filter_map(|(sid, entry)| {
+                    entry
+                        .live
+                        .as_ref()
+                        .map(|live| (sid.clone(), live.started_at))
+                })
                 .collect()
         };
 

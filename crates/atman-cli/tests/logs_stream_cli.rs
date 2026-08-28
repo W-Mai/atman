@@ -23,8 +23,24 @@ fn seed_events(root: &Path, sid: &str, lines: &[&str]) {
     std::fs::write(dir.join("events.jsonl"), body).unwrap();
 }
 
-async fn spawn_server(root: &Path, token: &str) -> (u16, tokio_util::sync::CancellationToken) {
+async fn spawn_server(
+    root: &Path,
+    token: &str,
+    session_id: &str,
+) -> (u16, tokio_util::sync::CancellationToken) {
     let daemon = Arc::new(DaemonState::new(root.to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let session_id = atman_proto::SessionId(uuid::Uuid::parse_str(session_id).unwrap());
+    daemon.register_broker(session_id.clone(), session, "authenticated-daemon-client");
+    daemon.register_live(
+        session_id,
+        atman_daemon::LiveSession {
+            run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
+            flow_name: "logs-stream-test".into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            started_at: chrono::Utc::now(),
+        },
+    );
     let state = Arc::new(HttpState {
         daemon,
         auth_token: token.to_string(),
@@ -67,7 +83,7 @@ async fn logs_stream_prints_existing_events_from_running_daemon() {
     );
 
     let token = "logs-stream-test-token";
-    let (port, shutdown) = spawn_server(&data_dir, token).await;
+    let (port, shutdown) = spawn_server(&data_dir, token, sid).await;
     let daemon_cfg = tmp.path().join("daemon.toml");
     write_daemon_config(&daemon_cfg, token);
 
@@ -136,7 +152,7 @@ async fn logs_stream_since_seq_skips_older_events() {
     seed_events(&data_dir, sid, &lines);
 
     let token = "logs-stream-since-token";
-    let (port, shutdown) = spawn_server(&data_dir, token).await;
+    let (port, shutdown) = spawn_server(&data_dir, token, sid).await;
     let daemon_cfg = tmp.path().join("daemon.toml");
     write_daemon_config(&daemon_cfg, token);
 

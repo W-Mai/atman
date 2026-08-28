@@ -488,7 +488,15 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 }
             }
             TranscriptEntry::PermissionGroup { payload, resolved } => {
-                let run_id = payload.owner_run_id.0.to_string();
+                let Some(run_id) = (match &payload.owner {
+                    atman_runtime::permission_audit::PermissionGroupAuditOwner::Flow { run_id } => {
+                        Some(run_id.0.to_string())
+                    }
+                    atman_runtime::permission_audit::PermissionGroupAuditOwner::User { .. }
+                    | atman_runtime::permission_audit::PermissionGroupAuditOwner::System => None,
+                }) else {
+                    continue;
+                };
                 if spawned_set.contains(run_id.as_str()) {
                     continue;
                 }
@@ -559,12 +567,22 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         );
                         continue;
                     }
-                    TranscriptEntry::PermissionGroup { payload, resolved }
-                        if find_spawned_root(&payload.owner_run_id.0.to_string())
-                            == Some(root_id.clone()) =>
-                    {
-                        workflow_graph.apply_permission_group(payload, *resolved);
-                        continue;
+                    TranscriptEntry::PermissionGroup { payload, resolved } => {
+                        let owner_run_id = match &payload.owner {
+                            atman_runtime::permission_audit::PermissionGroupAuditOwner::Flow {
+                                run_id,
+                            } => run_id.0.to_string(),
+                            atman_runtime::permission_audit::PermissionGroupAuditOwner::User {
+                                ..
+                            }
+                            | atman_runtime::permission_audit::PermissionGroupAuditOwner::System => {
+                                continue;
+                            }
+                        };
+                        if find_spawned_root(&owner_run_id) == Some(root_id.clone()) {
+                            workflow_graph.apply_permission_group(payload, *resolved);
+                            continue;
+                        }
                     }
                     _ => {}
                 }

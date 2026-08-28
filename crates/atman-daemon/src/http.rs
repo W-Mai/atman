@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use atman_proto::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
 
-use crate::{DaemonState, dispatch};
+use crate::DaemonState;
 
 pub struct HttpState {
     pub daemon: Arc<DaemonState>,
@@ -43,7 +43,11 @@ async fn openapi_handler() -> Json<serde_json::Value> {
     Json(serde_json::to_value(schema).unwrap_or(serde_json::json!({})))
 }
 
-async fn rpc_handler(State(state): State<Arc<HttpState>>, body: String) -> Json<JsonRpcResponse> {
+async fn rpc_handler(
+    State(state): State<Arc<HttpState>>,
+    Extension(principal_id): Extension<String>,
+    body: String,
+) -> Json<JsonRpcResponse> {
     let req: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -53,7 +57,7 @@ async fn rpc_handler(State(state): State<Arc<HttpState>>, body: String) -> Json<
             ));
         }
     };
-    Json(dispatch(state.daemon.clone(), req).await)
+    Json(crate::dispatch_as(state.daemon.clone(), req, &principal_id).await)
 }
 
 #[derive(Deserialize)]
@@ -65,9 +69,16 @@ pub struct SseQuery {
 
 async fn sse_handler(
     State(state): State<Arc<HttpState>>,
+    Extension(principal_id): Extension<String>,
     Query(q): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
+    if !state.daemon.owns_live_session(&q.session_id, &principal_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "permission denied for session".into(),
+        ));
+    }
     let events_path = state
         .daemon
         .sessions_root()
@@ -145,6 +156,9 @@ async fn require_bearer(
         && let Some(token) = auth_str.strip_prefix("Bearer ")
     {
         if constant_time_eq(token.as_bytes(), state.auth_token.as_bytes()) {
+            let principal_id = "authenticated-daemon-client".to_string();
+            let mut req = req;
+            req.extensions_mut().insert(principal_id);
             return next.run(req).await;
         }
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
@@ -159,6 +173,9 @@ async fn require_bearer(
                     .map(|c| c.into_owned())
                     .unwrap_or_else(|_| rest.to_string());
                 if constant_time_eq(decoded.as_bytes(), state.auth_token.as_bytes()) {
+                    let principal_id = "authenticated-daemon-client".to_string();
+                    let mut req = req;
+                    req.extensions_mut().insert(principal_id);
                     return next.run(req).await;
                 }
             }

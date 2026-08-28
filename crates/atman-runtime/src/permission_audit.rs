@@ -292,9 +292,17 @@ impl PermissionRequestAudit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PermissionGroupAuditOwner {
+    Flow { run_id: FlowRunId },
+    User { session_id: String },
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PermissionGroupAudit {
     pub group_id: PermissionGroupId,
-    pub owner_run_id: FlowRunId,
+    pub owner: PermissionGroupAuditOwner,
     pub label: String,
     pub request_ids: Vec<PermissionRequestId>,
     pub revision: u64,
@@ -302,18 +310,24 @@ pub struct PermissionGroupAudit {
 }
 
 impl PermissionGroupAudit {
-    pub fn from_group(group: &PermissionGroup, at: DateTime<Utc>) -> Option<Self> {
-        let GroupOwner::Flow(owner_run_id) = &group.owner else {
-            return None;
+    pub fn from_group(group: &PermissionGroup, session_id: &str, at: DateTime<Utc>) -> Self {
+        let owner = match &group.owner {
+            GroupOwner::Flow(run_id) => PermissionGroupAuditOwner::Flow {
+                run_id: run_id.clone(),
+            },
+            GroupOwner::User => PermissionGroupAuditOwner::User {
+                session_id: session_id.to_owned(),
+            },
+            GroupOwner::System => PermissionGroupAuditOwner::System,
         };
-        Some(Self {
+        Self {
             group_id: group.group_id.clone(),
-            owner_run_id: owner_run_id.clone(),
+            owner,
             label: group.label.clone(),
             request_ids: group.request_ids.iter().cloned().collect(),
             revision: group.revision,
             at,
-        })
+        }
     }
 }
 
@@ -389,24 +403,28 @@ impl PermissionAuditProjector {
 }
 
 trait AuditAnchor {
-    fn anchor_run_id(&self) -> &FlowRunId;
+    fn stream_anchor(&self) -> String;
 }
 
 impl AuditAnchor for PermissionRequestAudit {
-    fn anchor_run_id(&self) -> &FlowRunId {
-        &self.requesting_run_id
+    fn stream_anchor(&self) -> String {
+        self.requesting_run_id.to_string()
     }
 }
 
 impl AuditAnchor for PermissionGroupAudit {
-    fn anchor_run_id(&self) -> &FlowRunId {
-        &self.owner_run_id
+    fn stream_anchor(&self) -> String {
+        match &self.owner {
+            PermissionGroupAuditOwner::Flow { run_id } => run_id.to_string(),
+            PermissionGroupAuditOwner::User { session_id } => format!("user:{session_id}"),
+            PermissionGroupAuditOwner::System => "system".into(),
+        }
     }
 }
 
 impl AuditAnchor for PermissionGrantAudit {
-    fn anchor_run_id(&self) -> &FlowRunId {
-        &self.requesting_run_id
+    fn stream_anchor(&self) -> String {
+        self.requesting_run_id.to_string()
     }
 }
 
@@ -424,7 +442,7 @@ macro_rules! audit_conversions {
             fn from(record: PermissionAuditRecord) -> Self {
                 match record {
                     $(PermissionAuditRecord::$record(payload) => Self::$frame {
-                        run_id: payload.anchor_run_id().to_string(),
+                        run_id: payload.stream_anchor(),
                         payload,
                     },)+
                 }
@@ -580,7 +598,9 @@ mod tests {
         let request = request(&run_id);
         let group = PermissionGroupAudit {
             group_id: PermissionGroupId(uuid::Uuid::now_v7()),
-            owner_run_id: run_id.clone(),
+            owner: PermissionGroupAuditOwner::Flow {
+                run_id: run_id.clone(),
+            },
             label: "group".into(),
             request_ids: vec![request.request_id.clone().unwrap()],
             revision: 1,

@@ -59,6 +59,16 @@ impl RunLauncher {
         flow_path: &str,
         args: Vec<(String, atman_runtime::Value)>,
     ) -> Result<SpawnedRun> {
+        self.spawn_as(state, flow_path, args, "local-daemon").await
+    }
+
+    pub async fn spawn_as(
+        &self,
+        state: Arc<DaemonState>,
+        flow_path: &str,
+        args: Vec<(String, atman_runtime::Value)>,
+        owner_principal: &str,
+    ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
 
@@ -101,6 +111,7 @@ impl RunLauncher {
         let run_id_proto = ProtoRunId(run_id_runtime.0);
 
         let cancel = session.flow_cancel_token();
+        state.register_broker(sid_proto.clone(), session.clone(), owner_principal);
         state.register_live(
             sid_proto.clone(),
             LiveSession {
@@ -117,13 +128,21 @@ impl RunLauncher {
         let state_for_task = state.clone();
         let sid_for_task = sid_proto.clone();
 
-        std::thread::Builder::new()
+        let spawn_result = std::thread::Builder::new()
             .name(format!("atman-run-{}", sid_proto))
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("build current-thread runtime");
+                {
+                    Ok(rt) => rt,
+                    Err(error) => {
+                        atman_runtime::notify!(error, "build flow runtime failed: {error:#}");
+                        state_for_task.deregister_broker(&sid_for_task);
+                        state_for_task.deregister_live(&sid_for_task);
+                        return;
+                    }
+                };
                 let state_for_run = state_for_task.clone();
                 rt.block_on(async move {
                     if let Err(e) = run_flow_inner(
@@ -141,6 +160,7 @@ impl RunLauncher {
                     {
                         atman_runtime::notify!(error, "flow run failed: {e:#}");
                     }
+                    state_for_task.deregister_broker(&sid_for_task);
                     match std::sync::Arc::try_unwrap(session) {
                         Ok(s) => s.shutdown().await,
                         Err(_) => atman_runtime::notify!(
@@ -152,8 +172,12 @@ impl RunLauncher {
                     }
                     state_for_task.deregister_live(&sid_for_task);
                 });
-            })
-            .context("spawn run thread")?;
+            });
+        if let Err(error) = spawn_result {
+            state.deregister_broker(&sid_proto);
+            state.deregister_live(&sid_proto);
+            return Err(error).context("spawn run thread");
+        }
 
         Ok(SpawnedRun {
             session_id: sid_proto,

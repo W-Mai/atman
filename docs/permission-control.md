@@ -99,6 +99,12 @@ A tool's provenance may include these risks:
 
 `workspace_external` and `outside_workspace` risk configuration describe a real resource boundary. They are not a legacy `outside` switch. The obsolete `[trust].outside` field is rejected instead of being silently ignored.
 
+## Daemon authentication and session ownership
+
+The daemon HTTP API uses one static bearer token. A valid token authenticates as the fixed principal `authenticated-daemon-client`; it is a single-operator control model, not a multi-user identity provider. Unix-socket requests use the local principal `local-daemon`.
+
+Even in this single-principal model, each live session is bound in the daemon's in-memory registry to the principal that created it. The permission RPCs `list_permission_requests`, `create_permission_group`, and `resolve_permission_requests` must match that owner before looking up or mutating the broker. A missing owner or a mismatched principal fails closed. The caller-provided session UUID is only a lookup key and is never treated as an authorization claim.
+
 ## Session state and global defaults
 
 Permission state has three distinct roles:

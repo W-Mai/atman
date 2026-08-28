@@ -299,6 +299,9 @@ pub struct PermissionRequest {
     pub requirement: AuthorityRequirement,
     pub policy_reference: crate::permission_audit::PermissionPolicyReference,
     pub state: PermissionRequestState,
+    /// Optimistic concurrency token for client decisions. Incremented for every
+    /// state or target transition while the stable request ID is unchanged.
+    pub revision: u64,
     pub escalation_path: Vec<EscalationHop>,
     pub requested_at: DateTime<Utc>,
 }
@@ -673,12 +676,20 @@ impl PermissionBroker {
             if !Self::group_is_resolved(state, group) {
                 continue;
             }
-            if let Some(audit) =
-                crate::permission_audit::PermissionGroupAudit::from_group(group, at)
-            {
-                records.push(crate::permission_audit::PermissionAuditRecord::GroupResolved(audit));
-                state.resolved_group_audits.insert(group_id.clone());
-            }
+            let session_id = group
+                .request_ids
+                .iter()
+                .find_map(|request_id| {
+                    state
+                        .requests
+                        .get(request_id)
+                        .map(|entry| entry.request.session_id.as_str())
+                })
+                .unwrap_or("unknown");
+            let audit =
+                crate::permission_audit::PermissionGroupAudit::from_group(group, session_id, at);
+            records.push(crate::permission_audit::PermissionAuditRecord::GroupResolved(audit));
+            state.resolved_group_audits.insert(group_id.clone());
         }
     }
 
@@ -766,7 +777,7 @@ impl PermissionBroker {
         Ok(FlowDecisionAuthority { identity })
     }
 
-    pub(crate) fn user_authority(
+    pub fn user_authority(
         &self,
         session_id: impl Into<String>,
         principal_id: Option<String>,
@@ -913,6 +924,7 @@ impl PermissionBroker {
             intent,
             requirement,
             state: request_state,
+            revision: 0,
             escalation_path: vec![EscalationHop {
                 target,
                 actor: None,
@@ -1116,6 +1128,7 @@ impl PermissionBroker {
                 entry.request.state = PermissionRequestState::Pending {
                     target: next_target.clone(),
                 };
+                entry.request.revision += 1;
                 if let Some(target_tx) = &entry.target_tx {
                     let _ = target_tx.send(next_target.clone());
                 }
@@ -1159,6 +1172,7 @@ impl PermissionBroker {
                 decision_id: decision.decision_id.clone(),
             }
         };
+        entry.request.revision += 1;
         let responder = entry.responder.take();
         if let Some(grant) = persistent_grant
             && !state
@@ -1305,6 +1319,7 @@ impl PermissionBroker {
                 decision_id: decision.decision_id.clone(),
             }
         };
+        entry.request.revision += 1;
         let responder = entry.responder.take();
         if let Some(grant) = persistent_grant
             && !state
@@ -1382,6 +1397,7 @@ impl PermissionBroker {
         entry.request.state = PermissionRequestState::Pending {
             target: next_target.clone(),
         };
+        entry.request.revision += 1;
         entry.request.escalation_path.push(EscalationHop {
             target: next_target.clone(),
             actor: None,
@@ -1622,6 +1638,148 @@ impl PermissionBroker {
             .map(|entry| entry.request.clone())
     }
 
+    pub fn user_list(&self, session_id: &str) -> (Vec<PermissionRequest>, Vec<PermissionGroup>) {
+        let state = self.state.lock().unwrap();
+        let requests: Vec<_> = state
+            .requests
+            .values()
+            .filter(|entry| Self::user_visible_request(&entry.request, session_id))
+            .map(|entry| entry.request.clone())
+            .collect();
+        let groups: Vec<_> = state
+            .groups
+            .values()
+            .filter(|group| group.owner == GroupOwner::User)
+            .filter(|group| {
+                !group.request_ids.is_empty()
+                    && group.request_ids.iter().all(|request_id| {
+                        state.requests.get(request_id).is_some_and(|entry| {
+                            Self::user_visible_request(&entry.request, session_id)
+                        })
+                    })
+            })
+            .cloned()
+            .collect();
+        (requests, groups)
+    }
+
+    pub fn user_create_group(
+        &self,
+        session_id: &str,
+        request_ids: BTreeSet<PermissionRequestId>,
+        label: String,
+        expected_revisions: &HashMap<PermissionRequestId, u64>,
+    ) -> Result<PermissionGroup, PermissionError> {
+        if request_ids.is_empty() {
+            return Err(PermissionError::EmptyGroup);
+        }
+        let mut state = self.state.lock().unwrap();
+        if request_ids.iter().any(|id| {
+            state.requests.get(id).is_none_or(|entry| {
+                !Self::user_visible_request(&entry.request, session_id)
+                    || expected_revisions.get(id) != Some(&entry.request.revision)
+            })
+        }) {
+            return Err(PermissionError::GroupRevisionConflict);
+        }
+        let group = PermissionGroup {
+            group_id: PermissionGroupId::now(),
+            owner: GroupOwner::User,
+            label,
+            request_ids,
+            created_at: Utc::now(),
+            revision: 0,
+        };
+        state.groups.insert(group.group_id.clone(), group.clone());
+        let records = vec![
+            crate::permission_audit::PermissionAuditRecord::GroupCreated(
+                crate::permission_audit::PermissionGroupAudit::from_group(
+                    &group,
+                    session_id,
+                    group.created_at,
+                ),
+            ),
+        ];
+        let sequence = Self::enqueue_audit_bundle(&mut state, records);
+        drop(state);
+        self.dispatch_audit_bundle(sequence);
+        Ok(group)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn user_resolve(
+        &self,
+        session_id: &str,
+        principal_id: Option<String>,
+        request_ids: Vec<PermissionRequestId>,
+        expected_revisions: &HashMap<PermissionRequestId, u64>,
+        group_id: Option<(PermissionGroupId, u64)>,
+        action: PermissionAction,
+        grant_scope: Option<GrantScope>,
+        reason: Option<String>,
+    ) -> Result<Vec<BatchResolution>, PermissionError> {
+        let (results, sequence) = self.flows.with_lifecycle_arbitration(|| {
+            let mut state = self.state.lock().unwrap();
+            let is_group_selector = group_id.is_some();
+            let ids = if let Some((group_id, expected_revision)) = group_id {
+                let group = state
+                    .groups
+                    .get(&group_id)
+                    .ok_or(PermissionError::GroupNotFound)?;
+                if group.owner != GroupOwner::User || group.revision != expected_revision {
+                    return Err(PermissionError::GroupRevisionConflict);
+                }
+                group.request_ids.iter().cloned().collect()
+            } else {
+                request_ids
+            };
+            if ids.iter().any(|id| {
+                state.requests.get(id).is_none_or(|entry| {
+                    !Self::user_visible_request(&entry.request, session_id)
+                        || (!is_group_selector
+                            && expected_revisions.get(id) != Some(&entry.request.revision))
+                })
+            }) {
+                return Err(PermissionError::GroupRevisionConflict);
+            }
+            let authority =
+                DecisionAuthority::User(self.user_authority(session_id.to_string(), principal_id));
+            let request_set = ids.iter().cloned().collect();
+            let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_set);
+            let mut results = Vec::with_capacity(ids.len());
+            let mut audits = Vec::new();
+            for id in ids {
+                let outcome = self.resolve_locked_state(
+                    &mut state,
+                    &id,
+                    &authority,
+                    action,
+                    grant_scope.clone(),
+                    reason.clone(),
+                )?;
+                let decision = match &outcome {
+                    ResolveOutcome::Resolved(decision) | ResolveOutcome::Deferred(decision) => {
+                        decision
+                    }
+                };
+                audits.extend(resolution_audits_from_state(&state, &id, decision));
+                results.push(BatchResolution {
+                    request_id: id,
+                    outcome: batch_outcome(action, outcome),
+                });
+            }
+            Self::append_resolved_group_audits(
+                &mut state,
+                &candidate_groups,
+                &mut audits,
+                Utc::now(),
+            );
+            Ok((results, Self::enqueue_audit_bundle(&mut state, audits)))
+        })?;
+        self.dispatch_audit_bundle(sequence);
+        Ok(results)
+    }
+
     pub fn list(&self) -> Vec<PermissionRequest> {
         let mut requests: Vec<_> = self
             .state
@@ -1708,11 +1866,15 @@ impl PermissionBroker {
             revision: 0,
         };
         state.groups.insert(group.group_id.clone(), group.clone());
-        let mut records =
-            crate::permission_audit::PermissionGroupAudit::from_group(&group, group.created_at)
-                .map(crate::permission_audit::PermissionAuditRecord::GroupCreated)
-                .into_iter()
-                .collect();
+        let mut records = vec![
+            crate::permission_audit::PermissionAuditRecord::GroupCreated(
+                crate::permission_audit::PermissionGroupAudit::from_group(
+                    &group,
+                    &actor.session_id,
+                    group.created_at,
+                ),
+            ),
+        ];
         Self::append_resolved_group_audits(
             &mut state,
             &BTreeSet::from([group.group_id.clone()]),
@@ -1781,10 +1943,15 @@ impl PermissionBroker {
         }
         let group = group.clone();
         let at = Utc::now();
-        let mut records = crate::permission_audit::PermissionGroupAudit::from_group(&group, at)
-            .map(crate::permission_audit::PermissionAuditRecord::GroupUpdated)
-            .into_iter()
-            .collect();
+        let mut records = vec![
+            crate::permission_audit::PermissionAuditRecord::GroupUpdated(
+                crate::permission_audit::PermissionGroupAudit::from_group(
+                    &group,
+                    &actor.session_id,
+                    at,
+                ),
+            ),
+        ];
         Self::append_resolved_group_audits(
             &mut state,
             &BTreeSet::from([group.group_id.clone()]),
@@ -1993,6 +2160,16 @@ impl PermissionBroker {
             return Err(PermissionError::PermissionManagementRequired);
         }
         Ok(())
+    }
+
+    fn user_visible_request(request: &PermissionRequest, session_id: &str) -> bool {
+        request.session_id == session_id
+            && matches!(
+                &request.state,
+                PermissionRequestState::Pending {
+                    target: ApprovalTarget::User
+                }
+            )
     }
 
     fn visible_to(&self, actor: &FlowIdentity, request: &PermissionRequest) -> bool {
@@ -2373,6 +2550,7 @@ fn cancel_entry(entry: &mut RequestEntry, component: &str, reason: String, at: D
     entry.request.state = PermissionRequestState::Cancelled {
         reason: reason.clone(),
     };
+    entry.request.revision += 1;
     if let Some(responder) = entry.responder.take() {
         let _ = responder.send(PermissionResolution::Cancelled { reason });
     }
@@ -5060,9 +5238,9 @@ mod tests {
             live.apply_permission_group(
                 &crate::permission_audit::PermissionGroupAudit::from_group(
                     &group,
+                    "session",
                     group.created_at,
-                )
-                .unwrap(),
+                ),
                 false,
             );
             for frame in &frames {
@@ -5374,6 +5552,202 @@ mod tests {
                 component: "permission.run_cleanup".into(),
             })
         );
+    }
+
+    #[test]
+    fn user_group_facade_creates_and_resolves_with_current_revision() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_to_user(&broker, &requester);
+        let request_id = pending.request.request_id.clone();
+        let expected_revisions = HashMap::from([(request_id.clone(), pending.request.revision)]);
+
+        let group = broker
+            .user_create_group(
+                &requester.session_id,
+                BTreeSet::from([request_id.clone()]),
+                "user review".into(),
+                &expected_revisions,
+            )
+            .unwrap();
+
+        assert_eq!(group.owner, GroupOwner::User);
+        assert_eq!(group.request_ids, BTreeSet::from([request_id.clone()]));
+        assert_eq!(
+            broker.user_list(&requester.session_id).1,
+            vec![group.clone()]
+        );
+
+        let resolutions = broker
+            .user_resolve(
+                &requester.session_id,
+                Some("principal".into()),
+                Vec::new(),
+                &HashMap::new(),
+                Some((group.group_id, group.revision)),
+                PermissionAction::Deny,
+                None,
+                Some("denied by user".into()),
+            )
+            .unwrap();
+
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].request_id, request_id);
+        assert!(matches!(
+            resolutions[0].outcome,
+            BatchRequestOutcome::Denied(_)
+        ));
+        let resolved = broker.get(&resolutions[0].request_id).unwrap();
+        assert!(matches!(
+            resolved.state,
+            PermissionRequestState::Denied { .. }
+        ));
+        assert_eq!(resolved.revision, pending.request.revision + 1);
+        assert!(matches!(
+            pending.resolution.blocking_recv().unwrap(),
+            PermissionResolution::Decision(_)
+        ));
+    }
+
+    #[test]
+    fn user_group_facade_rejects_stale_group_revision_without_resolving() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_to_user(&broker, &requester);
+        let request_id = pending.request.request_id.clone();
+        let group = broker
+            .user_create_group(
+                &requester.session_id,
+                BTreeSet::from([request_id.clone()]),
+                "user review".into(),
+                &HashMap::from([(request_id.clone(), pending.request.revision)]),
+            )
+            .unwrap();
+        assert!(matches!(
+            broker.user_resolve(
+                &requester.session_id,
+                None,
+                Vec::new(),
+                &HashMap::new(),
+                Some((group.group_id, group.revision + 1)),
+                PermissionAction::Deny,
+                None,
+                None,
+            ),
+            Err(PermissionError::GroupRevisionConflict)
+        ));
+        assert_eq!(broker.get(&request_id).unwrap(), pending.request);
+    }
+
+    #[test]
+    fn user_request_facade_rejects_stale_and_duplicate_resolutions() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_to_user(&broker, &requester);
+        let request_id = pending.request.request_id.clone();
+
+        assert!(matches!(
+            broker.user_resolve(
+                &requester.session_id,
+                None,
+                vec![request_id.clone()],
+                &HashMap::from([(request_id.clone(), pending.request.revision + 1)]),
+                None,
+                PermissionAction::Deny,
+                None,
+                None,
+            ),
+            Err(PermissionError::GroupRevisionConflict)
+        ));
+
+        let expected_revisions = HashMap::from([(request_id.clone(), pending.request.revision)]);
+        let first = broker
+            .user_resolve(
+                &requester.session_id,
+                None,
+                vec![request_id.clone()],
+                &expected_revisions,
+                None,
+                PermissionAction::Deny,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0].outcome, BatchRequestOutcome::Denied(_)));
+
+        let after_first = broker.get(&request_id).unwrap();
+        assert_eq!(after_first.revision, pending.request.revision + 1);
+        assert!(matches!(
+            broker.user_resolve(
+                &requester.session_id,
+                None,
+                vec![request_id.clone()],
+                &expected_revisions,
+                None,
+                PermissionAction::Deny,
+                None,
+                None,
+            ),
+            Err(PermissionError::GroupRevisionConflict)
+        ));
+        assert_eq!(broker.get(&request_id).unwrap(), after_first);
+    }
+
+    #[test]
+    fn concurrent_user_resolutions_have_exactly_one_winner() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = Arc::new(PermissionBroker::new(flows));
+        let pending = submit_to_user(&broker, &requester);
+        let request_id = pending.request.request_id.clone();
+        let revision = pending.request.revision;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let resolve = |broker: Arc<PermissionBroker>, barrier: Arc<std::sync::Barrier>| {
+            let session_id = requester.session_id.clone();
+            let request_id = request_id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                broker.user_resolve(
+                    &session_id,
+                    None,
+                    vec![request_id.clone()],
+                    &HashMap::from([(request_id, revision)]),
+                    None,
+                    PermissionAction::Deny,
+                    None,
+                    None,
+                )
+            })
+        };
+
+        let first = resolve(Arc::clone(&broker), Arc::clone(&barrier));
+        let second = resolve(Arc::clone(&broker), Arc::clone(&barrier));
+        barrier.wait();
+        let results = [first.join().unwrap(), second.join().unwrap()];
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(PermissionError::GroupRevisionConflict)))
+                .count(),
+            1
+        );
+        let resolved = broker.get(&request_id).unwrap();
+        assert!(matches!(
+            resolved.state,
+            PermissionRequestState::Denied { .. }
+        ));
+        assert_eq!(resolved.revision, revision + 1);
+        assert!(matches!(
+            pending.resolution.blocking_recv().unwrap(),
+            PermissionResolution::Decision(_)
+        ));
     }
 
     #[test]

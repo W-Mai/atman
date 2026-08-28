@@ -1556,7 +1556,9 @@ mod tests {
         interrupted.parent_run_id = Some(root.clone());
         let group = PermissionGroupAudit {
             group_id: PermissionGroupId(uuid::Uuid::now_v7()),
-            owner_run_id: root.clone(),
+            owner: crate::permission_audit::PermissionGroupAuditOwner::Flow {
+                run_id: root.clone(),
+            },
             label: "acceptance".into(),
             request_ids: vec![approved_id.clone()],
             revision: 1,
@@ -1758,7 +1760,9 @@ mod tests {
         let groups = [
             PermissionGroupAudit {
                 group_id: PermissionGroupId(uuid::Uuid::now_v7()),
-                owner_run_id: owner.clone(),
+                owner: crate::permission_audit::PermissionGroupAuditOwner::Flow {
+                    run_id: owner.clone(),
+                },
                 label: "resolved before ungroup".into(),
                 request_ids: vec![request_id()],
                 revision: 1,
@@ -1766,7 +1770,9 @@ mod tests {
             },
             PermissionGroupAudit {
                 group_id: PermissionGroupId(uuid::Uuid::now_v7()),
-                owner_run_id: owner.clone(),
+                owner: crate::permission_audit::PermissionGroupAuditOwner::Flow {
+                    run_id: owner.clone(),
+                },
                 label: "terminal-only".into(),
                 request_ids: Vec::new(),
                 revision: 1,

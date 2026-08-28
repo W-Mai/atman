@@ -34,6 +34,38 @@ async fn cancel_run_hits_matching_live_session() {
     assert!(cancel.is_cancelled());
 }
 
+#[test]
+fn live_session_requires_both_live_and_broker_registration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+
+    state.register_broker(sid.clone(), session.clone(), "alice");
+    assert!(state.live_session(&sid).is_none());
+    assert!(state.authorized_live_session(&sid, "alice").is_none());
+
+    state.register_live(
+        sid.clone(),
+        LiveSession {
+            run_id: FlowRunId(Uuid::now_v7()),
+            flow_name: "hello".into(),
+            cancel: CancellationToken::new(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+    assert!(Arc::ptr_eq(&state.live_session(&sid).unwrap(), &session));
+    assert!(state.authorized_live_session(&sid, "mallory").is_none());
+    assert!(Arc::ptr_eq(
+        &state.authorized_live_session(&sid, "alice").unwrap(),
+        &session
+    ));
+
+    state.deregister_broker(&sid);
+    assert!(state.live_session(&sid).is_none());
+    assert!(state.authorized_live_session(&sid, "alice").is_none());
+}
+
 #[tokio::test]
 async fn list_sessions_accepts_search_and_limit_query() {
     let tmp = tempfile::tempdir().unwrap();

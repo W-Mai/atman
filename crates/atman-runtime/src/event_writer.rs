@@ -563,7 +563,16 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         Event::PermissionGroupCreated { payload }
         | Event::PermissionGroupUpdated { payload }
         | Event::PermissionGroupResolved { payload } => {
-            (None, Some(payload.owner_run_id.0.to_string()))
+            let anchor = match &payload.owner {
+                crate::permission_audit::PermissionGroupAuditOwner::Flow { run_id } => {
+                    run_id.to_string()
+                }
+                crate::permission_audit::PermissionGroupAuditOwner::User { session_id } => {
+                    format!("user:{session_id}")
+                }
+                crate::permission_audit::PermissionGroupAuditOwner::System => "system".into(),
+            };
+            (None, Some(anchor))
         }
         Event::PermissionGrantCreated { payload } | Event::PermissionGrantExpired { payload } => {
             (None, Some(payload.requesting_run_id.0.to_string()))
