@@ -1,27 +1,25 @@
+use crate::input::InputEditor;
+use crate::keys::KeyAction;
 use crate::wm::modal::ModalAction;
-
-use atman_runtime::form::{FormAnswer, FormKind, PendingForm};
+use atman_runtime::form::{FormAnswer, FormKind, FormQuestion, FormSubmission, PendingForm};
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::TuiControl;
-use crate::input::InputEditor;
-use crate::keys::KeyAction;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchStatus {
-    Pending,
-    Answered,
-    Cancelled,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FormPhase {
+    #[default]
+    Editing,
+    FinalConfirm,
 }
 
 #[derive(Debug, Clone)]
 pub enum SubmitOutcome {
-    Single { form_id: String, answer: FormAnswer },
-    BatchConfirmed,
-    BatchCancelled,
+    Submit {
+        form_id: String,
+        submission: FormSubmission,
+    },
     None,
 }
 
@@ -29,339 +27,227 @@ pub enum SubmitOutcome {
 pub struct FormModal {
     pub open: bool,
     pub pending: Option<PendingForm>,
-    pub cursor: usize,
+    pub current_index: usize,
+    pub draft_answers: Vec<Option<FormAnswer>>,
+    pub phase: FormPhase,
+    pub confirm_focus: usize,
     pub multi_selected: Vec<bool>,
     pub text_editor: InputEditor,
     pub error: Option<String>,
-    pub batch_ids: Vec<String>,
-    pub batch_statuses: Vec<BatchStatus>,
-    pub batch_index: usize,
-    pub batch_answers: Vec<Option<FormAnswer>>,
-    pub confirm_form: Option<PendingForm>,
-    pub confirm_focus: usize,
-    pub cached_forms: std::collections::HashMap<String, PendingForm>,
     pub last_input_rect: Option<Rect>,
     pub scroll: u16,
 }
 
 impl FormModal {
-    pub fn merge_batch_ids(&mut self, pending_ids: &[String]) {
-        for id in pending_ids {
-            if !self.batch_ids.contains(id) {
-                let confirm_idx = self
-                    .batch_ids
-                    .iter()
-                    .position(|x| x == "__batch_confirm")
-                    .unwrap_or(self.batch_ids.len());
-                self.batch_ids.insert(confirm_idx, id.clone());
-                self.batch_statuses
-                    .insert(confirm_idx, BatchStatus::Pending);
-                self.batch_answers.insert(confirm_idx, None);
-            }
-        }
-        if !self.batch_ids.contains(&"__batch_confirm".to_string()) {
-            self.batch_ids.push("__batch_confirm".into());
-            self.batch_statuses.push(BatchStatus::Pending);
-            self.batch_answers.push(None);
-        }
-    }
-
-    pub fn attach(&mut self, form: PendingForm, pending_ids: &[String]) {
-        let multi_len = match &form.kind {
-            FormKind::MultiSelect { options, .. } => options.len(),
-            _ => 0,
-        };
-        self.multi_selected = vec![false; multi_len];
-        self.text_editor = InputEditor::default();
-        self.cursor = 0;
+    pub fn attach(&mut self, form: PendingForm) {
+        let questions = questions(&form);
+        self.pending = Some(form);
+        self.open = true;
+        self.current_index = 0;
+        self.draft_answers = vec![None; questions.len()];
+        self.phase = FormPhase::Editing;
+        self.confirm_focus = 0;
         self.error = None;
         self.scroll = 0;
-        for id in pending_ids {
-            if !self.batch_ids.contains(id) {
-                let confirm_idx = self
-                    .batch_ids
-                    .iter()
-                    .position(|x| x == "__batch_confirm")
-                    .unwrap_or(self.batch_ids.len());
-                self.batch_ids.insert(confirm_idx, id.clone());
-                self.batch_statuses
-                    .insert(confirm_idx, BatchStatus::Pending);
-                self.batch_answers.insert(confirm_idx, None);
-            }
-        }
-        if !self.batch_ids.contains(&"__batch_confirm".to_string()) {
-            self.batch_ids.push("__batch_confirm".into());
-            self.batch_statuses.push(BatchStatus::Pending);
-            self.batch_answers.push(None);
-        }
-        if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
-            self.batch_index = idx;
-        }
-        self.cached_forms.insert(form.form_id.clone(), form.clone());
-        self.open = true;
-        self.pending = Some(form);
-    }
-
-    fn build_confirm_form(&self) -> PendingForm {
-        use atman_runtime::event::FlowRunId;
-        PendingForm {
-            form_id: "__batch_confirm".into(),
-            run_id: FlowRunId::now(),
-            tool_use_id: "__batch_confirm".into(),
-            kind: FormKind::Confirm {
-                prompt: "Confirm and submit all answers?".into(),
-            },
-            emitted_at: chrono::Utc::now(),
-        }
-    }
-
-    pub fn try_show_confirm(&mut self, registry_empty: bool) -> bool {
-        let real_count = self
-            .batch_ids
-            .iter()
-            .filter(|id| id.as_str() != "__batch_confirm")
-            .count();
-        if real_count < 2 {
-            return false;
-        }
-        if !registry_empty {
-            return false;
-        }
-        let all = self
-            .batch_statuses
-            .iter()
-            .take(self.batch_ids.len().saturating_sub(1))
-            .all(|s| matches!(s, BatchStatus::Answered));
-        if all {
-            let form = self.build_confirm_form();
-            if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
-                self.batch_index = idx;
-            }
-            self.pending = Some(form);
-            self.cursor = 0;
-            self.multi_selected.clear();
-            self.text_editor = InputEditor::default();
-            self.error = None;
-            self.confirm_form = self.pending.clone();
-            self.confirm_focus = 0;
-            self.open = true;
-            return true;
-        }
-        false
-    }
-
-    pub fn mark_current(&mut self, status: BatchStatus) {
-        if let Some(slot) = self.batch_statuses.get_mut(self.batch_index) {
-            *slot = status;
-        }
-    }
-
-    pub fn switch_to(&mut self, direction: isize) -> Option<String> {
-        if self.batch_ids.len() <= 1 {
-            return None;
-        }
-        let len = self.batch_ids.len() as isize;
-        let next = (self.batch_index as isize + direction).rem_euclid(len) as usize;
-        if next == self.batch_index {
-            return None;
-        }
-        self.batch_index = next;
-        Some(self.batch_ids[next].clone())
+        self.reset_question_state();
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.pending = None;
-        self.error = None;
+        self.current_index = 0;
+        self.draft_answers.clear();
+        self.phase = FormPhase::Editing;
+        self.confirm_focus = 0;
         self.multi_selected.clear();
-        self.cursor = 0;
-    }
-
-    pub fn end_batch(&mut self) {
-        self.close();
-        self.batch_ids.clear();
-        self.batch_statuses.clear();
-        self.batch_answers.clear();
-        self.batch_index = 0;
-        self.confirm_form = None;
-    }
-
-    pub fn batch_total(&self) -> usize {
-        self.batch_ids.len()
+        self.text_editor = InputEditor::default();
+        self.error = None;
+        self.scroll = 0;
     }
 
     pub fn active_form_id(&self) -> Option<&str> {
         self.pending.as_ref().map(|p| p.form_id.as_str())
     }
 
-    pub fn move_cursor(&mut self, delta: isize) {
-        let is_confirm = self.is_confirm_kind();
-        if is_confirm {
-            let len = 2isize;
-            let cur = self.confirm_focus as isize + delta;
-            self.confirm_focus = cur.rem_euclid(len) as usize;
-            return;
-        }
-        let len = match self.pending.as_ref().map(|p| &p.kind) {
-            Some(FormKind::SingleSelect { options, .. }) => options.len(),
-            Some(FormKind::MultiSelect { options, .. }) => options.len(),
-            _ => return,
+    fn questions(&self) -> &[FormQuestion] {
+        self.pending.as_ref().map_or(&[], |p| &p.form.questions)
+    }
+
+    fn current_kind(&self) -> Option<&FormKind> {
+        self.questions()
+            .get(self.current_index)
+            .map(|q| &q.kind)
+            .or_else(|| self.pending.as_ref().map(|p| &p.kind))
+    }
+
+    fn reset_question_state(&mut self) {
+        self.multi_selected = match self.current_kind() {
+            Some(FormKind::MultiSelect { options, .. }) => vec![false; options.len()],
+            _ => Vec::new(),
         };
-        if len == 0 {
+        self.text_editor = InputEditor::default();
+        if let Some(Some(FormAnswer::TextEntered { text })) =
+            self.draft_answers.get(self.current_index)
+        {
+            self.text_editor.insert_str(text);
+        }
+    }
+
+    fn answer_current(&self) -> Option<FormAnswer> {
+        match self.current_kind()? {
+            FormKind::Confirm { .. } => Some(FormAnswer::Confirmed { value: true }),
+            FormKind::SingleSelect { options, .. } => {
+                options
+                    .get(self.confirm_focus)
+                    .cloned()
+                    .map(|label| FormAnswer::Selected {
+                        index: self.confirm_focus,
+                        label,
+                    })
+            }
+            FormKind::MultiSelect {
+                options, min, max, ..
+            } => {
+                let indices: Vec<_> = self
+                    .multi_selected
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, b)| b.then_some(i))
+                    .collect();
+                if min.is_some_and(|m| indices.len() < m) {
+                    return None;
+                }
+                if max.is_some_and(|m| indices.len() > m) {
+                    return None;
+                }
+                let labels = indices
+                    .iter()
+                    .filter_map(|&i| options.get(i).cloned())
+                    .collect();
+                Some(FormAnswer::MultiSelected { indices, labels })
+            }
+            FormKind::Text { .. } => Some(FormAnswer::TextEntered {
+                text: self.text_editor.buf().to_string(),
+            }),
+        }
+    }
+
+    fn commit_current(&mut self) -> bool {
+        let Some(answer) = self.answer_current() else {
+            if let Some(FormKind::MultiSelect { min, max, .. }) = self.current_kind() {
+                let count = self.multi_selected.iter().filter(|b| **b).count();
+                self.error = if min.is_some_and(|m| count < m) {
+                    min.map(|m| format!("Select at least {m}"))
+                } else {
+                    max.map(|m| format!("Select at most {m}"))
+                };
+            }
+            return false;
+        };
+        if self.current_index >= self.draft_answers.len() {
+            self.draft_answers.resize(self.current_index + 1, None);
+        }
+        self.draft_answers[self.current_index] = Some(answer);
+        self.error = None;
+        true
+    }
+
+    pub fn move_question(&mut self, delta: isize) {
+        if self.phase != FormPhase::Editing || self.questions().is_empty() {
             return;
         }
-        let cur = self.cursor as isize + delta;
-        self.cursor = cur.rem_euclid(len as isize) as usize;
-        self.error = None;
+        if !self.commit_current() {
+            return;
+        }
+        let len = self.questions().len() as isize;
+        self.current_index = (self.current_index as isize + delta).rem_euclid(len) as usize;
+        self.confirm_focus = self.draft_answers[self.current_index]
+            .as_ref()
+            .and_then(|a| match a {
+                FormAnswer::Selected { index, .. } => Some(*index),
+                _ => None,
+            })
+            .unwrap_or(0);
+        self.reset_question_state();
+        self.scroll = 0;
+    }
+
+    pub fn move_cursor(&mut self, delta: isize) {
+        let Some(kind) = self.current_kind() else {
+            return;
+        };
+        let len = match kind {
+            FormKind::SingleSelect { options, .. } | FormKind::MultiSelect { options, .. } => {
+                options.len()
+            }
+            FormKind::Confirm { .. } => 2,
+            FormKind::Text { .. } => return,
+        };
+        if len > 0 {
+            self.confirm_focus =
+                (self.confirm_focus as isize + delta).rem_euclid(len as isize) as usize;
+            self.error = None;
+        }
     }
 
     pub fn toggle_current(&mut self) {
-        if matches!(
-            self.pending.as_ref().map(|p| &p.kind),
-            Some(FormKind::MultiSelect { .. })
-        ) {
-            if let Some(flag) = self.multi_selected.get_mut(self.cursor) {
-                *flag = !*flag;
+        if matches!(self.current_kind(), Some(FormKind::MultiSelect { .. })) {
+            if let Some(selected) = self.multi_selected.get_mut(self.confirm_focus) {
+                *selected = !*selected;
                 self.error = None;
             }
         }
     }
 
     pub fn submit(&mut self) -> SubmitOutcome {
-        let kind = match self.pending.as_ref().map(|p| p.kind.clone()) {
-            Some(k) => k,
-            None => return SubmitOutcome::None,
-        };
-        let is_confirm_form = self.is_batch_confirm();
-        let answer = match kind {
-            FormKind::Confirm { .. } => FormAnswer::Confirmed { value: true },
-            FormKind::SingleSelect { options, .. } => {
-                let Some(label) = options.get(self.cursor).cloned() else {
-                    return SubmitOutcome::None;
-                };
-                FormAnswer::Selected {
-                    index: self.cursor,
-                    label,
-                }
+        if self.phase == FormPhase::Editing {
+            if self.current_index + 1 < self.questions().len() {
+                self.move_question(1);
+                return SubmitOutcome::None;
             }
-            FormKind::MultiSelect {
-                options, min, max, ..
-            } => {
-                let count = self.multi_selected.iter().filter(|&&b| b).count();
-                if let Some(m) = min
-                    && count < m
-                {
-                    self.error = Some(format!("Select at least {m}"));
-                    return SubmitOutcome::None;
-                }
-                if let Some(m) = max
-                    && count > m
-                {
-                    self.error = Some(format!("Select at most {m}"));
-                    return SubmitOutcome::None;
-                }
-                let indices: Vec<usize> = self
-                    .multi_selected
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &b)| b.then_some(i))
-                    .collect();
-                let labels: Vec<String> = indices
-                    .iter()
-                    .filter_map(|&i| options.get(i).cloned())
-                    .collect();
-                FormAnswer::MultiSelected { indices, labels }
+            if !self.commit_current() {
+                return SubmitOutcome::None;
             }
-            FormKind::Text { .. } => FormAnswer::TextEntered {
-                text: self.text_editor.buf().to_string(),
-            },
-        };
-
-        if is_confirm_form {
-            if self.confirm_focus == 1 {
-                return self.confirm_no();
-            }
-            self.mark_current(BatchStatus::Answered);
-            self.close();
-            return SubmitOutcome::BatchConfirmed;
-        }
-
-        let form_id = self
-            .pending
-            .as_ref()
-            .map(|p| p.form_id.clone())
-            .unwrap_or_default();
-        if let Some(idx) = self.batch_ids.iter().position(|id| id == &form_id) {
-            self.batch_answers[idx] = Some(answer.clone());
-        }
-        self.mark_current(BatchStatus::Answered);
-        self.close_form_state();
-        SubmitOutcome::Single { form_id, answer }
-    }
-
-    pub fn confirm_no(&mut self) -> SubmitOutcome {
-        if !self.is_batch_confirm() {
+            self.phase = FormPhase::FinalConfirm;
+            self.confirm_focus = 0;
             return SubmitOutcome::None;
         }
-        self.mark_current(BatchStatus::Cancelled);
+        if self.confirm_focus == 1 {
+            return self.reject();
+        }
+        let Some(form_id) = self.active_form_id().map(str::to_owned) else {
+            return SubmitOutcome::None;
+        };
+        let answers = self.draft_answers.iter().filter_map(Clone::clone).collect();
         self.close();
-        SubmitOutcome::BatchCancelled
+        SubmitOutcome::Submit {
+            form_id,
+            submission: FormSubmission::Submitted { answers },
+        }
+    }
+
+    pub fn reject(&mut self) -> SubmitOutcome {
+        let Some(form_id) = self.active_form_id().map(str::to_owned) else {
+            return SubmitOutcome::None;
+        };
+        self.close();
+        SubmitOutcome::Submit {
+            form_id,
+            submission: FormSubmission::Rejected,
+        }
     }
 
     pub fn cancel(&mut self) -> SubmitOutcome {
         if !self.open {
-            return SubmitOutcome::None;
+            SubmitOutcome::None
+        } else {
+            self.reject()
         }
-        let pending = match self.pending.as_ref() {
-            Some(p) => p.clone(),
-            None => return SubmitOutcome::None,
-        };
-        let is_confirm_form = self.is_batch_confirm();
-        self.mark_current(BatchStatus::Cancelled);
-        if is_confirm_form {
-            self.close();
-            return SubmitOutcome::BatchCancelled;
-        }
-        let form_id = pending.form_id.clone();
-        self.close_form_state();
-        let real_pending = self
-            .batch_statuses
-            .iter()
-            .take(self.batch_ids.len().saturating_sub(1))
-            .any(|s| matches!(s, BatchStatus::Pending));
-        if !real_pending {
-            self.end_batch();
-        }
-        SubmitOutcome::Single {
-            form_id,
-            answer: FormAnswer::Cancelled,
-        }
-    }
-
-    fn is_batch_confirm(&self) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|p| p.form_id == "__batch_confirm")
-    }
-
-    fn is_confirm_kind(&self) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|p| matches!(p.kind, FormKind::Confirm { .. }))
-    }
-
-    fn close_form_state(&mut self) {
-        self.pending = None;
-        self.error = None;
-        self.multi_selected.clear();
-        self.cursor = 0;
-        self.text_editor = InputEditor::default();
     }
 
     #[cfg(test)]
     fn attach_test(&mut self, form: PendingForm) {
-        let id = form.form_id.clone();
-        self.attach(form, &[id]);
+        self.attach(form);
     }
 }
 
@@ -373,370 +259,182 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
-        let Some(form) = self.pending.as_ref() else {
+        let Some(kind) = self.current_kind().cloned() else {
             return;
-        };
-        let hint_area = Rect {
-            x: area.x,
-            y: area
-                .y
-                .checked_add(area.height)
-                .map_or(area.y, |l| l.saturating_sub(1)),
-            width: area.width,
-            height: 1,
         };
         let inner = Rect {
             x: area.x,
-            y: area.y,
+            y: area.y.saturating_add(2),
             width: area.width,
-            height: area.height.saturating_sub(1),
+            height: area.height.saturating_sub(3),
+        };
+        let total = self.questions().len().max(1);
+        let filled = (area.width as usize * (self.current_index + 1).min(total)) / total;
+        let progress_line = Line::from(
+            (0..area.width as usize)
+                .map(|i| {
+                    Span::styled(
+                        if i < filled { "━" } else { "·" },
+                        Style::default().fg(if i < filled {
+                            t.accent.into()
+                        } else {
+                            t.panel_bg.into()
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(
+            Paragraph::new(progress_line),
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            },
+        );
+        let hint = if self.phase == FormPhase::FinalConfirm {
+            " ←→ · choose  enter/y · confirm  n/esc · reject "
+        } else {
+            hint_for(&kind)
         };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint_for(&form.kind),
-                Style::default().fg(t.subtle_fg.into()),
-            )))
-            .alignment(Alignment::Right),
-            hint_area,
+            Paragraph::new(hint).alignment(Alignment::Right),
+            Rect {
+                x: area.x,
+                y: area.y + area.height.saturating_sub(1),
+                width: area.width,
+                height: 1,
+            },
         );
-
-        let inner_w = inner.width as usize;
-        let prompt_style = Style::default()
-            .fg(t.tinted_fg.into())
-            .add_modifier(Modifier::BOLD);
-        let dim_style = Style::default().fg(t.subtle_fg.into());
-        let idle_row_style = Style::default()
-            .fg(t.tinted_fg.into())
-            .bg(t.panel_bg.into());
-        let mut text_cursor: Option<(u16, u16)> = None;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(Span::styled(
-            form.kind.prompt().to_string(),
-            prompt_style,
-        )));
-        lines.push(Line::from(""));
-
-        match &form.kind {
-            FormKind::Confirm { .. } => {
-                let yes_focused = self.confirm_focus == 0;
-                let no_focused = self.confirm_focus == 1;
-                let yes_style = if yes_focused {
-                    Style::default()
-                        .fg(t.code_bg.into())
-                        .bg(t.success.into())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(t.tinted_fg.into())
-                        .bg(t.panel_bg.into())
-                };
-                let no_style = if no_focused {
-                    Style::default()
-                        .fg(t.code_bg.into())
-                        .bg(t.error.into())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(t.tinted_fg.into())
-                        .bg(t.panel_bg.into())
-                };
-                let label = "  Yes  ";
-                let label_w = crate::width::width(label);
-                let gap = 3;
-                let no_label = "  No  ";
-                let no_w = crate::width::width(no_label);
-                let total = label_w + gap + no_w;
-                let left_pad = inner_w.saturating_sub(total) / 2;
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                if left_pad > 0 {
-                    spans.push(Span::styled(
-                        " ".repeat(left_pad),
-                        Style::default().bg(t.modal_bg.into()),
-                    ));
-                }
-                spans.push(Span::styled(label.to_string(), yes_style));
-                spans.push(Span::styled(
-                    " ".repeat(gap),
-                    Style::default().bg(t.modal_bg.into()),
-                ));
-                spans.push(Span::styled(no_label.to_string(), no_style));
-                lines.push(Line::from(spans));
-            }
-            FormKind::SingleSelect { options, .. } => {
-                for (i, label) in options.iter().enumerate() {
-                    let is_cursor = i == self.cursor;
-                    let row_style = if is_cursor {
-                        Style::default()
-                            .fg(t.code_bg.into())
-                            .bg(t.accent.into())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        idle_row_style
-                    };
-                    let prefix = if is_cursor { "▶ " } else { "  " };
-                    let text = format!(" {prefix}{label} ");
-                    lines.push(render_full_row(
-                        inner_w,
-                        &text,
-                        row_style,
-                        t.modal_bg.into(),
-                    ));
-                    if i + 1 < options.len() {
-                        lines.push(Line::from(""));
+        let mut lines = vec![
+            Line::from(Span::styled(
+                kind.prompt().to_owned(),
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+        if self.phase == FormPhase::FinalConfirm {
+            lines.push(Line::from("  Submit all answers?  [ Yes ]   No"));
+        } else {
+            match kind {
+                FormKind::Confirm { .. } => lines.push(Line::from("  [ Yes ]   No")),
+                FormKind::SingleSelect { options, .. } | FormKind::MultiSelect { options, .. } => {
+                    let is_multi =
+                        matches!(self.current_kind(), Some(FormKind::MultiSelect { .. }));
+                    for (i, label) in options.iter().enumerate() {
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                " {}{}{}",
+                                if i == self.confirm_focus {
+                                    "▶ "
+                                } else {
+                                    "  "
+                                },
+                                if is_multi && self.multi_selected.get(i).copied().unwrap_or(false)
+                                {
+                                    "[✓] "
+                                } else if is_multi {
+                                    "[ ] "
+                                } else {
+                                    ""
+                                },
+                                label
+                            ),
+                            Style::default().fg(if i == self.confirm_focus {
+                                t.accent.into()
+                            } else {
+                                t.tinted_fg.into()
+                            }),
+                        )));
                     }
                 }
-            }
-            FormKind::MultiSelect {
-                options, min, max, ..
-            } => {
-                for (i, label) in options.iter().enumerate() {
-                    let checked = self.multi_selected.get(i).copied().unwrap_or(false);
-                    let is_cursor = i == self.cursor;
-                    let check_glyph = if checked { "✓" } else { " " };
-                    let row_style = if is_cursor && checked {
-                        Style::default()
-                            .fg(t.code_bg.into())
-                            .bg(t.success.into())
-                            .add_modifier(Modifier::BOLD)
-                    } else if is_cursor {
-                        Style::default()
-                            .fg(t.code_bg.into())
-                            .bg(t.accent.into())
-                            .add_modifier(Modifier::BOLD)
-                    } else if checked {
-                        Style::default()
-                            .fg(t.code_bg.into())
-                            .bg(t.success.into())
-                            .add_modifier(Modifier::BOLD)
+                FormKind::Text { placeholder, .. } => {
+                    let text = if self.text_editor.buf().is_empty() {
+                        placeholder.unwrap_or_default()
                     } else {
-                        idle_row_style
+                        self.text_editor.buf().to_owned()
                     };
-                    let prefix = if is_cursor { "▶ " } else { "  " };
-                    let text = format!(" {prefix}[{check_glyph}] {label} ");
-                    lines.push(render_full_row(
-                        inner_w,
-                        &text,
-                        row_style,
-                        t.modal_bg.into(),
-                    ));
-                    if i + 1 < options.len() {
-                        lines.push(Line::from(""));
-                    }
-                }
-                let count = self.multi_selected.iter().filter(|&&b| b).count();
-                let bounds = match (min, max) {
-                    (Some(m), Some(mx)) => format!(" (min {m}, max {mx})"),
-                    (Some(m), None) => format!(" (min {m})"),
-                    (None, Some(mx)) => format!(" (max {mx})"),
-                    (None, None) => String::new(),
-                };
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!("  {count} selected{bounds}"),
-                    dim_style,
-                )));
-            }
-            FormKind::Text {
-                placeholder,
-                multiline,
-                ..
-            } => {
-                let buf = self.text_editor.buf();
-                let display: String = if buf.is_empty() {
-                    placeholder.clone().unwrap_or_default()
-                } else {
-                    buf.to_string()
-                };
-                let text_style = if buf.is_empty() {
-                    dim_style
-                } else {
-                    prompt_style
-                };
-                let content_w = inner_w.saturating_sub(2);
-                let col =
-                    crate::input::wrapped_cursor_col(buf, self.text_editor.cursor(), content_w)
-                        as u16;
-                let row =
-                    crate::input::wrapped_cursor_row(buf, self.text_editor.cursor(), content_w)
-                        as u16;
-                text_cursor = Some((inner.x + 2 + col, inner.y + 2 + row));
-                self.last_input_rect = Some(Rect {
-                    x: inner.x + 2,
-                    y: inner.y + 2,
-                    width: content_w as u16,
-                    height: 1,
-                });
-                let row_style = Style::default()
-                    .fg(text_style.fg.unwrap_or(t.tinted_fg.into()))
-                    .bg(t.panel_bg.into());
-                for row in display.split('\n') {
-                    let text = format!("  {row}");
-                    lines.push(render_full_row(
-                        inner_w,
-                        &text,
-                        row_style,
-                        t.modal_bg.into(),
-                    ));
-                }
-                if buf.is_empty() {
                     lines.push(Line::from(Span::styled(
-                        "  ▏",
-                        Style::default().add_modifier(Modifier::SLOW_BLINK),
+                        text,
+                        Style::default().fg(t.tinted_fg.into()),
                     )));
-                }
-                if *multiline {
-                    lines.push(Line::from(Span::styled(
-                        "  (Ctrl+Enter to submit multi-line input)",
-                        dim_style,
-                    )));
+                    self.last_input_rect = Some(Rect {
+                        x: inner.x,
+                        y: inner.y + 2,
+                        width: inner.width,
+                        height: 1,
+                    });
                 }
             }
         }
-        if let Some(err) = &self.error {
-            lines.push(Line::from(""));
+        if let Some(error) = &self.error {
             lines.push(Line::from(Span::styled(
-                format!("  ! {err}"),
-                Style::default()
-                    .fg(t.error.into())
-                    .add_modifier(Modifier::BOLD),
+                format!("! {error}"),
+                Style::default().fg(t.error.into()),
             )));
         }
-        let visible_height = inner.height;
-        let content_height = lines
-            .iter()
-            .map(|line| {
-                if inner.width == 0 {
-                    1
-                } else {
-                    (line.width().max(1) as u16).div_ceil(inner.width)
-                }
-            })
-            .sum::<u16>();
-        let max_scroll = content_height.saturating_sub(visible_height);
-        self.scroll = self.scroll.min(max_scroll);
-        let para = Paragraph::new(lines)
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0));
-        f.render_widget(para, inner);
-        if let Some((cx, cy)) = text_cursor {
-            let cy = cy.saturating_sub(self.scroll);
-            if cy >= inner.y && cy < inner.y + inner.height {
-                f.set_cursor_position((cx, cy));
-            }
-        }
+        let height = lines.len() as u16;
+        self.scroll = self.scroll.min(height.saturating_sub(inner.height));
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((self.scroll, 0)),
+            inner,
+        );
     }
 
     fn handle_key(
         &mut self,
-        action: &crate::keys::KeyAction,
+        action: &KeyAction,
         _app: &mut crate::app::AppState,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
-        use atman_runtime::form::FormKind;
-        let Some(form_id) = self.active_form_id().map(String::from) else {
-            return Some(ModalAction::Consumed);
-        };
-        let is_text = matches!(
-            self.pending.as_ref().map(|p| &p.kind),
-            Some(FormKind::Text { .. })
-        );
-        let is_confirm = matches!(
-            self.pending.as_ref().map(|p| &p.kind),
-            Some(FormKind::Confirm { .. })
-        );
-        let is_multi = matches!(
-            self.pending.as_ref().map(|p| &p.kind),
-            Some(FormKind::MultiSelect { .. })
-        );
-        macro_rules! dispatch {
-            ($outcome:expr) => {{
-                match $outcome {
-                    SubmitOutcome::Single { form_id, answer } => {
-                        if let Some(tx) = tx {
-                            let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
-                        }
-                    }
-                    SubmitOutcome::BatchConfirmed => {
-                        for (i, answer) in self.batch_answers.iter().enumerate() {
-                            if let Some(a) = answer
-                                && let Some(tx) = tx
-                            {
-                                let id = self.batch_ids.get(i).cloned().unwrap_or_default();
-                                let _ = tx.send(TuiControl::FormSubmit {
-                                    form_id: id,
-                                    answer: a.clone(),
-                                });
-                            }
-                        }
-                        self.end_batch();
-                    }
-                    SubmitOutcome::BatchCancelled => {
-                        for id in &self.batch_ids {
-                            if id == "__batch_confirm" {
-                                continue;
-                            }
-                            if let Some(tx) = tx {
-                                let _ = tx.send(TuiControl::FormSubmit {
-                                    form_id: id.clone(),
-                                    answer: atman_runtime::form::FormAnswer::Cancelled,
-                                });
-                            }
-                        }
-                        self.end_batch();
-                    }
-                    SubmitOutcome::None => {}
-                }
-            }};
+        if !self.open {
+            return None;
         }
-        match action {
-            KeyAction::Escape => {
-                let outcome = self.cancel();
-                dispatch!(outcome);
+        let outcome = match action {
+            KeyAction::Escape => Some(self.cancel()),
+            KeyAction::Submit => Some(self.submit()),
+            KeyAction::Char('y') | KeyAction::Char('Y')
+                if self.phase == FormPhase::FinalConfirm =>
+            {
+                Some(self.submit())
             }
-            KeyAction::Submit => {
-                let outcome = self.submit();
-                dispatch!(outcome);
-            }
-            KeyAction::Char('y') | KeyAction::Char('Y') if is_confirm => {
-                let outcome = self.submit();
-                dispatch!(outcome);
-            }
-            KeyAction::Char('n') | KeyAction::Char('N') if is_confirm => {
-                let outcome = self.confirm_no();
-                dispatch!(outcome);
-            }
-            KeyAction::Char(' ') if is_multi => {
-                self.toggle_current();
+            KeyAction::Char('n') | KeyAction::Char('N')
+                if self.phase == FormPhase::FinalConfirm =>
+            {
+                Some(self.reject())
             }
             KeyAction::Tab => {
-                if let Some(target_id) = self.switch_to(1)
-                    && target_id != form_id
-                    && self.cached_forms.contains_key(&target_id)
-                {
-                    if let Some(cached) = self.cached_forms.get(&target_id).cloned() {
-                        let ids = self.batch_ids.clone();
-                        self.attach(cached, &ids);
-                    }
-                }
+                self.move_question(1);
+                None
             }
-            KeyAction::HistoryUp | KeyAction::Char('k') if !is_text => {
+            KeyAction::BackTab => {
+                self.move_question(-1);
+                None
+            }
+            KeyAction::HistoryUp | KeyAction::Char('k') => {
                 self.move_cursor(-1);
+                None
             }
-            KeyAction::HistoryDown | KeyAction::Char('j') if !is_text => {
+            KeyAction::HistoryDown | KeyAction::Char('j') => {
                 self.move_cursor(1);
+                None
             }
-            KeyAction::CursorLeft if is_confirm => {
-                self.move_cursor(-1);
+            KeyAction::Char(' ') => {
+                self.toggle_current();
+                None
             }
-            KeyAction::CursorRight if is_confirm => {
-                self.move_cursor(1);
-            }
-            KeyAction::ScrollUp | KeyAction::PageUp => {
+            KeyAction::PageUp | KeyAction::ScrollUp => {
                 self.scroll = self.scroll.saturating_sub(3);
+                None
             }
-            KeyAction::ScrollDown | KeyAction::PageDown => {
+            KeyAction::PageDown | KeyAction::ScrollDown => {
                 self.scroll = self.scroll.saturating_add(3);
+                None
             }
             KeyAction::Backspace
             | KeyAction::Delete
@@ -747,11 +445,24 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             | KeyAction::CursorEnd
             | KeyAction::Char(_)
             | KeyAction::Newline
-                if is_text =>
+                if matches!(self.current_kind(), Some(FormKind::Text { .. })) =>
             {
                 self.text_editor.handle_key(action);
+                None
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(Some(SubmitOutcome::Submit {
+            form_id,
+            submission,
+        })) = outcome.map(Some)
+        {
+            if let Some(tx) = tx {
+                let _ = tx.send(crate::TuiControl::FormSubmit {
+                    form_id,
+                    submission,
+                });
+            }
         }
         Some(ModalAction::Consumed)
     }
@@ -760,113 +471,53 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         self.last_input_rect
             .map(|r| (r.x + self.text_editor.cursor_display_col() as u16, r.y))
     }
-
     fn title(&self) -> Line<'static> {
-        match self.pending.as_ref() {
-            Some(form) => Line::from(build_title_spans(form.kind.discriminator(), self)),
-            None => Line::from(""),
-        }
+        Line::from(" form ")
     }
-
     fn icon(&self) -> &str {
         "📋"
     }
-
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
         t.accent.into()
     }
 }
 
-fn render_full_row<'a>(width: usize, text: &str, style: Style, fallback_bg: Color) -> Line<'a> {
-    let text_w = crate::width::width(text);
-    let pad = width.saturating_sub(text_w);
-    let bg = style.bg.unwrap_or(fallback_bg);
-    let mut spans: Vec<Span<'a>> = Vec::new();
-    spans.push(Span::styled(text.to_string(), style));
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+fn questions(form: &PendingForm) -> Vec<FormQuestion> {
+    if form.form.questions.is_empty() {
+        vec![FormQuestion {
+            id: "question".into(),
+            kind: form.kind.clone(),
+        }]
+    } else {
+        form.form.questions.clone()
     }
-    Line::from(spans)
-}
-
-fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
-    let t = crate::theme::theme();
-    let bold_cyan = Style::default()
-        .fg(t.accent.into())
-        .add_modifier(Modifier::BOLD);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled(format!(" form · {kind_name} "), bold_cyan));
-    let total = modal.batch_total();
-    if total > 1 {
-        spans.push(Span::raw(" "));
-        for (i, status) in modal.batch_statuses.iter().enumerate() {
-            let style = if i == modal.batch_index {
-                match status {
-                    BatchStatus::Pending => Style::default()
-                        .fg(t.accent.into())
-                        .add_modifier(Modifier::BOLD),
-                    BatchStatus::Answered => Style::default()
-                        .fg(t.success.into())
-                        .add_modifier(Modifier::BOLD),
-                    BatchStatus::Cancelled => Style::default()
-                        .fg(t.error.into())
-                        .add_modifier(Modifier::BOLD),
-                }
-            } else {
-                match status {
-                    BatchStatus::Pending => Style::default().fg(t.subtle_fg.into()),
-                    BatchStatus::Answered => Style::default().fg(t.success.into()),
-                    BatchStatus::Cancelled => Style::default().fg(t.error.into()),
-                }
-            };
-            spans.push(Span::styled("━━━", style));
-            if i + 1 < total {
-                spans.push(Span::raw(" "));
-            }
-        }
-        spans.push(Span::styled(
-            format!(" {}/{} ", modal.batch_index + 1, total),
-            Style::default().fg(t.subtle_fg.into()),
-        ));
-    }
-    spans
 }
 
 pub fn estimate_height(kind: &FormKind, width: u16) -> u16 {
     let width = width.max(1) as usize;
-    let wrapped = |text: &str| crate::width::width(text).max(1).div_ceil(width) as u16;
-    let prompt = wrapped(kind.prompt());
-    match kind {
-        FormKind::Confirm { .. } => prompt + 2,
-        FormKind::SingleSelect { options, .. } => {
-            prompt
-                + 1
-                + options
-                    .iter()
-                    .map(|o| wrapped(&format!(" ▶ {o} ")) + 1)
-                    .sum::<u16>()
+    let prompt = crate::width::width(kind.prompt()).max(1).div_ceil(width) as u16;
+    prompt
+        + match kind {
+            FormKind::Confirm { .. } => 3,
+            FormKind::SingleSelect { options, .. } | FormKind::MultiSelect { options, .. } => {
+                options.len() as u16 + 2
+            }
+            FormKind::Text { multiline, .. } => {
+                if *multiline {
+                    4
+                } else {
+                    2
+                }
+            }
         }
-        FormKind::MultiSelect { options, .. } => {
-            prompt
-                + 1
-                + options
-                    .iter()
-                    .map(|o| wrapped(&format!(" ▶ [ ] {o} ")) + 1)
-                    .sum::<u16>()
-                + 2
-        }
-        FormKind::Text { multiline, .. } => prompt + if *multiline { 4 } else { 2 },
-    }
 }
 
 fn hint_for(kind: &FormKind) -> &'static str {
     match kind {
-        FormKind::Confirm { .. } => " ←→/jk · move  enter · pick  esc · cancel ",
-        FormKind::SingleSelect { .. } => " ↑↓/jk · move  enter · pick  esc · cancel ",
-        FormKind::MultiSelect { .. } => {
-            " ↑↓/jk · move  space · toggle  enter · submit  esc · cancel "
-        }
-        FormKind::Text { .. } => " enter · submit  esc · cancel ",
+        FormKind::Confirm { .. } => " ←→/jk · move  enter · next ",
+        FormKind::SingleSelect { .. } => " ↑↓/jk · move  enter · next ",
+        FormKind::MultiSelect { .. } => " ↑↓/jk · move  space · toggle  tab · next ",
+        FormKind::Text { .. } => " tab · next  enter · next ",
     }
 }
 
@@ -875,239 +526,85 @@ mod tests {
     use super::*;
     use crate::wm::modal::ModalOverlay;
     use atman_runtime::event::FlowRunId;
-
-    fn mk(kind: FormKind) -> PendingForm {
+    fn mk_questions(kinds: Vec<FormKind>) -> PendingForm {
         PendingForm {
             form_id: "f".into(),
             run_id: FlowRunId::now(),
             tool_use_id: "t".into(),
-            kind,
+            kind: kinds[0].clone(),
+            form: atman_runtime::form::CompositeForm {
+                questions: kinds
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, kind)| FormQuestion {
+                        id: i.to_string(),
+                        kind,
+                    })
+                    .collect(),
+            },
             emitted_at: chrono::Utc::now(),
         }
     }
-
     #[test]
-    fn attach_resets_state_per_kind() {
+    fn attach_preserves_composite_questions() {
         let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::MultiSelect {
-            prompt: "?".into(),
-            options: vec!["a".into(), "b".into(), "c".into()],
-            min: None,
-            max: None,
-        }));
-        assert_eq!(m.multi_selected.len(), 3);
-        assert!(m.open);
+        m.attach_test(mk_questions(vec![
+            FormKind::Text {
+                prompt: "a".into(),
+                placeholder: None,
+                multiline: false,
+            },
+            FormKind::Confirm { prompt: "b".into() },
+        ]));
+        assert_eq!(m.draft_answers.len(), 2);
     }
-
     #[test]
-    fn move_cursor_wraps() {
+    fn tab_navigates_without_registry_order() {
         let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::SingleSelect {
-            prompt: "?".into(),
-            options: vec!["a".into(), "b".into()],
-        }));
-        m.move_cursor(-1);
-        assert_eq!(m.cursor, 1);
-        m.move_cursor(1);
-        assert_eq!(m.cursor, 0);
+        m.attach_test(mk_questions(vec![
+            FormKind::SingleSelect {
+                prompt: "a".into(),
+                options: vec!["x".into()],
+            },
+            FormKind::Confirm { prompt: "b".into() },
+        ]));
+        m.handle_key(&KeyAction::Tab, &mut crate::app::AppState::default(), None);
+        assert_eq!(m.current_index, 1);
     }
-
     #[test]
-    fn confirm_submit_yields_single() {
+    fn final_yes_submits_all_drafts_once() {
         let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::Confirm {
-            prompt: "sure?".into(),
-        }));
-        let outcome = m.submit();
-        assert!(matches!(outcome, SubmitOutcome::Single { .. }));
-    }
-
-    #[test]
-    fn completed_batch_requires_yes_and_no_cancels() {
-        let mut m = FormModal::default();
-        let first = mk(FormKind::SingleSelect {
-            prompt: "pick".into(),
-            options: vec!["one".into()],
-        });
-        m.attach(first, &["f".into(), "g".into()]);
-        m.batch_answers[0] = Some(FormAnswer::Selected {
-            index: 0,
-            label: "one".into(),
-        });
-        m.batch_statuses[0] = BatchStatus::Answered;
-        m.batch_statuses[1] = BatchStatus::Answered;
-        assert!(m.try_show_confirm(true));
-        m.confirm_focus = 1;
-        assert!(matches!(m.submit(), SubmitOutcome::BatchCancelled));
-        assert!(!m.open);
-        assert_eq!(m.batch_ids, vec!["f", "g", "__batch_confirm"]);
-        assert!(m.batch_answers[0].is_some());
-    }
-
-    #[test]
-    fn completed_batch_yes_commits_answers_outcome() {
-        let mut m = FormModal::default();
-        m.attach(
-            mk(FormKind::SingleSelect {
-                prompt: "pick".into(),
-                options: vec!["one".into()],
-            }),
-            &["f".into(), "g".into()],
+        m.attach_test(mk_questions(vec![
+            FormKind::SingleSelect {
+                prompt: "a".into(),
+                options: vec!["x".into()],
+            },
+            FormKind::Confirm { prompt: "b".into() },
+        ]));
+        m.submit();
+        m.submit();
+        assert!(
+            matches!(m.submit(), SubmitOutcome::Submit { submission: FormSubmission::Submitted { answers }, .. } if answers.len() == 2)
         );
-        m.batch_answers[0] = Some(FormAnswer::Selected {
-            index: 0,
-            label: "one".into(),
-        });
-        m.batch_statuses[0] = BatchStatus::Answered;
-        m.batch_statuses[1] = BatchStatus::Answered;
-        assert!(m.try_show_confirm(true));
-        assert!(matches!(m.submit(), SubmitOutcome::BatchConfirmed));
-        assert!(!m.open);
-        assert_eq!(m.batch_ids, vec!["f", "g", "__batch_confirm"]);
-        assert!(m.batch_answers[0].is_some());
     }
-
-    #[tokio::test]
-    async fn batch_no_and_escape_dispatch_cancellations_before_cleanup() {
-        for action in [
-            crate::keys::KeyAction::Char('n'),
-            crate::keys::KeyAction::Escape,
-        ] {
+    #[test]
+    fn final_no_and_escape_reject_one_request() {
+        for action in [KeyAction::Char('n'), KeyAction::Escape] {
             let mut m = FormModal::default();
-            m.attach(
-                mk(FormKind::SingleSelect {
-                    prompt: "pick".into(),
-                    options: vec!["one".into()],
-                }),
-                &["f".into(), "g".into()],
-            );
-            m.batch_answers[0] = Some(FormAnswer::Selected {
-                index: 0,
-                label: "one".into(),
-            });
-            m.batch_statuses[0] = BatchStatus::Answered;
-            m.batch_statuses[1] = BatchStatus::Answered;
-            assert!(m.try_show_confirm(true));
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut app = crate::app::AppState::default();
-            m.handle_key(&action, &mut app, Some(&tx));
-            drop(tx);
-            let mut cancelled = Vec::new();
-            while let Some(crate::TuiControl::FormSubmit { form_id, answer }) = rx.recv().await {
-                assert_eq!(answer, FormAnswer::Cancelled);
-                cancelled.push(form_id);
-            }
-            assert_eq!(cancelled, vec!["f", "g"]);
-            assert!(m.batch_ids.is_empty());
-            assert!(m.batch_answers.is_empty());
+            m.attach_test(mk_questions(vec![FormKind::Confirm { prompt: "a".into() }]));
+            m.submit();
+            let out = if matches!(action, KeyAction::Escape) {
+                m.cancel()
+            } else {
+                m.reject()
+            };
+            assert!(matches!(
+                out,
+                SubmitOutcome::Submit {
+                    submission: FormSubmission::Rejected,
+                    ..
+                }
+            ));
         }
-    }
-
-    #[test]
-    fn page_actions_change_scroll_position() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::Text {
-            prompt: "long prompt".into(),
-            placeholder: None,
-            multiline: true,
-        }));
-        assert_eq!(m.scroll, 0);
-        let mut app = crate::app::AppState::default();
-        assert!(matches!(
-            m.handle_key(&crate::keys::KeyAction::PageDown, &mut app, None),
-            Some(ModalAction::Consumed)
-        ));
-        assert_eq!(m.scroll, 3);
-        m.handle_key(&crate::keys::KeyAction::ScrollUp, &mut app, None);
-        assert_eq!(m.scroll, 0);
-    }
-
-    #[test]
-    fn multi_select_min_bound_rejects_empty_submit() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::MultiSelect {
-            prompt: "?".into(),
-            options: vec!["a".into(), "b".into()],
-            min: Some(1),
-            max: None,
-        }));
-        assert!(matches!(m.submit(), SubmitOutcome::None));
-        assert!(m.error.is_some());
-        assert!(m.open, "modal stays open after failed submit");
-    }
-
-    #[test]
-    fn multi_select_max_bound_rejects_overfull_submit() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::MultiSelect {
-            prompt: "?".into(),
-            options: vec!["a".into(), "b".into(), "c".into()],
-            min: None,
-            max: Some(1),
-        }));
-        m.cursor = 0;
-        m.toggle_current();
-        m.cursor = 1;
-        m.toggle_current();
-        assert!(matches!(m.submit(), SubmitOutcome::None));
-        assert!(m.error.is_some());
-    }
-
-    #[test]
-    fn multi_select_valid_submit_returns_indices_and_labels() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::MultiSelect {
-            prompt: "?".into(),
-            options: vec!["a".into(), "b".into(), "c".into()],
-            min: None,
-            max: None,
-        }));
-        m.cursor = 0;
-        m.toggle_current();
-        m.cursor = 2;
-        m.toggle_current();
-        match m.submit() {
-            SubmitOutcome::Single {
-                answer: FormAnswer::MultiSelected { indices, labels },
-                ..
-            } => {
-                assert_eq!(indices, vec![0, 2]);
-                assert_eq!(labels, vec!["a", "c"]);
-            }
-            other => panic!("expected Single MultiSelected, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn text_submit_returns_editor_buf() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::Text {
-            prompt: "?".into(),
-            placeholder: None,
-            multiline: false,
-        }));
-        m.text_editor.insert_str("hi there");
-        match m.submit() {
-            SubmitOutcome::Single {
-                answer: FormAnswer::TextEntered { text },
-                ..
-            } => assert_eq!(text, "hi there"),
-            other => panic!("expected Single TextEntered, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cancel_from_open_returns_cancelled_outcome() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::Confirm { prompt: "?".into() }));
-        let outcome = m.cancel();
-        assert!(matches!(
-            outcome,
-            SubmitOutcome::Single {
-                answer: FormAnswer::Cancelled,
-                ..
-            }
-        ));
-        assert!(!m.open);
     }
 }

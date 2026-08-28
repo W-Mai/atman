@@ -128,7 +128,7 @@ pub enum TuiControl {
     },
     FormSubmit {
         form_id: String,
-        answer: atman_runtime::form::FormAnswer,
+        submission: atman_runtime::form::FormSubmission,
     },
     AuthLogin {
         kind: atman_runtime::auth_store::ProviderKind,

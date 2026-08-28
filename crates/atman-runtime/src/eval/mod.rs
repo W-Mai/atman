@@ -1377,14 +1377,21 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 form_id: uuid::Uuid::now_v7().to_string(),
                 run_id,
                 tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
+                form: crate::form::CompositeForm {
+                    questions: vec![crate::form::FormQuestion {
+                        id: "question".into(),
+                        kind: confirm_kind.clone(),
+                    }],
+                },
                 kind: confirm_kind,
                 emitted_at: chrono::Utc::now(),
             };
             let rx = forms.request(pending);
-            let answer = rx.await.unwrap_or(crate::form::FormAnswer::Cancelled);
+            let submission = rx.await.unwrap_or(crate::form::FormSubmission::Rejected);
             Value::Bool(matches!(
-                answer,
-                crate::form::FormAnswer::Confirmed { value: true }
+                submission,
+                crate::form::FormSubmission::Submitted { answers }
+                    if matches!(answers.first(), Some(crate::form::FormAnswer::Confirmed { value: true }))
             ))
         }
         Node::FixUntilTestPasses { kwargs } => eval_fix_until_test_passes(kwargs, env, ctx).await,

@@ -668,6 +668,16 @@ impl WindowManager {
                             placeholder: Some("/path/to/project".to_string()),
                             multiline: false,
                         },
+                        form: atman_runtime::form::CompositeForm {
+                            questions: vec![atman_runtime::form::FormQuestion {
+                                id: "question".into(),
+                                kind: atman_runtime::form::FormKind::Text {
+                                    prompt: "New working directory:".to_string(),
+                                    placeholder: Some("/path/to/project".to_string()),
+                                    multiline: false,
+                                },
+                            }],
+                        },
                         emitted_at: chrono::Utc::now(),
                     };
                     session.forms().request(form);

@@ -1,5 +1,5 @@
 use crate::error::RuntimeError;
-use crate::form::{FormAnswer, FormKind, PendingForm};
+use crate::form::{CompositeForm, FormAnswer, FormKind, FormQuestion, PendingForm};
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -28,10 +28,10 @@ impl Tool for FormAsk {
              multi_select  { kind:\"multi_select\", prompt, options[], min?, max? }
              text          { kind:\"text\", prompt, placeholder?, multiline? }
              \
-             When you need several independent answers, call `form.ask` multiple times
-             consecutively in the same turn; the UI groups them and asks for one final
-             Yes/No confirmation before submitting the batch. Keep unrelated questions
-             as separate form calls rather than combining them into one text field.
+             For several independent answers, make one `form.ask` call with a `questions`
+             list. Each question has an `id`, `kind`, and the fields for that kind.
+             The UI keeps all answers as a draft and asks for one final Yes/No confirmation;
+             do not make multiple calls expecting the UI to merge them.
              \
              Returns a struct { kind, ... } where kind is one of \
              confirmed | selected | multi_selected | text_entered | cancelled.",
@@ -48,30 +48,55 @@ impl Tool for FormAsk {
                 "min": {"type": "integer"},
                 "max": {"type": "integer"},
                 "placeholder": {"type": "string"},
-                "multiline": {"type": "boolean"}
+                "multiline": {"type": "boolean"},
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "kind": {"type": "string"},
+                            "prompt": {"type": "string"},
+                            "options": {"type": "array", "items": {"type": "string"}},
+                            "min": {"type": "integer"},
+                            "max": {"type": "integer"},
+                            "placeholder": {"type": "string"},
+                            "multiline": {"type": "boolean"}
+                        },
+                        "required": ["id", "kind", "prompt"]
+                    }
+                }
             },
-            "required": ["kind", "prompt"]
+            "oneOf": [
+                {"required": ["kind", "prompt"], "not": {"required": ["questions"]}},
+                {"required": ["questions"], "not": {"anyOf": [{"required": ["kind"]}, {"required": ["prompt"]}]}}
+            ]
         })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let kind = parse_form_kind(&args)?;
+            let (form, kind, composite) = parse_form_request(&args)?;
             // Daemon clients drive the modal over RPC via the prompt
             // resolver; the in-process TUI subscribes to FormRegistry.
             // Pick whichever the runtime host wired up, prefer the
             // resolver so daemon overrides an accidental fallback.
             if let Some(resolver) = ctx.prompt_resolver.clone() {
                 let id = crate::rendezvous::PromptId::now();
-                let payload = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
+                let payload = if composite {
+                    serde_json::to_value(&form).unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null)
+                };
                 let timeout = std::time::Duration::from_secs(300);
                 let answer_json = crate::rendezvous::await_prompt_with_payload(
                     &resolver, id, "form_ask", payload, timeout,
                 )
                 .await?;
-                let answer: FormAnswer =
-                    serde_json::from_value(answer_json.clone()).unwrap_or(FormAnswer::Cancelled);
-                return Ok(answer_to_value(&answer));
+                let submission = serde_json::from_value::<crate::form::FormSubmission>(answer_json)
+                    .unwrap_or(crate::form::FormSubmission::Rejected);
+                return Ok(submission_to_value(&submission, composite));
             }
             let forms = ctx.forms.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed(
@@ -86,28 +111,120 @@ impl Tool for FormAsk {
                 form_id: form_id.clone(),
                 run_id,
                 tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
+                form,
                 kind,
                 emitted_at: chrono::Utc::now(),
             };
             let rx = forms.request(pending);
-            let answer =
-                await_local_form(forms, form_id, rx, std::time::Duration::from_secs(300)).await;
-            Ok(answer_to_value(&answer))
+            let submission =
+                await_local_submission(forms, form_id, rx, std::time::Duration::from_secs(300))
+                    .await;
+            Ok(submission_to_value(&submission, composite))
         })
     }
 }
 
-async fn await_local_form(
+async fn await_local_submission(
     forms: &crate::session::FormRegistry,
     form_id: String,
-    rx: tokio::sync::oneshot::Receiver<FormAnswer>,
+    rx: tokio::sync::oneshot::Receiver<crate::form::FormSubmission>,
     timeout: std::time::Duration,
-) -> FormAnswer {
+) -> crate::form::FormSubmission {
     match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(answer)) => answer,
+        Ok(Ok(submission)) => submission,
         Ok(Err(_)) | Err(_) => {
             forms.cancel(&form_id);
-            FormAnswer::Cancelled
+            crate::form::FormSubmission::Rejected
+        }
+    }
+}
+
+fn submission_to_value(submission: &crate::form::FormSubmission, composite: bool) -> Value {
+    match submission {
+        crate::form::FormSubmission::Submitted { answers } if composite => Value::Struct(vec![
+            ("kind".into(), Value::Str("submitted".into())),
+            (
+                "answers".into(),
+                Value::List(answers.iter().map(answer_to_value).collect()),
+            ),
+        ]),
+        crate::form::FormSubmission::Submitted { answers } => {
+            answers.first().map(answer_to_value).unwrap_or_else(|| {
+                Value::Struct(vec![("kind".into(), Value::Str("cancelled".into()))])
+            })
+        }
+        crate::form::FormSubmission::Rejected => {
+            Value::Struct(vec![("kind".into(), Value::Str("cancelled".into()))])
+        }
+    }
+}
+
+fn parse_form_request(args: &ToolArgs) -> Result<(CompositeForm, FormKind, bool), RuntimeError> {
+    match (args.named("questions"), args.named("kind")) {
+        (Some(Value::List(items)), None) => {
+            if items.is_empty() {
+                return Err(RuntimeError::ToolFailed(
+                    "form.ask: `questions` must be non-empty".into(),
+                ));
+            }
+            let mut questions = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Value::Struct(fields) = item else {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "struct {id, kind, prompt, ...}".into(),
+                        actual: item.kind_name().into(),
+                    });
+                };
+                let get = |name: &str| {
+                    fields
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value)
+                };
+                let id = match get("id") {
+                    Some(Value::Str(value)) if !value.is_empty() => value.clone(),
+                    Some(value) => {
+                        return Err(RuntimeError::TypeMismatch {
+                            expected: "string".into(),
+                            actual: value.kind_name().into(),
+                        });
+                    }
+                    None => return Err(RuntimeError::MissingArg(format!("questions[{index}].id"))),
+                };
+                if questions
+                    .iter()
+                    .any(|question: &FormQuestion| question.id == id)
+                {
+                    return Err(RuntimeError::ToolFailed(format!(
+                        "form.ask: duplicate question id `{id}`"
+                    )));
+                }
+                let named = ToolArgs {
+                    positional: Vec::new(),
+                    named: fields.clone(),
+                };
+                let kind = parse_form_kind(&named)?;
+                questions.push(FormQuestion { id, kind });
+            }
+            let first = questions[0].kind.clone();
+            Ok((CompositeForm { questions }, first, true))
+        }
+        (Some(value), _) => Err(RuntimeError::TypeMismatch {
+            expected: "list<struct>".into(),
+            actual: value.kind_name().into(),
+        }),
+        (None, _) => {
+            let kind = parse_form_kind(args)?;
+            Ok((
+                CompositeForm {
+                    questions: vec![FormQuestion {
+                        id: "question".into(),
+                        kind: kind.clone(),
+                    }],
+                },
+                kind,
+                false,
+            ))
         }
     }
 }
@@ -267,19 +384,70 @@ mod tests {
         let forms = crate::session::FormRegistry::new();
         let _subscriber = forms.subscribe();
         let form_id = "timed-out".to_string();
+        let form = crate::form::CompositeForm {
+            questions: vec![crate::form::FormQuestion {
+                id: "question".into(),
+                kind: FormKind::Confirm { prompt: "?".into() },
+            }],
+        };
         let pending = PendingForm {
             form_id: form_id.clone(),
             run_id: crate::event::FlowRunId::now(),
             tool_use_id: "tool".into(),
+            form,
             kind: FormKind::Confirm { prompt: "?".into() },
             emitted_at: chrono::Utc::now(),
         };
         let rx = forms.request(pending);
         assert_eq!(
-            await_local_form(&forms, form_id, rx, std::time::Duration::ZERO).await,
-            FormAnswer::Cancelled
+            await_local_submission(&forms, form_id, rx, std::time::Duration::ZERO).await,
+            crate::form::FormSubmission::Rejected
         );
         assert!(forms.list_pending().is_empty());
+    }
+
+    #[test]
+    fn parse_composite_questions() {
+        let question = |id: &str, prompt: &str| {
+            Value::Struct(vec![
+                ("id".into(), Value::Str(id.into())),
+                ("kind".into(), Value::Str("text".into())),
+                ("prompt".into(), Value::Str(prompt.into())),
+            ])
+        };
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![(
+                "questions".into(),
+                Value::List(vec![question("name", "Name?"), question("team", "Team?")]),
+            )],
+        };
+        let (form, first, composite) = parse_form_request(&args).unwrap();
+        assert!(composite);
+        assert_eq!(form.questions.len(), 2);
+        assert_eq!(form.questions[0].id, "name");
+        assert_eq!(form.questions[1].id, "team");
+        assert!(matches!(first, FormKind::Text { .. }));
+    }
+
+    #[test]
+    fn parse_composite_questions_rejects_duplicate_ids() {
+        let question = |id: &str| {
+            Value::Struct(vec![
+                ("id".into(), Value::Str(id.into())),
+                ("kind".into(), Value::Str("confirm".into())),
+                ("prompt".into(), Value::Str("Continue?".into())),
+            ])
+        };
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![(
+                "questions".into(),
+                Value::List(vec![question("same"), question("same")]),
+            )],
+        };
+        let error = parse_form_request(&args).unwrap_err();
+        assert!(error.to_string().contains("duplicate question id"));
     }
 
     #[test]

@@ -1854,20 +1854,25 @@ async fn cmd_repl_once(
                             }
                         }
                     }
-                    atman_tui::TuiControl::FormSubmit { form_id, answer } => {
-                        if form_id == "session_move_path" {
-                            if let atman_runtime::form::FormAnswer::TextEntered { text } = answer {
-                                let cwd = std::path::PathBuf::from(&text);
-                                let mut meta = atman_runtime::session_meta::SessionMeta::load(
-                                    session_for_ctrl.dir(),
-                                )
-                                .unwrap_or_default();
-                                meta.rebase(&cwd);
-                                let _ = meta.save(session_for_ctrl.dir());
-                            }
-                        } else {
-                            let _ = session_for_ctrl.forms().submit(&form_id, answer);
+                    atman_tui::TuiControl::FormSubmit {
+                        form_id,
+                        submission,
+                    } => {
+                        if form_id == "session_move_path"
+                            && let atman_runtime::form::FormSubmission::Submitted { answers } =
+                                &submission
+                            && let Some(atman_runtime::form::FormAnswer::TextEntered { text }) =
+                                answers.first()
+                        {
+                            let cwd = std::path::PathBuf::from(text);
+                            let mut meta = atman_runtime::session_meta::SessionMeta::load(
+                                session_for_ctrl.dir(),
+                            )
+                            .unwrap_or_default();
+                            meta.rebase(&cwd);
+                            let _ = meta.save(session_for_ctrl.dir());
                         }
+                        let _ = session_for_ctrl.forms().submit(&form_id, submission);
                     }
                     atman_tui::TuiControl::AuthLogin { kind, name } => match kind {
                         atman_runtime::auth_store::ProviderKind::Codex => {
@@ -3861,6 +3866,14 @@ async fn handle_suggest(
             form_id: "suggest_confirm".to_string(),
             run_id: atman_runtime::event::FlowRunId::now(),
             tool_use_id: "suggest_confirm".to_string(),
+            form: atman_runtime::form::CompositeForm {
+                questions: vec![atman_runtime::form::FormQuestion {
+                    id: "question".into(),
+                    kind: atman_runtime::form::FormKind::Confirm {
+                        prompt: format!("accept suggested flow `{flow_name}`?"),
+                    },
+                }],
+            },
             kind: atman_runtime::form::FormKind::Confirm {
                 prompt: format!("accept suggested flow `{flow_name}`?"),
             },
@@ -3868,7 +3881,14 @@ async fn handle_suggest(
         };
         let rx = session.forms().request(form);
         match rx.await {
-            Ok(atman_runtime::form::FormAnswer::Confirmed { value: true }) => 'y',
+            Ok(atman_runtime::form::FormSubmission::Submitted { answers })
+                if matches!(
+                    answers.first(),
+                    Some(atman_runtime::form::FormAnswer::Confirmed { value: true })
+                ) =>
+            {
+                'y'
+            }
             _ => 'n',
         }
     } else {
@@ -4629,8 +4649,11 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                         atman_runtime::notify!(error, "permission decision rejected: {error}");
                     }
                 }
-                atman_tui::TuiControl::FormSubmit { form_id, answer } => {
-                    ctrl_session.forms().submit(&form_id, answer);
+                atman_tui::TuiControl::FormSubmit {
+                    form_id,
+                    submission,
+                } => {
+                    ctrl_session.forms().submit(&form_id, submission);
                 }
                 atman_tui::TuiControl::AuthLogin { kind, name } => {
                     if kind == atman_runtime::auth_store::ProviderKind::Codex {
@@ -4956,10 +4979,17 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
 async fn preview_scene_form(session: std::sync::Arc<Session>, kind: atman_runtime::form::FormKind) {
     use atman_runtime::event::FlowRunId;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let form = atman_runtime::form::CompositeForm {
+        questions: vec![atman_runtime::form::FormQuestion {
+            id: "question".into(),
+            kind: kind.clone(),
+        }],
+    };
     let _rx = session.forms().request(atman_runtime::form::PendingForm {
         form_id: "preview_form".into(),
         run_id: FlowRunId::now(),
         tool_use_id: "preview_form_tool".into(),
+        form,
         kind,
         emitted_at: chrono::Utc::now(),
     });
@@ -5005,6 +5035,12 @@ async fn preview_scene_form_sequence(session: std::sync::Arc<Session>) {
                 form_id: id.into(),
                 run_id: FlowRunId::now(),
                 tool_use_id: format!("preview_seq_{id}"),
+                form: atman_runtime::form::CompositeForm {
+                    questions: vec![atman_runtime::form::FormQuestion {
+                        id: "question".into(),
+                        kind: kind.clone(),
+                    }],
+                },
                 kind,
                 emitted_at: chrono::Utc::now(),
             })

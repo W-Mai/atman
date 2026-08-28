@@ -53,11 +53,30 @@ impl FormKind {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FormQuestion {
+    pub id: String,
+    #[serde(flatten)]
+    pub kind: FormKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompositeForm {
+    pub questions: Vec<FormQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum FormSubmission {
+    Submitted { answers: Vec<FormAnswer> },
+    Rejected,
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingForm {
     pub form_id: String,
     pub run_id: FlowRunId,
     pub tool_use_id: String,
+    pub form: CompositeForm,
     pub kind: FormKind,
     pub emitted_at: DateTime<Utc>,
 }

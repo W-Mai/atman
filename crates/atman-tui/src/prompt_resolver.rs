@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use atman_runtime::event::FlowRunId;
-use atman_runtime::form::{FormAnswer, FormKind, PendingForm};
+use atman_runtime::form::{
+    CompositeForm, FormAnswer, FormKind, FormQuestion, FormSubmission, PendingForm,
+};
 use atman_runtime::rendezvous::{PromptId, PromptResolver};
 use atman_runtime::session::FormRegistry;
 use tokio::sync::oneshot;
@@ -23,7 +25,7 @@ impl PromptResolver for TuiPromptResolver {
 
     fn drop_pending(&self, id: &PromptId) {
         let form_id = format!("prompt_{}", id);
-        self.forms.submit(&form_id, FormAnswer::Cancelled);
+        self.forms.submit(&form_id, FormSubmission::Rejected);
     }
 
     fn register_with_payload(
@@ -34,32 +36,74 @@ impl PromptResolver for TuiPromptResolver {
     ) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
         let form_id = format!("prompt_{}", id);
-        let form_kind = build_form_kind(kind, &payload);
-        let form = PendingForm {
-            form_id,
-            run_id: FlowRunId::now(),
-            tool_use_id: format!("prompt_{}", id),
-            kind: form_kind,
-            emitted_at: chrono::Utc::now(),
-        };
+        let form = composite_pending_form(&form_id, &id, kind, &payload);
         let answer_rx = self.forms.request(form);
         let payload_clone = payload;
         let kind_str = kind.to_string();
         tokio::spawn(async move {
-            let answer = answer_rx.await.ok();
-            let value = answer_to_value(answer, &kind_str, &payload_clone);
+            let submission = answer_rx.await.unwrap_or(FormSubmission::Rejected);
+            let value = if kind_str == "form_ask"
+                && serde_json::from_value::<CompositeForm>(payload_clone.clone()).is_ok()
+            {
+                serde_json::to_value(&submission).unwrap_or(serde_json::json!({"kind":"rejected"}))
+            } else {
+                let answer = match submission {
+                    FormSubmission::Submitted { mut answers } => answers.pop(),
+                    FormSubmission::Rejected => Some(FormAnswer::Cancelled),
+                };
+                answer_to_value(answer, &kind_str, &payload_clone)
+            };
             let _ = tx.send(value);
         });
         rx
     }
 }
 
+fn composite_pending_form(
+    form_id: &str,
+    id: &PromptId,
+    kind: &str,
+    payload: &serde_json::Value,
+) -> PendingForm {
+    let questions = serde_json::from_value::<CompositeForm>(payload.clone())
+        .map(|form| form.questions)
+        .unwrap_or_else(|_| {
+            vec![FormQuestion {
+                id: "question".into(),
+                kind: build_form_kind(kind, payload),
+            }]
+        });
+    let first_kind = questions
+        .first()
+        .map(|question| question.kind.clone())
+        .unwrap_or(FormKind::Confirm {
+            prompt: "Approve form_ask?".into(),
+        });
+    PendingForm {
+        form_id: form_id.into(),
+        run_id: FlowRunId::now(),
+        tool_use_id: format!("prompt_{id}"),
+        form: CompositeForm { questions },
+        kind: first_kind,
+        emitted_at: chrono::Utc::now(),
+    }
+}
+
 fn build_form_kind(kind: &str, payload: &serde_json::Value) -> FormKind {
     match kind {
         "form_ask" => {
-            serde_json::from_value::<FormKind>(payload.clone()).unwrap_or(FormKind::Confirm {
-                prompt: "Approve form_ask?".into(),
-            })
+            if let Ok(form) = serde_json::from_value::<CompositeForm>(payload.clone()) {
+                form.questions
+                    .first()
+                    .map(|question| question.kind.clone())
+                    .unwrap_or(FormKind::Confirm {
+                        prompt: "Approve form_ask?".into(),
+                    })
+            } else {
+                serde_json::from_value::<FormKind>(payload.clone()).unwrap_or(FormKind::Confirm {
+                    prompt: "Approve form_ask?".into(),
+                })
+            }
         }
         "hunk_selection" => {
             let hunks = payload["hunks"].as_array().cloned().unwrap_or_default();

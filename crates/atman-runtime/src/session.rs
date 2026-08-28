@@ -270,7 +270,7 @@ pub struct FormRegistry {
 
 struct FormEntry {
     pending: crate::form::PendingForm,
-    responder: tokio::sync::oneshot::Sender<crate::form::FormAnswer>,
+    responder: tokio::sync::oneshot::Sender<crate::form::FormSubmission>,
 }
 
 impl Default for FormRegistry {
@@ -310,10 +310,10 @@ impl FormRegistry {
     pub fn request(
         &self,
         pending: crate::form::PendingForm,
-    ) -> tokio::sync::oneshot::Receiver<crate::form::FormAnswer> {
+    ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.watch_tx.receiver_count() == 0 {
-            let _ = tx.send(crate::form::FormAnswer::Cancelled);
+            let _ = tx.send(crate::form::FormSubmission::Rejected);
             return rx;
         }
         {
@@ -327,7 +327,7 @@ impl FormRegistry {
         rx
     }
 
-    pub fn submit(&self, form_id: &str, answer: crate::form::FormAnswer) -> bool {
+    pub fn submit(&self, form_id: &str, submission: crate::form::FormSubmission) -> bool {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             let pos = entries.iter().position(|e| e.pending.form_id == form_id);
@@ -335,7 +335,7 @@ impl FormRegistry {
         };
         match entry {
             Some(e) => {
-                let _ = e.responder.send(answer);
+                let _ = e.responder.send(submission);
                 self.broadcast_snapshot();
                 true
             }
@@ -344,7 +344,7 @@ impl FormRegistry {
     }
 
     pub fn cancel(&self, form_id: &str) -> bool {
-        self.submit(form_id, crate::form::FormAnswer::Cancelled)
+        self.submit(form_id, crate::form::FormSubmission::Rejected)
     }
 
     pub fn cancel_all(&self) {
@@ -353,7 +353,7 @@ impl FormRegistry {
             std::mem::take(&mut *entries)
         };
         for e in drained {
-            let _ = e.responder.send(crate::form::FormAnswer::Cancelled);
+            let _ = e.responder.send(crate::form::FormSubmission::Rejected);
         }
         self.broadcast_snapshot();
     }
@@ -2851,6 +2851,14 @@ mod tests {
             kind: crate::form::FormKind::Confirm {
                 prompt: prompt.into(),
             },
+            form: crate::form::CompositeForm {
+                questions: vec![crate::form::FormQuestion {
+                    id: "question".into(),
+                    kind: crate::form::FormKind::Confirm {
+                        prompt: prompt.into(),
+                    },
+                }],
+            },
             emitted_at: chrono::Utc::now(),
         }
     }
@@ -2860,7 +2868,7 @@ mod tests {
         let reg = FormRegistry::new();
         let rx = reg.request(mk_form("f1", "sure?"));
         let got = rx.blocking_recv().unwrap();
-        assert_eq!(got, crate::form::FormAnswer::Cancelled);
+        assert_eq!(got, crate::form::FormSubmission::Rejected);
         assert!(reg.list_pending().is_empty());
     }
 
@@ -2870,10 +2878,20 @@ mod tests {
         let _sub = reg.subscribe();
         let rx = reg.request(mk_form("fA", "?"));
         assert_eq!(reg.list_pending().len(), 1);
-        let ok = reg.submit("fA", crate::form::FormAnswer::Confirmed { value: true });
+        let ok = reg.submit(
+            "fA",
+            crate::form::FormSubmission::Submitted {
+                answers: vec![crate::form::FormAnswer::Confirmed { value: true }],
+            },
+        );
         assert!(ok);
         let got = rx.blocking_recv().unwrap();
-        assert_eq!(got, crate::form::FormAnswer::Confirmed { value: true });
+        assert_eq!(
+            got,
+            crate::form::FormSubmission::Submitted {
+                answers: vec![crate::form::FormAnswer::Confirmed { value: true }],
+            }
+        );
         assert!(reg.list_pending().is_empty());
     }
 
@@ -2882,7 +2900,7 @@ mod tests {
         let reg = std::sync::Arc::new(FormRegistry::new());
         let _sub = reg.subscribe();
         let _rx = reg.request(mk_form("real", "?"));
-        assert!(!reg.submit("ghost", crate::form::FormAnswer::Cancelled));
+        assert!(!reg.submit("ghost", crate::form::FormSubmission::Rejected));
         assert_eq!(reg.list_pending().len(), 1);
     }
 
@@ -2894,7 +2912,7 @@ mod tests {
         assert!(reg.cancel("cancel"));
         assert_eq!(
             rx.blocking_recv().unwrap(),
-            crate::form::FormAnswer::Cancelled
+            crate::form::FormSubmission::Rejected
         );
         assert!(reg.list_pending().is_empty());
     }
@@ -2908,11 +2926,11 @@ mod tests {
         reg.cancel_all();
         assert_eq!(
             rx_a.blocking_recv().unwrap(),
-            crate::form::FormAnswer::Cancelled
+            crate::form::FormSubmission::Rejected
         );
         assert_eq!(
             rx_b.blocking_recv().unwrap(),
-            crate::form::FormAnswer::Cancelled
+            crate::form::FormSubmission::Rejected
         );
         assert!(reg.list_pending().is_empty());
     }

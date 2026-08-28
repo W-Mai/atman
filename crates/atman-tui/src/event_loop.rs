@@ -1338,36 +1338,11 @@ pub(crate) async fn run_frames(
             _ = wait_form_change(handle.form_rx.as_mut()) => {
                 if let Some(rx) = handle.form_rx.as_mut() {
                     let latest = rx.borrow().clone();
-                    if latest.is_empty() {
-                        if !app.wm.modals.form_modal.try_show_confirm(true)
-                            && app.wm.modals.form_modal.confirm_form.is_none()
-                        {
-                            app.wm.modals.form_modal.end_batch();
-                        }
-                    } else {
-                        let ids: Vec<String> =
-                            latest.iter().map(|p| p.form_id.clone()).collect();
-                        app.wm.modals.form_modal.merge_batch_ids(&ids);
-                        let current = app.wm.modals.form_modal.active_form_id().map(String::from);
-                        let want: Option<String> = current
-                            .filter(|id| ids.iter().any(|x| x == id))
-                            .or_else(|| {
-                                app.wm.modals.form_modal
-                                    .batch_ids
-                                    .iter()
-                                    .zip(app.wm.modals.form_modal.batch_statuses.iter())
-                                    .find(|(_, s)| matches!(s, crate::form_modal::BatchStatus::Pending))
-                                    .map(|(id, _)| id.clone())
-                                    .filter(|id| ids.iter().any(|x| x == id))
-                            })
-                            .or_else(|| latest.first().map(|p| p.form_id.clone()));
-                        if let Some(want_id) = want
-                            && let Some(target) =
-                                latest.iter().find(|p| p.form_id == want_id).cloned()
-                            && app.wm.modals.form_modal.active_form_id() != Some(target.form_id.as_str())
-                        {
-                            app.wm.modals.form_modal.attach(target, &ids);
-                        }
+                    if let Some(target) = latest.first().cloned()
+                        && app.wm.modals.form_modal.active_form_id()
+                            != Some(target.form_id.as_str())
+                    {
+                        app.wm.modals.form_modal.attach(target);
                     }
                 }
             }
