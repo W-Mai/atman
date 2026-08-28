@@ -132,7 +132,7 @@ pub struct BoxSpec<'a> {
     pub status_glyph: &'a str,
     pub kind_glyph: &'a str,
     pub label: &'a str,
-    pub approval_hotkey: Option<u8>,
+    pub approval_badge: Option<(String, Style)>,
 }
 
 struct CompactionSummaryRender<'a> {
@@ -149,7 +149,6 @@ struct CompactionSummaryRender<'a> {
 }
 
 pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
-    let t = crate::theme::theme();
     let BoxSpec {
         row0,
         col0,
@@ -159,7 +158,7 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         status_glyph,
         kind_glyph,
         label,
-        approval_hotkey,
+        approval_badge,
     } = spec;
     let min_outer: u16 = 6;
     if outer_width < min_outer {
@@ -170,15 +169,18 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
             rows: 0,
         };
     }
-    let approval_text = approval_hotkey.map(|n| format!("─[{n}]─"));
-    let approval_w = approval_text.as_deref().map_or(0, crate::width::width);
+    let approval_text = approval_badge.map(|(badge, style)| (format!("─{badge}─"), style));
+    let approval_w = approval_text
+        .as_ref()
+        .map_or(0, |(text, _)| crate::width::width(text));
     let status_w = crate::width::width(status_glyph);
     let kind_w = crate::width::width(kind_glyph);
     let leading_w = 2usize + 1; // `╭─` + leading space
     let trailing_w = 2usize; // `─╮`
     let status_seg = if status_w > 0 { status_w + 1 } else { 0 };
     let kind_seg = if kind_w > 0 { kind_w + 1 } else { 0 };
-    let fixed = leading_w + status_seg + kind_seg + approval_w + trailing_w;
+    let approval_gap = if approval_text.is_some() { 2 } else { 0 };
+    let fixed = leading_w + status_seg + kind_seg + approval_w + approval_gap + trailing_w;
     let label_budget = (outer_width as usize).saturating_sub(fixed).max(1);
     let label_display = crate::width::middle_truncate(label, label_budget);
     let label_w = crate::width::width(label_display.as_str());
@@ -200,13 +202,8 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
     if fill_w > 0 {
         top_spans.push(Span::styled(" ".repeat(fill_w), border_style));
     }
-    if let Some(text) = approval_text {
-        top_spans.push(Span::styled(
-            text,
-            Style::default()
-                .fg(t.warn.into())
-                .add_modifier(Modifier::BOLD),
-        ));
+    if let Some((text, style)) = approval_text {
+        top_spans.push(Span::styled(text, style));
     }
     top_spans.push(Span::styled("─╮".to_string(), border_style));
     out.push(Line::from(top_spans));
@@ -2622,95 +2619,6 @@ fn format_workflow_stats_footer(
     Line::from(Span::styled(bottom_text, border_style))
 }
 
-fn permission_summary(graph: &atman_runtime::workflow::WorkflowGraph) -> Option<String> {
-    use atman_runtime::workflow::WorkflowPermissionState;
-    let mut counts = [0usize; 6];
-    for request in graph.permission_requests.values() {
-        let index = match request.state {
-            WorkflowPermissionState::Pending => 0,
-            WorkflowPermissionState::Approved => 1,
-            WorkflowPermissionState::Denied => 2,
-            WorkflowPermissionState::Cancelled => 3,
-            WorkflowPermissionState::Interrupted => 4,
-            WorkflowPermissionState::Unrestricted => 5,
-        };
-        counts[index] += 1;
-    }
-    if counts.iter().all(|count| *count == 0) && graph.permission_groups.is_empty() {
-        return None;
-    }
-    let labels = [
-        "pending",
-        "approved",
-        "denied",
-        "cancelled",
-        "interrupted",
-        "unrestricted",
-    ];
-    let mut parts = counts
-        .into_iter()
-        .zip(labels)
-        .filter(|(count, _)| *count > 0)
-        .map(|(count, label)| format!("{count} {label}"))
-        .collect::<Vec<_>>();
-    if !graph.permission_groups.is_empty() {
-        parts.push(format!("{} groups", graph.permission_groups.len()));
-    }
-    Some(format!("permissions · {}", parts.join(" · ")))
-}
-
-fn append_permission_details(
-    lines: &mut Vec<Line<'static>>,
-    graph: &atman_runtime::workflow::WorkflowGraph,
-) {
-    use atman_runtime::workflow::permission_preview;
-    if graph.permission_requests.is_empty() && graph.permission_groups.is_empty() {
-        return;
-    }
-    let t = crate::theme::theme();
-    lines.push(Line::from(Span::styled(
-        " permissions",
-        Style::default()
-            .fg(t.accent.into())
-            .add_modifier(Modifier::BOLD),
-    )));
-    for request in graph.permission_requests.values() {
-        lines.push(Line::from(Span::styled(
-            format!("  {:?} · {}", request.state, request.payload.tool),
-            Style::default().fg(t.tinted_fg.into()),
-        )));
-        if let Some(detail) = permission_preview(&request.payload) {
-            for detail_line in detail.lines() {
-                lines.push(Line::from(Span::raw(format!("    {detail_line}"))));
-            }
-        }
-    }
-    for group in graph.permission_groups.values() {
-        let resolved = group
-            .request_ids
-            .iter()
-            .filter(|id| {
-                graph
-                    .permission_requests
-                    .get(
-                        &atman_runtime::workflow::WorkflowPermissionIdentity::Canonical {
-                            request_id: (*id).clone(),
-                        },
-                    )
-                    .is_some_and(|request| !request.state.is_pending())
-            })
-            .count();
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  group · {} · {resolved}/{} resolved",
-                group.label,
-                group.request_ids.len()
-            ),
-            Style::default().fg(t.tinted_fg.into()),
-        )));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_workflow_panel(
     graph: &atman_runtime::workflow::WorkflowGraph,
@@ -2784,13 +2692,6 @@ pub fn render_workflow_panel_with_regions(
         );
     }
     let mut lines = vec![header];
-    if let Some(summary) = permission_summary(graph) {
-        lines.push(Line::from(Span::styled(
-            format!("  {summary}"),
-            Style::default().fg(t.tinted_fg.into()),
-        )));
-    }
-    append_permission_details(&mut lines, graph);
     let mut regions: Vec<NodeRegion> = Vec::new();
     // Register header click region so the expanded panel can be collapsed
     // by clicking the header (path_key="" triggers toggle_workflow_panel_expansion).
@@ -2813,6 +2714,7 @@ pub fn render_workflow_panel_with_regions(
                 append_workflow_node(
                     &mut lines,
                     &mut regions,
+                    graph,
                     node,
                     expanded_nodes,
                     "",
@@ -2833,6 +2735,7 @@ pub fn render_workflow_panel_with_regions(
             append_workflow_node_boxed(
                 &mut lines,
                 &mut regions,
+                graph,
                 node,
                 expanded_nodes,
                 &[],
@@ -3124,6 +3027,7 @@ fn render_collapsed_workflow_card(
         append_workflow_node_boxed(
             &mut body_lines,
             &mut regions,
+            graph,
             node,
             &std::collections::HashSet::new(),
             &[],
@@ -3306,6 +3210,7 @@ fn horizontal_layout_feasible(branch_count: usize, panel_width: u16, prefix: &st
 fn append_fanout_horizontal(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
+    graph: &atman_runtime::workflow::WorkflowGraph,
     branches: &[atman_runtime::workflow::WorkflowNode],
     expanded_nodes: &std::collections::HashSet<String>,
     child_prefix: &str,
@@ -3330,6 +3235,7 @@ fn append_fanout_horizontal(
         append_workflow_node(
             &mut b_lines,
             &mut b_regions,
+            graph,
             branch,
             expanded_nodes,
             "",
@@ -3494,6 +3400,7 @@ fn tree_continuation_spans(ancestor_last: &[bool], is_last: bool) -> Vec<Span<'s
 fn append_workflow_node_boxed(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
+    graph: &atman_runtime::workflow::WorkflowGraph,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_last: &[bool],
@@ -3575,13 +3482,11 @@ fn append_workflow_node_boxed(
     } else {
         label
     };
-    let mut approval_hotkey: Option<u8> = None;
+    let mut pending_number = None;
     let mut auto_expand = false;
-    if let Some(ApprovalState::Pending { .. }) = &node.approval {
+    if matches!(&node.approval, Some(ApprovalState::Pending { .. })) {
         *pending_counter = pending_counter.saturating_add(1);
-        if *pending_counter <= 9 {
-            approval_hotkey = Some(*pending_counter);
-        }
+        pending_number = (*pending_counter <= 9).then_some(*pending_counter);
         border_style = Style::default()
             .fg(t.warn.into())
             .add_modifier(Modifier::BOLD);
@@ -3589,12 +3494,20 @@ fn append_workflow_node_boxed(
     } else if matches!(&node.approval, Some(ApprovalState::Denied { .. })) {
         border_style = Style::default().fg(t.error.into());
     }
+    let approval = approval_badge(
+        node.approval.as_ref(),
+        pending_number,
+        permission_request_for_node(graph, node)
+            .is_some_and(|request| !request.payload.group_ids.is_empty()),
+    );
     let is_expanded = auto_expand || expanded_nodes.contains(path);
     let mut inner_lines: Vec<Line<'static>> = Vec::new();
     if is_expanded {
-        collect_boxed_details(node, &mut inner_lines);
+        collect_boxed_details(graph, node, &mut inner_lines);
     }
-    let approval_seg = if approval_hotkey.is_some() { 5 } else { 0 };
+    let approval_seg = approval
+        .as_ref()
+        .map_or(0, |(badge, _)| crate::width::width(badge.as_str()) + 2);
     let status_seg = if crate::width::width(status_glyph) > 0 {
         crate::width::width(status_glyph) + 1
     } else {
@@ -3622,7 +3535,7 @@ fn append_workflow_node_boxed(
             status_glyph,
             kind_glyph,
             label: &label,
-            approval_hotkey,
+            approval_badge: approval,
         },
     );
     for (row_idx, line) in scratch.into_iter().enumerate() {
@@ -3657,6 +3570,7 @@ fn append_workflow_node_boxed(
         append_fanout_horizontal_boxed(
             out,
             regions,
+            graph,
             &node.children,
             expanded_nodes,
             &child_ancestor_last,
@@ -3680,6 +3594,7 @@ fn append_workflow_node_boxed(
         append_workflow_node_boxed(
             out,
             regions,
+            graph,
             child,
             expanded_nodes,
             &child_ancestor_last,
@@ -3699,6 +3614,7 @@ fn append_workflow_node_boxed(
 fn append_fanout_horizontal_boxed(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
+    graph: &atman_runtime::workflow::WorkflowGraph,
     branches: &[atman_runtime::workflow::WorkflowNode],
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_last: &[bool],
@@ -3730,6 +3646,7 @@ fn append_fanout_horizontal_boxed(
         append_workflow_node_boxed(
             &mut b_lines,
             &mut b_regions,
+            graph,
             branch,
             expanded_nodes,
             &[],
@@ -3790,7 +3707,153 @@ fn append_fanout_horizontal_boxed(
     }
 }
 
+fn approval_badge(
+    approval: Option<&atman_runtime::workflow::ApprovalState>,
+    pending_number: Option<u8>,
+    grouped: bool,
+) -> Option<(String, Style)> {
+    use atman_runtime::workflow::ApprovalState;
+    let t = crate::theme::theme();
+    let (mut badge, style) = match approval {
+        Some(ApprovalState::Pending { .. }) => (
+            pending_number
+                .map(|number| format!("◷{number}"))
+                .unwrap_or_else(|| "◷".into()),
+            Style::default()
+                .fg(t.warn.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(ApprovalState::Approved) => (
+            "✓".into(),
+            Style::default()
+                .fg(t.success.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(ApprovalState::Denied { .. }) => (
+            "⊘".into(),
+            Style::default()
+                .fg(t.error.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        None => return None,
+    };
+    if grouped {
+        badge.push('Ⓖ');
+    }
+    Some((badge, style))
+}
+
+fn permission_request_for_node<'a>(
+    graph: &'a atman_runtime::workflow::WorkflowGraph,
+    node: &atman_runtime::workflow::WorkflowNode,
+) -> Option<&'a atman_runtime::workflow::WorkflowPermissionRequest> {
+    let atman_runtime::workflow::WorkflowNodeKind::ToolCall { tool_use_id, .. } = &node.kind else {
+        return None;
+    };
+    graph.permission_requests.values().find(|request| {
+        request.payload.tool_use_id == *tool_use_id
+            && node.id
+                == format!(
+                    "tool:{}:{}",
+                    request.payload.requesting_run_id.0, request.payload.tool_use_id
+                )
+    })
+}
+
+fn permission_detail_sections(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+    node: &atman_runtime::workflow::WorkflowNode,
+) -> Vec<(&'static str, String)> {
+    let Some(request) = permission_request_for_node(graph, node) else {
+        return Vec::new();
+    };
+    let payload = &request.payload;
+    let mut sections = vec![(
+        "approval",
+        format!(
+            "{} · {}",
+            format!("{:?}", request.state).to_lowercase(),
+            format!("{:?}", payload.tier).to_lowercase()
+        ),
+    )];
+    if let Some(reason) = &payload.reason {
+        sections.push(("reason", reason.clone()));
+    }
+    if let Some(actor) = &payload.actor {
+        sections.push(("actor", format!("{actor:?}")));
+    }
+    if let Some(scope) = &payload.scope {
+        sections.push(("scope", format!("{scope:?}")));
+    }
+    sections.push((
+        "policy",
+        format!(
+            "{} · {}",
+            payload.policy.rule_id, payload.policy.snapshot_id
+        ),
+    ));
+    let provenance = &payload.provenance;
+    let mut provenance_parts = Vec::new();
+    if let Some(cwd) = &provenance.cwd {
+        provenance_parts.push(format!("cwd={cwd}"));
+    }
+    if let Some(path) = &provenance.path {
+        provenance_parts.push(format!("path={path}"));
+    }
+    if provenance.network {
+        provenance_parts.push("network".into());
+    }
+    if !provenance.risks.is_empty() {
+        provenance_parts.push(format!(
+            "risks={}",
+            provenance
+                .risks
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if !provenance.targets.is_empty() {
+        provenance_parts.push(format!("targets={}", provenance.targets.join(",")));
+    }
+    if !provenance_parts.is_empty() {
+        sections.push(("provenance", provenance_parts.join(" · ")));
+    }
+    for group_id in &payload.group_ids {
+        if let Some(group) = graph.permission_groups.get(group_id) {
+            let resolved = group
+                .request_ids
+                .iter()
+                .filter(|request_id| {
+                    graph.permission_requests.iter().any(|(identity, request)| {
+                        matches!(
+                            identity,
+                            atman_runtime::workflow::WorkflowPermissionIdentity::Canonical {
+                                request_id: id
+                            } if id == *request_id
+                        ) && !request.state.is_pending()
+                    })
+                })
+                .count();
+            sections.push((
+                "group",
+                format!(
+                    "{} · {resolved}/{} resolved",
+                    group.label,
+                    group.request_ids.len()
+                ),
+            ));
+        }
+    }
+    if let Some(request_id) = &payload.request_id {
+        sections.push(("request", request_id.to_string()));
+    }
+    sections
+}
+
 fn collect_boxed_details(
+    graph: &atman_runtime::workflow::WorkflowGraph,
     node: &atman_runtime::workflow::WorkflowNode,
     out: &mut Vec<Line<'static>>,
 ) {
@@ -3833,12 +3896,16 @@ fn collect_boxed_details(
     if let Some(p) = &node.output_preview {
         push_detail_section(out, "output", p);
     }
-    if let Some(ApprovalState::Pending {
-        level,
-        preview: Some(p),
-    }) = &node.approval
+    if permission_request_for_node(graph, node).is_none()
+        && let Some(ApprovalState::Pending {
+            level,
+            preview: Some(p),
+        }) = &node.approval
     {
         push_detail_section(out, &format!("approval ({level})"), p);
+    }
+    for (label, body) in permission_detail_sections(graph, node) {
+        push_detail_section(out, label, &body);
     }
     if let (Some(start), Some(end)) = (node.started_at, node.ended_at) {
         let ms = (end - start).num_milliseconds().max(0);
@@ -3866,6 +3933,7 @@ fn push_detail_section(out: &mut Vec<Line<'static>>, header: &str, body: &str) {
 fn append_workflow_node(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
+    graph: &atman_runtime::workflow::WorkflowGraph,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_prefix: &str,
@@ -3940,36 +4008,18 @@ fn append_workflow_node(
     } else {
         "▸ "
     };
-    let (approval_prefix, approval_suffix) = match &effective.approval {
-        Some(ApprovalState::Pending { level, .. }) => {
-            *pending_counter = pending_counter.saturating_add(1);
-            let key = if *pending_counter <= 9 {
-                format!("{pending_counter}")
-            } else {
-                "•".into()
-            };
-            (
-                Some((
-                    format!("[{key}] "),
-                    Style::default()
-                        .fg(t.warn.into())
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Some((
-                    format!("  ⏸ waiting approval ({level})"),
-                    Style::default().fg(t.warn.into()),
-                )),
-            )
-        }
-        Some(ApprovalState::Denied { reason }) => (
-            None,
-            Some((
-                format!("  ⊘ denied: {reason}"),
-                Style::default().fg(t.error.into()),
-            )),
-        ),
-        _ => (None, None),
+    let pending_number = if matches!(&effective.approval, Some(ApprovalState::Pending { .. })) {
+        *pending_counter = pending_counter.saturating_add(1);
+        (*pending_counter <= 9).then_some(*pending_counter)
+    } else {
+        None
     };
+    let approval = approval_badge(
+        effective.approval.as_ref(),
+        pending_number,
+        permission_request_for_node(graph, effective)
+            .is_some_and(|request| !request.payload.group_ids.is_empty()),
+    );
     let label = base_label;
     let mut spans = vec![
         Span::styled(
@@ -3982,16 +4032,13 @@ fn append_workflow_node(
             Style::default().fg(t.subtle_fg.into()),
         ),
     ];
-    if let Some((text, style)) = approval_prefix {
-        spans.push(Span::styled(text, style));
-    }
     spans.push(Span::styled(
         format!("{kind_glyph} "),
         Style::default().fg(kind_color),
     ));
     spans.push(Span::raw(label));
-    if let Some((text, style)) = approval_suffix {
-        spans.push(Span::styled(text, style));
+    if let Some((text, style)) = approval {
+        spans.push(Span::styled(format!("  {text}"), style));
     }
     out.push(Line::from(spans));
     regions.push(NodeRegion {
@@ -4005,7 +4052,7 @@ fn append_workflow_node(
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
     if is_expanded {
-        append_expanded_details(out, effective, &child_prefix);
+        append_expanded_details(out, graph, effective, &child_prefix);
     }
     let child_count = effective.children.len();
     if child_count > 1
@@ -4015,6 +4062,7 @@ fn append_workflow_node(
         append_fanout_horizontal(
             out,
             regions,
+            graph,
             &effective.children,
             expanded_nodes,
             &child_prefix,
@@ -4032,6 +4080,7 @@ fn append_workflow_node(
         append_workflow_node(
             out,
             regions,
+            graph,
             child,
             expanded_nodes,
             &child_prefix,
@@ -4047,6 +4096,7 @@ fn append_workflow_node(
 
 fn append_expanded_details(
     out: &mut Vec<Line<'static>>,
+    graph: &atman_runtime::workflow::WorkflowGraph,
     node: &atman_runtime::workflow::WorkflowNode,
     prefix: &str,
 ) {
@@ -4081,6 +4131,7 @@ fn append_expanded_details(
     {
         sections.push(("diff", p.clone()));
     }
+    sections.extend(permission_detail_sections(graph, node));
     for (label, body) in sections {
         out.push(Line::from(vec![Span::styled(
             format!("{prefix}  ▪ {label}:"),
@@ -4884,7 +4935,7 @@ mod tests {
             status_glyph: status,
             kind_glyph: kind,
             label,
-            approval_hotkey: approval,
+            approval_badge: approval.map(|n| (format!("◷{n}"), Style::default())),
         }
     }
 
@@ -4934,13 +4985,50 @@ mod tests {
         );
         assert_eq!(rect.rows, 2);
         let top = plain_line(&out[0]);
-        assert!(top.contains("─[3]─"), "approval tag missing: {top:?}");
-        let idx_approval = top.find("─[3]─").unwrap();
+        assert!(top.contains("◷3"), "approval tag missing: {top:?}");
+        let idx_approval = top.find("◷3").unwrap();
         let idx_label = top.find("shell.exec").unwrap();
         assert!(
             idx_label < idx_approval,
             "approval must appear after label: {top:?}"
         );
+    }
+
+    #[test]
+    fn approval_badge_uses_compact_terminal_icons_and_group_marker() {
+        use atman_runtime::workflow::ApprovalState;
+
+        let approved =
+            approval_badge(Some(&ApprovalState::Approved), None, false).expect("approved badge");
+        assert_eq!(approved.0, "✓");
+
+        let denied = approval_badge(
+            Some(&ApprovalState::Denied {
+                reason: "rejected".into(),
+            }),
+            None,
+            true,
+        )
+        .expect("denied badge");
+        assert_eq!(denied.0, "⊘Ⓖ");
+    }
+
+    #[test]
+    fn approval_badge_is_not_a_standalone_button_shape() {
+        use atman_runtime::workflow::ApprovalState;
+
+        let badge = approval_badge(
+            Some(&ApprovalState::Pending {
+                level: "high".into(),
+                preview: None,
+            }),
+            Some(2),
+            false,
+        )
+        .expect("pending badge");
+        assert_eq!(badge.0, "◷2");
+        assert!(!badge.0.contains('['));
+        assert!(!badge.0.contains(']'));
     }
 
     #[test]

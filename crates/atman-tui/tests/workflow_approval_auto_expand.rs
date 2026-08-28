@@ -211,7 +211,7 @@ fn pending_approval_gets_sequential_hotkey_up_to_nine() {
     let rendered = render_boxed(root, 80);
     let joined = rendered.join("\n");
     for hotkey in 1..=3u8 {
-        let marker = format!("─[{hotkey}]─");
+        let marker = format!("◷{hotkey}");
         assert!(
             joined.contains(&marker),
             "expected hotkey {marker} for pending node, got:\n{joined}"
