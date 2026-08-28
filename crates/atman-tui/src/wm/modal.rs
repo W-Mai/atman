@@ -443,7 +443,7 @@ impl ModalManager {
                     .pending
                     .as_ref()
                     .map(|f| {
-                        crate::form_modal::estimate_height(&f.kind, &self.form_modal.multi_selected)
+                        crate::form_modal::estimate_height(&f.kind, outer_width.saturating_sub(4))
                     })
                     .unwrap_or(6);
                 let outer_height = (content_lines + 6).min(canvas.height.saturating_sub(4).max(6));

@@ -28,6 +28,11 @@ impl Tool for FormAsk {
              multi_select  { kind:\"multi_select\", prompt, options[], min?, max? }
              text          { kind:\"text\", prompt, placeholder?, multiline? }
              \
+             When you need several independent answers, call `form.ask` multiple times
+             consecutively in the same turn; the UI groups them and asks for one final
+             Yes/No confirmation before submitting the batch. Keep unrelated questions
+             as separate form calls rather than combining them into one text field.
+             \
              Returns a struct { kind, ... } where kind is one of \
              confirmed | selected | multi_selected | text_entered | cancelled.",
         )
@@ -85,9 +90,25 @@ impl Tool for FormAsk {
                 emitted_at: chrono::Utc::now(),
             };
             let rx = forms.request(pending);
-            let answer = rx.await.unwrap_or(FormAnswer::Cancelled);
+            let answer =
+                await_local_form(forms, form_id, rx, std::time::Duration::from_secs(300)).await;
             Ok(answer_to_value(&answer))
         })
+    }
+}
+
+async fn await_local_form(
+    forms: &crate::session::FormRegistry,
+    form_id: String,
+    rx: tokio::sync::oneshot::Receiver<FormAnswer>,
+    timeout: std::time::Duration,
+) -> FormAnswer {
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(_)) | Err(_) => {
+            forms.cancel(&form_id);
+            FormAnswer::Cancelled
+        }
     }
 }
 
@@ -239,6 +260,26 @@ mod tests {
 
     fn named(name: &str, v: Value) -> (String, Value) {
         (name.into(), v)
+    }
+
+    #[tokio::test]
+    async fn local_form_timeout_cancels_pending_entry() {
+        let forms = crate::session::FormRegistry::new();
+        let _subscriber = forms.subscribe();
+        let form_id = "timed-out".to_string();
+        let pending = PendingForm {
+            form_id: form_id.clone(),
+            run_id: crate::event::FlowRunId::now(),
+            tool_use_id: "tool".into(),
+            kind: FormKind::Confirm { prompt: "?".into() },
+            emitted_at: chrono::Utc::now(),
+        };
+        let rx = forms.request(pending);
+        assert_eq!(
+            await_local_form(&forms, form_id, rx, std::time::Duration::ZERO).await,
+            FormAnswer::Cancelled
+        );
+        assert!(forms.list_pending().is_empty());
     }
 
     #[test]

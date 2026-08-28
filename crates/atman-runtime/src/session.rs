@@ -343,6 +343,10 @@ impl FormRegistry {
         }
     }
 
+    pub fn cancel(&self, form_id: &str) -> bool {
+        self.submit(form_id, crate::form::FormAnswer::Cancelled)
+    }
+
     pub fn cancel_all(&self) {
         let drained: Vec<FormEntry> = {
             let mut entries = self.entries.lock().unwrap();
@@ -2880,6 +2884,19 @@ mod tests {
         let _rx = reg.request(mk_form("real", "?"));
         assert!(!reg.submit("ghost", crate::form::FormAnswer::Cancelled));
         assert_eq!(reg.list_pending().len(), 1);
+    }
+
+    #[test]
+    fn form_registry_cancel_removes_one_pending_form() {
+        let reg = std::sync::Arc::new(FormRegistry::new());
+        let _sub = reg.subscribe();
+        let rx = reg.request(mk_form("cancel", "?"));
+        assert!(reg.cancel("cancel"));
+        assert_eq!(
+            rx.blocking_recv().unwrap(),
+            crate::form::FormAnswer::Cancelled
+        );
+        assert!(reg.list_pending().is_empty());
     }
 
     #[test]

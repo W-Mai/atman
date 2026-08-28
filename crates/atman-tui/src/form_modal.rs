@@ -41,6 +41,7 @@ pub struct FormModal {
     pub confirm_focus: usize,
     pub cached_forms: std::collections::HashMap<String, PendingForm>,
     pub last_input_rect: Option<Rect>,
+    pub scroll: u16,
 }
 
 impl FormModal {
@@ -74,6 +75,7 @@ impl FormModal {
         self.text_editor = InputEditor::default();
         self.cursor = 0;
         self.error = None;
+        self.scroll = 0;
         for id in pending_ids {
             if !self.batch_ids.contains(id) {
                 let confirm_idx = self
@@ -114,7 +116,12 @@ impl FormModal {
     }
 
     pub fn try_show_confirm(&mut self, registry_empty: bool) -> bool {
-        if self.batch_ids.is_empty() {
+        let real_count = self
+            .batch_ids
+            .iter()
+            .filter(|id| id.as_str() != "__batch_confirm")
+            .count();
+        if real_count < 2 {
             return false;
         }
         if !registry_empty {
@@ -271,8 +278,11 @@ impl FormModal {
         };
 
         if is_confirm_form {
+            if self.confirm_focus == 1 {
+                return self.confirm_no();
+            }
             self.mark_current(BatchStatus::Answered);
-            self.end_batch();
+            self.close();
             return SubmitOutcome::BatchConfirmed;
         }
 
@@ -294,7 +304,7 @@ impl FormModal {
             return SubmitOutcome::None;
         }
         self.mark_current(BatchStatus::Cancelled);
-        self.end_batch();
+        self.close();
         SubmitOutcome::BatchCancelled
     }
 
@@ -309,7 +319,7 @@ impl FormModal {
         let is_confirm_form = self.is_batch_confirm();
         self.mark_current(BatchStatus::Cancelled);
         if is_confirm_form {
-            self.end_batch();
+            self.close();
             return SubmitOutcome::BatchCancelled;
         }
         let form_id = pending.form_id.clone();
@@ -591,12 +601,29 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                     .add_modifier(Modifier::BOLD),
             )));
         }
+        let visible_height = inner.height;
+        let content_height = lines
+            .iter()
+            .map(|line| {
+                if inner.width == 0 {
+                    1
+                } else {
+                    (line.width().max(1) as u16).div_ceil(inner.width)
+                }
+            })
+            .sum::<u16>();
+        let max_scroll = content_height.saturating_sub(visible_height);
+        self.scroll = self.scroll.min(max_scroll);
         let para = Paragraph::new(lines)
             .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll, 0));
         f.render_widget(para, inner);
         if let Some((cx, cy)) = text_cursor {
-            f.set_cursor_position((cx, cy));
+            let cy = cy.saturating_sub(self.scroll);
+            if cy >= inner.y && cy < inner.y + inner.height {
+                f.set_cursor_position((cx, cy));
+            }
         }
     }
 
@@ -642,6 +669,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                                 });
                             }
                         }
+                        self.end_batch();
                     }
                     SubmitOutcome::BatchCancelled => {
                         for id in &self.batch_ids {
@@ -655,6 +683,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                                 });
                             }
                         }
+                        self.end_batch();
                     }
                     SubmitOutcome::None => {}
                 }
@@ -702,6 +731,12 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             }
             KeyAction::CursorRight if is_confirm => {
                 self.move_cursor(1);
+            }
+            KeyAction::ScrollUp | KeyAction::PageUp => {
+                self.scroll = self.scroll.saturating_sub(3);
+            }
+            KeyAction::ScrollDown | KeyAction::PageDown => {
+                self.scroll = self.scroll.saturating_add(3);
             }
             KeyAction::Backspace
             | KeyAction::Delete
@@ -797,18 +832,30 @@ fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
     spans
 }
 
-pub fn estimate_height(kind: &FormKind, _multi: &[bool]) -> u16 {
+pub fn estimate_height(kind: &FormKind, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let wrapped = |text: &str| crate::width::width(text).max(1).div_ceil(width) as u16;
+    let prompt = wrapped(kind.prompt());
     match kind {
-        FormKind::Confirm { .. } => 3,
-        FormKind::SingleSelect { options, .. } => options.len().min(12) as u16 * 2 + 1,
-        FormKind::MultiSelect { options, .. } => options.len().min(12) as u16 * 2 + 4,
-        FormKind::Text { multiline, .. } => {
-            if *multiline {
-                6
-            } else {
-                3
-            }
+        FormKind::Confirm { .. } => prompt + 2,
+        FormKind::SingleSelect { options, .. } => {
+            prompt
+                + 1
+                + options
+                    .iter()
+                    .map(|o| wrapped(&format!(" ▶ {o} ")) + 1)
+                    .sum::<u16>()
         }
+        FormKind::MultiSelect { options, .. } => {
+            prompt
+                + 1
+                + options
+                    .iter()
+                    .map(|o| wrapped(&format!(" ▶ [ ] {o} ")) + 1)
+                    .sum::<u16>()
+                + 2
+        }
+        FormKind::Text { multiline, .. } => prompt + if *multiline { 4 } else { 2 },
     }
 }
 
@@ -826,6 +873,7 @@ fn hint_for(kind: &FormKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wm::modal::ModalOverlay;
     use atman_runtime::event::FlowRunId;
 
     fn mk(kind: FormKind) -> PendingForm {
@@ -872,6 +920,106 @@ mod tests {
         }));
         let outcome = m.submit();
         assert!(matches!(outcome, SubmitOutcome::Single { .. }));
+    }
+
+    #[test]
+    fn completed_batch_requires_yes_and_no_cancels() {
+        let mut m = FormModal::default();
+        let first = mk(FormKind::SingleSelect {
+            prompt: "pick".into(),
+            options: vec!["one".into()],
+        });
+        m.attach(first, &["f".into(), "g".into()]);
+        m.batch_answers[0] = Some(FormAnswer::Selected {
+            index: 0,
+            label: "one".into(),
+        });
+        m.batch_statuses[0] = BatchStatus::Answered;
+        m.batch_statuses[1] = BatchStatus::Answered;
+        assert!(m.try_show_confirm(true));
+        m.confirm_focus = 1;
+        assert!(matches!(m.submit(), SubmitOutcome::BatchCancelled));
+        assert!(!m.open);
+        assert_eq!(m.batch_ids, vec!["f", "g", "__batch_confirm"]);
+        assert!(m.batch_answers[0].is_some());
+    }
+
+    #[test]
+    fn completed_batch_yes_commits_answers_outcome() {
+        let mut m = FormModal::default();
+        m.attach(
+            mk(FormKind::SingleSelect {
+                prompt: "pick".into(),
+                options: vec!["one".into()],
+            }),
+            &["f".into(), "g".into()],
+        );
+        m.batch_answers[0] = Some(FormAnswer::Selected {
+            index: 0,
+            label: "one".into(),
+        });
+        m.batch_statuses[0] = BatchStatus::Answered;
+        m.batch_statuses[1] = BatchStatus::Answered;
+        assert!(m.try_show_confirm(true));
+        assert!(matches!(m.submit(), SubmitOutcome::BatchConfirmed));
+        assert!(!m.open);
+        assert_eq!(m.batch_ids, vec!["f", "g", "__batch_confirm"]);
+        assert!(m.batch_answers[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn batch_no_and_escape_dispatch_cancellations_before_cleanup() {
+        for action in [
+            crate::keys::KeyAction::Char('n'),
+            crate::keys::KeyAction::Escape,
+        ] {
+            let mut m = FormModal::default();
+            m.attach(
+                mk(FormKind::SingleSelect {
+                    prompt: "pick".into(),
+                    options: vec!["one".into()],
+                }),
+                &["f".into(), "g".into()],
+            );
+            m.batch_answers[0] = Some(FormAnswer::Selected {
+                index: 0,
+                label: "one".into(),
+            });
+            m.batch_statuses[0] = BatchStatus::Answered;
+            m.batch_statuses[1] = BatchStatus::Answered;
+            assert!(m.try_show_confirm(true));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = crate::app::AppState::default();
+            m.handle_key(&action, &mut app, Some(&tx));
+            drop(tx);
+            let mut cancelled = Vec::new();
+            while let Some(crate::TuiControl::FormSubmit { form_id, answer }) = rx.recv().await {
+                assert_eq!(answer, FormAnswer::Cancelled);
+                cancelled.push(form_id);
+            }
+            assert_eq!(cancelled, vec!["f", "g"]);
+            assert!(m.batch_ids.is_empty());
+            assert!(m.batch_answers.is_empty());
+        }
+    }
+
+    #[test]
+    fn page_actions_change_scroll_position() {
+        let mut m = FormModal::default();
+        m.attach_test(mk(FormKind::Text {
+            prompt: "long prompt".into(),
+            placeholder: None,
+            multiline: true,
+        }));
+        assert_eq!(m.scroll, 0);
+        let mut app = crate::app::AppState::default();
+        assert!(matches!(
+            m.handle_key(&crate::keys::KeyAction::PageDown, &mut app, None),
+            Some(ModalAction::Consumed)
+        ));
+        assert_eq!(m.scroll, 3);
+        m.handle_key(&crate::keys::KeyAction::ScrollUp, &mut app, None);
+        assert_eq!(m.scroll, 0);
     }
 
     #[test]
