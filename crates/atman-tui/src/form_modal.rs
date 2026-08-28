@@ -82,7 +82,19 @@ impl FormModal {
 
     fn reset_question_state(&mut self) {
         self.multi_selected = match self.current_kind() {
-            Some(FormKind::MultiSelect { options, .. }) => vec![false; options.len()],
+            Some(FormKind::MultiSelect { options, .. }) => {
+                let mut selected = vec![false; options.len()];
+                if let Some(Some(FormAnswer::MultiSelected { indices, .. })) =
+                    self.draft_answers.get(self.current_index)
+                {
+                    for &index in indices {
+                        if let Some(value) = selected.get_mut(index) {
+                            *value = true;
+                        }
+                    }
+                }
+                selected
+            }
             _ => Vec::new(),
         };
         self.text_editor = InputEditor::default();
@@ -95,7 +107,9 @@ impl FormModal {
 
     fn answer_current(&self) -> Option<FormAnswer> {
         match self.current_kind()? {
-            FormKind::Confirm { .. } => Some(FormAnswer::Confirmed { value: true }),
+            FormKind::Confirm { .. } => Some(FormAnswer::Confirmed {
+                value: self.confirm_focus == 0,
+            }),
             FormKind::SingleSelect { options, .. } => {
                 options
                     .get(self.confirm_focus)
@@ -210,6 +224,8 @@ impl FormModal {
             }
             self.phase = FormPhase::FinalConfirm;
             self.confirm_focus = 0;
+            self.last_input_rect = None;
+            self.scroll = 0;
             return SubmitOutcome::None;
         }
         if self.confirm_focus == 1 {
@@ -435,6 +451,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 self.phase = FormPhase::Editing;
                 self.current_index = self.questions().len().saturating_sub(1);
                 self.reset_question_state();
+                self.last_input_rect = None;
                 self.scroll = 0;
                 None
             }
@@ -622,6 +639,80 @@ mod tests {
         );
     }
     #[test]
+    fn final_confirmation_keys_control_focus_and_submission() {
+        let mut m = FormModal::default();
+        m.attach_test(mk_questions(vec![FormKind::Text {
+            prompt: "last question".into(),
+            placeholder: None,
+            multiline: false,
+        }]));
+        m.submit();
+        assert_eq!(m.phase, FormPhase::FinalConfirm);
+        m.handle_key(
+            &KeyAction::CursorRight,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        assert_eq!(m.confirm_focus, 1);
+        let out = m.handle_key(
+            &KeyAction::Submit,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        assert!(matches!(out, Some(ModalAction::Consumed)));
+        assert!(!m.open);
+
+        let mut m = FormModal::default();
+        m.attach_test(mk_questions(vec![FormKind::Text {
+            prompt: "last question".into(),
+            placeholder: None,
+            multiline: false,
+        }]));
+        m.submit();
+        m.handle_key(
+            &KeyAction::CursorLeft,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        assert_eq!(m.confirm_focus, 0);
+        assert!(matches!(
+            m.submit(),
+            SubmitOutcome::Submit {
+                submission: FormSubmission::Submitted { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn backtab_from_final_confirmation_returns_to_last_question() {
+        let mut m = FormModal::default();
+        m.attach_test(mk_questions(vec![
+            FormKind::Text {
+                prompt: "first".into(),
+                placeholder: None,
+                multiline: false,
+            },
+            FormKind::Text {
+                prompt: "last".into(),
+                placeholder: None,
+                multiline: false,
+            },
+        ]));
+        m.submit();
+        m.submit();
+        assert_eq!(m.phase, FormPhase::FinalConfirm);
+        m.handle_key(
+            &KeyAction::BackTab,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        assert_eq!(m.phase, FormPhase::Editing);
+        assert_eq!(m.current_index, 1);
+        assert_eq!(m.current_kind().unwrap().prompt(), "last");
+    }
+
+    #[test]
     fn final_no_and_escape_reject_one_request() {
         for action in [KeyAction::Char('n'), KeyAction::Escape] {
             let mut m = FormModal::default();
@@ -639,6 +730,66 @@ mod tests {
                     ..
                 }
             ));
+        }
+    }
+
+    #[test]
+    fn final_confirmation_backtab_returns_to_last_question() {
+        let mut m = FormModal::default();
+        m.attach_test(mk_questions(vec![
+            FormKind::Confirm {
+                prompt: "first".into(),
+            },
+            FormKind::Confirm {
+                prompt: "last".into(),
+            },
+        ]));
+        m.submit();
+        m.submit();
+        assert_eq!(m.phase, FormPhase::FinalConfirm);
+        assert_eq!(m.current_index, 1);
+
+        m.handle_key(
+            &KeyAction::BackTab,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        assert_eq!(m.phase, FormPhase::Editing);
+        assert_eq!(m.current_index, 1);
+        assert_eq!(m.current_kind().unwrap().prompt(), "last");
+    }
+
+    #[test]
+    fn final_confirmation_arrows_choose_submission() {
+        for (arrow, expected) in [
+            (
+                KeyAction::CursorLeft,
+                FormSubmission::Submitted {
+                    answers: vec![
+                        FormAnswer::Confirmed { value: true },
+                        FormAnswer::Confirmed { value: true },
+                    ],
+                },
+            ),
+            (KeyAction::CursorRight, FormSubmission::Rejected),
+        ] {
+            let mut m = FormModal::default();
+            m.attach_test(mk_questions(vec![
+                FormKind::Confirm {
+                    prompt: "first".into(),
+                },
+                FormKind::Confirm {
+                    prompt: "last".into(),
+                },
+            ]));
+            m.submit();
+            m.submit();
+            let mut app = crate::app::AppState::default();
+            m.handle_key(&arrow, &mut app, None);
+            let out = m.submit();
+            assert!(
+                matches!(out, SubmitOutcome::Submit { submission, .. } if submission == expected)
+            );
         }
     }
 }
