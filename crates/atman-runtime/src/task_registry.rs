@@ -344,11 +344,6 @@ impl TaskRegistry {
         self.kill_from(id, None, false)
     }
 
-    /// Compatibility wrapper for callers that only need a boolean result.
-    pub fn kill(&self, id: &TaskId) -> bool {
-        matches!(self.kill_from_operator(id), KillOutcome::Killed { .. })
-    }
-
     pub fn kill_from(
         &self,
         id: &TaskId,
@@ -531,7 +526,12 @@ mod tests {
             "s".into(),
             tok.clone(),
         );
-        assert!(reg.kill(&id));
+        assert_eq!(
+            reg.kill_from_operator(&id),
+            KillOutcome::Killed {
+                termination: TaskTermination::Killed
+            }
+        );
         assert!(tok.is_cancelled());
     }
 
@@ -642,7 +642,7 @@ mod tests {
             cancel(),
         );
         reg.finish(&id, TaskStatus::Ok);
-        assert!(!reg.kill(&id));
+        assert_eq!(reg.kill_from_operator(&id), KillOutcome::NotRunning);
     }
 
     #[test]
