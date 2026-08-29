@@ -8,7 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
-- **Provider-aware reasoning controls** — model settings, DSL calls, TUI sessions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
+- **Provider-aware reasoning controls** — model settings, DSL calls, TUI submissions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
 - **Multimodal image input** — OpenAI Chat Completions, Codex Responses, and Anthropic Messages accept persistent image attachments from TUI clipboard paste, CLI paths, daemon requests, and DSL messages.
 - **TUI generation controls** — the input border displays the effective reasoning depth, while pending images use a dedicated attachment bar and removable `[image N]` editor references.
 - **Compatible-provider reasoning format** — OpenAI-compatible providers can select `thinking-toggle` or `reasoning-effort` independently of their endpoint type.
@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Invocation-scoped reasoning effort** — TUI submissions, CLI runs, and daemon requests capture selections per invocation; an LLM helper consumes the value only when it explicitly passes `effort: env("effort")`, while non-opt-in helpers retain their model defaults.
 - **TUI double Ctrl+C exit** — closing a blank TUI releases its submission relay so the REPL exits, while quit confirmation remains scoped to the input editor.
 - **Reasoning profile consistency** — TUI controls, model switches, request validation, and provider serializers share the same wire-profile rules; Anthropic auto reasoning uses adaptive thinking and the effort badge uses the active input-border color.
 - **Visible LLM failures** — request errors and retry state update a keyed inline session note even when content streaming and message history are disabled.

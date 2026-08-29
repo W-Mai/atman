@@ -142,6 +142,7 @@ pub struct ToolCtx {
     pub trust: Option<crate::trust::TrustConfig>,
     pub safety: Option<crate::safety::SafetyConfig>,
     pub current_model: Option<String>,
+    pub(crate) invocation_env: crate::invocation_env::InvocationEnv,
     pub watch_rules: Option<crate::streaming::WatchRules>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
@@ -169,6 +170,14 @@ impl ToolCtx {
 
     pub fn with_history_segment(mut self, segment: HistorySegment) -> Self {
         self.history_segment = segment;
+        self
+    }
+
+    pub(crate) fn with_invocation_env(
+        mut self,
+        invocation_env: crate::invocation_env::InvocationEnv,
+    ) -> Self {
+        self.invocation_env = invocation_env;
         self
     }
 
@@ -608,6 +617,11 @@ impl ToolRegistry {
     }
 
     pub fn register(&self, tool: std::sync::Arc<dyn Tool>) {
+        assert!(
+            !crate::eval::is_evaluator_intrinsic(tool.name()),
+            "tool name `{}` is reserved for an evaluator intrinsic",
+            tool.name()
+        );
         self.tools
             .write()
             .unwrap()
@@ -647,6 +661,28 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ReservedEnvTool;
+
+    impl Tool for ReservedEnvTool {
+        fn name(&self) -> &str {
+            "env"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { Ok(Value::Unit) })
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "tool name `env` is reserved for an evaluator intrinsic")]
+    fn evaluator_intrinsic_names_cannot_be_registered_as_tools() {
+        ToolRegistry::new().register(std::sync::Arc::new(ReservedEnvTool));
+    }
 
     #[test]
     fn approval_level_default_maps_from_tier() {

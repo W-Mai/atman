@@ -254,11 +254,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let requested_reasoning = args
         .reasoning
         .clone()
-        .or_else(|| {
-            ctx.session_runtime
-                .as_ref()
-                .and_then(|session| session.reasoning_override())
-        })
         .unwrap_or_else(|| model_info.reasoning.clone());
     let mut reasoning =
         match crate::model_registry::resolve_reasoning_for_model(&model, &requested_reasoning) {

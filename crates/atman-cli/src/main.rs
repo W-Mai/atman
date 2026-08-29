@@ -681,6 +681,15 @@ async fn cmd_run(
     };
 
     let args = parse_args(&raw_args)?;
+    let invocation_env = match reasoning {
+        Some(value) => {
+            let selection: atman_runtime::provider::ReasoningSelection = value
+                .parse()
+                .map_err(|error: String| anyhow::anyhow!("invalid --reasoning value: {error}"))?;
+            atman_runtime::InvocationEnv::single("effort", Value::Str(selection.to_string()))
+        }
+        None => atman_runtime::InvocationEnv::default(),
+    };
 
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let session = std::sync::Arc::new(if ephemeral {
@@ -696,14 +705,6 @@ async fn cmd_run(
         )
         .with_context(|| format!("opening session under {}", root.display()))?
     });
-    if let Some(reasoning) = reasoning {
-        session.set_reasoning_override(Some(
-            reasoning
-                .parse()
-                .map_err(|error: String| anyhow::anyhow!("invalid --reasoning value: {error}"))?,
-        ));
-    }
-
     if let Some(path) = session.events_path() {
         atman_runtime::notify!(
             info,
@@ -777,12 +778,13 @@ async fn cmd_run(
         session.begin_turn(user_msg);
     }
     let outcome = executor
-        .run_in_turn(
+        .run_in_turn_with_env(
             &parsed,
             &flow_name,
             args,
             Some(turn_id),
             Some(session.clone()),
+            invocation_env,
         )
         .await;
     session.end_turn();
@@ -1235,8 +1237,17 @@ async fn route_input_in_turn(
     executor: &Executor,
     session: std::sync::Arc<Session>,
     turn_id: atman_runtime::event::TurnId,
+    invocation_env: atman_runtime::InvocationEnv,
 ) -> RouteOutcome {
-    match run_slash_command_in_turn(&route.slash_call(), executor, session, turn_id).await {
+    match run_slash_command_in_turn(
+        &route.slash_call(),
+        executor,
+        session,
+        turn_id,
+        invocation_env,
+    )
+    .await
+    {
         Ok(v) => RouteOutcome::Handled(v),
         Err(e) => RouteOutcome::HandledErr(e),
     }
@@ -1282,12 +1293,20 @@ async fn run_slash_command_in_turn(
     executor: &Executor,
     session: std::sync::Arc<Session>,
     turn_id: atman_runtime::event::TurnId,
+    invocation_env: atman_runtime::InvocationEnv,
 ) -> Result<Value> {
     let (parsed, flow_name, kv, source_dir) = resolve_slash_command(line)?;
     let mut executor = executor.clone();
     executor.source_dir = source_dir;
     executor
-        .run_in_turn(&parsed, &flow_name, kv, Some(turn_id), Some(session))
+        .run_in_turn_with_env(
+            &parsed,
+            &flow_name,
+            kv,
+            Some(turn_id),
+            Some(session),
+            invocation_env,
+        )
         .await
         .map_err(Into::into)
 }
@@ -2172,34 +2191,35 @@ async fn cmd_repl_once(
                                 )),
                             );
                         } else {
-                            if let Err(e) = atman_runtime::config_hub::ConfigHub::global()
+                            match atman_runtime::config_hub::ConfigHub::global()
                                 .and_then(|hub| hub.update_alias(Some("smart"), "smart", &model))
                             {
-                                eprintln!("failed to switch model: {e}");
-                            }
-                            load_model_config_from_disk();
-                            let cleared_reasoning =
-                                session_for_ctrl.set_current_model(model.clone());
-                            let _ = session_for_ctrl.stream_tx().send(
-                                atman_runtime::stream::StreamFrame::Note(format!(
-                                    "model switched: smart → {model}"
-                                )),
-                            );
-                            if let Some((selection, error)) = cleared_reasoning {
-                                let _ = session_for_ctrl.stream_tx().send(
-                                    atman_runtime::stream::StreamFrame::Notification(
-                                        atman_runtime::stream::NotificationFrame {
-                                            level: atman_runtime::notify::NotifyLevel::Warn,
-                                            location: atman_runtime::notify::NotifyLocation::Inline,
-                                            lifecycle:
-                                                atman_runtime::notify::NotifyLifecycle::Persistent,
-                                            stack: atman_runtime::notify::NotifyStack::Append,
-                                            message: format!(
-                                                "session reasoning `{selection}` cleared for `{model}`: {error}"
-                                            ),
-                                        },
-                                    ),
-                                );
+                                Ok(()) => {
+                                    load_model_config_from_disk();
+                                    session_for_ctrl.set_current_model(model.clone());
+                                    let _ = session_for_ctrl.stream_tx().send(
+                                        atman_runtime::stream::StreamFrame::Note(format!(
+                                            "model switched: smart → {model}"
+                                        )),
+                                    );
+                                }
+                                Err(error) => {
+                                    let _ = session_for_ctrl.stream_tx().send(
+                                        atman_runtime::stream::StreamFrame::Notification(
+                                            atman_runtime::stream::NotificationFrame {
+                                                level: atman_runtime::notify::NotifyLevel::Error,
+                                                location:
+                                                    atman_runtime::notify::NotifyLocation::Inline,
+                                                lifecycle:
+                                                    atman_runtime::notify::NotifyLifecycle::Persistent,
+                                                stack: atman_runtime::notify::NotifyStack::Append,
+                                                message: format!(
+                                                    "failed to switch smart model to `{model}`: {error}"
+                                                ),
+                                            },
+                                        ),
+                                    );
+                                }
                             }
                         }
                     }
@@ -2614,6 +2634,7 @@ async fn cmd_repl_once(
             classifier.as_ref(),
             &text,
             line.images.take(),
+            line.invocation_env.clone(),
             atman_runtime::message::MessageOrigin::User,
             kind,
             &mut input_rx,
@@ -2643,6 +2664,7 @@ async fn cmd_repl_once(
                                     classifier.as_ref(),
                                     &event_text,
                                     None,
+                                    atman_runtime::InvocationEnv::default(),
                                     atman_runtime::message::MessageOrigin::Watcher,
                                     TurnKind::Bare(route),
                                     &mut input_rx,
@@ -2942,17 +2964,29 @@ type ExternalPrinter = Box<dyn rustyline::ExternalPrinter + Send>;
 struct ReplInput {
     text: String,
     images: Option<Vec<atman_runtime::message::ImageSource>>,
+    invocation_env: atman_runtime::InvocationEnv,
 }
 
 impl ReplInput {
     fn text(text: String) -> Self {
-        Self { text, images: None }
+        Self {
+            text,
+            images: None,
+            invocation_env: atman_runtime::InvocationEnv::default(),
+        }
     }
 
     fn from_tui(submission: atman_tui::TuiSubmission) -> Self {
+        let invocation_env = submission
+            .reasoning
+            .map(|selection| {
+                atman_runtime::InvocationEnv::single("effort", Value::Str(selection.to_string()))
+            })
+            .unwrap_or_default();
         Self {
             text: submission.text,
             images: Some(submission.images),
+            invocation_env,
         }
     }
 
@@ -3175,6 +3209,7 @@ async fn run_turn_with_interjection(
     >,
     raw_line: &str,
     submitted_images: Option<Vec<atman_runtime::message::ImageSource>>,
+    invocation_env: atman_runtime::InvocationEnv,
     origin: atman_runtime::message::MessageOrigin,
     kind: TurnKind,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
@@ -3211,10 +3246,19 @@ async fn run_turn_with_interjection(
     let flow_fut = async {
         match kind {
             TurnKind::Slash => {
-                run_slash_command_in_turn(&text, executor, session.clone(), turn_id).await
+                run_slash_command_in_turn(&text, executor, session.clone(), turn_id, invocation_env)
+                    .await
             }
             TurnKind::Bare(route) => {
-                match route_input_in_turn(&route, executor, session.clone(), turn_id).await {
+                match route_input_in_turn(
+                    &route,
+                    executor,
+                    session.clone(),
+                    turn_id,
+                    invocation_env,
+                )
+                .await
+                {
                     RouteOutcome::Handled(v) => Ok(v),
                     RouteOutcome::HandledErr(e) => Err(e),
                 }
@@ -7115,6 +7159,39 @@ mod tests {
         assert!(received.is_none());
     }
 
+    #[tokio::test]
+    async fn consecutive_tui_submissions_keep_invocation_effort_isolated() {
+        let session = std::sync::Arc::new(Session::open_ephemeral());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tui_submit_tx = spawn_tui_submission_bridge(input_tx, session);
+
+        tui_submit_tx
+            .send(atman_tui::TuiSubmission {
+                text: "first".into(),
+                images: Vec::new(),
+                reasoning: Some(atman_runtime::provider::ReasoningSelection::Effort {
+                    effort: atman_runtime::provider::ReasoningEffort::High,
+                    execution_mode: None,
+                }),
+            })
+            .unwrap();
+        tui_submit_tx
+            .send(atman_tui::TuiSubmission {
+                text: "second".into(),
+                images: Vec::new(),
+                reasoning: None,
+            })
+            .unwrap();
+
+        let first = input_rx.recv().await.unwrap();
+        let second = input_rx.recv().await.unwrap();
+        assert!(matches!(
+            first.invocation_env.get("effort"),
+            Some(Value::Str(value)) if value == "high"
+        ));
+        assert!(second.invocation_env.get("effort").is_none());
+    }
+
     #[test]
     fn submitted_image_snapshot_does_not_drain_new_pending_images() {
         let session = Session::open_ephemeral();
@@ -7151,6 +7228,7 @@ mod tests {
         let mut input = ReplInput {
             text: "/agent inspect".into(),
             images: Some(vec![first.clone()]),
+            invocation_env: atman_runtime::InvocationEnv::default(),
         };
         session
             .queue_image_bytes(&[PNG_BYTES, &[0x01]].concat(), Some("second.png"))

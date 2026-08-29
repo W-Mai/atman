@@ -487,6 +487,16 @@ mod tests {
     use super::*;
     use crate::keys::KeyAction;
 
+    struct ModelConfigReset;
+
+    impl Drop for ModelConfigReset {
+        fn drop(&mut self) {
+            atman_runtime::model_registry::set_model_config(
+                atman_runtime::model_registry::ModelConfig::default(),
+            );
+        }
+    }
+
     #[test]
     fn provider_select_skip() {
         let mut state = OnboardingState::default();
@@ -514,6 +524,13 @@ mod tests {
 
     #[test]
     fn model_select_empty_list_enter() {
+        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap();
+        let _reset = ModelConfigReset;
+        atman_runtime::model_registry::set_model_config(
+            atman_runtime::model_registry::ModelConfig::default(),
+        );
         let mut state = OnboardingState {
             step: OnboardingStep::ModelSelect,
             ..Default::default()
@@ -533,6 +550,10 @@ mod tests {
 
     #[test]
     fn try_advance_to_model_select() {
+        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap();
+        let _reset = ModelConfigReset;
         let mut cfg = atman_runtime::model_registry::ModelConfig::default();
         cfg.providers.insert(
             "test-provider".into(),

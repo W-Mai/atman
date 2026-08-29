@@ -1018,25 +1018,19 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::CycleReasoning => {
-            let Some(session) = app.session.clone() else {
-                return;
-            };
-            let choices = reasoning_choices(&session);
-            let current = session.reasoning_override();
-            let index = choices
-                .iter()
-                .position(|choice| *choice == current)
-                .unwrap_or(0);
-            let next = choices[(index + 1) % choices.len()].clone();
-            session.set_reasoning_override(next.clone());
-            app.push_note(
-                format!(
-                    "session reasoning: {}",
-                    next.map(|selection| selection.to_string())
-                        .unwrap_or_else(|| "model default".into())
-                ),
-                app::NoteLevel::Info,
-            );
+            if input_has_focus(app) {
+                app.reconcile_input_reasoning();
+                app.cycle_input_reasoning();
+                let reasoning = app
+                    .input_reasoning
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "model default".into());
+                app.push_note(
+                    format!("input reasoning: {reasoning}"),
+                    app::NoteLevel::Info,
+                );
+            }
             *interrupt_prompt = None;
         }
         KeyAction::Char(c) => {
@@ -1077,6 +1071,7 @@ pub(crate) fn handle_key(
                 editor.reconcile_images(&session.pending_images());
             }
             if let Some(editor_submission) = editor.submit_with_images() {
+                app.reconcile_input_reasoning();
                 let line = editor_submission.text;
                 if !app.has_running_workflow() {
                     app.push_user_turn(line.clone());
@@ -1090,7 +1085,11 @@ pub(crate) fn handle_key(
                             .map(|session| session.take_pending_images())
                             .unwrap_or_default()
                     };
-                    let submission = crate::TuiSubmission { text: line, images };
+                    let submission = crate::TuiSubmission {
+                        text: line,
+                        images,
+                        reasoning: app.input_reasoning.clone(),
+                    };
                     if let Err(error) = tx.send(submission)
                         && let Some(session) = app.session.clone()
                     {
@@ -1349,21 +1348,6 @@ pub(crate) fn input_has_focus(app: &UiState) -> bool {
         && app.modal_notification.is_none()
 }
 
-fn reasoning_choices(
-    session: &atman_runtime::Session,
-) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
-    atman_runtime::model_registry::reasoning_selections_for_model(&session.last_model())
-        .into_iter()
-        .map(|selection| {
-            (!matches!(
-                selection,
-                atman_runtime::provider::ReasoningSelection::ProviderDefault
-            ))
-            .then_some(selection)
-        })
-        .collect()
-}
-
 // The outgoing tui exits fast; the incoming tui plays the fade+slide
 // intro on top of the freshly rendered new session so content appears
 // first, then the banner/sessions fade out and input docks bottom.
@@ -1461,6 +1445,39 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_cycle_is_inert_while_floating_panel_has_focus() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Auto {
+            execution_mode: None,
+        });
+        state.wm.open(
+            "cheatsheet",
+            crate::wm::ContentKey::Cheatsheet,
+            crate::wm::WindowContent::Cheatsheet,
+            "Keybindings",
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::CycleReasoning,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            state.app.input_reasoning,
+            Some(atman_runtime::provider::ReasoningSelection::Auto {
+                execution_mode: None,
+            })
+        );
+    }
+
+    #[test]
     fn modal_state_is_not_input_focus() {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
         state.wm.modals.theme_picker_open = true;
@@ -1508,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_captures_the_current_attachment_snapshot() {
+    fn submit_captures_the_current_composer_snapshot() {
         let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
         session
             .queue_image_bytes(PNG_BYTES, Some("first.png"))
@@ -1516,6 +1533,7 @@ mod tests {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
         state.app.session = Some(session.clone());
         state.app.attach_count = 1;
+        state.app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
         let mut editor = InputEditor::default();
         editor.insert_str("/agent inspect");
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1536,6 +1554,14 @@ mod tests {
         let submission = rx.try_recv().unwrap();
         assert_eq!(submission.text, "/agent inspect");
         assert_eq!(submission.images.len(), 1);
+        assert_eq!(
+            submission.reasoning,
+            Some(atman_runtime::provider::ReasoningSelection::Disabled)
+        );
+        assert_eq!(
+            state.app.input_reasoning,
+            Some(atman_runtime::provider::ReasoningSelection::Disabled)
+        );
         assert_eq!(session.pending_image_count(), 1);
     }
 

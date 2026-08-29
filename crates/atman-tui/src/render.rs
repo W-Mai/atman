@@ -46,21 +46,6 @@ pub(crate) fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> 
         && row < rect.y.saturating_add(rect.height)
 }
 
-fn effective_reasoning_badge(app: &crate::app::AppState) -> Option<String> {
-    let session = app.session.as_ref()?;
-    let model = session.last_model();
-    let override_selection = session.reasoning_override();
-    match atman_runtime::model_registry::effective_reasoning_for_model(
-        &model,
-        override_selection.as_ref(),
-    ) {
-        Ok(selection) => selection.map(|selection| selection.to_string()),
-        Err(_) => override_selection
-            .or_else(|| Some(atman_runtime::model_registry::model_info(&model).reasoning))
-            .map(|selection| format!("{selection} !")),
-    }
-}
-
 // Startup input eases from the overlay's centered slot to the normal
 // bottom position. 300 ms sits inside the 200–400 ms band that feels
 // like a real transition rather than a snap or a lag.
@@ -598,7 +583,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     } else {
         target_border
     };
-    let reasoning_badge = effective_reasoning_badge(app);
+    let reasoning_badge = app.effective_input_reasoning_badge();
     f.render_widget(
         input_paragraph(
             editor.buf(),

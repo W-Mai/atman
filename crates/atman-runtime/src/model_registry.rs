@@ -577,15 +577,18 @@ pub fn reasoning_selections_for_model(model: &str) -> Vec<ReasoningSelection> {
 
 pub fn effective_reasoning_for_model(
     model: &str,
-    session_override: Option<&ReasoningSelection>,
+    input_selection: Option<&ReasoningSelection>,
 ) -> Result<Option<ReasoningSelection>, String> {
     let info = model_info(model);
-    let requested = session_override.unwrap_or(&info.reasoning);
-    let should_display = session_override.is_some()
+    let requested = input_selection.unwrap_or(&info.reasoning);
+    let provider_supports_reasoning =
+        reasoning_wire_profile_for_model(model) != ReasoningWireProfile::Unknown;
+    let should_display = input_selection.is_some()
         || !matches!(&info.reasoning, ReasoningSelection::ProviderDefault)
         || !info.capabilities.reasoning_efforts.is_empty()
-        || info.capabilities.default_reasoning_effort.is_some();
-    if !should_display || (session_override.is_none() && explicitly_lacks_reasoning(model)) {
+        || info.capabilities.default_reasoning_effort.is_some()
+        || provider_supports_reasoning;
+    if !should_display || (input_selection.is_none() && explicitly_lacks_reasoning(model)) {
         return Ok(None);
     }
     resolve_reasoning_for_model(model, requested).map(Some)
@@ -1474,11 +1477,10 @@ pub fn is_first_run() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
 
     /// Tests that mutate MODEL_CONFIG must hold this lock to avoid races
     /// when cargo test runs them in parallel.
-    static TEST_CFG_LOCK: StdMutex<()> = StdMutex::new(());
+    static TEST_CFG_LOCK: &std::sync::Mutex<()> = &MODEL_CONFIG_LOCK;
 
     #[test]
     fn enabled_auth_provider_names_match_discovered_model_groups() {
@@ -1928,6 +1930,42 @@ reasoning_format = "reasoning-effort"
         assert_eq!(
             cfg.providers["openai-compatible"].reasoning_format,
             Some(crate::providers::openai::OpenAiReasoningFormat::Official)
+        );
+    }
+
+    #[test]
+    fn known_provider_profile_displays_default_reasoning_without_model_hints() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let cfg = parse_config(
+            r#"
+[providers.messages]
+kind = "anthropic"
+
+[models.plain]
+model = "claude-plain"
+provider = "messages"
+context_budget = 128000
+
+[models.disabled]
+model = "claude-disabled"
+provider = "messages"
+context_budget = 128000
+thinking = false
+
+[alias]
+smart = { model = "plain" }
+"#,
+        )
+        .unwrap();
+        set_provider_config(cfg);
+
+        assert_eq!(
+            effective_reasoning_for_model("smart", None).unwrap(),
+            Some(ReasoningSelection::ProviderDefault)
+        );
+        assert_eq!(
+            effective_reasoning_for_model("disabled", None).unwrap(),
+            None
         );
     }
 

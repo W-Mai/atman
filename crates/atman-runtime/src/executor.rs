@@ -5,10 +5,19 @@ use atman_dsl::ast::{File, FlowDecl};
 use crate::error::RuntimeError;
 use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
 use crate::exec::exec_flow_with_siblings;
+use crate::invocation_env::InvocationEnv;
 use crate::provider::ProviderRegistry;
 use crate::session::Session;
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
+
+#[derive(Clone, Default)]
+pub struct RootInvocation {
+    pub turn_id: Option<TurnId>,
+    pub session: Option<std::sync::Arc<Session>>,
+    pub first_run_id: Option<FlowRunId>,
+    pub env: InvocationEnv,
+}
 
 #[derive(Clone)]
 pub struct Executor {
@@ -70,8 +79,40 @@ impl Executor {
         turn_id: Option<TurnId>,
         session: Option<std::sync::Arc<Session>>,
     ) -> Result<Value, RuntimeError> {
-        self.run_in_turn_with_run_id(file, flow_name, args, turn_id, session, None)
-            .await
+        self.run_with_invocation(
+            file,
+            flow_name,
+            args,
+            RootInvocation {
+                turn_id,
+                session,
+                ..RootInvocation::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn run_in_turn_with_env(
+        &self,
+        file: &File,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        turn_id: Option<TurnId>,
+        session: Option<std::sync::Arc<Session>>,
+        invocation_env: InvocationEnv,
+    ) -> Result<Value, RuntimeError> {
+        self.run_with_invocation(
+            file,
+            flow_name,
+            args,
+            RootInvocation {
+                turn_id,
+                session,
+                env: invocation_env,
+                ..RootInvocation::default()
+            },
+        )
+        .await
     }
 
     pub async fn run_in_turn_with_run_id(
@@ -83,6 +124,27 @@ impl Executor {
         session: Option<std::sync::Arc<Session>>,
         first_run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
+        self.run_with_invocation(
+            file,
+            flow_name,
+            args,
+            RootInvocation {
+                turn_id,
+                session,
+                first_run_id,
+                ..RootInvocation::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn run_with_invocation(
+        &self,
+        file: &File,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        invocation: RootInvocation,
+    ) -> Result<Value, RuntimeError> {
         let flows: HashMap<_, _> = file
             .flows
             .iter()
@@ -90,20 +152,13 @@ impl Executor {
             .collect();
         let mut current = flow_name.to_string();
         let mut current_args = args;
-        let mut next_run_id = first_run_id;
+        let mut next_run_id = invocation.first_run_id.clone();
         for _ in 0..5 {
             let flow = flows
                 .get(&current)
                 .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
             match self
-                .run_flow(
-                    flow,
-                    current_args,
-                    &flows,
-                    turn_id.clone(),
-                    session.clone(),
-                    next_run_id.take(),
-                )
+                .run_flow(flow, current_args, &flows, &invocation, next_run_id.take())
                 .await
             {
                 Err(RuntimeError::Redirect(target)) => {
@@ -124,10 +179,11 @@ impl Executor {
         flow: &FlowDecl,
         args: Vec<(String, Value)>,
         flows: &HashMap<String, FlowDecl>,
-        turn_id: Option<TurnId>,
-        session: Option<std::sync::Arc<Session>>,
+        invocation: &RootInvocation,
         run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
+        let turn_id = invocation.turn_id.clone();
+        let session = invocation.session.clone();
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
         let flow_cancel = session
             .as_ref()
@@ -225,7 +281,10 @@ impl Executor {
         }
         // Root's tool_ctx carries session stream_tx so emit sites use
         // tool_ctx.stream_tx uniformly.
-        let mut tool_ctx = self.tool_ctx.clone();
+        let mut tool_ctx = self
+            .tool_ctx
+            .clone()
+            .with_invocation_env(invocation.env.clone());
         tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
         tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
         tool_ctx.trust = Some(trust);

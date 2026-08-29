@@ -186,6 +186,7 @@ pub struct PendingPermissionGroup {
 pub struct AppState {
     pub items: Vec<OutputItem>,
     pub input: String,
+    pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
     pub scroll_offset: u32,
     pub follow_tail: bool,
     pub should_quit: bool,
@@ -339,6 +340,79 @@ impl AppState {
             wm_visual_version: 0,
             ..Default::default()
         }
+    }
+
+    pub fn input_reasoning_choices(
+        &self,
+    ) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
+        if atman_runtime::model_registry::model_info("smart").context_budget == 0 {
+            return vec![None];
+        }
+        let mut choices = atman_runtime::model_registry::reasoning_selections_for_model("smart")
+            .into_iter()
+            .map(|selection| {
+                (!matches!(
+                    selection,
+                    atman_runtime::provider::ReasoningSelection::ProviderDefault
+                ))
+                .then_some(selection)
+            })
+            .collect::<Vec<_>>();
+        if choices.is_empty() {
+            choices.push(None);
+        }
+        choices
+    }
+
+    pub fn cycle_input_reasoning(&mut self) {
+        let choices = self.input_reasoning_choices();
+        let index = choices
+            .iter()
+            .position(|choice| *choice == self.input_reasoning)
+            .unwrap_or(0);
+        self.input_reasoning = choices[(index + 1) % choices.len()].clone();
+    }
+
+    pub fn effective_input_reasoning_badge(&self) -> Option<String> {
+        let info = atman_runtime::model_registry::model_info("smart");
+        if info.context_budget == 0 {
+            return None;
+        }
+        match atman_runtime::model_registry::effective_reasoning_for_model(
+            "smart",
+            self.input_reasoning.as_ref(),
+        ) {
+            Ok(selection) => selection.map(|selection| selection.to_string()),
+            Err(_) => self
+                .input_reasoning
+                .clone()
+                .or(Some(info.reasoning))
+                .map(|selection| format!("{selection} !")),
+        }
+    }
+
+    pub fn reconcile_input_reasoning(&mut self) -> bool {
+        let Some(selection) = self.input_reasoning.clone() else {
+            return false;
+        };
+        let info = atman_runtime::model_registry::model_info("smart");
+        if info.context_budget == 0 {
+            return false;
+        }
+        let error =
+            atman_runtime::model_registry::resolve_reasoning_for_model("smart", &selection).err();
+        let Some(error) = error else {
+            return false;
+        };
+        self.input_reasoning = None;
+        self.push_note(
+            format!(
+                "input reasoning `{selection}` reset to model default for `{}`: {error}",
+                info.name
+            ),
+            NoteLevel::Warn,
+        );
+        true
     }
 
     pub fn toggle_mouse_capture(&mut self) -> bool {
@@ -2002,6 +2076,106 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ModelConfigReset;
+
+    impl Drop for ModelConfigReset {
+        fn drop(&mut self) {
+            atman_runtime::model_registry::set_provider_config(
+                atman_runtime::model_registry::ProviderConfig::default(),
+            );
+        }
+    }
+
+    #[test]
+    fn smart_alias_badge_and_effort_reconcile_follow_the_selected_model() {
+        use atman_runtime::model_registry::{
+            AliasEntry, ModelEntry, ProviderConfig, ProviderEntry,
+        };
+        use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
+        use atman_runtime::providers::openai::OpenAiReasoningFormat;
+
+        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap();
+        let _reset = ModelConfigReset;
+        atman_runtime::model_registry::set_provider_config(ProviderConfig {
+            providers: std::collections::HashMap::from([(
+                "official".into(),
+                ProviderEntry {
+                    kind: "openai".into(),
+                    reasoning_format: Some(OpenAiReasoningFormat::Official),
+                    ..Default::default()
+                },
+            )]),
+            models: std::collections::HashMap::from([(
+                "official-model".into(),
+                ModelEntry {
+                    model: "vendor/official-model".into(),
+                    provider: Some("official".into()),
+                    context_budget: Some(128_000),
+                    ..Default::default()
+                },
+            )]),
+            aliases: std::collections::HashMap::from([(
+                "smart".into(),
+                AliasEntry {
+                    model: "official-model".into(),
+                },
+            )]),
+        });
+
+        let mut app = AppState::new("session".into(), None);
+        assert_eq!(
+            app.effective_input_reasoning_badge().as_deref(),
+            Some("default")
+        );
+        app.input_reasoning = Some(ReasoningSelection::Effort {
+            effort: ReasoningEffort::High,
+            execution_mode: None,
+        });
+
+        atman_runtime::model_registry::set_provider_config(ProviderConfig {
+            providers: std::collections::HashMap::from([(
+                "compatible".into(),
+                ProviderEntry {
+                    kind: "openai-compat".into(),
+                    reasoning_format: Some(OpenAiReasoningFormat::CompatibleThinking),
+                    ..Default::default()
+                },
+            )]),
+            models: std::collections::HashMap::from([(
+                "compatible-model".into(),
+                ModelEntry {
+                    model: "vendor/compatible-model".into(),
+                    provider: Some("compatible".into()),
+                    context_budget: Some(128_000),
+                    thinking: Some(true),
+                    ..Default::default()
+                },
+            )]),
+            aliases: std::collections::HashMap::from([(
+                "smart".into(),
+                AliasEntry {
+                    model: "compatible-model".into(),
+                },
+            )]),
+        });
+
+        assert!(app.reconcile_input_reasoning());
+        assert_eq!(app.input_reasoning, None);
+        assert_eq!(
+            app.effective_input_reasoning_badge().as_deref(),
+            Some("auto")
+        );
+        assert!(matches!(
+            app.items.last(),
+            Some(OutputItem::SystemNote {
+                level: NoteLevel::Warn,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn inline_replace_notification_updates_the_existing_note() {

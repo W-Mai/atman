@@ -104,7 +104,11 @@ Reasoning can also be selected for one run with `--reasoning high`; repeat
 attaches the clipboard image. Its `[image N]` reference and attachment bar remain
 visible until submit; deleting the reference removes that image. Alt+Delete
 removes the latest pending image. The input border shows the effective reasoning
-depth, and Ctrl+T cycles the session override.
+depth for the next submission, and Ctrl+T cycles that input value. It is exposed
+to the flow as invocation-local `env("effort")` data. `llm.call`, `llm.extract`,
+`llm.classify`, and `llm.generate_branches` consume it only when their own call
+explicitly passes `effort: env("effort")`; inheriting the invocation environment
+alone does not change a request.
 
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
 

@@ -706,7 +706,7 @@ impl WindowManager {
                 self.modals.model_manager.open();
             }
             PaletteEntryId::SwitchModel => {
-                let current = app.context.model.clone();
+                let current = atman_runtime::model_registry::model_info("smart").name;
                 self.modals.model_picker.open_with_model(Some(&current));
             }
             PaletteEntryId::ManageMcp => {

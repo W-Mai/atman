@@ -240,6 +240,7 @@ pub enum TuiCommand {
 pub struct TuiSubmission {
     pub text: String,
     pub images: Vec<atman_runtime::message::ImageSource>,
+    pub reasoning: Option<atman_runtime::provider::ReasoningSelection>,
 }
 
 pub struct TuiHandle {

@@ -1,9 +1,8 @@
 # Atman DSL Syntax Reference
 
-This reference describes the executable DSL shipped by the runtime. It follows the
-parser and evaluator in `atman-dsl` and `atman-runtime`; older examples using
-`llm { ... }` or `fetch_rule(...)` are obsolete. Use `llm.call(...)` and
-`rule.fetch(...)`.
+The parser and evaluator in `atman-dsl` and `atman-runtime` define the executable
+DSL described here. Older examples using `llm { ... }` or `fetch_rule(...)` are
+obsolete. Use `llm.call(...)` and `rule.fetch(...)`.
 
 ## Top-Level Declarations
 
@@ -78,19 +77,32 @@ reply = llm.call(
     model: "smart",
     context: "session",
     system: @"prompts/system.md",
-    reasoning: "high",
+    effort: env("effort"),
     retry: 3,
     stall_timeout: 120,
     tools: ["fs.read", "bash.spawn", "mcp.*"],
 )
 ```
 
+`env("name")` reads immutable data supplied for the current root invocation; it
+does not read process environment variables and is not exposed as an LLM tool.
+A missing key evaluates to unit. `effort: env("effort")` therefore uses the
+input/CLI/daemon selection when present and otherwise leaves the call on its
+model-configured default.
+
+`llm.call`, `llm.extract`, `llm.classify`, and `llm.generate_branches` share this
+explicit effort behavior. Each helper consumes the invocation value only when
+its own call includes `effort: env("effort")`; inheriting the invocation
+environment alone does not change an LLM request.
+
 `llm.call` accepts `model`, `prompt`, `messages`, `system`, `input`, `context`,
 `cache`, `retry`, `retry_classified`, `context_budget`, `stall_timeout`, `tools`,
-`reasoning`, `reasoning_budget`, `thinking`, and `fallback`. `reasoning` accepts
-`default`, `off`, `auto`, an effort such as `high`, or an effort and execution
-mode such as `high@pro`. `reasoning_budget` is a positive token count for
-providers that expose budget-based thinking. `thinking` remains a boolean
+`effort`, `reasoning`, `reasoning_budget`, `thinking`, and `fallback`. `effort`
+and `reasoning` both accept `default`, `off`, `auto`, an effort such as `high`,
+or an effort and execution mode such as `high@pro`; `effort` additionally treats
+unit as absent for `env(...)` composition. `reasoning_budget` is a positive token
+count for providers that expose budget-based thinking. Only one of `effort`,
+`reasoning`, and `reasoning_budget` may be supplied. `thinking` remains a boolean
 compatibility input. `fallback` is evaluated before the call; use an explicit
 `when result.is_err()` path when the fallback itself has side effects.
 

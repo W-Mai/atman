@@ -35,6 +35,7 @@ pub fn parse_llm_args_from_toolargs(
     let mut context_mode = String::from("none");
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
     let mut reasoning: Option<crate::provider::ReasoningSelection> = None;
+    let mut reasoning_arg: Option<&'static str> = None;
     let mut legacy_thinking: Option<bool> = None;
     let mut stall_timeout_secs: u64 = 120;
     let mut fallback_value: Option<crate::value::Value> = None;
@@ -186,13 +187,38 @@ pub fn parse_llm_args_from_toolargs(
             },
             "reasoning" => match v {
                 Value::Str(value) => {
-                    reasoning = Some(value.parse().map_err(|error: String| {
-                        RuntimeError::ToolFailed(format!("llm.reasoning: {error}"))
-                    })?);
+                    set_reasoning_arg(
+                        &mut reasoning,
+                        &mut reasoning_arg,
+                        "reasoning",
+                        value.parse().map_err(|error: String| {
+                            RuntimeError::ToolFailed(format!("llm.reasoning: {error}"))
+                        })?,
+                    )?;
                 }
                 other => {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "string (default, off, auto, effort, effort@mode, or budget:N)"
+                            .into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            },
+            "effort" => match v {
+                Value::Unit => {}
+                Value::Str(value) => {
+                    set_reasoning_arg(
+                        &mut reasoning,
+                        &mut reasoning_arg,
+                        "effort",
+                        value.parse().map_err(|error: String| {
+                            RuntimeError::ToolFailed(format!("llm.effort: {error}"))
+                        })?,
+                    )?;
+                }
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "string (off, auto, effort, effort@mode, or budget:N), or unit"
                             .into(),
                         actual: other.kind_name().into(),
                     });
@@ -206,7 +232,12 @@ pub fn parse_llm_args_from_toolargs(
                                 .into(),
                             actual: tokens.to_string(),
                         })?;
-                    reasoning = Some(crate::provider::ReasoningSelection::BudgetTokens { tokens });
+                    set_reasoning_arg(
+                        &mut reasoning,
+                        &mut reasoning_arg,
+                        "reasoning_budget",
+                        crate::provider::ReasoningSelection::BudgetTokens { tokens },
+                    )?;
                 }
                 other => {
                     return Err(RuntimeError::TypeMismatch {
@@ -272,6 +303,22 @@ pub fn parse_llm_args_from_toolargs(
         }),
         stall_timeout_secs,
     })
+}
+
+fn set_reasoning_arg(
+    reasoning: &mut Option<crate::provider::ReasoningSelection>,
+    source: &mut Option<&'static str>,
+    next_source: &'static str,
+    selection: crate::provider::ReasoningSelection,
+) -> Result<(), RuntimeError> {
+    if let Some(previous) = source {
+        return Err(RuntimeError::ToolFailed(format!(
+            "llm: `{previous}` and `{next_source}` cannot be used together"
+        )));
+    }
+    *reasoning = Some(selection);
+    *source = Some(next_source);
+    Ok(())
 }
 
 pub fn resolve_tool_specs_from_values(
@@ -366,5 +413,98 @@ mod tests {
             Value::Int(i64::from(u32::MAX) + 1),
         )]);
         assert!(matches!(result, Err(RuntimeError::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn parses_effort_alias() {
+        let args = parse(vec![("effort".into(), Value::Str("high".into()))]).unwrap();
+        assert_eq!(
+            args.reasoning,
+            Some(crate::provider::ReasoningSelection::Effort {
+                effort: crate::provider::ReasoningEffort::High,
+                execution_mode: None,
+            })
+        );
+    }
+
+    #[test]
+    fn absent_invocation_effort_uses_no_explicit_selection() {
+        let args = parse(vec![("effort".into(), Value::Unit)]).unwrap();
+        assert_eq!(args.reasoning, None);
+    }
+
+    #[test]
+    fn rejects_multiple_explicit_reasoning_arguments() {
+        let result = parse(vec![
+            ("effort".into(), Value::Str("high".into())),
+            ("reasoning".into(), Value::Str("auto".into())),
+        ]);
+        assert!(
+            matches!(result, Err(RuntimeError::ToolFailed(message)) if message.contains("cannot be used together"))
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_explicit_reasoning_arguments_in_reverse_order() {
+        let result = parse(vec![
+            ("reasoning".into(), Value::Str("auto".into())),
+            ("effort".into(), Value::Str("high".into())),
+        ]);
+        assert!(
+            matches!(result, Err(RuntimeError::ToolFailed(message)) if message.contains("cannot be used together"))
+        );
+    }
+
+    #[test]
+    fn rejects_reasoning_with_reasoning_budget() {
+        let result = parse(vec![
+            ("reasoning".into(), Value::Str("auto".into())),
+            ("reasoning_budget".into(), Value::Int(4_096)),
+        ]);
+        assert!(
+            matches!(result, Err(RuntimeError::ToolFailed(message)) if message.contains("cannot be used together"))
+        );
+    }
+
+    #[test]
+    fn rejects_effort_with_reasoning_budget_in_either_order() {
+        for named in [
+            vec![
+                ("effort".into(), Value::Str("high".into())),
+                ("reasoning_budget".into(), Value::Int(4_096)),
+            ],
+            vec![
+                ("reasoning_budget".into(), Value::Int(4_096)),
+                ("effort".into(), Value::Str("high".into())),
+            ],
+        ] {
+            let result = parse(named);
+            assert!(
+                matches!(result, Err(RuntimeError::ToolFailed(message)) if message.contains("cannot be used together"))
+            );
+        }
+    }
+
+    #[test]
+    fn effort_takes_precedence_over_legacy_thinking_in_either_order() {
+        for named in [
+            vec![
+                ("effort".into(), Value::Str("high".into())),
+                ("thinking".into(), Value::Bool(false)),
+            ],
+            vec![
+                ("thinking".into(), Value::Bool(false)),
+                ("effort".into(), Value::Str("high".into())),
+            ],
+        ] {
+            let args = parse(named).unwrap();
+            assert_eq!(
+                args.reasoning,
+                Some(crate::provider::ReasoningSelection::Effort {
+                    effort: crate::provider::ReasoningEffort::High,
+                    execution_mode: None,
+                })
+            );
+        }
     }
 }

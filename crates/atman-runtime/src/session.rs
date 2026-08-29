@@ -139,7 +139,6 @@ pub struct Session {
     injection_tx: broadcast::Sender<Injection>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     pending_images: Mutex<Vec<crate::message::ImageSource>>,
-    reasoning_override: std::sync::RwLock<Option<crate::provider::ReasoningSelection>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     output_store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
     fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
@@ -838,7 +837,6 @@ impl Session {
             injection_tx,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
-            reasoning_override: std::sync::RwLock::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
@@ -1015,7 +1013,6 @@ impl Session {
             injection_tx,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
-            reasoning_override: std::sync::RwLock::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
@@ -1067,7 +1064,6 @@ impl Session {
             injection_tx,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
-            reasoning_override: std::sync::RwLock::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
@@ -1355,20 +1351,9 @@ impl Session {
         self.watch.context.borrow().model.clone()
     }
 
-    pub fn set_current_model(
-        &self,
-        model: impl Into<String>,
-    ) -> Option<(crate::provider::ReasoningSelection, String)> {
+    pub fn set_current_model(&self, model: impl Into<String>) {
         let model = model.into();
         let budget = crate::model_registry::model_info(&model).context_budget;
-        let invalid_override = self.reasoning_override().and_then(|selection| {
-            crate::model_registry::resolve_reasoning_for_model(&model, &selection)
-                .err()
-                .map(|error| (selection, error))
-        });
-        if invalid_override.is_some() {
-            self.set_reasoning_override(None);
-        }
         self.watch.context.send_modify(|snap| {
             snap.model = model.clone();
             if budget > 0 {
@@ -1382,7 +1367,6 @@ impl Session {
             window_budget: snap.window_budget,
         }
         .save(&self.dir);
-        invalid_override
     }
 
     pub fn update_mcp_server(&self, status: crate::mcp::McpServerStatus) {
@@ -1595,14 +1579,6 @@ impl Session {
 
     pub fn pending_image_count(&self) -> usize {
         self.pending_images.lock().unwrap().len()
-    }
-
-    pub fn set_reasoning_override(&self, selection: Option<crate::provider::ReasoningSelection>) {
-        *self.reasoning_override.write().unwrap() = selection;
-    }
-
-    pub fn reasoning_override(&self) -> Option<crate::provider::ReasoningSelection> {
-        self.reasoning_override.read().unwrap().clone()
     }
 
     /// Single-writer append. Emits the matching event before the in-memory push

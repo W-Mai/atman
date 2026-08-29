@@ -231,6 +231,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     loop {
         reply = llm.call(
             model: "smart",
+            effort: env("effort"),
             context: "session",
             system: system_prompt,
             cache: true,

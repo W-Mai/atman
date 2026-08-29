@@ -12,7 +12,7 @@ use atman_runtime::provider::{
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{Executor, RuntimeError, Value};
+use atman_runtime::{Executor, InvocationEnv, RuntimeError, Value};
 
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
@@ -133,7 +133,7 @@ async fn l3_redirect_switches_to_target_flow() {
     return llm.call(model: "mock", prompt: "won't reach here")
 }
 flow second() -> string {
-    return "redirected"
+    return env("effort")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -150,16 +150,17 @@ flow second() -> string {
     ));
 
     let out = ex
-        .run_in_turn(
+        .run_in_turn_with_env(
             &file,
             "first",
             vec![],
             Some(turn_id.clone()),
             Some(session.clone()),
+            InvocationEnv::single("effort", Value::Str("high".into())),
         )
         .await
         .unwrap();
-    assert!(matches!(&out, Value::Str(s) if s == "redirected"));
+    assert!(matches!(&out, Value::Str(s) if s == "high"));
 }
 
 #[tokio::test]

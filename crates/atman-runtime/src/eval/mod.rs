@@ -13,6 +13,13 @@ use crate::streaming::LlmStream;
 use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
+pub(crate) fn is_evaluator_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "env" | "list.map" | "list.filter" | "list.reduce" | "list.find" | "list.any" | "list.all"
+    )
+}
+
 #[derive(Clone)]
 pub struct EvalCtx<'a> {
     pub tools: &'a ToolRegistry,
@@ -726,6 +733,9 @@ async fn dispatch_tool_call<'a>(
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
     let name = tool_name(path);
+    if name == "env" {
+        return eval_invocation_env(args, prefix_positional, env, ctx).await;
+    }
     let tool = match ctx.tools.get(&name) {
         Some(t) => t,
         None => {
@@ -926,6 +936,46 @@ async fn dispatch_tool_call<'a>(
         Ok(v) => v,
         Err(e) => Value::Err(e),
     }
+}
+
+async fn eval_invocation_env<'a>(
+    args: &'a [Arg],
+    mut positional: Vec<Value>,
+    env: &'a Env,
+    ctx: &'a EvalCtx<'a>,
+) -> Value {
+    for arg in args {
+        match arg {
+            Arg::Positional(expr) => {
+                let value = eval_expr(expr, env, ctx).await;
+                if value.is_err() {
+                    return value;
+                }
+                positional.push(value);
+            }
+            Arg::Named { .. } => {
+                return Value::Err(RuntimeError::ToolFailed(
+                    "env: expected exactly one positional string key".into(),
+                ));
+            }
+        }
+    }
+    let [key] = positional.as_slice() else {
+        return Value::Err(RuntimeError::ToolFailed(
+            "env: expected exactly one positional string key".into(),
+        ));
+    };
+    let Value::Str(key) = key else {
+        return Value::Err(RuntimeError::TypeMismatch {
+            expected: "string (invocation environment key)".into(),
+            actual: key.kind_name().into(),
+        });
+    };
+    ctx.tool_ctx
+        .invocation_env
+        .get(key)
+        .cloned()
+        .unwrap_or(Value::Unit)
 }
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);

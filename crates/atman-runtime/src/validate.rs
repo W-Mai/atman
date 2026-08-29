@@ -229,9 +229,9 @@ fn walk_node(
                 .map(|i| i.name.as_str())
                 .collect::<Vec<_>>()
                 .join(".");
-            // list.* combinators are intercepted at eval time, not registered as tools
-            let is_combinator = name.starts_with("list.");
-            if !is_combinator && !tools.has(&name) {
+            // Evaluator intrinsics are not registered or exposed as provider tools.
+            let is_intrinsic = crate::eval::is_evaluator_intrinsic(&name);
+            if !is_intrinsic && !tools.has(&name) {
                 errors.push(ValidationError::UndefinedTool(name));
             }
             for arg in args {
@@ -380,5 +380,17 @@ mod tests {
 "#;
         let file = parse_file(src).unwrap();
         validate(&file.flows[0], &registry_with_fs()).expect("valid flow");
+    }
+
+    #[test]
+    fn invocation_env_is_a_valid_intrinsic_without_a_registered_tool() {
+        let file = parse_file(
+            r#"flow t() -> string {
+    return env("effort")
+}"#,
+        )
+        .unwrap();
+
+        validate(&file.flows[0], &ToolRegistry::new()).expect("env is evaluator-owned");
     }
 }

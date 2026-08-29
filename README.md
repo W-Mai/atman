@@ -356,10 +356,14 @@ appear in a bar above the input and as stable `[image N]` references in the
 editor; deleting a reference removes that image, while Alt+Delete removes the
 latest one. Images are copied into the session attachment store by content
 digest before the user turn is written. The effective reasoning depth appears
-at the input's top-right corner, and Ctrl+T cycles the current session override.
-CLI and daemon runs accept repeatable `--image` arguments and the same
-`--reasoning` values. A flow can override the selection per call with
-`llm.call(reasoning: "high@pro")` or
+at the input's top-right corner, and Ctrl+T selects the effort captured with the
+next submission. CLI and daemon runs accept repeatable `--image` arguments and
+the same `--reasoning` values. The selected value is invocation-local.
+`llm.call`, `llm.extract`, `llm.classify`, and `llm.generate_branches` consume it
+only when their own call explicitly passes `effort: env("effort")`; inheriting
+the invocation environment alone does not change a request. The managed agent's
+primary call opts in.
+Flows can also use a fixed selection with `llm.call(reasoning: "high@pro")` or
 `llm.call(reasoning_budget: 4096)`.
 
 ## Architecture

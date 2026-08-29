@@ -1570,8 +1570,12 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_then_emit;
+    use super::{AgentSpawn, FlowRegistry, FlowRunStatus, terminal_then_emit};
+    use crate::provider::ProviderRegistry;
+    use crate::tool::{Tool, ToolArgs, ToolCtx, ToolRegistry};
+    use crate::{InvocationEnv, Value};
     use std::cell::Cell;
+    use std::sync::Arc;
 
     #[test]
     fn terminal_transition_happens_before_flow_end_emit() {
@@ -1581,5 +1585,93 @@ mod tests {
             || terminal.set(true),
             || assert!(terminal.get(), "FlowEnd emitted before terminal transition"),
         );
+    }
+
+    #[tokio::test]
+    async fn sync_and_async_spawned_flows_inherit_invocation_snapshot() {
+        for is_async in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("child.at");
+            std::fs::write(&path, r#"flow child() -> string { return env("effort") }"#).unwrap();
+
+            let registry = Arc::new(FlowRegistry::new());
+            let root_run_id = crate::event::FlowRunId::now();
+            let root_identity = registry
+                .register_root(
+                    "test-session".into(),
+                    root_run_id.clone(),
+                    crate::flow_authority::EffectiveAuthority::root(
+                        &Default::default(),
+                        false,
+                        None,
+                    ),
+                )
+                .unwrap();
+            let mut ctx = ToolCtx::new()
+                .with_registry(Arc::new(ToolRegistry::new()))
+                .with_providers(Arc::new(ProviderRegistry::new()))
+                .with_flow_registry(Arc::clone(&registry))
+                .with_invocation_env(InvocationEnv::single("effort", Value::Str("high".into())));
+            ctx.flow_run_id = Some(root_run_id);
+            ctx.flow_identity = Some(root_identity);
+
+            let result = AgentSpawn
+                .call(
+                    ToolArgs {
+                        positional: Vec::new(),
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@child", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(is_async)),
+                        ],
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+
+            if !is_async {
+                assert!(matches!(result, Value::Str(value) if value == "high"));
+                continue;
+            }
+
+            let Value::Struct(fields) = result else {
+                panic!("expected async spawn handle");
+            };
+            let handle = fields
+                .into_iter()
+                .find_map(|(name, value)| {
+                    (name == "handle")
+                        .then_some(value)
+                        .and_then(|value| match value {
+                            Value::Str(handle) => Some(handle),
+                            _ => None,
+                        })
+                })
+                .expect("async spawn handle");
+            let status = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let status = registry
+                        .lookup(&handle)
+                        .unwrap()
+                        .status
+                        .lock()
+                        .unwrap()
+                        .clone();
+                    if !status.is_running() {
+                        break status;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                status,
+                FlowRunStatus::Ok { final_text, .. } if final_text == "high"
+            ));
+        }
     }
 }

@@ -29,6 +29,7 @@ pub mod hunk;
 pub mod index;
 pub mod injection;
 pub mod injection_classifier;
+pub mod invocation_env;
 pub mod known_models;
 pub mod lifecycle;
 pub mod mcp;
@@ -80,9 +81,10 @@ pub use eval::{EvalCtx, eval_expr};
 pub use event::{
     Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
 };
-pub use executor::Executor;
+pub use executor::{Executor, RootInvocation};
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
 pub use injection::{Injection, InjectionId, InjectionSource, InjectionState};
+pub use invocation_env::InvocationEnv;
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use projection::message_window::{TranscriptEntry, replay_transcript_from};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};

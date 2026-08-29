@@ -36,15 +36,28 @@ pub struct RunOptions {
     pub images: Vec<atman_proto::InlineImage>,
 }
 
-fn apply_run_options(session: &atman_runtime::Session, options: RunOptions) -> Result<()> {
-    if let Some(reasoning) = options.reasoning {
-        session.set_reasoning_override(Some(
-            reasoning
+fn invocation_env_from_reasoning(
+    reasoning: Option<String>,
+) -> Result<atman_runtime::InvocationEnv> {
+    match reasoning {
+        Some(reasoning) => {
+            let selection: atman_runtime::provider::ReasoningSelection = reasoning
                 .parse()
-                .map_err(|error: String| anyhow::anyhow!("invalid reasoning override: {error}"))?,
-        ));
+                .map_err(|error: String| anyhow::anyhow!("invalid reasoning: {error}"))?;
+            Ok(atman_runtime::InvocationEnv::single(
+                "effort",
+                atman_runtime::Value::Str(selection.to_string()),
+            ))
+        }
+        None => Ok(atman_runtime::InvocationEnv::default()),
     }
-    for image in options.images {
+}
+
+fn queue_run_images(
+    session: &atman_runtime::Session,
+    images: Vec<atman_proto::InlineImage>,
+) -> Result<()> {
+    for image in images {
         session.queue_image_base64(&image.data_base64, image.name.as_deref())?;
     }
     Ok(())
@@ -121,6 +134,8 @@ impl RunLauncher {
     ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
+        let RunOptions { reasoning, images } = options;
+        let invocation_env = invocation_env_from_reasoning(reasoning)?;
 
         reload_model_config(self.config_dir.as_deref());
 
@@ -156,7 +171,7 @@ impl RunLauncher {
             )
             .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
         );
-        apply_run_options(&session, options)?;
+        queue_run_images(&session, images)?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
@@ -210,6 +225,7 @@ impl RunLauncher {
                         config_dir,
                         home_dir,
                         Some(state_for_run),
+                        invocation_env,
                     )
                     .await
                     {
@@ -252,6 +268,7 @@ async fn run_flow_inner(
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     daemon_state: Option<Arc<crate::DaemonState>>,
+    invocation_env: atman_runtime::InvocationEnv,
 ) -> Result<()> {
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
         if let Some(dir) = &config_dir {
@@ -360,13 +377,16 @@ async fn run_flow_inner(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
         .await;
     let result = executor
-        .run_in_turn_with_run_id(
+        .run_with_invocation(
             &parsed,
             &flow_name,
             args,
-            Some(turn_id),
-            Some(session.clone()),
-            Some(run_id),
+            atman_runtime::RootInvocation {
+                turn_id: Some(turn_id),
+                session: Some(session.clone()),
+                first_run_id: Some(run_id),
+                env: invocation_env,
+            },
         )
         .await;
     while let Ok(ev) = lifecycle_rx.try_recv() {
@@ -602,27 +622,25 @@ mod tests {
     }
 
     #[test]
-    fn run_options_apply_reasoning_and_image_inputs() {
+    fn run_options_isolate_reasoning_and_queue_image_inputs() {
         let session = atman_runtime::Session::open_ephemeral();
-        apply_run_options(
+        let invocation_env = invocation_env_from_reasoning(Some("high@pro".into())).unwrap();
+        queue_run_images(
             &session,
-            RunOptions {
-                reasoning: Some("high@pro".into()),
-                images: vec![atman_proto::InlineImage {
-                    data_base64: "iVBORw0KGgo=".into(),
-                    name: Some("input.png".into()),
-                }],
-            },
+            vec![atman_proto::InlineImage {
+                data_base64: "iVBORw0KGgo=".into(),
+                name: Some("input.png".into()),
+            }],
         )
         .unwrap();
 
-        assert_eq!(
-            session.reasoning_override(),
-            Some(atman_runtime::provider::ReasoningSelection::Effort {
-                effort: atman_runtime::provider::ReasoningEffort::High,
-                execution_mode: Some(atman_runtime::provider::ReasoningExecutionMode::Pro,),
-            })
-        );
+        assert!(matches!(
+            invocation_env.get("effort"),
+            Some(atman_runtime::Value::Str(value)) if value == "high@pro"
+        ));
         assert_eq!(session.pending_image_count(), 1);
+
+        let next_invocation_env = invocation_env_from_reasoning(None).unwrap();
+        assert!(next_invocation_env.get("effort").is_none());
     }
 }

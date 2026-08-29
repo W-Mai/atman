@@ -82,7 +82,7 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
         &mut self,
         f: &mut ratatui::Frame,
         area: Rect,
-        app: &crate::app::AppState,
+        _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
         let rows = Layout::default()
@@ -94,10 +94,11 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
             ])
             .split(area);
 
+        let current_model = atman_runtime::model_registry::model_info("smart").name;
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("current: ", Style::default().fg(t.meta_fg.into())),
-                Span::styled(&app.context.model, Style::default().fg(t.accent.into())),
+                Span::styled(current_model, Style::default().fg(t.accent.into())),
             ])),
             rows[0],
         );
