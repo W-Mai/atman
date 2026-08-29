@@ -117,6 +117,14 @@ pub struct AuthTokenUpdate {
     pub account: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthModelCacheCommit {
+    Updated,
+    Missing,
+    Disabled,
+    Changed,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigHub {
     config_dir: PathBuf,
@@ -143,6 +151,10 @@ impl ConfigHub {
 
     pub fn config_dir(&self) -> &Path {
         &self.config_dir
+    }
+
+    pub(crate) fn auth_path(&self) -> &Path {
+        &self.auth_path
     }
 
     pub fn config_toml_path(&self) -> PathBuf {
@@ -283,6 +295,24 @@ impl ConfigHub {
         Ok(load_auth_document_from_path(&self.auth_path)?.model_cache_details(id))
     }
 
+    pub(crate) fn load_or_create_auth_provider_catalog_state(
+        &self,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::auth_store::StoredProvider,
+            crate::auth_store::AuthProviderCatalogSnapshot,
+        )>,
+        ConfigError,
+    > {
+        self.update_auth_document_conditionally(|document| {
+            let Some((state, changed)) = document.ensure_provider_catalog_state(id) else {
+                return Ok((None, false));
+            };
+            Ok((Some(state), changed))
+        })
+    }
+
     pub(crate) fn load_auth_model_namespace(
         &self,
         id: &str,
@@ -327,9 +357,29 @@ impl ConfigHub {
         &self,
         mutate: impl FnOnce(&mut crate::auth_store::AuthStoreDocument) -> Result<T, ConfigError>,
     ) -> Result<T, ConfigError> {
+        self.update_auth_document_conditionally(|document| {
+            mutate(document).map(|result| (result, true))
+        })
+    }
+
+    fn update_auth_document_conditionally<T>(
+        &self,
+        mutate: impl FnOnce(&mut crate::auth_store::AuthStoreDocument) -> Result<(T, bool), ConfigError>,
+    ) -> Result<T, ConfigError> {
+        self.update_auth_document_conditionally_and_then(mutate, |_| ())
+            .map(|(result, ())| result)
+    }
+
+    fn update_auth_document_conditionally_and_then<T, U>(
+        &self,
+        mutate: impl FnOnce(&mut crate::auth_store::AuthStoreDocument) -> Result<(T, bool), ConfigError>,
+        after_write: impl FnOnce(&T) -> U,
+    ) -> Result<(T, U), ConfigError> {
         use fs2::FileExt;
 
-        let _guard = AUTH_WRITE_LOCK.lock().unwrap();
+        let _guard = AUTH_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = self.auth_path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)?;
         let lock_path = parent.join(".auth.json.lock");
@@ -348,9 +398,12 @@ impl ConfigHub {
         )?;
         lock.lock_exclusive()?;
         let mut document = load_auth_document_from_path(&self.auth_path)?;
-        let result = mutate(&mut document)?;
-        self.write_auth_document(&document)?;
-        Ok(result)
+        let (result, changed) = mutate(&mut document)?;
+        if changed {
+            self.write_auth_document(&document)?;
+        }
+        let follow_up = after_write(&result);
+        Ok((result, follow_up))
     }
 
     pub fn add_auth_provider(
@@ -373,21 +426,81 @@ impl ConfigHub {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn add_auth_provider_with_model_cache_details(
+        &self,
+        provider: crate::auth_store::StoredProvider,
+        model_namespace: &str,
+        fetched_at: i64,
+        models: &[crate::provider::DiscoveredModelDetails],
+    ) -> Result<(), ConfigError> {
+        self.add_auth_provider_with_model_cache_details_and_then(
+            provider,
+            model_namespace,
+            fetched_at,
+            models,
+            || (),
+        )
+    }
+
+    pub(crate) fn add_auth_provider_with_model_cache_details_and_then<T>(
+        &self,
+        provider: crate::auth_store::StoredProvider,
+        model_namespace: &str,
+        fetched_at: i64,
+        models: &[crate::provider::DiscoveredModelDetails],
+        after_write: impl FnOnce() -> T,
+    ) -> Result<T, ConfigError> {
+        self.update_auth_document_conditionally_and_then(
+            |document| {
+                let provider_id = provider.id.clone();
+                let mut store = document.legacy_view();
+                if store
+                    .providers
+                    .iter()
+                    .any(|existing| existing.id == provider_id)
+                {
+                    return Err(ConfigError::Invalid(format!(
+                        "auth provider id {provider_id:?} already exists"
+                    )));
+                }
+                store.providers.push(provider);
+                document.merge_legacy_view(store);
+                let updated = document
+                    .update_model_cache_details(&provider_id, model_namespace, fetched_at, models)
+                    .map_err(ConfigError::Invalid)?;
+                if !updated {
+                    return Err(ConfigError::Invalid(format!(
+                        "auth provider `{provider_id}` disappeared during insertion"
+                    )));
+                }
+                Ok(((), true))
+            },
+            |_| after_write(),
+        )
+        .map(|((), result)| result)
+    }
+
     pub fn remove_auth_provider(&self, id: &str) -> Result<bool, ConfigError> {
         self.update_auth(|store| Ok(store.remove(id)))
     }
 
     pub fn set_auth_provider_enabled(&self, id: &str, enabled: bool) -> Result<bool, ConfigError> {
-        self.update_auth(|store| {
-            let Some(provider) = store
-                .providers
-                .iter_mut()
-                .find(|provider| provider.id == id)
-            else {
-                return Ok(false);
+        Ok(self
+            .set_auth_provider_enabled_with_change(id, enabled)?
+            .is_some())
+    }
+
+    pub(crate) fn set_auth_provider_enabled_with_change(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<Option<bool>, ConfigError> {
+        self.update_auth_document_conditionally(|document| {
+            let Some(changed) = document.set_provider_enabled(id, enabled) else {
+                return Ok((None, false));
             };
-            provider.enabled = enabled;
-            Ok(true)
+            Ok((Some(changed), changed))
         })
     }
 
@@ -421,7 +534,10 @@ impl ConfigHub {
         id: &str,
         cache: crate::auth_store::ModelCache,
     ) -> Result<bool, ConfigError> {
-        self.update_auth(|store| Ok(store.update_model_cache(id, cache)))
+        self.update_auth_document_conditionally(|document| {
+            let updated = document.update_model_cache(id, cache);
+            Ok((updated, updated))
+        })
     }
 
     pub(crate) fn update_auth_model_cache_details(
@@ -436,6 +552,66 @@ impl ConfigHub {
                 .update_model_cache_details(id, model_namespace, fetched_at, models)
                 .map_err(ConfigError::Invalid)
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn update_auth_model_cache_details_if_enabled(
+        &self,
+        expected: &crate::auth_store::StoredProvider,
+        expected_catalog: &crate::auth_store::AuthProviderCatalogSnapshot,
+        model_namespace: &str,
+        fetched_at: i64,
+        models: &[crate::provider::DiscoveredModelDetails],
+    ) -> Result<AuthModelCacheCommit, ConfigError> {
+        self.update_auth_model_cache_details_if_enabled_and_then(
+            expected,
+            expected_catalog,
+            model_namespace,
+            fetched_at,
+            models,
+            || (),
+        )
+        .map(|(commit, _)| commit)
+    }
+
+    pub(crate) fn update_auth_model_cache_details_if_enabled_and_then<T>(
+        &self,
+        expected: &crate::auth_store::StoredProvider,
+        expected_catalog: &crate::auth_store::AuthProviderCatalogSnapshot,
+        model_namespace: &str,
+        fetched_at: i64,
+        models: &[crate::provider::DiscoveredModelDetails],
+        after_update: impl FnOnce() -> T,
+    ) -> Result<(AuthModelCacheCommit, Option<T>), ConfigError> {
+        self.update_auth_document_conditionally_and_then(
+            |document| {
+                let store = document.legacy_view();
+                let Some(provider) = store
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == expected.id)
+                else {
+                    return Ok((AuthModelCacheCommit::Missing, false));
+                };
+                if !provider.enabled {
+                    return Ok((AuthModelCacheCommit::Disabled, false));
+                }
+                if !auth_provider_matches(provider, expected)
+                    || document.provider_catalog_snapshot(&expected.id).as_ref()
+                        != Some(expected_catalog)
+                {
+                    return Ok((AuthModelCacheCommit::Changed, false));
+                }
+                let updated = document
+                    .update_model_cache_details(&expected.id, model_namespace, fetched_at, models)
+                    .map_err(ConfigError::Invalid)?;
+                if !updated {
+                    return Ok((AuthModelCacheCommit::Missing, false));
+                }
+                Ok((AuthModelCacheCommit::Updated, true))
+            },
+            |commit| (*commit == AuthModelCacheCommit::Updated).then(after_update),
+        )
     }
 
     pub fn load_or_init_daemon_config(&self) -> Result<DaemonConfig, ConfigError> {
@@ -1187,6 +1363,13 @@ impl ConfigHub {
     }
 }
 
+fn auth_provider_matches(
+    current: &crate::auth_store::StoredProvider,
+    expected: &crate::auth_store::StoredProvider,
+) -> bool {
+    current.id == expected.id && current.name == expected.name && current.kind == expected.kind
+}
+
 fn dsl_route_source(flow_name: &str, trigger: &str) -> Result<String, ConfigError> {
     if syn_identifier(flow_name).is_none() {
         return Err(ConfigError::Invalid(format!(
@@ -1799,6 +1982,16 @@ mod tests {
         }
     }
 
+    fn catalog_snapshot(
+        hub: &ConfigHub,
+        id: &str,
+    ) -> crate::auth_store::AuthProviderCatalogSnapshot {
+        hub.load_or_create_auth_provider_catalog_state(id)
+            .unwrap()
+            .unwrap()
+            .1
+    }
+
     #[test]
     fn auth_transactions_preserve_independent_concurrent_updates() {
         let dir = tempfile::tempdir().unwrap();
@@ -1946,6 +2139,300 @@ mod tests {
         assert!(error.to_string().contains("already exists"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert_eq!(hub.load_auth().unwrap().providers.len(), 1);
+    }
+
+    #[test]
+    fn auth_provider_and_typed_model_cache_are_added_in_one_transaction() {
+        let (_dir, hub) = temp_hub();
+        let models = [crate::provider::DiscoveredModelDetails {
+            slug: "gpt-test".into(),
+            context_budget: Some(32_000),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                crate::provider::ModelCapabilities::default(),
+            ),
+        }];
+
+        hub.add_auth_provider_with_model_cache_details(
+            auth_provider("provider"),
+            "provider@account",
+            42,
+            &models,
+        )
+        .unwrap();
+
+        let stored = hub.load_auth().unwrap().providers.remove(0);
+        assert_eq!(stored.model_cache.unwrap().fetched_at, 42);
+        assert_eq!(
+            hub.load_auth_model_namespace("provider")
+                .unwrap()
+                .as_deref(),
+            Some("provider@account")
+        );
+        assert_eq!(
+            hub.load_auth_model_cache_details("provider").unwrap(),
+            Some(models.to_vec())
+        );
+    }
+
+    #[test]
+    fn conditional_auth_cache_update_rejects_stale_provider_state() {
+        let (_dir, hub) = temp_hub();
+        let initial = [crate::provider::DiscoveredModelDetails {
+            slug: "initial".into(),
+            context_budget: Some(8_192),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Legacy { thinking: false },
+        }];
+        hub.add_auth_provider_with_model_cache_details(
+            auth_provider("provider"),
+            "provider@account",
+            1,
+            &initial,
+        )
+        .unwrap();
+        let catalog_snapshot = catalog_snapshot(&hub, "provider");
+        hub.set_auth_provider_enabled("provider", false).unwrap();
+        let before = std::fs::read(hub.auth_path.clone()).unwrap();
+
+        let replacement = [crate::provider::DiscoveredModelDetails {
+            slug: "replacement".into(),
+            context_budget: Some(16_384),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Legacy { thinking: true },
+        }];
+        assert_eq!(
+            hub.update_auth_model_cache_details_if_enabled(
+                &auth_provider("provider"),
+                &catalog_snapshot,
+                "provider@account",
+                2,
+                &replacement,
+            )
+            .unwrap(),
+            AuthModelCacheCommit::Disabled
+        );
+        assert_eq!(std::fs::read(hub.auth_path.clone()).unwrap(), before);
+        assert_eq!(
+            hub.load_auth_model_cache_details("provider").unwrap(),
+            Some(initial.to_vec())
+        );
+    }
+
+    #[test]
+    fn catalog_revision_tracks_catalog_changes_but_not_credential_rotation() {
+        let (_dir, hub) = temp_hub();
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        let initial = catalog_snapshot(&hub, "provider");
+
+        assert!(
+            hub.update_auth_tokens(
+                "provider",
+                AuthTokenUpdate {
+                    access_token: "rotated-access".into(),
+                    refresh_token: Some("rotated-refresh".into()),
+                    expires_at: 123,
+                    account: Some("rotated@example.com".into()),
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(catalog_snapshot(&hub, "provider"), initial);
+
+        hub.set_auth_provider_enabled("provider", false).unwrap();
+        let disabled = catalog_snapshot(&hub, "provider");
+        assert_ne!(disabled, initial);
+        hub.set_auth_provider_enabled("provider", true).unwrap();
+        let enabled_again = catalog_snapshot(&hub, "provider");
+        assert_ne!(enabled_again, disabled);
+        assert_ne!(enabled_again, initial);
+    }
+
+    #[test]
+    fn legacy_catalog_revision_is_persisted_once_and_shared_by_hubs() {
+        let (_dir, hub) = temp_hub();
+        std::fs::write(
+            hub.auth_path(),
+            r#"{
+                "providers": [{
+                    "id": "legacy",
+                    "name": "Legacy",
+                    "kind": "codex",
+                    "access_token": "access",
+                    "expires_at": 1,
+                    "enabled": true
+                }]
+            }"#,
+        )
+        .unwrap();
+        let before = std::fs::read(hub.auth_path()).unwrap();
+
+        let first = catalog_snapshot(&hub, "legacy");
+        let migrated = std::fs::read(hub.auth_path()).unwrap();
+        assert_ne!(migrated, before);
+        let peer = ConfigHub::from_auth_path(hub.auth_path());
+        assert_eq!(catalog_snapshot(&peer, "legacy"), first);
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), migrated);
+    }
+
+    #[test]
+    fn catalog_revision_advances_for_equal_cache_commits_but_not_equal_enable_writes() {
+        let (_dir, hub) = temp_hub();
+        let models = [crate::provider::DiscoveredModelDetails {
+            slug: "same".into(),
+            context_budget: Some(8_192),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Legacy { thinking: false },
+        }];
+        hub.add_auth_provider_with_model_cache_details(
+            auth_provider("provider"),
+            "provider@account",
+            1,
+            &models,
+        )
+        .unwrap();
+        let initial = catalog_snapshot(&hub, "provider");
+
+        assert!(
+            hub.update_auth_model_cache_details("provider", "provider@account", 1, &models,)
+                .unwrap()
+        );
+        let refreshed = catalog_snapshot(&hub, "provider");
+        assert_ne!(refreshed, initial);
+        let before_equal_enable = std::fs::read(hub.auth_path()).unwrap();
+        assert!(hub.set_auth_provider_enabled("provider", true).unwrap());
+        assert_eq!(catalog_snapshot(&hub, "provider"), refreshed);
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), before_equal_enable);
+    }
+
+    #[test]
+    fn removing_and_readding_the_same_provider_invalidates_old_catalog_snapshot() {
+        let (_dir, hub) = temp_hub();
+        let models = [crate::provider::DiscoveredModelDetails {
+            slug: "same".into(),
+            context_budget: Some(8_192),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Legacy { thinking: false },
+        }];
+        hub.add_auth_provider_with_model_cache_details(
+            auth_provider("provider"),
+            "provider@account",
+            1,
+            &models,
+        )
+        .unwrap();
+        let original = catalog_snapshot(&hub, "provider");
+        assert!(hub.remove_auth_provider("provider").unwrap());
+        hub.add_auth_provider_with_model_cache_details(
+            auth_provider("provider"),
+            "provider@account",
+            1,
+            &models,
+        )
+        .unwrap();
+        assert_ne!(catalog_snapshot(&hub, "provider"), original);
+        let before = std::fs::read(hub.auth_path()).unwrap();
+
+        assert_eq!(
+            hub.update_auth_model_cache_details_if_enabled(
+                &auth_provider("provider"),
+                &original,
+                "provider@account",
+                2,
+                &models,
+            )
+            .unwrap(),
+            AuthModelCacheCommit::Changed
+        );
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn cache_write_and_follow_up_complete_before_a_peer_auth_write() {
+        let (_dir, hub) = temp_hub();
+        let initial = [crate::provider::DiscoveredModelDetails {
+            slug: "initial".into(),
+            context_budget: Some(8_192),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Legacy { thinking: false },
+        }];
+        hub.add_auth_provider_with_model_cache_details(
+            auth_provider("provider"),
+            "provider@account",
+            1,
+            &initial,
+        )
+        .unwrap();
+        let expected = hub.load_auth().unwrap().providers.remove(0);
+        let expected_catalog = catalog_snapshot(&hub, "provider");
+        let replacement = vec![crate::provider::DiscoveredModelDetails {
+            slug: "replacement".into(),
+            context_budget: Some(16_384),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Legacy { thinking: true },
+        }];
+        let (follow_up_entered_tx, follow_up_entered_rx) = std::sync::mpsc::channel();
+        let (release_follow_up_tx, release_follow_up_rx) = std::sync::mpsc::channel();
+        let transaction_hub = hub.clone();
+        let transaction = std::thread::spawn(move || {
+            transaction_hub.update_auth_model_cache_details_if_enabled_and_then(
+                &expected,
+                &expected_catalog,
+                "provider@account",
+                2,
+                &replacement,
+                || {
+                    assert_eq!(
+                        transaction_hub
+                            .load_auth_model_cache_details("provider")
+                            .unwrap()
+                            .unwrap()[0]
+                            .slug,
+                        "replacement"
+                    );
+                    follow_up_entered_tx.send(()).unwrap();
+                    release_follow_up_rx.recv().unwrap();
+                    "catalog-committed"
+                },
+            )
+        });
+        follow_up_entered_rx.recv().unwrap();
+
+        let (peer_started_tx, peer_started_rx) = std::sync::mpsc::channel();
+        let (peer_done_tx, peer_done_rx) = std::sync::mpsc::channel();
+        let peer_hub = hub.clone();
+        let peer = std::thread::spawn(move || {
+            peer_started_tx.send(()).unwrap();
+            peer_hub
+                .update_auth_model_cache_details(
+                    "provider",
+                    "provider@account",
+                    3,
+                    &[crate::provider::DiscoveredModelDetails {
+                        slug: "peer".into(),
+                        context_budget: Some(32_768),
+                        capability_knowledge: crate::provider::CapabilityKnowledge::Legacy {
+                            thinking: false,
+                        },
+                    }],
+                )
+                .unwrap();
+            peer_done_tx.send(()).unwrap();
+        });
+        peer_started_rx.recv().unwrap();
+        assert!(
+            peer_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+
+        release_follow_up_tx.send(()).unwrap();
+        assert_eq!(
+            transaction.join().unwrap().unwrap(),
+            (AuthModelCacheCommit::Updated, Some("catalog-committed"))
+        );
+        peer_done_rx.recv().unwrap();
+        peer.join().unwrap();
+        assert_eq!(
+            hub.load_auth_model_cache_details("provider")
+                .unwrap()
+                .unwrap()[0]
+                .slug,
+            "peer"
+        );
     }
 
     #[test]

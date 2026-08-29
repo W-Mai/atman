@@ -48,6 +48,7 @@ pub mod permission;
 pub mod permission_audit;
 pub mod projection;
 pub mod provider;
+pub mod provider_lifecycle;
 pub mod providers;
 pub mod redact;
 pub mod rendezvous;
@@ -88,6 +89,7 @@ pub use invocation_env::InvocationEnv;
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use projection::message_window::{TranscriptEntry, replay_transcript_from};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
+pub use provider_lifecycle::{ProviderLifecycle, ProviderLifecycleError, ProviderStateChange};
 pub use session::{
     CompactReviewDecision, CompactReviewMode, CompactReviewRegistry, ContextSnapshot,
     PendingCompactReview, Session, SessionId,

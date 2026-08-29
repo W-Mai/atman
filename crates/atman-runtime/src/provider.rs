@@ -697,6 +697,12 @@ pub struct ProviderRegistry {
     default: std::sync::Arc<std::sync::RwLock<Option<String>>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct WeakProviderRegistry {
+    providers: std::sync::Weak<std::sync::RwLock<HashMap<String, Arc<dyn Provider>>>>,
+    default: std::sync::Weak<std::sync::RwLock<Option<String>>>,
+}
+
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -704,17 +710,59 @@ impl ProviderRegistry {
 
     pub fn register(&self, provider: Arc<dyn Provider>) {
         let name = provider.name().to_string();
-        let mut defaults = self.default.write().unwrap();
+        drop(self.register_named(name, provider));
+    }
+
+    pub(crate) fn register_named(
+        &self,
+        name: String,
+        provider: Arc<dyn Provider>,
+    ) -> Option<Arc<dyn Provider>> {
+        let mut providers = self
+            .providers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut defaults = self
+            .default
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if defaults.is_none() {
             *defaults = Some(name.clone());
         }
-        drop(defaults);
-        self.providers.write().unwrap().insert(name, provider);
+        providers.insert(name, provider)
     }
 
     pub fn set_default(&self, name: &str) {
-        if self.providers.read().unwrap().contains_key(name) {
+        let providers = self.providers.read().unwrap();
+        if providers.contains_key(name) {
             *self.default.write().unwrap() = Some(name.to_string());
+        }
+    }
+
+    pub fn remove(&self, name: &str) -> bool {
+        let mut providers = self.providers.write().unwrap();
+        let removed = providers.remove(name).is_some();
+        if removed {
+            let mut default = self.default.write().unwrap();
+            if default.as_deref() == Some(name) {
+                *default = None;
+            }
+        }
+        removed
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.providers.read().unwrap().contains_key(name)
+    }
+
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.providers, &other.providers)
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakProviderRegistry {
+        WeakProviderRegistry {
+            providers: Arc::downgrade(&self.providers),
+            default: Arc::downgrade(&self.default),
         }
     }
 
@@ -745,6 +793,15 @@ impl ProviderRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
         self.providers.read().unwrap().get(name).cloned()
+    }
+}
+
+impl WeakProviderRegistry {
+    pub(crate) fn upgrade(&self) -> Option<ProviderRegistry> {
+        Some(ProviderRegistry {
+            providers: self.providers.upgrade()?,
+            default: self.default.upgrade()?,
+        })
     }
 }
 
@@ -827,6 +884,26 @@ mod tests {
     fn resolve_returns_none_for_unknown() {
         let reg = fixture_registry();
         assert!(reg.resolve("some-unknown-model").is_none());
+    }
+
+    #[test]
+    fn remove_updates_membership_and_clears_only_the_removed_default() {
+        let reg = fixture_registry();
+        reg.set_default("openai");
+
+        assert!(reg.contains("codex"));
+        assert!(reg.contains("openai"));
+        assert!(!reg.remove("missing"));
+        assert_eq!(reg.default.read().unwrap().as_deref(), Some("openai"));
+
+        assert!(reg.remove("codex"));
+        assert!(!reg.contains("codex"));
+        assert!(reg.contains("openai"));
+        assert_eq!(reg.default.read().unwrap().as_deref(), Some("openai"));
+
+        assert!(reg.remove("openai"));
+        assert!(!reg.contains("openai"));
+        assert!(reg.default.read().unwrap().is_none());
     }
 
     #[test]

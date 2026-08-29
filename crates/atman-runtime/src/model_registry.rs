@@ -404,7 +404,7 @@ fn prepare_discovered_details_with_profile(
     prepare_provider_catalog(descriptor, models)
 }
 
-fn shortest_unique_provider_id(provider_id: &str, provider_ids: &[String]) -> String {
+pub(crate) fn shortest_unique_provider_id(provider_id: &str, provider_ids: &[String]) -> String {
     let normalized: String = provider_id
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
@@ -584,8 +584,12 @@ pub fn prepare_provider_catalog(
         }
     }
 
-    let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
-    let state = REGISTRY_STATE.read().unwrap();
+    let transaction = REGISTRY_TRANSACTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = REGISTRY_STATE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = state.catalogs.get(&descriptor.provider_key);
     if let Some(previous) = previous
         && previous.descriptor.namespace != descriptor.namespace
@@ -656,7 +660,9 @@ pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog) -> Ca
         descriptor,
         models: next_models,
     } = catalog;
-    let mut state = REGISTRY_STATE.write().unwrap();
+    let mut state = REGISTRY_STATE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = state.catalogs.get(&descriptor.provider_key);
     let added = next_models
         .keys()
@@ -717,6 +723,15 @@ pub fn remove_provider_catalog(provider_key: &str) -> bool {
         CATALOG_REVISION.send_replace(state.catalog_revision);
     }
     removed
+}
+
+pub(crate) fn provider_catalog_namespace(provider_key: &str) -> Option<String> {
+    REGISTRY_STATE
+        .read()
+        .unwrap()
+        .catalogs
+        .get(provider_key)
+        .map(|catalog| catalog.descriptor.namespace.clone())
 }
 
 pub fn model_catalog_revision() -> u64 {

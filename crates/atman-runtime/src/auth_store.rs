@@ -72,6 +72,8 @@ struct StoredProviderDocument {
     account: Option<String>,
     enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     model_namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_cache: Option<ModelCacheDocument>,
@@ -93,6 +95,11 @@ struct CachedModelDocument {
     thinking: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<crate::provider::ModelCapabilities>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthProviderCatalogSnapshot {
+    revision: String,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -146,6 +153,7 @@ impl AuthStoreDocument {
         };
         assign_model_namespace(provider, provider_id, model_namespace)?;
         provider.model_cache = Some(ModelCacheDocument::from_details(fetched_at, models));
+        provider.bump_catalog_revision();
         Ok(true)
     }
 
@@ -161,7 +169,41 @@ impl AuthStoreDocument {
         else {
             return Err(format!("auth provider `{provider_id}` does not exist"));
         };
-        assign_model_namespace(provider, provider_id, model_namespace)
+        let changed = assign_model_namespace(provider, provider_id, model_namespace)?;
+        if changed {
+            provider.bump_catalog_revision();
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn set_provider_enabled(
+        &mut self,
+        provider_id: &str,
+        enabled: bool,
+    ) -> Option<bool> {
+        let provider = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)?;
+        if provider.enabled == enabled {
+            return Some(false);
+        }
+        provider.enabled = enabled;
+        provider.bump_catalog_revision();
+        Some(true)
+    }
+
+    pub(crate) fn update_model_cache(&mut self, provider_id: &str, cache: ModelCache) -> bool {
+        let Some(provider) = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return false;
+        };
+        provider.model_cache = Some(cache.into());
+        provider.bump_catalog_revision();
+        true
     }
 
     pub(crate) fn model_namespace(&self, provider_id: &str) -> Option<String> {
@@ -182,6 +224,41 @@ impl AuthStoreDocument {
             .model_cache
             .as_ref()
             .map(ModelCacheDocument::details)
+    }
+
+    pub(crate) fn provider_catalog_snapshot(
+        &self,
+        provider_id: &str,
+    ) -> Option<AuthProviderCatalogSnapshot> {
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)?;
+        Some(AuthProviderCatalogSnapshot {
+            revision: provider.catalog_revision.clone()?,
+        })
+    }
+
+    pub(crate) fn ensure_provider_catalog_state(
+        &mut self,
+        provider_id: &str,
+    ) -> Option<((StoredProvider, AuthProviderCatalogSnapshot), bool)> {
+        let provider = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)?;
+        let changed = provider.catalog_revision.is_none();
+        let revision = provider
+            .catalog_revision
+            .get_or_insert_with(new_catalog_revision)
+            .clone();
+        Some((
+            (
+                provider.legacy_view(),
+                AuthProviderCatalogSnapshot { revision },
+            ),
+            changed,
+        ))
     }
 }
 
@@ -221,10 +298,23 @@ impl StoredProviderDocument {
     }
 
     fn merge(mut self, provider: StoredProvider) -> Self {
+        let catalog_changed = self.name != provider.name
+            || self.kind != provider.kind
+            || self.enabled != provider.enabled
+            || self
+                .model_cache
+                .as_ref()
+                .map(ModelCacheDocument::legacy_view)
+                != provider.model_cache;
         let model_cache = match (provider.model_cache, self.model_cache.take()) {
             (Some(cache), Some(document)) if document.legacy_view() == cache => Some(document),
             (Some(cache), _) => Some(cache.into()),
             (None, _) => None,
+        };
+        let catalog_revision = if catalog_changed {
+            Some(new_catalog_revision())
+        } else {
+            self.catalog_revision
         };
         Self {
             id: provider.id,
@@ -235,9 +325,14 @@ impl StoredProviderDocument {
             expires_at: provider.expires_at,
             account: provider.account,
             enabled: provider.enabled,
+            catalog_revision,
             model_namespace: self.model_namespace,
             model_cache,
         }
+    }
+
+    fn bump_catalog_revision(&mut self) {
+        self.catalog_revision = Some(new_catalog_revision());
     }
 }
 
@@ -252,10 +347,15 @@ impl From<StoredProvider> for StoredProviderDocument {
             expires_at: provider.expires_at,
             account: provider.account,
             enabled: provider.enabled,
+            catalog_revision: Some(new_catalog_revision()),
             model_namespace: None,
             model_cache: provider.model_cache.map(ModelCacheDocument::from),
         }
     }
+}
+
+fn new_catalog_revision() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 impl ModelCacheDocument {
