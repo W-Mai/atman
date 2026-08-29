@@ -593,13 +593,23 @@ fn monitor_serves_sessions_and_events_over_http() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn");
-    std::thread::sleep(std::time::Duration::from_millis(800));
-
     let base = format!("http://127.0.0.1:{port}");
-    let sessions_resp = std::process::Command::new("curl")
-        .args(["-s", &format!("{base}/api/sessions")])
-        .output()
-        .expect("curl sessions");
+    let sessions_url = format!("{base}/api/sessions");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let sessions_resp = loop {
+        let response = std::process::Command::new("curl")
+            .args(["-s", &sessions_url])
+            .output()
+            .expect("curl sessions");
+        if response.status.success() {
+            break response;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "monitor did not become ready before timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     let events_resp = std::process::Command::new("curl")
         .args(["-s", &format!("{base}/api/sessions/{sid}/events")])
         .output()
