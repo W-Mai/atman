@@ -260,17 +260,35 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .and_then(|session| session.reasoning_override())
         })
         .unwrap_or_else(|| model_info.reasoning.clone());
-    let mut reasoning = match crate::model_registry::resolve_reasoning(
-        &requested_reasoning,
-        &model_info.capabilities,
-    ) {
-        Ok(reasoning) => reasoning,
-        Err(error) => {
-            return Value::Err(RuntimeError::ToolFailed(format!(
-                "model `{model}` reasoning config: {error}"
-            )));
-        }
-    };
+    let mut reasoning =
+        match crate::model_registry::resolve_reasoning_for_model(&model, &requested_reasoning) {
+            Ok(reasoning) => reasoning,
+            Err(error) => {
+                let error =
+                    RuntimeError::ToolFailed(format!("model `{model}` reasoning config: {error}"));
+                if let Some(sink) = ctx.events.as_ref() {
+                    sink.emit(crate::event::Event::LlmCall {
+                        model: model.clone(),
+                        provider: provider.name().to_string(),
+                        usage: crate::provider::TokenUsage::default(),
+                        wallclock_ms: 0,
+                        ttft_ms: None,
+                        tokens_per_second: None,
+                        status: crate::event::LlmCallStatus::Errored {
+                            message: error.to_string(),
+                        },
+                        run_id: ctx.flow_run_id.clone(),
+                        node_id: ctx.current_node_id.clone(),
+                    });
+                }
+                send_llm_diagnostic(
+                    ctx,
+                    crate::notify::NotifyLevel::Error,
+                    format!("LLM call failed: {error}"),
+                );
+                return Value::Err(error);
+            }
+        };
     let mut signature_retries: u32 = 0;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
@@ -386,6 +404,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
             match outcome {
                 Ok(am) => {
+                    if last_err.is_some() {
+                        send_llm_diagnostic(
+                            ctx,
+                            crate::notify::NotifyLevel::Success,
+                            "LLM call recovered after retry".into(),
+                        );
+                    }
                     if let Some(session) = ctx.session_runtime.as_ref()
                         && !matches!(context_mode, ContextMode::None)
                     {
@@ -417,6 +442,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     ) {
                         return Value::Err(e);
                     }
+                    send_llm_diagnostic(
+                        ctx,
+                        crate::notify::NotifyLevel::Warn,
+                        format!("LLM call failed: {e}"),
+                    );
                     if is_context_overflow_error(&e)
                         && can_rebuild_from_session
                         && !compact_after_overflow_used
@@ -543,15 +573,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 | crate::error::ErrorKind::Transient
                         ) {
                             let delay_ms = 1000u64 << attempt;
-                            if let Some(tx) = stream_tx.as_ref() {
-                                let _ = tx.send(crate::stream::StreamFrame::Note(format!(
+                            send_llm_diagnostic(
+                                ctx,
+                                crate::notify::NotifyLevel::Warn,
+                                format!(
                                     "{} — retry {}/{} in {}s…",
                                     e,
                                     attempt + 1,
                                     retry_count,
                                     delay_ms / 1000
-                                )));
-                            }
+                                ),
+                            );
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
                         last_err = Some(e);
@@ -564,6 +596,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         break;
     }
     if let Some(fb) = args.fallback_value.clone() {
+        send_llm_diagnostic(
+            ctx,
+            crate::notify::NotifyLevel::Warn,
+            "LLM call failed; using configured fallback value".into(),
+        );
         return fb;
     }
     if let Some(session) = ctx.session_runtime.as_ref()
@@ -577,16 +614,42 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         )
         .await;
     }
-    if let Some(tx) = stream_tx.as_ref() {
-        let _ = tx.send(crate::stream::StreamFrame::Note(format!(
-            "LLM call failed: {}",
-            last_err
-                .as_ref()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "unknown error".into())
-        )));
-    }
-    Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
+    let error = last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into()));
+    send_llm_diagnostic(
+        ctx,
+        crate::notify::NotifyLevel::Error,
+        format!("LLM call failed: {error}"),
+    );
+    Value::Err(error)
+}
+
+fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message: String) {
+    let tx = ctx
+        .session_runtime
+        .as_ref()
+        .map(|session| session.stream_tx())
+        .or_else(|| ctx.stream_tx.clone());
+    let Some(tx) = tx else {
+        return;
+    };
+    let run = ctx
+        .flow_run_id
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| ctx.turn_id.as_ref().map(ToString::to_string))
+        .unwrap_or_else(|| "session".into());
+    let node = ctx.current_node_id.as_deref().unwrap_or("llm");
+    let _ = tx.send(crate::stream::StreamFrame::Notification(
+        crate::stream::NotificationFrame {
+            level,
+            location: crate::notify::NotifyLocation::Inline,
+            lifecycle: crate::notify::NotifyLifecycle::UntilReplaced,
+            stack: crate::notify::NotifyStack::Replace {
+                key: format!("llm-call:{run}:{node}"),
+            },
+            message,
+        },
+    ));
 }
 
 fn fixed_input_tokens(
@@ -608,4 +671,37 @@ fn fixed_input_tokens(
         .saturating_add(input_tokens)
         .saturating_add(tool_tokens)
         .saturating_add(prompt_tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn llm_diagnostic_uses_session_stream_without_content_streaming() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let mut rx = session.stream_subscribe();
+        let ctx = ToolCtx::new()
+            .with_session_runtime(session)
+            .with_anchors(None, Some(crate::event::FlowRunId::now()), None)
+            .with_current_node(Some("7.iter[0].0".into()));
+
+        send_llm_diagnostic(
+            &ctx,
+            crate::notify::NotifyLevel::Error,
+            "LLM call failed: invalid request".into(),
+        );
+
+        let frame = rx.recv().await.unwrap();
+        assert!(matches!(
+            frame,
+            crate::stream::StreamFrame::Notification(crate::stream::NotificationFrame {
+                level: crate::notify::NotifyLevel::Error,
+                location: crate::notify::NotifyLocation::Inline,
+                stack: crate::notify::NotifyStack::Replace { key },
+                message,
+                ..
+            }) if key.ends_with(":7.iter[0].0") && message.contains("invalid request")
+        ));
+    }
 }

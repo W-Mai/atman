@@ -9,21 +9,6 @@ use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use crate::model_browser::{BrowserRow, BrowserRowKind, ModelBrowser};
 
-const REASONING_CHOICES: &[&str] = &[
-    "default",
-    "off",
-    "auto",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultra",
-    "persistent",
-    "budget:4096",
-];
-
 fn reasoning_label(selection: &atman_runtime::provider::ReasoningSelection) -> String {
     selection.to_string()
 }
@@ -172,6 +157,29 @@ impl ModelManager {
             .unwrap_or("")
     }
 
+    fn reasoning_choices(&self) -> Vec<String> {
+        let selections = self
+            .editing
+            .as_deref()
+            .filter(|model| {
+                atman_runtime::model_registry::model_entry(model)
+                    .and_then(|entry| entry.provider)
+                    .as_deref()
+                    == Some(self.selected_provider.as_str())
+            })
+            .map(atman_runtime::model_registry::reasoning_selections_for_model)
+            .unwrap_or_else(|| {
+                atman_runtime::model_registry::reasoning_selections_for_provider(
+                    &self.selected_provider,
+                    &atman_runtime::provider::ModelCapabilities::default(),
+                )
+            });
+        selections
+            .into_iter()
+            .map(|selection| selection.to_string())
+            .collect()
+    }
+
     fn open_form(&mut self) {
         self.show_form = true;
         self.form_field = 0;
@@ -316,17 +324,17 @@ impl ModelManager {
                         self.selected_provider = providers[selected].to_string();
                     }
                 } else {
-                    let mut selected = REASONING_CHOICES
+                    let choices = self.reasoning_choices();
+                    let mut selected = choices
                         .iter()
-                        .position(|choice| *choice == self.thinking_editor.buf().trim())
+                        .position(|choice| choice == self.thinking_editor.buf().trim())
                         .unwrap_or(0);
                     crate::directional_selector::move_wrapped(
                         &mut selected,
-                        REASONING_CHOICES.len(),
+                        choices.len(),
                         direction,
                     );
-                    self.thinking_editor
-                        .replace_with(REASONING_CHOICES[selected]);
+                    self.thinking_editor.replace_with(&choices[selected]);
                 }
             }
             KeyAction::CursorLeft

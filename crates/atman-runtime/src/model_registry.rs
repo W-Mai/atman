@@ -4,7 +4,7 @@ use std::sync::RwLock;
 use crate::auth_store::AuthStore;
 use crate::provider::{
     ImageDetail, InputModality, ModelCapabilities, ReasoningEffort, ReasoningExecutionMode,
-    ReasoningSelection,
+    ReasoningSelection, ReasoningWireProfile,
 };
 
 #[derive(Debug, Clone)]
@@ -433,6 +433,162 @@ pub fn model_info(name: &str) -> ModelInfo {
         image_detail: ImageDetail::Auto,
         max_output_tokens: None,
     }
+}
+
+pub fn reasoning_wire_profile_for_provider(provider: &str) -> ReasoningWireProfile {
+    if let Some((_, entry)) = all_provider_entries()
+        .into_iter()
+        .find(|(name, _)| name == provider)
+    {
+        return match entry.kind.as_str() {
+            "openai" | "openai-compat" => match entry.reasoning_format.unwrap_or_else(|| {
+                crate::providers::openai::OpenAiReasoningFormat::for_provider_kind(&entry.kind)
+            }) {
+                crate::providers::openai::OpenAiReasoningFormat::Official => {
+                    ReasoningWireProfile::OpenAiOfficial
+                }
+                crate::providers::openai::OpenAiReasoningFormat::CompatibleThinking => {
+                    ReasoningWireProfile::CompatibleThinking
+                }
+            },
+            "anthropic" => ReasoningWireProfile::AnthropicMessages,
+            "codex" => ReasoningWireProfile::CodexResponses,
+            _ => ReasoningWireProfile::Unknown,
+        };
+    }
+    match provider {
+        "openai" => ReasoningWireProfile::OpenAiOfficial,
+        "openai-compat" => ReasoningWireProfile::CompatibleThinking,
+        "anthropic" => ReasoningWireProfile::AnthropicMessages,
+        "codex" => ReasoningWireProfile::CodexResponses,
+        _ => ReasoningWireProfile::Unknown,
+    }
+}
+
+pub fn reasoning_wire_profile_for_model(model: &str) -> ReasoningWireProfile {
+    let Some(entry) = model_entry(model) else {
+        return ReasoningWireProfile::Unknown;
+    };
+    let profile = entry
+        .provider
+        .as_deref()
+        .map(reasoning_wire_profile_for_provider)
+        .unwrap_or(ReasoningWireProfile::Unknown);
+    if profile == ReasoningWireProfile::Unknown && entry.model.starts_with("codex/") {
+        ReasoningWireProfile::CodexResponses
+    } else {
+        profile
+    }
+}
+
+fn explicitly_lacks_reasoning(model: &str) -> bool {
+    model_entry(model).is_some_and(|entry| {
+        entry.thinking == Some(false)
+            && entry.reasoning.is_none()
+            && entry.reasoning_budget_tokens.is_none()
+            && entry.reasoning_efforts.is_empty()
+            && entry.default_reasoning_effort.is_none()
+    })
+}
+
+pub fn resolve_reasoning_for_model(
+    model: &str,
+    selection: &ReasoningSelection,
+) -> Result<ReasoningSelection, String> {
+    if selection.enabled() && explicitly_lacks_reasoning(model) {
+        return Err(format!(
+            "model `{}` does not advertise reasoning support",
+            resolve_alias(model)
+        ));
+    }
+    let info = model_info(model);
+    let profile = reasoning_wire_profile_for_model(model);
+    let resolved = resolve_reasoning(selection, &info.capabilities)?;
+    let resolved = if matches!(selection, ReasoningSelection::Auto { .. })
+        && matches!(
+            profile,
+            ReasoningWireProfile::CompatibleThinking
+                | ReasoningWireProfile::CodexResponses
+                | ReasoningWireProfile::AnthropicMessages
+        ) {
+        ReasoningSelection::Auto {
+            execution_mode: resolved.execution_mode().cloned(),
+        }
+    } else {
+        resolved
+    };
+    profile.validate(&resolved, info.max_output_tokens)?;
+    Ok(resolved)
+}
+
+pub fn reasoning_selections_for_provider(
+    provider: &str,
+    capabilities: &ModelCapabilities,
+) -> Vec<ReasoningSelection> {
+    let profile = reasoning_wire_profile_for_provider(provider);
+    let mut choices = vec![
+        ReasoningSelection::ProviderDefault,
+        ReasoningSelection::Disabled,
+        ReasoningSelection::Auto {
+            execution_mode: None,
+        },
+    ];
+    let efforts = if capabilities.reasoning_efforts.is_empty() {
+        profile.fallback_efforts()
+    } else {
+        capabilities.reasoning_efforts.as_slice()
+    };
+    for effort in efforts {
+        let selection = ReasoningSelection::Effort {
+            effort: effort.clone(),
+            execution_mode: None,
+        };
+        if profile.validate(&selection, None).is_ok() && !choices.contains(&selection) {
+            choices.push(selection);
+        }
+    }
+    if profile.supports_token_budget() {
+        choices.push(ReasoningSelection::BudgetTokens { tokens: 4096 });
+    }
+    choices
+}
+
+pub fn reasoning_selections_for_model(model: &str) -> Vec<ReasoningSelection> {
+    if explicitly_lacks_reasoning(model) {
+        return vec![ReasoningSelection::ProviderDefault];
+    }
+    let info = model_info(model);
+    let provider = model_entry(model).and_then(|entry| entry.provider);
+    let mut choices = provider
+        .as_deref()
+        .map(|provider| reasoning_selections_for_provider(provider, &info.capabilities))
+        .unwrap_or_else(|| {
+            vec![
+                ReasoningSelection::ProviderDefault,
+                ReasoningSelection::Disabled,
+                ReasoningSelection::Auto {
+                    execution_mode: None,
+                },
+            ]
+        });
+    choices.retain(|selection| resolve_reasoning_for_model(model, selection).is_ok());
+    choices
+}
+
+pub fn effective_reasoning_for_model(
+    model: &str,
+    session_override: Option<&ReasoningSelection>,
+) -> Result<Option<ReasoningSelection>, String> {
+    let info = model_info(model);
+    let requested = session_override.unwrap_or(&info.reasoning);
+    let should_display = session_override.is_some()
+        || !matches!(&info.reasoning, ReasoningSelection::ProviderDefault)
+        || !info.capabilities.reasoning_efforts.is_empty()
+        || info.capabilities.default_reasoning_effort.is_some();
+    if !should_display || (session_override.is_none() && explicitly_lacks_reasoning(model)) {
+        return Ok(None);
+    }
+    resolve_reasoning_for_model(model, requested).map(Some)
 }
 
 impl ModelInfo {
@@ -1772,6 +1928,63 @@ reasoning_format = "reasoning-effort"
         assert_eq!(
             cfg.providers["openai-compatible"].reasoning_format,
             Some(crate::providers::openai::OpenAiReasoningFormat::Official)
+        );
+    }
+
+    #[test]
+    fn compatible_thinking_profile_limits_shared_model_choices() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let cfg = parse_config(
+            r#"
+[providers.openai-compatible]
+kind = "openai-compat"
+reasoning_format = "thinking-toggle"
+
+[models.custom-reasoning]
+model = "vendor/reasoning-model"
+provider = "openai-compatible"
+context_budget = 128000
+thinking = true
+reasoning_efforts = ["high"]
+default_reasoning_effort = "high"
+"#,
+        )
+        .unwrap();
+        set_provider_config(cfg);
+
+        assert_eq!(
+            reasoning_wire_profile_for_model("custom-reasoning"),
+            ReasoningWireProfile::CompatibleThinking
+        );
+        assert_eq!(
+            reasoning_selections_for_model("custom-reasoning")
+                .into_iter()
+                .map(|selection| selection.to_string())
+                .collect::<Vec<_>>(),
+            ["default", "off", "auto"]
+        );
+        assert_eq!(
+            resolve_reasoning_for_model(
+                "custom-reasoning",
+                &ReasoningSelection::Auto {
+                    execution_mode: None,
+                },
+            )
+            .unwrap(),
+            ReasoningSelection::Auto {
+                execution_mode: None,
+            }
+        );
+        assert!(
+            resolve_reasoning_for_model(
+                "custom-reasoning",
+                &ReasoningSelection::Effort {
+                    effort: ReasoningEffort::High,
+                    execution_mode: None,
+                },
+            )
+            .unwrap_err()
+            .contains("cannot represent effort `high`")
         );
     }
 

@@ -7,7 +7,7 @@ use crate::event::{NodeEvent, Observable};
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
-    ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
+    ReasoningSelection, ReasoningWireProfile, StopReason, TokenUsage, estimate_tokens,
 };
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
@@ -49,27 +49,9 @@ impl AnthropicProvider {
     }
 
     fn validate_reasoning(&self, selection: &ReasoningSelection) -> Result<(), RuntimeError> {
-        if selection.execution_mode().is_some() {
-            return Err(RuntimeError::ToolFailed(
-                "invalid request: Anthropic does not support reasoning execution mode".into(),
-            ));
-        }
-        if let ReasoningSelection::BudgetTokens { tokens } = selection
-            && *tokens < 1024
-        {
-            return Err(RuntimeError::ToolFailed(
-                "invalid request: Anthropic thinking budget must be at least 1024 tokens".into(),
-            ));
-        }
-        if let ReasoningSelection::BudgetTokens { tokens } = selection
-            && *tokens >= self.max_tokens
-        {
-            return Err(RuntimeError::ToolFailed(format!(
-                "invalid request: Anthropic thinking budget ({tokens}) must be lower than max_tokens ({})",
-                self.max_tokens
-            )));
-        }
-        Ok(())
+        ReasoningWireProfile::AnthropicMessages
+            .validate(selection, Some(self.max_tokens))
+            .map_err(|error| RuntimeError::ToolFailed(format!("invalid request: {error}")))
     }
 
     fn build_body(&self, req: &LlmRequest, stream: bool) -> Result<MessagesRequest, RuntimeError> {
@@ -88,7 +70,7 @@ impl AnthropicProvider {
                 input_schema: t.input_schema.clone(),
             })
             .collect();
-        let (thinking, output_config) = anthropic_reasoning(&req.reasoning, self.max_tokens);
+        let (thinking, output_config) = anthropic_reasoning(&req.reasoning);
         Ok(MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
@@ -133,14 +115,13 @@ impl AnthropicProvider {
 
 fn anthropic_reasoning(
     selection: &ReasoningSelection,
-    max_tokens: u32,
 ) -> (Option<ThinkingConfig>, Option<OutputConfig>) {
     match selection {
         ReasoningSelection::ProviderDefault | ReasoningSelection::Disabled => (None, None),
         ReasoningSelection::Auto { .. } => (
             Some(ThinkingConfig {
-                kind: "enabled",
-                budget_tokens: Some(max_tokens.saturating_sub(4096).max(1024)),
+                kind: "adaptive",
+                budget_tokens: None,
             }),
             None,
         ),

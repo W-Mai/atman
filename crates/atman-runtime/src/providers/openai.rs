@@ -7,7 +7,7 @@ use crate::event::{NodeEvent, Observable};
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
-    ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
+    ReasoningSelection, ReasoningWireProfile, StopReason, TokenUsage, estimate_tokens,
 };
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
@@ -95,32 +95,13 @@ impl OpenAiProvider {
     }
 
     fn validate_reasoning(&self, selection: &ReasoningSelection) -> Result<(), RuntimeError> {
-        if selection.execution_mode().is_some() {
-            return Err(RuntimeError::ToolFailed(
-                "invalid request: Chat Completions does not support reasoning execution mode"
-                    .into(),
-            ));
-        }
-        match (self.reasoning_format, selection) {
-            (_, ReasoningSelection::BudgetTokens { .. }) => Err(RuntimeError::ToolFailed(
-                "invalid request: this OpenAI adapter does not support token-budget reasoning"
-                    .into(),
-            )),
-            (
-                OpenAiReasoningFormat::CompatibleThinking,
-                ReasoningSelection::Effort {
-                    effort: ReasoningEffort::None,
-                    ..
-                },
-            ) => Ok(()),
-            (
-                OpenAiReasoningFormat::CompatibleThinking,
-                ReasoningSelection::Effort { effort, .. },
-            ) => Err(RuntimeError::ToolFailed(format!(
-                "invalid request: compatible thinking profile cannot represent effort `{effort}`; use `auto` or select the official OpenAI profile"
-            ))),
-            _ => Ok(()),
-        }
+        let profile = match self.reasoning_format {
+            OpenAiReasoningFormat::Official => ReasoningWireProfile::OpenAiOfficial,
+            OpenAiReasoningFormat::CompatibleThinking => ReasoningWireProfile::CompatibleThinking,
+        };
+        profile
+            .validate(selection, self.max_tokens)
+            .map_err(|error| RuntimeError::ToolFailed(format!("invalid request: {error}")))
     }
 
     fn build_body(

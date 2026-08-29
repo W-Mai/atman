@@ -47,16 +47,18 @@ pub(crate) fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> 
 }
 
 fn effective_reasoning_badge(app: &crate::app::AppState) -> Option<String> {
-    use atman_runtime::provider::ReasoningSelection;
-
     let session = app.session.as_ref()?;
-    let info = atman_runtime::model_registry::model_info(&session.last_model());
+    let model = session.last_model();
     let override_selection = session.reasoning_override();
-    let supports_reasoning = override_selection.is_some()
-        || !matches!(&info.reasoning, ReasoningSelection::ProviderDefault)
-        || !info.capabilities.reasoning_efforts.is_empty()
-        || info.capabilities.default_reasoning_effort.is_some();
-    supports_reasoning.then(|| override_selection.unwrap_or(info.reasoning).to_string())
+    match atman_runtime::model_registry::effective_reasoning_for_model(
+        &model,
+        override_selection.as_ref(),
+    ) {
+        Ok(selection) => selection.map(|selection| selection.to_string()),
+        Err(_) => override_selection
+            .or_else(|| Some(atman_runtime::model_registry::model_info(&model).reasoning))
+            .map(|selection| format!("{selection} !")),
+    }
 }
 
 // Startup input eases from the overlay's centered slot to the normal

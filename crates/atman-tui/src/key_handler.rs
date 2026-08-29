@@ -915,6 +915,7 @@ pub(crate) fn handle_key(
                 _ => (String::new(), Vec::new()),
             };
             app.items.remove(0);
+            app.inline_note_indices.clear();
             app.items_version = app.items_version.wrapping_add(1);
             app.startup_intro = Some(crate::app::StartupIntro {
                 started_at: std::time::Instant::now(),
@@ -1342,60 +1343,16 @@ pub(crate) fn handle_key(
 fn reasoning_choices(
     session: &atman_runtime::Session,
 ) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
-    use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
-
-    let info = atman_runtime::model_registry::model_info(&session.last_model());
-    let mut choices = vec![
-        None,
-        Some(ReasoningSelection::Disabled),
-        Some(ReasoningSelection::Auto {
-            execution_mode: None,
-        }),
-    ];
-    let openai_reasoning_format = atman_runtime::model_registry::model_entry(&session.last_model())
-        .and_then(|model| model.provider)
-        .and_then(|provider| {
-            atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .find(|(name, _)| name == &provider)
-                .and_then(|(_, entry)| {
-                    matches!(entry.kind.as_str(), "openai" | "openai-compat").then(|| {
-                        entry.reasoning_format.unwrap_or_else(|| {
-                            atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
-                                &entry.kind,
-                            )
-                        })
-                    })
-                })
-        });
-    let fallback_efforts = [
-        ReasoningEffort::Minimal,
-        ReasoningEffort::Low,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-        ReasoningEffort::XHigh,
-        ReasoningEffort::Max,
-        ReasoningEffort::Ultra,
-    ];
-    let efforts = match openai_reasoning_format {
-        Some(atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking) => &[],
-        Some(atman_runtime::providers::openai::OpenAiReasoningFormat::Official)
-            if info.capabilities.reasoning_efforts.is_empty() =>
-        {
-            fallback_efforts.as_slice()
-        }
-        _ => info.capabilities.reasoning_efforts.as_slice(),
-    };
-    for effort in efforts {
-        let selection = Some(ReasoningSelection::Effort {
-            effort: effort.clone(),
-            execution_mode: None,
-        });
-        if !choices.contains(&selection) {
-            choices.push(selection);
-        }
-    }
-    choices
+    atman_runtime::model_registry::reasoning_selections_for_model(&session.last_model())
+        .into_iter()
+        .map(|selection| {
+            (!matches!(
+                selection,
+                atman_runtime::provider::ReasoningSelection::ProviderDefault
+            ))
+            .then_some(selection)
+        })
+        .collect()
 }
 
 // The outgoing tui exits fast; the incoming tui plays the fade+slide

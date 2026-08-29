@@ -7,7 +7,7 @@ use crate::event::{NodeEvent, Observable, TurnId};
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
-    ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
+    ReasoningSelection, ReasoningWireProfile, StopReason, TokenUsage, estimate_tokens,
 };
 use crate::tool::BoxFut;
 use anyhow::Context;
@@ -77,12 +77,9 @@ impl CodexProvider {
     }
 
     fn validate_reasoning(selection: &ReasoningSelection) -> Result<(), RuntimeError> {
-        if matches!(selection, ReasoningSelection::BudgetTokens { .. }) {
-            return Err(RuntimeError::ToolFailed(
-                "invalid request: Codex Responses does not support token-budget reasoning".into(),
-            ));
-        }
-        Ok(())
+        ReasoningWireProfile::CodexResponses
+            .validate(selection, None)
+            .map_err(|error| RuntimeError::ToolFailed(format!("invalid request: {error}")))
     }
 }
 

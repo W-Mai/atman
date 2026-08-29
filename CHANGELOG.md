@@ -20,6 +20,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Reasoning profile consistency** — TUI controls, model switches, request validation, and provider serializers share the same wire-profile rules; Anthropic auto reasoning uses adaptive thinking and the effort badge uses the active input-border color.
+- **Visible LLM failures** — request errors and retry state update a keyed inline session note even when content streaming and message history are disabled.
 - **Codex multimodal request shape** — mixed text and image input is serialized as typed Responses API content instead of a JSON string.
 - **Codex compacted context** — compact summaries and stored system context remain present in Responses API input history.
 - **Attachment degradation targeting** — provider rejection replaces only the rejected image message instead of matching the same part indexes across unrelated history.

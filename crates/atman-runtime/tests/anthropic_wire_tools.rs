@@ -85,6 +85,19 @@ fn anthropic_effort_uses_adaptive_thinking_and_output_config() {
 }
 
 #[test]
+fn anthropic_auto_uses_adaptive_thinking_without_forcing_effort() {
+    let p = provider();
+    let mut req = request_with_tools();
+    req.reasoning = atman_runtime::provider::ReasoningSelection::Auto {
+        execution_mode: None,
+    };
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert!(body["thinking"].get("budget_tokens").is_none());
+    assert!(body.get("output_config").is_none());
+}
+
+#[test]
 fn anthropic_budget_uses_legacy_manual_thinking() {
     let p = provider();
     let mut req = request_with_tools();

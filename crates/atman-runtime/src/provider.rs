@@ -166,6 +166,129 @@ pub enum ReasoningSelection {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningWireProfile {
+    OpenAiOfficial,
+    CompatibleThinking,
+    CodexResponses,
+    AnthropicMessages,
+    Unknown,
+}
+
+const OPENAI_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Minimal,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+    ReasoningEffort::Ultra,
+];
+
+const CODEX_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Minimal,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+    ReasoningEffort::Ultra,
+    ReasoningEffort::Persistent,
+];
+
+const ANTHROPIC_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
+
+impl ReasoningWireProfile {
+    pub fn fallback_efforts(self) -> &'static [ReasoningEffort] {
+        match self {
+            Self::OpenAiOfficial => OPENAI_REASONING_EFFORTS,
+            Self::CodexResponses => CODEX_REASONING_EFFORTS,
+            Self::AnthropicMessages => ANTHROPIC_REASONING_EFFORTS,
+            Self::CompatibleThinking | Self::Unknown => &[],
+        }
+    }
+
+    pub fn supports_token_budget(self) -> bool {
+        matches!(self, Self::AnthropicMessages)
+    }
+
+    pub fn validate(
+        self,
+        selection: &ReasoningSelection,
+        max_tokens: Option<u32>,
+    ) -> Result<(), String> {
+        if selection.execution_mode().is_some()
+            && !matches!(self, Self::CodexResponses | Self::Unknown)
+        {
+            return Err(match self {
+                Self::AnthropicMessages => {
+                    "Anthropic does not support reasoning execution mode".into()
+                }
+                Self::OpenAiOfficial | Self::CompatibleThinking => {
+                    "Chat Completions does not support reasoning execution mode".into()
+                }
+                Self::CodexResponses | Self::Unknown => unreachable!(),
+            });
+        }
+
+        match (self, selection) {
+            (Self::Unknown, _) => Ok(()),
+            (
+                Self::OpenAiOfficial | Self::CompatibleThinking | Self::CodexResponses,
+                ReasoningSelection::BudgetTokens { .. },
+            ) => Err(match self {
+                Self::CodexResponses => {
+                    "Codex Responses does not support token-budget reasoning".into()
+                }
+                _ => "this OpenAI adapter does not support token-budget reasoning".into(),
+            }),
+            (
+                Self::CompatibleThinking,
+                ReasoningSelection::Effort {
+                    effort: ReasoningEffort::None,
+                    ..
+                },
+            ) => Ok(()),
+            (Self::CompatibleThinking, ReasoningSelection::Effort { effort, .. }) => Err(format!(
+                "compatible thinking profile cannot represent effort `{effort}`; use `auto` or select the official OpenAI profile"
+            )),
+            (
+                Self::AnthropicMessages,
+                ReasoningSelection::Effort {
+                    effort:
+                        ReasoningEffort::Minimal
+                        | ReasoningEffort::XHigh
+                        | ReasoningEffort::Ultra
+                        | ReasoningEffort::Persistent,
+                    ..
+                },
+            ) => Err(format!(
+                "Anthropic Messages cannot represent effort `{}`; use one of: low, medium, high, max",
+                selection.effort().expect("matched effort")
+            )),
+            (Self::AnthropicMessages, ReasoningSelection::BudgetTokens { tokens })
+                if *tokens < 1024 =>
+            {
+                Err("Anthropic thinking budget must be at least 1024 tokens".into())
+            }
+            (Self::AnthropicMessages, ReasoningSelection::BudgetTokens { tokens })
+                if max_tokens.is_some_and(|max| *tokens >= max) =>
+            {
+                Err(format!(
+                    "Anthropic thinking budget ({tokens}) must be lower than max_tokens ({})",
+                    max_tokens.expect("checked max_tokens")
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 impl ReasoningSelection {
     pub fn enabled(&self) -> bool {
         !matches!(self, Self::ProviderDefault | Self::Disabled)
@@ -608,5 +731,41 @@ mod tests {
     #[test]
     fn reasoning_selection_rejects_zero_budget() {
         assert!("budget:0".parse::<ReasoningSelection>().is_err());
+    }
+
+    #[test]
+    fn reasoning_wire_profiles_reject_unrepresentable_controls() {
+        let high = ReasoningSelection::Effort {
+            effort: ReasoningEffort::High,
+            execution_mode: None,
+        };
+        assert!(
+            ReasoningWireProfile::CompatibleThinking
+                .validate(&high, None)
+                .unwrap_err()
+                .contains("cannot represent effort `high`")
+        );
+        assert!(
+            ReasoningWireProfile::CompatibleThinking
+                .validate(
+                    &ReasoningSelection::Auto {
+                        execution_mode: None
+                    },
+                    None
+                )
+                .is_ok()
+        );
+        assert!(
+            ReasoningWireProfile::AnthropicMessages
+                .validate(
+                    &ReasoningSelection::Effort {
+                        effort: ReasoningEffort::XHigh,
+                        execution_mode: None,
+                    },
+                    None,
+                )
+                .unwrap_err()
+                .contains("cannot represent effort `xhigh`")
+        );
     }
 }

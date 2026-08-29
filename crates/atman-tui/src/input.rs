@@ -57,7 +57,7 @@ pub fn input_paragraph<'a>(
         block = block.title(
             Line::from(Span::styled(
                 format!(" reasoning: {reasoning} "),
-                Style::default().fg(t.accent.into()),
+                Style::default().fg(border_color),
             ))
             .right_aligned(),
         );

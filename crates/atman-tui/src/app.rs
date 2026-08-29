@@ -222,6 +222,8 @@ pub struct AppState {
     pub toasts: Vec<ToastNote>,
     /// Status bar notes keyed by slot id (e.g. "compact", "daemon").
     pub status_notes: std::collections::HashMap<String, String>,
+    /// Inline notification slots keyed by replacement id.
+    pub inline_note_indices: std::collections::HashMap<String, usize>,
     /// Active modal notification (dismiss with Esc).
     pub modal_notification: Option<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
@@ -398,6 +400,7 @@ impl AppState {
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.items = items;
+        self.inline_note_indices.clear();
         self.items_version = self.items_version.wrapping_add(1);
         self
     }
@@ -1343,7 +1346,39 @@ impl AppState {
                         self.modal_notification = Some(text);
                     }
                     _ => {
-                        self.push_item(OutputItem::SystemNote { text, level });
+                        let replace_key = match &frame.stack {
+                            atman_runtime::notify::NotifyStack::Replace { key }
+                            | atman_runtime::notify::NotifyStack::Coalesce { key } => {
+                                Some(key.clone())
+                            }
+                            _ => None,
+                        };
+                        let completes_llm_wait = replace_key
+                            .as_deref()
+                            .is_some_and(|key| key.starts_with("llm-call:"))
+                            && matches!(level, NoteLevel::Error | NoteLevel::Success);
+                        if let Some(key) = replace_key.as_ref()
+                            && let Some(index) = self.inline_note_indices.get(key).copied()
+                            && let Some(OutputItem::SystemNote {
+                                text: current_text,
+                                level: current_level,
+                            }) = self.items.get_mut(index)
+                        {
+                            *current_text = text;
+                            *current_level = level;
+                            self.items_version = self.items_version.wrapping_add(1);
+                            self.reset_lag_state();
+                        } else {
+                            let index = self.items.len();
+                            self.push_item(OutputItem::SystemNote { text, level });
+                            if let Some(key) = replace_key {
+                                self.inline_note_indices.insert(key, index);
+                            }
+                        }
+                        if completes_llm_wait {
+                            self.streaming = false;
+                            self.waiting_for_llm = false;
+                        }
                     }
                 }
             }
@@ -1967,6 +2002,40 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_replace_notification_updates_the_existing_note() {
+        let mut app = AppState {
+            streaming: true,
+            waiting_for_llm: true,
+            ..Default::default()
+        };
+        let frame = |level, message: &str| {
+            StreamFrame::Notification(atman_runtime::stream::NotificationFrame {
+                level,
+                location: atman_runtime::notify::NotifyLocation::Inline,
+                lifecycle: atman_runtime::notify::NotifyLifecycle::UntilReplaced,
+                stack: atman_runtime::notify::NotifyStack::Replace {
+                    key: "llm-call:run:node".into(),
+                },
+                message: message.into(),
+            })
+        };
+
+        app.apply_stream_frame(frame(atman_runtime::notify::NotifyLevel::Warn, "retrying"));
+        app.apply_stream_frame(frame(atman_runtime::notify::NotifyLevel::Error, "failed"));
+
+        assert_eq!(app.items.len(), 1);
+        assert!(!app.streaming);
+        assert!(!app.waiting_for_llm);
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SystemNote {
+                text,
+                level: NoteLevel::Error
+            } if text == "failed"
+        ));
+    }
 
     #[test]
     fn s8_permission_frames_route_to_root_and_spawned_workflow_owners() {

@@ -1355,9 +1355,20 @@ impl Session {
         self.watch.context.borrow().model.clone()
     }
 
-    pub fn set_current_model(&self, model: impl Into<String>) {
+    pub fn set_current_model(
+        &self,
+        model: impl Into<String>,
+    ) -> Option<(crate::provider::ReasoningSelection, String)> {
         let model = model.into();
         let budget = crate::model_registry::model_info(&model).context_budget;
+        let invalid_override = self.reasoning_override().and_then(|selection| {
+            crate::model_registry::resolve_reasoning_for_model(&model, &selection)
+                .err()
+                .map(|error| (selection, error))
+        });
+        if invalid_override.is_some() {
+            self.set_reasoning_override(None);
+        }
         self.watch.context.send_modify(|snap| {
             snap.model = model.clone();
             if budget > 0 {
@@ -1371,6 +1382,7 @@ impl Session {
             window_budget: snap.window_budget,
         }
         .save(&self.dir);
+        invalid_override
     }
 
     pub fn update_mcp_server(&self, status: crate::mcp::McpServerStatus) {

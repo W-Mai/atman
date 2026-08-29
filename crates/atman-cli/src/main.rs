@@ -2189,11 +2189,29 @@ async fn cmd_repl_once(
                                 eprintln!("failed to switch model: {e}");
                             }
                             load_model_config_from_disk();
+                            let cleared_reasoning =
+                                session_for_ctrl.set_current_model(model.clone());
                             let _ = session_for_ctrl.stream_tx().send(
                                 atman_runtime::stream::StreamFrame::Note(format!(
                                     "model switched: smart → {model}"
                                 )),
                             );
+                            if let Some((selection, error)) = cleared_reasoning {
+                                let _ = session_for_ctrl.stream_tx().send(
+                                    atman_runtime::stream::StreamFrame::Notification(
+                                        atman_runtime::stream::NotificationFrame {
+                                            level: atman_runtime::notify::NotifyLevel::Warn,
+                                            location: atman_runtime::notify::NotifyLocation::Inline,
+                                            lifecycle:
+                                                atman_runtime::notify::NotifyLifecycle::Persistent,
+                                            stack: atman_runtime::notify::NotifyStack::Append,
+                                            message: format!(
+                                                "session reasoning `{selection}` cleared for `{model}`: {error}"
+                                            ),
+                                        },
+                                    ),
+                                );
+                            }
                         }
                     }
                     atman_tui::TuiControl::RefreshProviderModels { provider_id } => {
