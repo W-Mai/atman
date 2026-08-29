@@ -723,11 +723,6 @@ impl ProviderRegistry {
         if let Some(p) = providers.get(model) {
             return Some(p.clone());
         }
-        if let Some((prefix, _)) = model.split_once('/')
-            && let Some(p) = providers.get(prefix)
-        {
-            return Some(p.clone());
-        }
         if let Some(entry) = crate::model_registry::model_entry(model)
             && let Some(ref provider_name) = entry.provider
         {
@@ -735,12 +730,15 @@ impl ProviderRegistry {
                 return None;
             }
             let config_key = format!("config:{provider_name}");
-            if let Some(p) = providers
+            return providers
                 .get(&config_key)
                 .or_else(|| providers.get(provider_name))
-            {
-                return Some(p.clone());
-            }
+                .cloned();
+        }
+        if let Some((prefix, _)) = model.split_once('/')
+            && let Some(p) = providers.get(prefix)
+        {
+            return Some(p.clone());
         }
         None
     }
@@ -853,6 +851,36 @@ mod tests {
             .resolve("codex-auto-review")
             .expect("should resolve via model registry provider field");
         assert_eq!(p.name(), "codex");
+        crate::model_registry::set_provider_config(Default::default());
+    }
+
+    #[test]
+    fn resolve_explicit_model_provider_before_slash_prefix() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::model_registry::set_provider_config(Default::default());
+        crate::model_registry::register_model_entries(vec![(
+            "gateway/model".into(),
+            crate::model_registry::ModelEntry {
+                model: "api-model".into(),
+                provider: Some("target".into()),
+                ..Default::default()
+            },
+        )]);
+
+        let registry = ProviderRegistry::new();
+        registry.register(Arc::new(MockProvider::new("gateway")));
+        registry.register(Arc::new(MockProvider::new("config:target")));
+
+        let provider = registry
+            .resolve("gateway/model")
+            .expect("explicit model provider should resolve");
+        assert_eq!(provider.name(), "config:target");
+
+        let registry_without_target = ProviderRegistry::new();
+        registry_without_target.register(Arc::new(MockProvider::new("gateway")));
+        assert!(registry_without_target.resolve("gateway/model").is_none());
         crate::model_registry::set_provider_config(Default::default());
     }
 
