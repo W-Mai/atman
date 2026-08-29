@@ -508,10 +508,29 @@ pub trait Provider: Send + Sync {
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
 
-    fn discover_models(
+    /// Discover available models using the original best-effort API.
+    fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
+        Box::pin(async { vec![] })
+    }
+
+    /// Discover available models with capability provenance and typed failures.
+    ///
+    /// The default adapts providers implemented against the original API and
+    /// treats their capability data as legacy knowledge.
+    fn try_discover_models(
         &self,
-    ) -> BoxFut<'static, Result<Vec<DiscoveredModel>, ModelDiscoveryError>> {
-        Box::pin(async { Err(ModelDiscoveryError::Unsupported) })
+    ) -> BoxFut<'static, Result<Vec<DiscoveredModelDetails>, ModelDiscoveryError>> {
+        let discovery = self.discover_models();
+        Box::pin(async move {
+            let models = discovery.await;
+            if models.is_empty() {
+                return Err(ModelDiscoveryError::Unsupported);
+            }
+            Ok(models
+                .into_iter()
+                .map(DiscoveredModelDetails::from)
+                .collect())
+        })
     }
 
     fn test_connection(&self) -> BoxFut<'_, Result<String, String>> {
@@ -520,6 +539,7 @@ pub trait Provider: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ModelDiscoveryError {
     #[error("model discovery is not supported by this provider")]
     Unsupported,
@@ -535,10 +555,18 @@ pub enum ModelDiscoveryError {
 pub struct DiscoveredModel {
     pub slug: String,
     pub context_budget: Option<u64>,
+    pub thinking: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredModelDetails {
+    pub slug: String,
+    pub context_budget: Option<u64>,
     pub capability_knowledge: CapabilityKnowledge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CapabilityKnowledge {
     Legacy { thinking: bool },
     Advertised(ModelCapabilities),
@@ -564,6 +592,28 @@ impl CapabilityKnowledge {
         match self {
             Self::Legacy { .. } => None,
             Self::Advertised(capabilities) => Some(capabilities),
+        }
+    }
+}
+
+impl From<DiscoveredModel> for DiscoveredModelDetails {
+    fn from(model: DiscoveredModel) -> Self {
+        Self {
+            slug: model.slug,
+            context_budget: model.context_budget,
+            capability_knowledge: CapabilityKnowledge::Legacy {
+                thinking: model.thinking,
+            },
+        }
+    }
+}
+
+impl From<DiscoveredModelDetails> for DiscoveredModel {
+    fn from(model: DiscoveredModelDetails) -> Self {
+        Self {
+            slug: model.slug,
+            context_budget: model.context_budget,
+            thinking: model.capability_knowledge.thinking(),
         }
     }
 }
@@ -706,6 +756,35 @@ mod tests {
     use super::*;
     use crate::providers::mock::MockProvider;
 
+    struct LegacyDiscoveryProvider;
+
+    impl Provider for LegacyDiscoveryProvider {
+        fn name(&self) -> &str {
+            "legacy"
+        }
+
+        fn call<'a>(
+            &'a self,
+            _req: LlmRequest,
+        ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+            Box::pin(async { unreachable!("not used by discovery test") })
+        }
+
+        fn call_streaming(&self, _req: LlmRequest) -> Observable<AssistantMessage> {
+            unreachable!("not used by discovery test")
+        }
+
+        fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
+            Box::pin(async {
+                vec![DiscoveredModel {
+                    slug: "legacy/model".into(),
+                    context_budget: Some(8_192),
+                    thinking: true,
+                }]
+            })
+        }
+    }
+
     /// Helper: build a registry with a "codex" provider and an "openai" default.
     fn fixture_registry() -> ProviderRegistry {
         let reg = ProviderRegistry::new();
@@ -714,6 +793,29 @@ mod tests {
         let openai = Arc::new(MockProvider::new("openai"));
         reg.register(openai);
         reg
+    }
+
+    #[tokio::test]
+    async fn fallible_discovery_adapts_legacy_provider_implementations() {
+        let models = LegacyDiscoveryProvider.try_discover_models().await.unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "legacy/model");
+        assert_eq!(models[0].context_budget, Some(8_192));
+        assert_eq!(
+            models[0].capability_knowledge,
+            CapabilityKnowledge::Legacy { thinking: true }
+        );
+    }
+
+    #[tokio::test]
+    async fn fallible_discovery_does_not_treat_missing_legacy_support_as_empty_catalog() {
+        let provider = MockProvider::new("mock");
+
+        assert_eq!(
+            provider.try_discover_models().await.unwrap_err(),
+            ModelDiscoveryError::Unsupported
+        );
     }
 
     #[test]
@@ -732,6 +834,10 @@ mod tests {
 
     #[test]
     fn resolve_model_registry_provider_field_takes_priority() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::model_registry::set_provider_config(Default::default());
         // Simulate the Codex bootstrap: register model entry with provider="codex",
         // resolve by model name that has no '/' separator.
         crate::model_registry::register_model_entries(vec![(
@@ -748,6 +854,7 @@ mod tests {
             .resolve("codex-auto-review")
             .expect("should resolve via model registry provider field");
         assert_eq!(p.name(), "codex");
+        crate::model_registry::set_provider_config(Default::default());
     }
 
     #[test]

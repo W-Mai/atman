@@ -2238,21 +2238,36 @@ async fn cmd_repl_once(
                                 &p.access_token,
                                 p.account.as_deref().unwrap_or(""),
                             );
-                            let models = match provider.discover_models().await {
+                            let models = match provider.try_discover_models().await {
                                 Ok(models) => models,
                                 Err(error) => {
                                     atman_runtime::notify!(error, "model refresh failed: {error}");
                                     return;
                                 }
                             };
+                            let prepared = match atman_runtime::model_registry::prepare_discovered_details_for_provider(
+                                &pid,
+                                &p.name,
+                                &models,
+                            ) {
+                                Ok(prepared) => prepared,
+                                Err(error) => {
+                                    atman_runtime::notify!(error, "model catalog refresh failed: {error}");
+                                    return;
+                                }
+                            };
                             if let Err(error) =
-                                atman_runtime::auth_store::save_provider_model_cache(&pid, &models)
+                                atman_runtime::auth_store::save_provider_model_cache_details(
+                                    &pid,
+                                    prepared.namespace(),
+                                    &models,
+                                )
                             {
                                 atman_runtime::notify!(error, "model cache save failed: {error:#}");
                                 return;
                             }
-                            atman_runtime::model_registry::register_discovered_for_provider(
-                                &pid, &p.name, &models,
+                            atman_runtime::model_registry::commit_prepared_provider_catalog(
+                                prepared,
                             );
                             let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
                         });

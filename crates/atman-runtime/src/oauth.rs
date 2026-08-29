@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::auth_store::StoredProvider;
 use crate::config_hub::AuthTokenUpdate;
-use crate::provider::{DiscoveredModel, Provider};
+use crate::provider::{DiscoveredModel, DiscoveredModelDetails, Provider};
 
 pub struct Pkce {
     pub verifier: String,
@@ -84,7 +84,21 @@ pub fn extract_account_from_id_token(id_token: &str) -> Option<String> {
 pub async fn create_oauth_provider<P: OAuthProvider>(
     stored: &StoredProvider,
 ) -> Result<(Arc<P>, Vec<DiscoveredModel>)> {
-    create_oauth_provider_impl(stored, true).await
+    let provider = create_oauth_provider_impl::<P>(stored).await?;
+    let models = provider.discover_models().await;
+    Ok((provider, models))
+}
+
+/// Create an OAuth provider and discover rich model capability data.
+pub async fn create_oauth_provider_with_details<P: OAuthProvider>(
+    stored: &StoredProvider,
+) -> Result<(Arc<P>, Vec<DiscoveredModelDetails>)> {
+    let provider = create_oauth_provider_impl::<P>(stored).await?;
+    let models = provider
+        .try_discover_models()
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok((provider, models))
 }
 
 /// Same as `create_oauth_provider` but skips `discover_models()`.
@@ -92,14 +106,10 @@ pub async fn create_oauth_provider<P: OAuthProvider>(
 pub async fn create_oauth_provider_no_discover<P: OAuthProvider>(
     stored: &StoredProvider,
 ) -> Result<Arc<P>> {
-    let (provider, _) = create_oauth_provider_impl(stored, false).await?;
-    Ok(provider)
+    create_oauth_provider_impl::<P>(stored).await
 }
 
-async fn create_oauth_provider_impl<P: OAuthProvider>(
-    stored: &StoredProvider,
-    discover: bool,
-) -> Result<(Arc<P>, Vec<DiscoveredModel>)> {
+async fn create_oauth_provider_impl<P: OAuthProvider>(stored: &StoredProvider) -> Result<Arc<P>> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock")?
@@ -132,16 +142,7 @@ async fn create_oauth_provider_impl<P: OAuthProvider>(
         }
     }
 
-    let provider = P::from_stored(&updated);
-    let models = if discover {
-        provider
-            .discover_models()
-            .await
-            .map_err(|error| anyhow::anyhow!(error))?
-    } else {
-        vec![]
-    };
-    Ok((Arc::new(provider), models))
+    Ok(Arc::new(P::from_stored(&updated)))
 }
 
 pub fn callback_page(ok: bool, title: &str, message: &str) -> String {

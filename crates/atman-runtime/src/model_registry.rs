@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{LazyLock, RwLock};
 
 use crate::auth_store::AuthStore;
 use crate::provider::{
-    ImageDetail, InputModality, ModelCapabilities, ReasoningEffort, ReasoningExecutionMode,
-    ReasoningSelection, ReasoningWireProfile,
+    CapabilityKnowledge, ImageDetail, InputModality, ModelCapabilities, ReasoningEffort,
+    ReasoningExecutionMode, ReasoningSelection, ReasoningWireProfile,
 };
 
 #[derive(Debug, Clone)]
@@ -85,41 +85,136 @@ pub struct ProviderConfig {
 /// Backwards-compatible alias — ProviderConfig is the canonical name.
 pub type ModelConfig = ProviderConfig;
 
-static MODEL_CONFIG: RwLock<Option<ProviderConfig>> = RwLock::new(None);
+#[derive(Debug, Clone, Default)]
+struct CapabilityDeclarations {
+    reasoning_efforts: bool,
+    reasoning_modes: bool,
+    input_modalities: bool,
+}
+
+impl CapabilityDeclarations {
+    fn inferred(entry: &ModelEntry) -> Self {
+        Self {
+            reasoning_efforts: !entry.reasoning_efforts.is_empty(),
+            reasoning_modes: !entry.reasoning_modes.is_empty(),
+            input_modalities: !entry.input_modalities.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConfigLayer {
+    values: ProviderConfig,
+    capabilities: HashMap<String, CapabilityDeclarations>,
+}
+
+impl ConfigLayer {
+    fn inferred(values: ProviderConfig) -> Self {
+        let capabilities = values
+            .models
+            .iter()
+            .map(|(name, entry)| (name.clone(), CapabilityDeclarations::inferred(entry)))
+            .collect();
+        Self {
+            values,
+            capabilities,
+        }
+    }
+
+    fn declarations(&self, name: &str) -> CapabilityDeclarations {
+        self.capabilities.get(name).cloned().unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ModelIdentity {
+    provider_key: String,
+    api_model: String,
+}
+
+impl ModelIdentity {
+    fn new(provider_key: impl Into<String>, api_model: impl Into<String>) -> Self {
+        Self {
+            provider_key: provider_key.into(),
+            api_model: api_model.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PresetModelEntry {
+    registry_key: String,
+    entry: ModelEntry,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogModelEntry {
+    registry_key: String,
+    api_model: String,
+    context_budget: Option<u64>,
+    capability_knowledge: CapabilityKnowledge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDescriptor {
+    pub provider_key: String,
+    pub provider_name: String,
+    pub namespace: String,
+    pub wire_profile: ReasoningWireProfile,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderCatalog {
+    descriptor: ProviderDescriptor,
+    models: BTreeMap<String, CatalogModelEntry>,
+}
+
+#[derive(Debug, Default)]
+struct RegistryState {
+    config: ConfigLayer,
+    preset_models: BTreeMap<ModelIdentity, PresetModelEntry>,
+    catalogs: BTreeMap<String, ProviderCatalog>,
+    legacy_models: BTreeMap<String, ModelEntry>,
+    legacy_discovered_models: Vec<String>,
+    catalog_revision: u64,
+}
+
+static REGISTRY_STATE: LazyLock<RwLock<RegistryState>> =
+    LazyLock::new(|| RwLock::new(RegistryState::default()));
+static CATALOG_REVISION: LazyLock<tokio::sync::watch::Sender<u64>> =
+    LazyLock::new(|| tokio::sync::watch::channel(0).0);
+static REGISTRY_TRANSACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serializes tests that mutate the global model registry.
 ///
 /// This stays available in integration tests so they can avoid racing the
-/// shared `MODEL_CONFIG` state.
+/// shared model registry state.
 pub static MODEL_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Model IDs discovered from OAuth providers (e.g. Codex).
-static DISCOVERED_MODELS: RwLock<Vec<String>> = RwLock::new(Vec::new());
-
 pub fn set_discovered_models(models: Vec<String>) {
-    *DISCOVERED_MODELS.write().unwrap() = models;
+    REGISTRY_STATE.write().unwrap().legacy_discovered_models = models;
 }
 
 pub fn discovered_models() -> Vec<String> {
-    DISCOVERED_MODELS.read().unwrap().clone()
+    let state = REGISTRY_STATE.read().unwrap();
+    let mut models = state.legacy_discovered_models.clone();
+    let mut seen: BTreeSet<String> = models.iter().cloned().collect();
+    for catalog in state.catalogs.values() {
+        for model in catalog.models.values() {
+            if seen.insert(model.registry_key.clone()) {
+                models.push(model.registry_key.clone());
+            }
+        }
+    }
+    models
 }
 
 /// Set the base model configuration (from config.toml).
-/// Preserves previously registered discovered models.
-pub fn set_provider_config(mut cfg: ProviderConfig) {
-    let mut guard = MODEL_CONFIG.write().unwrap();
-    if let Some(old) = guard.take() {
-        // Preserve discovered models from old config.
-        for (name, entry) in old.models {
-            if entry.discovered {
-                cfg.models.entry(name).or_insert(entry);
-            }
-        }
-        // Preserve aliases from old config that aren't in the new one.
-        // config.toml aliases are authoritative; only preserve
-        // non-config-sourced aliases (currently none exist).
+/// Dynamic provider catalogs remain in their own layer.
+pub fn set_provider_config(cfg: ProviderConfig) {
+    if let Err(error) = install_config_layer(ConfigLayer::inferred(cfg)) {
+        crate::notify!(error, "model config update rejected: {error}");
     }
-    *guard = Some(cfg);
 }
 
 /// Backwards-compatible alias for [set_provider_config].
@@ -129,32 +224,59 @@ pub fn set_model_config(cfg: ModelConfig) {
 
 /// Register additional model entries without clobbering existing ones.
 pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
-    let mut guard = MODEL_CONFIG.write().unwrap();
-    let mut cfg = guard.take().unwrap_or_default();
+    let mut state = REGISTRY_STATE.write().unwrap();
     for (name, entry) in entries {
-        cfg.models.entry(name).or_insert(entry);
+        if state.config.values.models.contains_key(&name) || state.legacy_models.contains_key(&name)
+        {
+            continue;
+        }
+        if entry.discovered {
+            state.legacy_models.insert(name, entry);
+        } else {
+            let declarations = CapabilityDeclarations::inferred(&entry);
+            state.config.capabilities.insert(name.clone(), declarations);
+            state.config.values.models.insert(name, entry);
+        }
     }
-    *guard = Some(cfg);
 }
 
 /// Register additional provider entries without clobbering existing ones.
 pub fn register_provider_entries(entries: Vec<(String, ProviderEntry)>) {
-    let mut guard = MODEL_CONFIG.write().unwrap();
-    let mut cfg = guard.take().unwrap_or_default();
+    let mut config = REGISTRY_STATE.read().unwrap().config.clone();
     for (name, entry) in entries {
-        cfg.providers.entry(name).or_insert(entry);
+        config.values.providers.entry(name).or_insert(entry);
     }
-    *guard = Some(cfg);
+    if let Err(error) = install_config_layer(config) {
+        crate::notify!(error, "provider config update rejected: {error}");
+    }
 }
 
 /// Build ModelEntry values from discovered models and register them.
-/// Models are keyed as `<provider_name>:<slug>` (e.g. `Codex:codex/gpt-5.5`).
+/// Models are keyed by a stable provider namespace plus the provider API model.
 pub fn register_discovered(
     _provider_id: &str,
     provider_name: &str,
     models: &[crate::provider::DiscoveredModel],
 ) {
-    register_discovered_entries(provider_name, provider_name, models, true);
+    register_legacy_discovered_entries(provider_name, provider_name, models, true);
+}
+
+pub fn register_discovered_details(
+    provider_id: &str,
+    provider_name: &str,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<CatalogDelta, CatalogError> {
+    let prepared = prepare_discovered_details(provider_id, provider_name, models)?;
+    Ok(commit_prepared_provider_catalog(prepared))
+}
+
+pub fn prepare_discovered_details(
+    provider_id: &str,
+    provider_name: &str,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    let profile = reasoning_wire_profile_for_provider(provider_name);
+    prepare_discovered_details_with_profile(provider_id, provider_name, profile, models)
 }
 
 pub fn register_discovered_for_provider(
@@ -162,6 +284,9 @@ pub fn register_discovered_for_provider(
     provider_name: &str,
     models: &[crate::provider::DiscoveredModel],
 ) {
+    if models.is_empty() {
+        return;
+    }
     let provider_ids = AuthStore::load()
         .map(|auth| {
             auth.providers
@@ -172,7 +297,112 @@ pub fn register_discovered_for_provider(
         .unwrap_or_else(|_| vec![provider_key.to_string()]);
     let short_id = shortest_unique_provider_id(provider_key, &provider_ids);
     let model_namespace = format!("{short_id}@{provider_name}");
-    register_discovered_entries(&model_namespace, provider_key, models, false);
+    register_legacy_discovered_entries(&model_namespace, provider_key, models, false);
+}
+
+fn register_legacy_discovered_entries(
+    model_namespace: &str,
+    provider_key: &str,
+    models: &[crate::provider::DiscoveredModel],
+    api_model_uses_registry_key: bool,
+) {
+    if models.is_empty() {
+        return;
+    }
+    let entries: Vec<_> = models
+        .iter()
+        .map(|model| {
+            let name = format!("{model_namespace}:{}", model.slug);
+            (
+                name.clone(),
+                ModelEntry {
+                    model: if api_model_uses_registry_key {
+                        name.clone()
+                    } else {
+                        model.slug.clone()
+                    },
+                    provider: Some(provider_key.to_string()),
+                    context_budget: model.context_budget,
+                    thinking: Some(model.thinking),
+                    discovered: true,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let names = entries.iter().map(|(name, _)| name.clone()).collect();
+    register_model_entries(entries);
+    set_discovered_models(names);
+}
+
+pub fn register_discovered_details_for_provider(
+    provider_key: &str,
+    provider_name: &str,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<CatalogDelta, CatalogError> {
+    let prepared = prepare_discovered_details_for_provider(provider_key, provider_name, models)?;
+    Ok(commit_prepared_provider_catalog(prepared))
+}
+
+pub fn prepare_discovered_details_for_provider(
+    provider_key: &str,
+    provider_name: &str,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    prepare_discovered_details_with_profile(
+        provider_key,
+        provider_name,
+        ReasoningWireProfile::CodexResponses,
+        models,
+    )
+}
+
+fn prepare_discovered_details_with_profile(
+    provider_key: &str,
+    provider_name: &str,
+    wire_profile: ReasoningWireProfile,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    let in_memory_namespace = REGISTRY_STATE
+        .read()
+        .unwrap()
+        .catalogs
+        .get(provider_key)
+        .map(|catalog| catalog.descriptor.namespace.clone());
+    let persisted_namespace = crate::auth_store::load_provider_model_namespace(provider_key)
+        .map_err(|error| CatalogError::NamespaceStore {
+            message: error.to_string(),
+        })?;
+    if let (Some(current), Some(persisted)) = (&in_memory_namespace, &persisted_namespace)
+        && current != persisted
+    {
+        return Err(CatalogError::NamespaceChanged {
+            provider_key: provider_key.to_string(),
+            current: current.clone(),
+            requested: persisted.clone(),
+        });
+    }
+    let model_namespace = if let Some(namespace) = in_memory_namespace.or(persisted_namespace) {
+        namespace
+    } else {
+        let provider_ids = AuthStore::load()
+            .map_err(|error| CatalogError::NamespaceStore {
+                message: error.to_string(),
+            })?
+            .providers
+            .into_iter()
+            .map(|provider| provider.id)
+            .collect::<Vec<_>>();
+        let short_id = shortest_unique_provider_id(provider_key, &provider_ids);
+        format!("{short_id}@{provider_name}")
+    };
+    let descriptor = ProviderDescriptor {
+        provider_key: provider_key.to_string(),
+        provider_name: provider_name.to_string(),
+        namespace: model_namespace,
+        wire_profile,
+    };
+    prepare_provider_catalog(descriptor, models)
 }
 
 fn shortest_unique_provider_id(provider_id: &str, provider_ids: &[String]) -> String {
@@ -180,61 +410,736 @@ fn shortest_unique_provider_id(provider_id: &str, provider_ids: &[String]) -> St
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect();
-    let peers: Vec<String> = provider_ids
+    let peers: Vec<(&str, String)> = provider_ids
         .iter()
-        .map(|id| id.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect())
+        .map(|id| {
+            (
+                id.as_str(),
+                id.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect(),
+            )
+        })
         .collect();
+    if normalized.is_empty() {
+        return "provider".to_string();
+    }
+    if peers
+        .iter()
+        .any(|(id, peer)| *id != provider_id && peer == &normalized)
+    {
+        return provider_id.to_string();
+    }
     let mut len = normalized.len().min(6);
     while len < normalized.len()
         && peers
             .iter()
-            .filter(|peer| peer.as_str() != normalized)
-            .any(|peer| peer.starts_with(&normalized[..len]))
+            .filter(|(id, _)| *id != provider_id)
+            .any(|(_, peer)| peer.starts_with(&normalized[..len]))
     {
         len += 1;
     }
     normalized[..len].to_string()
 }
 
-fn register_discovered_entries(
-    model_namespace: &str,
-    provider_key: &str,
-    models: &[crate::provider::DiscoveredModel],
-    api_model_uses_registry_key: bool,
-) {
-    let entries: Vec<(String, ModelEntry)> = models
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CatalogDelta {
+    pub added: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CatalogError {
+    #[error("provider catalog {field} must not be empty")]
+    EmptyDescriptorField { field: &'static str },
+    #[error("provider catalog contains an empty model id")]
+    EmptyModel,
+    #[error("provider catalog contains duplicate model `{model}`")]
+    DuplicateModel { model: String },
+    #[error(
+        "provider `{provider_key}` namespace is already `{current}` and cannot change to `{requested}`"
+    )]
+    NamespaceChanged {
+        provider_key: String,
+        current: String,
+        requested: String,
+    },
+    #[error("provider namespace `{namespace}` is already used by `{provider_key}`")]
+    NamespaceInUse {
+        namespace: String,
+        provider_key: String,
+    },
+    #[error("model registry key `{registry_key}` is already used by `{provider_key}`")]
+    RegistryKeyInUse {
+        registry_key: String,
+        provider_key: String,
+    },
+    #[error("load provider model namespace: {message}")]
+    NamespaceStore { message: String },
+}
+
+pub struct PreparedProviderCatalog {
+    _transaction: std::sync::MutexGuard<'static, ()>,
+    catalog: ProviderCatalog,
+}
+
+impl PreparedProviderCatalog {
+    pub fn namespace(&self) -> &str {
+        &self.catalog.descriptor.namespace
+    }
+}
+
+pub(crate) struct PreparedConfigLayer {
+    _transaction: std::sync::MutexGuard<'static, ()>,
+    config: ConfigLayer,
+    presets: BTreeMap<ModelIdentity, PresetModelEntry>,
+}
+
+fn prepare_config_layer(config: ConfigLayer) -> Result<PreparedConfigLayer, CatalogError> {
+    let presets = build_preset_models(&config);
+    let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
+    let state = REGISTRY_STATE.read().unwrap();
+    for (preset_identity, preset) in &presets {
+        if let Some(catalog) = state.catalogs.values().find(|catalog| {
+            catalog.models.values().any(|model| {
+                model.registry_key == preset.registry_key
+                    && ModelIdentity::new(&catalog.descriptor.provider_key, &model.api_model)
+                        != *preset_identity
+            })
+        }) {
+            return Err(CatalogError::RegistryKeyInUse {
+                registry_key: preset.registry_key.clone(),
+                provider_key: catalog.descriptor.provider_key.clone(),
+            });
+        }
+    }
+    drop(state);
+    Ok(PreparedConfigLayer {
+        _transaction: transaction,
+        config,
+        presets,
+    })
+}
+
+pub(crate) fn prepare_config_text(text: &str) -> anyhow::Result<PreparedConfigLayer> {
+    let config = parse_config_layer(text)
+        .map_err(|error| anyhow::anyhow!("parse config.toml: {error}"))?
+        .unwrap_or_default();
+    prepare_config_layer(config).map_err(Into::into)
+}
+
+pub(crate) fn commit_prepared_config(prepared: PreparedConfigLayer) {
+    let PreparedConfigLayer {
+        _transaction,
+        config,
+        presets,
+    } = prepared;
+    let mut state = REGISTRY_STATE.write().unwrap();
+    state.config = config;
+    state.preset_models = presets;
+}
+
+fn install_config_layer(config: ConfigLayer) -> Result<(), CatalogError> {
+    let prepared = prepare_config_layer(config)?;
+    commit_prepared_config(prepared);
+    Ok(())
+}
+
+pub fn replace_provider_catalog(
+    descriptor: ProviderDescriptor,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<CatalogDelta, CatalogError> {
+    let prepared = prepare_provider_catalog(descriptor, models)?;
+    Ok(commit_prepared_provider_catalog(prepared))
+}
+
+pub fn prepare_provider_catalog(
+    descriptor: ProviderDescriptor,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    for (field, value) in [
+        ("provider_key", descriptor.provider_key.as_str()),
+        ("provider_name", descriptor.provider_name.as_str()),
+        ("namespace", descriptor.namespace.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(CatalogError::EmptyDescriptorField { field });
+        }
+    }
+    let mut next_models = BTreeMap::new();
+    for model in models {
+        if model.slug.trim().is_empty() {
+            return Err(CatalogError::EmptyModel);
+        }
+        let entry = CatalogModelEntry {
+            registry_key: qualified_model_key(&descriptor.namespace, &model.slug),
+            api_model: model.slug.clone(),
+            context_budget: model.context_budget,
+            capability_knowledge: model.capability_knowledge.clone(),
+        };
+        if next_models.insert(model.slug.clone(), entry).is_some() {
+            return Err(CatalogError::DuplicateModel {
+                model: model.slug.clone(),
+            });
+        }
+    }
+
+    let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
+    let state = REGISTRY_STATE.read().unwrap();
+    let previous = state.catalogs.get(&descriptor.provider_key);
+    if let Some(previous) = previous
+        && previous.descriptor.namespace != descriptor.namespace
+    {
+        return Err(CatalogError::NamespaceChanged {
+            provider_key: descriptor.provider_key,
+            current: previous.descriptor.namespace.clone(),
+            requested: descriptor.namespace,
+        });
+    }
+    if let Some((provider_key, _)) = state.catalogs.iter().find(|(provider_key, catalog)| {
+        provider_key.as_str() != descriptor.provider_key
+            && catalog.descriptor.namespace == descriptor.namespace
+    }) {
+        return Err(CatalogError::NamespaceInUse {
+            namespace: descriptor.namespace,
+            provider_key: provider_key.clone(),
+        });
+    }
+    for model in next_models.values() {
+        if let Some((provider_key, _)) = state
+            .catalogs
+            .iter()
+            .filter(|(provider_key, _)| provider_key.as_str() != descriptor.provider_key)
+            .find(|(_, catalog)| {
+                catalog
+                    .models
+                    .values()
+                    .any(|existing| existing.registry_key == model.registry_key)
+            })
+        {
+            return Err(CatalogError::RegistryKeyInUse {
+                registry_key: model.registry_key.clone(),
+                provider_key: provider_key.clone(),
+            });
+        }
+        let identity = ModelIdentity::new(&descriptor.provider_key, &model.api_model);
+        if let Some((preset_identity, _)) =
+            state
+                .preset_models
+                .iter()
+                .find(|(preset_identity, preset)| {
+                    preset.registry_key == model.registry_key && **preset_identity != identity
+                })
+        {
+            return Err(CatalogError::RegistryKeyInUse {
+                registry_key: model.registry_key.clone(),
+                provider_key: preset_identity.provider_key.clone(),
+            });
+        }
+    }
+    drop(state);
+    Ok(PreparedProviderCatalog {
+        _transaction: transaction,
+        catalog: ProviderCatalog {
+            descriptor,
+            models: next_models,
+        },
+    })
+}
+
+pub fn commit_prepared_provider_catalog(prepared: PreparedProviderCatalog) -> CatalogDelta {
+    let PreparedProviderCatalog {
+        _transaction,
+        catalog,
+    } = prepared;
+    let ProviderCatalog {
+        descriptor,
+        models: next_models,
+    } = catalog;
+    let mut state = REGISTRY_STATE.write().unwrap();
+    let previous = state.catalogs.get(&descriptor.provider_key);
+    let added = next_models
+        .keys()
+        .filter(|key| previous.is_none_or(|catalog| !catalog.models.contains_key(*key)))
+        .count();
+    let updated = next_models
         .iter()
-        .map(|m| {
-            let name = format!("{model_namespace}:{}", m.slug);
-            let capabilities = m
-                .capability_knowledge
-                .advertised()
-                .cloned()
-                .unwrap_or_default();
-            let entry = ModelEntry {
-                model: if api_model_uses_registry_key {
-                    name.clone()
-                } else {
-                    m.slug.clone()
+        .filter(|(key, next)| {
+            previous
+                .and_then(|catalog| catalog.models.get(*key))
+                .is_some_and(|old| !catalog_model_eq(old, next))
+        })
+        .count();
+    let removed = previous
+        .map(|catalog| {
+            catalog
+                .models
+                .keys()
+                .filter(|key| !next_models.contains_key(*key))
+                .count()
+        })
+        .unwrap_or(0);
+    let total = next_models.len();
+    let changed = previous.is_none_or(|catalog| {
+        catalog.descriptor != descriptor
+            || catalog.models.len() != next_models.len()
+            || catalog.models.iter().any(|(model, entry)| {
+                next_models
+                    .get(model)
+                    .is_none_or(|next| !catalog_model_eq(entry, next))
+            })
+    });
+    state.catalogs.insert(
+        descriptor.provider_key.clone(),
+        ProviderCatalog {
+            descriptor,
+            models: next_models,
+        },
+    );
+    if changed {
+        state.catalog_revision = state.catalog_revision.wrapping_add(1);
+        CATALOG_REVISION.send_replace(state.catalog_revision);
+    }
+    CatalogDelta {
+        added,
+        updated,
+        removed,
+        total,
+    }
+}
+
+pub fn remove_provider_catalog(provider_key: &str) -> bool {
+    let _transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
+    let mut state = REGISTRY_STATE.write().unwrap();
+    let removed = state.catalogs.remove(provider_key).is_some();
+    if removed {
+        state.catalog_revision = state.catalog_revision.wrapping_add(1);
+        CATALOG_REVISION.send_replace(state.catalog_revision);
+    }
+    removed
+}
+
+pub fn model_catalog_revision() -> u64 {
+    REGISTRY_STATE.read().unwrap().catalog_revision
+}
+
+pub fn subscribe_model_catalog() -> tokio::sync::watch::Receiver<u64> {
+    CATALOG_REVISION.subscribe()
+}
+
+fn catalog_model_eq(left: &CatalogModelEntry, right: &CatalogModelEntry) -> bool {
+    left.registry_key == right.registry_key
+        && left.api_model == right.api_model
+        && left.context_budget == right.context_budget
+        && left.capability_knowledge == right.capability_knowledge
+}
+
+fn qualified_model_key(namespace: &str, api_model: &str) -> String {
+    let escaped_namespace = namespace.replace('%', "%25").replace(':', "%3A");
+    format!("{escaped_namespace}:{api_model}")
+}
+
+fn build_preset_models(config: &ConfigLayer) -> BTreeMap<ModelIdentity, PresetModelEntry> {
+    let providers: BTreeMap<String, ProviderEntry> = config
+        .values
+        .providers
+        .iter()
+        .map(|(name, entry)| (name.clone(), entry.clone()))
+        .collect();
+    let mut candidates = Vec::new();
+    for (provider_name, provider) in providers {
+        let Some(base_url) = provider.base_url.as_deref() else {
+            continue;
+        };
+        let Some(preset) = PROVIDER_PRESETS
+            .iter()
+            .find(|preset| preset.base_url == base_url)
+        else {
+            continue;
+        };
+        for model in preset.models {
+            candidates.push((
+                ModelIdentity::new(&provider_name, model.id),
+                ModelEntry {
+                    model: model.id.to_string(),
+                    provider: Some(provider_name.clone()),
+                    context_budget: Some(model.context_budget),
+                    thinking: Some(model.thinking),
+                    discovered: true,
+                    ..Default::default()
                 },
-                provider: Some(provider_key.to_string()),
-                context_budget: m.context_budget,
-                thinking: Some(m.capability_knowledge.thinking()),
-                reasoning_efforts: capabilities.reasoning_efforts,
-                default_reasoning_effort: capabilities.default_reasoning_effort,
-                reasoning_modes: capabilities.reasoning_modes,
-                default_reasoning_mode: capabilities.default_reasoning_mode,
-                input_modalities: capabilities.input_modalities,
-                enabled: None,
-                discovered: true,
-                ..Default::default()
-            };
-            (name, entry)
+            ));
+        }
+    }
+    candidates
+        .into_iter()
+        .map(|(identity, entry)| {
+            let registry_key = qualified_model_key(&identity.provider_key, &identity.api_model);
+            (
+                identity,
+                PresetModelEntry {
+                    registry_key,
+                    entry,
+                },
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CapabilityFieldKnowledge {
+    #[default]
+    Unknown,
+    Legacy,
+    Advertised,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ResolvedCapabilityKnowledge {
+    reasoning_efforts: CapabilityFieldKnowledge,
+    reasoning_modes: CapabilityFieldKnowledge,
+    input_modalities: CapabilityFieldKnowledge,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedModel {
+    key: String,
+    identity: Option<ModelIdentity>,
+    entry: ModelEntry,
+    capability_knowledge: ResolvedCapabilityKnowledge,
+    wire_profile: ReasoningWireProfile,
+}
+
+fn profile_from_provider_entry(entry: &ProviderEntry) -> ReasoningWireProfile {
+    match entry.kind.as_str() {
+        "openai" | "openai-compat" => match entry.reasoning_format.unwrap_or_else(|| {
+            crate::providers::openai::OpenAiReasoningFormat::for_provider_kind(&entry.kind)
+        }) {
+            crate::providers::openai::OpenAiReasoningFormat::Official => {
+                ReasoningWireProfile::OpenAiOfficial
+            }
+            crate::providers::openai::OpenAiReasoningFormat::CompatibleThinking => {
+                ReasoningWireProfile::CompatibleThinking
+            }
+        },
+        "anthropic" => ReasoningWireProfile::AnthropicMessages,
+        "codex" => ReasoningWireProfile::CodexResponses,
+        _ => ReasoningWireProfile::Unknown,
+    }
+}
+
+fn fallback_profile(provider: &str) -> ReasoningWireProfile {
+    match provider {
+        "openai" => ReasoningWireProfile::OpenAiOfficial,
+        "openai-compat" => ReasoningWireProfile::CompatibleThinking,
+        "anthropic" => ReasoningWireProfile::AnthropicMessages,
+        "codex" => ReasoningWireProfile::CodexResponses,
+        _ => ReasoningWireProfile::Unknown,
+    }
+}
+
+fn provider_entries_in_state(state: &RegistryState) -> BTreeMap<String, ProviderEntry> {
+    state
+        .config
+        .values
+        .providers
+        .iter()
+        .map(|(name, entry)| (name.clone(), entry.clone()))
+        .collect()
+}
+
+fn provider_profile_in_state(state: &RegistryState, provider: &str) -> ReasoningWireProfile {
+    if let Some(catalog) = state.catalogs.get(provider) {
+        return catalog.descriptor.wire_profile;
+    }
+    provider_entries_in_state(state)
+        .get(provider)
+        .map(profile_from_provider_entry)
+        .unwrap_or_else(|| fallback_profile(provider))
+}
+
+fn catalog_model_to_resolved(
+    catalog: &ProviderCatalog,
+    model: &CatalogModelEntry,
+) -> ResolvedModel {
+    let capabilities = model
+        .capability_knowledge
+        .advertised()
+        .cloned()
+        .unwrap_or_default();
+    let thinking = match &model.capability_knowledge {
+        CapabilityKnowledge::Legacy { thinking } => Some(*thinking),
+        CapabilityKnowledge::Advertised(_) => None,
+    };
+    let field_knowledge = match &model.capability_knowledge {
+        CapabilityKnowledge::Legacy { .. } => CapabilityFieldKnowledge::Legacy,
+        CapabilityKnowledge::Advertised(_) => CapabilityFieldKnowledge::Advertised,
+    };
+    ResolvedModel {
+        key: model.registry_key.clone(),
+        identity: Some(ModelIdentity::new(
+            &catalog.descriptor.provider_key,
+            &model.api_model,
+        )),
+        entry: ModelEntry {
+            model: model.api_model.clone(),
+            provider: Some(catalog.descriptor.provider_key.clone()),
+            context_budget: model.context_budget,
+            thinking,
+            reasoning_efforts: capabilities.reasoning_efforts,
+            default_reasoning_effort: capabilities.default_reasoning_effort,
+            reasoning_modes: capabilities.reasoning_modes,
+            default_reasoning_mode: capabilities.default_reasoning_mode,
+            input_modalities: capabilities.input_modalities,
+            discovered: true,
+            ..Default::default()
+        },
+        capability_knowledge: ResolvedCapabilityKnowledge {
+            reasoning_efforts: field_knowledge,
+            reasoning_modes: field_knowledge,
+            input_modalities: field_knowledge,
+        },
+        wire_profile: catalog.descriptor.wire_profile,
+    }
+}
+
+fn model_identity(entry: &ModelEntry) -> Option<ModelIdentity> {
+    let provider = entry.provider.as_deref()?;
+    (!entry.model.is_empty()).then(|| ModelIdentity::new(provider, &entry.model))
+}
+
+fn model_entry_to_resolved(
+    state: &RegistryState,
+    key: String,
+    entry: ModelEntry,
+    declarations: &CapabilityDeclarations,
+    legacy_capabilities: bool,
+) -> ResolvedModel {
+    let wire_profile = entry
+        .provider
+        .as_deref()
+        .map(|provider| provider_profile_in_state(state, provider))
+        .unwrap_or(ReasoningWireProfile::Unknown);
+    let unknown_or_legacy = if legacy_capabilities {
+        CapabilityFieldKnowledge::Legacy
+    } else {
+        CapabilityFieldKnowledge::Unknown
+    };
+    ResolvedModel {
+        key,
+        identity: model_identity(&entry),
+        entry,
+        capability_knowledge: ResolvedCapabilityKnowledge {
+            reasoning_efforts: if declarations.reasoning_efforts {
+                CapabilityFieldKnowledge::Advertised
+            } else {
+                unknown_or_legacy
+            },
+            reasoning_modes: if declarations.reasoning_modes {
+                CapabilityFieldKnowledge::Advertised
+            } else {
+                unknown_or_legacy
+            },
+            input_modalities: if declarations.input_modalities {
+                CapabilityFieldKnowledge::Advertised
+            } else {
+                unknown_or_legacy
+            },
+        },
+        wire_profile,
+    }
+}
+
+fn entries_have_compatible_identity(base: &ModelEntry, overlay: &ModelEntry) -> bool {
+    (overlay.model.is_empty() || overlay.model == base.model)
+        && overlay
+            .provider
+            .as_ref()
+            .is_none_or(|provider| base.provider.as_ref() == Some(provider))
+}
+
+fn overlay_model_entry(
+    state: &RegistryState,
+    key: String,
+    base: &ResolvedModel,
+    overlay: &ModelEntry,
+    declarations: &CapabilityDeclarations,
+) -> ResolvedModel {
+    let mut entry = base.entry.clone();
+    if !overlay.model.is_empty() {
+        entry.model = overlay.model.clone();
+    }
+    if overlay.provider.is_some() {
+        entry.provider = overlay.provider.clone();
+    }
+    entry.context_budget = overlay.context_budget.or(entry.context_budget);
+    entry.compact_threshold_ratio = overlay
+        .compact_threshold_ratio
+        .or(entry.compact_threshold_ratio);
+    entry.thinking = overlay.thinking.or(entry.thinking);
+    entry.reasoning = overlay.reasoning.clone().or(entry.reasoning);
+    entry.reasoning_mode = overlay.reasoning_mode.clone().or(entry.reasoning_mode);
+    entry.reasoning_budget_tokens = overlay
+        .reasoning_budget_tokens
+        .or(entry.reasoning_budget_tokens);
+    if declarations.reasoning_efforts {
+        entry.reasoning_efforts = overlay.reasoning_efforts.clone();
+    }
+    entry.default_reasoning_effort = overlay
+        .default_reasoning_effort
+        .clone()
+        .or(entry.default_reasoning_effort);
+    if declarations.reasoning_modes {
+        entry.reasoning_modes = overlay.reasoning_modes.clone();
+    }
+    entry.default_reasoning_mode = overlay
+        .default_reasoning_mode
+        .clone()
+        .or(entry.default_reasoning_mode);
+    if declarations.input_modalities {
+        entry.input_modalities = overlay.input_modalities.clone();
+    }
+    entry.image_detail = overlay.image_detail.or(entry.image_detail);
+    entry.max_tokens = overlay.max_tokens.or(entry.max_tokens);
+    entry.enabled = overlay.enabled.or(entry.enabled);
+    entry.discovered |= overlay.discovered;
+
+    let mut capability_knowledge = base.capability_knowledge;
+    if declarations.reasoning_efforts {
+        capability_knowledge.reasoning_efforts = CapabilityFieldKnowledge::Advertised;
+    }
+    if declarations.reasoning_modes {
+        capability_knowledge.reasoning_modes = CapabilityFieldKnowledge::Advertised;
+    }
+    if declarations.input_modalities {
+        capability_knowledge.input_modalities = CapabilityFieldKnowledge::Advertised;
+    }
+    let wire_profile = entry
+        .provider
+        .as_deref()
+        .map(|provider| provider_profile_in_state(state, provider))
+        .filter(|profile| *profile != ReasoningWireProfile::Unknown)
+        .unwrap_or(base.wire_profile);
+    ResolvedModel {
+        key,
+        identity: base.identity.clone(),
+        entry,
+        capability_knowledge,
+        wire_profile,
+    }
+}
+
+fn config_matches_base(config_key: &str, config: &ModelEntry, base: &ResolvedModel) -> bool {
+    model_identity(config)
+        .zip(base.identity.clone())
+        .is_some_and(|(config, base)| config == base)
+        || (config_key == base.key && entries_have_compatible_identity(&base.entry, config))
+}
+
+fn resolved_models_in_state(state: &RegistryState) -> BTreeMap<String, ResolvedModel> {
+    let mut bases = BTreeMap::new();
+    for (identity, preset) in &state.preset_models {
+        let model = model_entry_to_resolved(
+            state,
+            preset.registry_key.clone(),
+            preset.entry.clone(),
+            &CapabilityDeclarations::default(),
+            true,
+        );
+        bases.insert(identity.clone(), model);
+    }
+    for catalog in state.catalogs.values() {
+        for model in catalog.models.values() {
+            let model = catalog_model_to_resolved(catalog, model);
+            if let Some(identity) = model.identity.clone() {
+                bases.insert(identity, model);
+            }
+        }
+    }
+
+    let mut configs: Vec<(&String, &ModelEntry)> = state.config.values.models.iter().collect();
+    configs.sort_by(|left, right| left.0.cmp(right.0));
+    let associations: BTreeMap<String, ResolvedModel> = configs
+        .iter()
+        .filter_map(|(key, entry)| {
+            let base = model_identity(entry)
+                .and_then(|identity| bases.get(&identity))
+                .or_else(|| {
+                    bases
+                        .values()
+                        .find(|base| config_matches_base(key, entry, base))
+                })?;
+            Some(((*key).clone(), base.clone()))
         })
         .collect();
-    let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
-    register_model_entries(entries);
-    set_discovered_models(slugs);
+    let suppressed: BTreeSet<String> = associations.values().map(|base| base.key.clone()).collect();
+    let mut resolved: BTreeMap<String, ResolvedModel> = bases
+        .into_values()
+        .filter(|base| !suppressed.contains(&base.key))
+        .map(|base| (base.key.clone(), base))
+        .collect();
+
+    for (key, entry) in &state.legacy_models {
+        resolved.entry(key.clone()).or_insert_with(|| {
+            model_entry_to_resolved(
+                state,
+                key.clone(),
+                entry.clone(),
+                &CapabilityDeclarations::inferred(entry),
+                false,
+            )
+        });
+    }
+
+    for (key, entry) in configs {
+        let key = key.clone();
+        let declarations = state.config.declarations(&key);
+        if let Some(base) = associations.get(&key) {
+            resolved.insert(
+                key.clone(),
+                overlay_model_entry(state, key, base, entry, &declarations),
+            );
+        } else {
+            resolved.insert(
+                key.clone(),
+                model_entry_to_resolved(state, key, entry.clone(), &declarations, false),
+            );
+        }
+    }
+    resolved
+}
+
+fn resolve_alias_in_state(state: &RegistryState, name: &str) -> String {
+    let mut current = name.to_string();
+    let mut seen = BTreeSet::new();
+    while let Some(entry) = state.config.values.aliases.get(&current) {
+        if !seen.insert(current.clone()) {
+            break;
+        }
+        current = entry.model.clone();
+    }
+    current
+}
+
+fn resolved_model_in_state(state: &RegistryState, name: &str) -> Option<ResolvedModel> {
+    let resolved = resolve_alias_in_state(state, name);
+    let mut models = resolved_models_in_state(state);
+    if let Some(model) = models.remove(&resolved) {
+        return Some(model);
+    }
+
+    // Preserve aliases written before preset model keys became provider-qualified.
+    // A bare API model is only safe when it identifies exactly one model.
+    let mut matches = models.into_values().filter(|model| {
+        model.entry.model == resolved
+            && model
+                .identity
+                .as_ref()
+                .is_some_and(|identity| state.preset_models.contains_key(identity))
+    });
+    let model = matches.next()?;
+    matches.next().is_none().then_some(model)
 }
 
 #[derive(Debug, Clone)]
@@ -288,12 +1193,17 @@ pub fn all_provider_groups_with_empty() -> Vec<ProviderGroup> {
 }
 
 fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
-    let entries = all_model_entries();
+    let state = REGISTRY_STATE.read().unwrap();
+    let entries = resolved_models_in_state(&state);
     let mut groups: std::collections::BTreeMap<String, Vec<ModelRow>> =
         std::collections::BTreeMap::new();
-    for (name, entry) in entries {
-        let info = model_info(&name);
-        let provider = entry.provider.unwrap_or_else(|| "unknown".to_string());
+    for (name, resolved) in entries {
+        let info = model_info_from_resolved(&resolved);
+        let provider = resolved
+            .entry
+            .provider
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let row = ModelRow {
             slug: name,
             provider_name: provider.clone(),
@@ -307,10 +1217,15 @@ fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
         groups.entry(provider).or_default().push(row);
     }
     if include_empty {
-        for (provider, entry) in all_provider_entries() {
+        for (provider, entry) in provider_entries_in_state(&state) {
             if entry.enabled.unwrap_or(true) {
                 groups.entry(provider).or_default();
             }
+        }
+        for catalog in state.catalogs.values() {
+            groups
+                .entry(catalog.descriptor.provider_key.clone())
+                .or_default();
         }
     }
     groups
@@ -323,37 +1238,18 @@ fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
 }
 
 pub fn resolve_alias(name: &str) -> String {
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        let mut current = name.to_string();
-        let mut seen = std::collections::HashSet::new();
-        while let Some(entry) = cfg.aliases.get(&current) {
-            if !seen.insert(current.clone()) {
-                break;
-            }
-            current = entry.model.clone();
-        }
-        return current;
-    }
-    name.to_string()
+    resolve_alias_in_state(&REGISTRY_STATE.read().unwrap(), name)
 }
 
 pub fn model_entry(name: &str) -> Option<ModelEntry> {
-    let resolved = resolve_alias(name);
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        return cfg.models.get(&resolved).cloned();
-    }
-    None
+    resolved_model_in_state(&REGISTRY_STATE.read().unwrap(), name).map(|model| model.entry)
 }
 
 pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        return cfg
-            .models
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-    }
-    Vec::new()
+    resolved_models_in_state(&REGISTRY_STATE.read().unwrap())
+        .into_iter()
+        .map(|(name, model)| (name, model.entry))
+        .collect()
 }
 
 pub fn provider_display_name(provider_key: &str) -> String {
@@ -372,65 +1268,47 @@ pub fn provider_display_name(provider_key: &str) -> String {
 }
 
 pub fn is_provider_enabled(name: &str) -> bool {
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref()
-        && let Some(entry) = cfg.providers.get(name)
-    {
+    let state = REGISTRY_STATE.read().unwrap();
+    if let Some(entry) = provider_entries_in_state(&state).get(name) {
         return entry.enabled.unwrap_or(true);
     }
-    AuthStore::load()
-        .ok()
-        .and_then(|auth| {
-            auth.providers
-                .into_iter()
-                .find(|provider| provider.id == name)
-        })
-        .is_none_or(|provider| provider.enabled)
+    let auth_provider = AuthStore::load().ok().and_then(|auth| {
+        auth.providers
+            .into_iter()
+            .find(|provider| provider.id == name)
+    });
+    if state.catalogs.contains_key(name) {
+        return auth_provider.is_some_and(|provider| provider.enabled);
+    }
+    auth_provider.is_none_or(|provider| provider.enabled)
 }
 
 pub fn all_provider_entries() -> Vec<(String, ProviderEntry)> {
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        return cfg
-            .providers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-    }
-    Vec::new()
+    provider_entries_in_state(&REGISTRY_STATE.read().unwrap())
+        .into_iter()
+        .collect()
 }
 
 pub fn all_aliases() -> Vec<(String, String)> {
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        return cfg
-            .aliases
-            .iter()
-            .map(|(k, v)| (k.clone(), v.model.clone()))
-            .collect();
-    }
-    Vec::new()
+    let state = REGISTRY_STATE.read().unwrap();
+    let mut aliases: Vec<(String, String)> = state
+        .config
+        .values
+        .aliases
+        .iter()
+        .map(|(name, entry)| (name.clone(), entry.model.clone()))
+        .collect();
+    aliases.sort_by(|left, right| left.0.cmp(&right.0));
+    aliases
 }
 
 pub fn model_info(name: &str) -> ModelInfo {
-    let resolved = resolve_alias(name);
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        if let Some(entry) = cfg.models.get(&resolved) {
-            let enabled = entry.enabled.unwrap_or(true);
-            return ModelInfo {
-                name: resolved.clone(),
-                context_budget: if enabled {
-                    entry.context_budget.unwrap_or(0)
-                } else {
-                    0
-                },
-                compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(0.8),
-                reasoning: reasoning_selection(entry),
-                capabilities: model_capabilities(entry),
-                image_detail: entry.image_detail.unwrap_or_default(),
-                max_output_tokens: entry.max_tokens,
-            };
-        }
+    let state = REGISTRY_STATE.read().unwrap();
+    if let Some(model) = resolved_model_in_state(&state, name) {
+        return model_info_from_resolved(&model);
     }
     ModelInfo {
-        name: resolved,
+        name: resolve_alias_in_state(&state, name),
         context_budget: 0,
         compact_threshold_ratio: 0.8,
         reasoning: crate::provider::ReasoningSelection::ProviderDefault,
@@ -440,74 +1318,126 @@ pub fn model_info(name: &str) -> ModelInfo {
     }
 }
 
+fn model_info_from_resolved(model: &ResolvedModel) -> ModelInfo {
+    let enabled = model.entry.enabled.unwrap_or(true);
+    ModelInfo {
+        name: model.key.clone(),
+        context_budget: if enabled {
+            model.entry.context_budget.unwrap_or(0)
+        } else {
+            0
+        },
+        compact_threshold_ratio: model.entry.compact_threshold_ratio.unwrap_or(0.8),
+        reasoning: reasoning_selection(&model.entry),
+        capabilities: model_capabilities(&model.entry),
+        image_detail: model.entry.image_detail.unwrap_or_default(),
+        max_output_tokens: model.entry.max_tokens,
+    }
+}
+
 pub fn reasoning_wire_profile_for_provider(provider: &str) -> ReasoningWireProfile {
-    if let Some((_, entry)) = all_provider_entries()
-        .into_iter()
-        .find(|(name, _)| name == provider)
-    {
-        return match entry.kind.as_str() {
-            "openai" | "openai-compat" => match entry.reasoning_format.unwrap_or_else(|| {
-                crate::providers::openai::OpenAiReasoningFormat::for_provider_kind(&entry.kind)
-            }) {
-                crate::providers::openai::OpenAiReasoningFormat::Official => {
-                    ReasoningWireProfile::OpenAiOfficial
-                }
-                crate::providers::openai::OpenAiReasoningFormat::CompatibleThinking => {
-                    ReasoningWireProfile::CompatibleThinking
-                }
-            },
-            "anthropic" => ReasoningWireProfile::AnthropicMessages,
-            "codex" => ReasoningWireProfile::CodexResponses,
-            _ => ReasoningWireProfile::Unknown,
-        };
-    }
-    match provider {
-        "openai" => ReasoningWireProfile::OpenAiOfficial,
-        "openai-compat" => ReasoningWireProfile::CompatibleThinking,
-        "anthropic" => ReasoningWireProfile::AnthropicMessages,
-        "codex" => ReasoningWireProfile::CodexResponses,
-        _ => ReasoningWireProfile::Unknown,
-    }
+    provider_profile_in_state(&REGISTRY_STATE.read().unwrap(), provider)
 }
 
 pub fn reasoning_wire_profile_for_model(model: &str) -> ReasoningWireProfile {
-    let Some(entry) = model_entry(model) else {
-        return ReasoningWireProfile::Unknown;
-    };
-    let profile = entry
-        .provider
-        .as_deref()
-        .map(reasoning_wire_profile_for_provider)
-        .unwrap_or(ReasoningWireProfile::Unknown);
-    if profile == ReasoningWireProfile::Unknown && entry.model.starts_with("codex/") {
-        ReasoningWireProfile::CodexResponses
-    } else {
-        profile
-    }
-}
-
-fn explicitly_lacks_reasoning(model: &str) -> bool {
-    model_entry(model).is_some_and(|entry| {
-        entry.thinking == Some(false)
-            && entry.reasoning.is_none()
-            && entry.reasoning_budget_tokens.is_none()
-            && entry.reasoning_efforts.is_empty()
-            && entry.default_reasoning_effort.is_none()
-    })
+    resolved_model_in_state(&REGISTRY_STATE.read().unwrap(), model)
+        .map(|model| model.wire_profile)
+        .unwrap_or(ReasoningWireProfile::Unknown)
 }
 
 pub fn resolve_reasoning_for_model(
     model: &str,
     selection: &ReasoningSelection,
 ) -> Result<ReasoningSelection, String> {
-    if selection.enabled() && explicitly_lacks_reasoning(model) {
+    let state = REGISTRY_STATE.read().unwrap();
+    let Some(model) = resolved_model_in_state(&state, model) else {
+        return ReasoningWireProfile::Unknown
+            .validate(selection, None)
+            .map(|()| selection.clone());
+    };
+    resolve_reasoning_for_resolved(&model, selection)
+}
+
+fn resolve_reasoning_for_resolved(
+    model: &ResolvedModel,
+    selection: &ReasoningSelection,
+) -> Result<ReasoningSelection, String> {
+    if let ReasoningSelection::Effort { effort, .. } = selection
+        && !matches!(effort, ReasoningEffort::None)
+    {
+        match model.capability_knowledge.reasoning_efforts {
+            CapabilityFieldKnowledge::Legacy => {
+                return Err(format!(
+                    "model `{}` has legacy reasoning metadata; use `auto` until its catalog is refreshed",
+                    model.key
+                ));
+            }
+            CapabilityFieldKnowledge::Advertised
+                if !model.entry.reasoning_efforts.contains(effort) =>
+            {
+                let available = model
+                    .entry
+                    .reasoning_efforts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(if available.is_empty() {
+                    format!(
+                        "model `{}` does not advertise exact reasoning efforts",
+                        model.key
+                    )
+                } else {
+                    format!(
+                        "reasoning effort `{effort}` is not supported by model `{}`; available: {available}",
+                        model.key
+                    )
+                });
+            }
+            _ => {}
+        }
+    }
+    if matches!(selection, ReasoningSelection::BudgetTokens { .. })
+        && matches!(
+            model.capability_knowledge.reasoning_efforts,
+            CapabilityFieldKnowledge::Legacy
+        )
+    {
         return Err(format!(
-            "model `{}` does not advertise reasoning support",
-            resolve_alias(model)
+            "model `{}` has legacy reasoning metadata; use `auto` until its catalog is refreshed",
+            model.key
         ));
     }
-    let info = model_info(model);
-    let profile = reasoning_wire_profile_for_model(model);
+    if let Some(mode) = selection.execution_mode() {
+        match model.capability_knowledge.reasoning_modes {
+            CapabilityFieldKnowledge::Legacy => {
+                return Err(format!(
+                    "model `{}` has legacy reasoning metadata and cannot validate mode `{mode}`",
+                    model.key
+                ));
+            }
+            CapabilityFieldKnowledge::Advertised if !model.entry.reasoning_modes.contains(mode) => {
+                let available = model
+                    .entry
+                    .reasoning_modes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(if available.is_empty() {
+                    format!("model `{}` does not advertise reasoning modes", model.key)
+                } else {
+                    format!(
+                        "reasoning mode `{mode}` is not supported by model `{}`; available: {available}",
+                        model.key
+                    )
+                });
+            }
+            _ => {}
+        }
+    }
+    let info = model_info_from_resolved(model);
+    let profile = model.wire_profile;
     let resolved = resolve_reasoning(selection, &info.capabilities)?;
     let resolved = if matches!(selection, ReasoningSelection::Auto { .. })
         && matches!(
@@ -531,6 +1461,14 @@ pub fn reasoning_selections_for_provider(
     capabilities: &ModelCapabilities,
 ) -> Vec<ReasoningSelection> {
     let profile = reasoning_wire_profile_for_provider(provider);
+    reasoning_selections(profile, capabilities, true)
+}
+
+fn reasoning_selections(
+    profile: ReasoningWireProfile,
+    capabilities: &ModelCapabilities,
+    use_profile_fallback: bool,
+) -> Vec<ReasoningSelection> {
     let mut choices = vec![
         ReasoningSelection::ProviderDefault,
         ReasoningSelection::Disabled,
@@ -538,7 +1476,7 @@ pub fn reasoning_selections_for_provider(
             execution_mode: None,
         },
     ];
-    let efforts = if capabilities.reasoning_efforts.is_empty() {
+    let efforts = if use_profile_fallback && capabilities.reasoning_efforts.is_empty() {
         profile.fallback_efforts()
     } else {
         capabilities.reasoning_efforts.as_slice()
@@ -559,24 +1497,33 @@ pub fn reasoning_selections_for_provider(
 }
 
 pub fn reasoning_selections_for_model(model: &str) -> Vec<ReasoningSelection> {
-    if explicitly_lacks_reasoning(model) {
-        return vec![ReasoningSelection::ProviderDefault];
-    }
-    let info = model_info(model);
-    let provider = model_entry(model).and_then(|entry| entry.provider);
-    let mut choices = provider
-        .as_deref()
-        .map(|provider| reasoning_selections_for_provider(provider, &info.capabilities))
-        .unwrap_or_else(|| {
-            vec![
-                ReasoningSelection::ProviderDefault,
-                ReasoningSelection::Disabled,
-                ReasoningSelection::Auto {
-                    execution_mode: None,
-                },
-            ]
-        });
-    choices.retain(|selection| resolve_reasoning_for_model(model, selection).is_ok());
+    let state = REGISTRY_STATE.read().unwrap();
+    let Some(model) = resolved_model_in_state(&state, model) else {
+        return vec![
+            ReasoningSelection::ProviderDefault,
+            ReasoningSelection::Disabled,
+            ReasoningSelection::Auto {
+                execution_mode: None,
+            },
+        ];
+    };
+    let info = model_info_from_resolved(&model);
+    let mut choices = match model.capability_knowledge.reasoning_efforts {
+        CapabilityFieldKnowledge::Legacy => vec![
+            ReasoningSelection::ProviderDefault,
+            ReasoningSelection::Disabled,
+            ReasoningSelection::Auto {
+                execution_mode: None,
+            },
+        ],
+        CapabilityFieldKnowledge::Advertised => {
+            reasoning_selections(model.wire_profile, &info.capabilities, false)
+        }
+        CapabilityFieldKnowledge::Unknown => {
+            reasoning_selections(model.wire_profile, &info.capabilities, true)
+        }
+    };
+    choices.retain(|selection| resolve_reasoning_for_resolved(&model, selection).is_ok());
     choices
 }
 
@@ -584,19 +1531,22 @@ pub fn effective_reasoning_for_model(
     model: &str,
     input_selection: Option<&ReasoningSelection>,
 ) -> Result<Option<ReasoningSelection>, String> {
-    let info = model_info(model);
+    let state = REGISTRY_STATE.read().unwrap();
+    let Some(model) = resolved_model_in_state(&state, model) else {
+        return Ok(None);
+    };
+    let info = model_info_from_resolved(&model);
     let requested = input_selection.unwrap_or(&info.reasoning);
-    let provider_supports_reasoning =
-        reasoning_wire_profile_for_model(model) != ReasoningWireProfile::Unknown;
+    let provider_supports_reasoning = model.wire_profile != ReasoningWireProfile::Unknown;
     let should_display = input_selection.is_some()
         || !matches!(&info.reasoning, ReasoningSelection::ProviderDefault)
         || !info.capabilities.reasoning_efforts.is_empty()
         || info.capabilities.default_reasoning_effort.is_some()
         || provider_supports_reasoning;
-    if !should_display || (input_selection.is_none() && explicitly_lacks_reasoning(model)) {
+    if !should_display {
         return Ok(None);
     }
-    resolve_reasoning_for_model(model, requested).map(Some)
+    resolve_reasoning_for_resolved(&model, requested).map(Some)
 }
 
 impl ModelInfo {
@@ -759,39 +1709,30 @@ pub use crate::known_models::{KNOWN_MODELS, lookup_known_model};
 /// Models are marked `discovered = true` so they survive `set_model_config` reloads
 /// but are never written to config.toml. User-defined models in config.toml take priority.
 pub fn register_preset_models_for(provider_name: &str, base_url: &str) {
-    for preset in PROVIDER_PRESETS {
-        if preset.base_url == base_url && !preset.models.is_empty() {
-            let entries: Vec<(String, ModelEntry)> = preset
-                .models
-                .iter()
-                .map(|m| {
-                    let name = m.id.to_string();
-                    let entry = ModelEntry {
-                        model: m.id.to_string(),
-                        provider: Some(provider_name.to_string()),
-                        context_budget: Some(m.context_budget),
-                        thinking: Some(m.thinking),
-                        enabled: None,
-                        discovered: true,
-                        ..Default::default()
-                    };
-                    (name, entry)
-                })
-                .collect();
-            register_model_entries(entries);
+    let config = {
+        let state = REGISTRY_STATE.read().unwrap();
+        let configured = state
+            .config
+            .values
+            .providers
+            .get(provider_name)
+            .and_then(|provider| provider.base_url.as_deref());
+        if configured != Some(base_url) {
             return;
         }
+        state.config.clone()
+    };
+    if let Err(error) = install_config_layer(config) {
+        crate::notify!(error, "preset model update rejected: {error}");
     }
 }
 
 /// Register preset models for all config providers that match a PROVIDER_PRESETS entry.
 /// Called at bootstrap after `register_providers_from_config`.
 pub fn register_all_preset_models() {
-    let providers = all_provider_entries();
-    for (name, entry) in &providers {
-        if let Some(base_url) = &entry.base_url {
-            register_preset_models_for(name, base_url);
-        }
+    let config = REGISTRY_STATE.read().unwrap().config.clone();
+    if let Err(error) = install_config_layer(config) {
+        crate::notify!(error, "preset model update rejected: {error}");
     }
 }
 
@@ -987,11 +1928,8 @@ pub fn read_config_toml_pub() -> Option<String> {
 }
 
 pub(crate) fn reload_from_text(text: &str) -> anyhow::Result<()> {
-    if !text.trim().is_empty() {
-        toml::from_str::<toml::Value>(text)
-            .map_err(|error| anyhow::anyhow!("parse config.toml: {error}"))?;
-    }
-    set_provider_config(parse_config(text).unwrap_or_default());
+    let prepared = prepare_config_text(text)?;
+    commit_prepared_config(prepared);
     Ok(())
 }
 
@@ -1000,6 +1938,13 @@ pub(crate) fn reload_from_text(text: &str) -> anyhow::Result<()> {
 ///
 /// Replaces the per-crate `parse_model_config` functions in CLI and daemon.
 pub fn parse_config(text: &str) -> Option<ProviderConfig> {
+    parse_config_layer(text)
+        .ok()
+        .flatten()
+        .map(|layer| layer.values)
+}
+
+fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error> {
     #[derive(serde::Deserialize, Default)]
     struct RawProvider {
         #[serde(default)]
@@ -1039,15 +1984,15 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
         #[serde(default)]
         reasoning_budget_tokens: Option<u32>,
         #[serde(default)]
-        reasoning_efforts: Vec<ReasoningEffort>,
+        reasoning_efforts: Option<Vec<ReasoningEffort>>,
         #[serde(default)]
         default_reasoning_effort: Option<ReasoningEffort>,
         #[serde(default)]
-        reasoning_modes: Vec<ReasoningExecutionMode>,
+        reasoning_modes: Option<Vec<ReasoningExecutionMode>>,
         #[serde(default)]
         default_reasoning_mode: Option<ReasoningExecutionMode>,
         #[serde(default)]
-        input_modalities: Vec<InputModality>,
+        input_modalities: Option<Vec<InputModality>>,
         #[serde(default)]
         image_detail: Option<ImageDetail>,
         #[serde(default)]
@@ -1073,8 +2018,9 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
         alias: std::collections::HashMap<String, RawAlias>,
     }
 
-    let raw: RawFile = toml::from_str(text).ok()?;
+    let raw: RawFile = toml::from_str(text)?;
     let mut cfg = ProviderConfig::default();
+    let mut declarations = HashMap::new();
 
     for (key, p) in raw.providers {
         cfg.providers.insert(
@@ -1093,6 +2039,14 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
     }
 
     for (name, m) in raw.models {
+        declarations.insert(
+            name.clone(),
+            CapabilityDeclarations {
+                reasoning_efforts: m.reasoning_efforts.is_some(),
+                reasoning_modes: m.reasoning_modes.is_some(),
+                input_modalities: m.input_modalities.is_some(),
+            },
+        );
         cfg.models.insert(
             name,
             ModelEntry {
@@ -1104,11 +2058,11 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
                 reasoning: m.reasoning,
                 reasoning_mode: m.reasoning_mode,
                 reasoning_budget_tokens: m.reasoning_budget_tokens,
-                reasoning_efforts: m.reasoning_efforts,
+                reasoning_efforts: m.reasoning_efforts.unwrap_or_default(),
                 default_reasoning_effort: m.default_reasoning_effort,
-                reasoning_modes: m.reasoning_modes,
+                reasoning_modes: m.reasoning_modes.unwrap_or_default(),
                 default_reasoning_mode: m.default_reasoning_mode,
-                input_modalities: m.input_modalities,
+                input_modalities: m.input_modalities.unwrap_or_default(),
                 image_detail: m.image_detail,
                 max_tokens: m.max_tokens,
                 enabled: m.enabled,
@@ -1122,9 +2076,12 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
     }
 
     if cfg.providers.is_empty() && cfg.models.is_empty() && cfg.aliases.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(cfg)
+    Ok(Some(ConfigLayer {
+        values: cfg,
+        capabilities: declarations,
+    }))
 }
 
 pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
@@ -1318,11 +2275,7 @@ fn insert_string_array(
     for value in values {
         array.push(value);
     }
-    if array.is_empty() {
-        entry.remove(key);
-    } else {
-        entry.insert(key, toml_edit::value(array));
-    }
+    entry.insert(key, toml_edit::value(array));
 }
 
 pub fn upsert_model_config(update: ModelConfigUpdate<'_>) -> anyhow::Result<()> {
@@ -1461,7 +2414,6 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
 
 pub fn is_first_run() -> bool {
     let providers = all_provider_entries();
-    let models = all_model_entries();
     let config_configured = providers.iter().any(|(_, e)| {
         e.api_key.as_deref().is_some_and(|k| !k.is_empty())
             || e.api_key_env
@@ -1474,7 +2426,7 @@ pub fn is_first_run() -> bool {
         .is_ok_and(|store| store.providers.iter().any(|provider| provider.enabled));
     let smart_resolves = {
         let resolved = resolve_alias("smart");
-        resolved != "smart" && models.iter().any(|(n, _)| *n == resolved)
+        resolved != "smart" && model_entry(&resolved).is_some()
     };
     !(config_configured || env_configured || auth_configured) || !smart_resolves
 }
@@ -1483,14 +2435,62 @@ pub fn is_first_run() -> bool {
 mod tests {
     use super::*;
 
-    /// Tests that mutate MODEL_CONFIG must hold this lock to avoid races
+    /// Tests that mutate the global registry must hold this lock to avoid races
     /// when cargo test runs them in parallel.
     static TEST_CFG_LOCK: &std::sync::Mutex<()> = &MODEL_CONFIG_LOCK;
 
+    struct IsolatedRegistry {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for IsolatedRegistry {
+        fn drop(&mut self) {
+            *REGISTRY_STATE.write().unwrap() = RegistryState::default();
+            CATALOG_REVISION.send_replace(0);
+        }
+    }
+
+    fn isolated_registry() -> IsolatedRegistry {
+        let lock = TEST_CFG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *REGISTRY_STATE.write().unwrap() = RegistryState::default();
+        CATALOG_REVISION.send_replace(0);
+        IsolatedRegistry { _lock: lock }
+    }
+
+    fn descriptor(
+        provider_key: &str,
+        namespace: &str,
+        wire_profile: ReasoningWireProfile,
+    ) -> ProviderDescriptor {
+        ProviderDescriptor {
+            provider_key: provider_key.to_string(),
+            provider_name: "Test Provider".to_string(),
+            namespace: namespace.to_string(),
+            wire_profile,
+        }
+    }
+
+    fn advertised_model(
+        slug: &str,
+        context_budget: u64,
+        reasoning_efforts: Vec<ReasoningEffort>,
+    ) -> crate::provider::DiscoveredModelDetails {
+        crate::provider::DiscoveredModelDetails {
+            slug: slug.to_string(),
+            context_budget: Some(context_budget),
+            capability_knowledge: CapabilityKnowledge::Advertised(ModelCapabilities {
+                reasoning_efforts,
+                input_modalities: vec![InputModality::Text, InputModality::Image],
+                ..Default::default()
+            }),
+        }
+    }
+
     #[test]
     fn enabled_auth_provider_names_match_discovered_model_groups() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
-        *MODEL_CONFIG.write().unwrap() = Some(ModelConfig::default());
+        let _registry = isolated_registry();
         let auth = AuthStore {
             providers: vec![
                 crate::auth_store::StoredProvider {
@@ -1522,7 +2522,7 @@ mod tests {
         assert!(names.contains("enabled-id"));
         assert!(!names.contains("disabled-id"));
 
-        let models = vec![crate::provider::DiscoveredModel {
+        let models = vec![crate::provider::DiscoveredModelDetails {
             slug: "codex/gpt-test".into(),
             context_budget: Some(272_000),
             capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
@@ -1540,7 +2540,7 @@ mod tests {
             ),
             "abcdef1"
         );
-        register_discovered_for_provider("enabled-id", "Codex", &models);
+        register_discovered_details_for_provider("enabled-id", "Codex", &models).unwrap();
         let model_key = "enable@Codex:codex/gpt-test";
         let entry = model_entry(model_key).unwrap();
         assert_eq!(entry.provider.as_deref(), Some("enabled-id"));
@@ -1550,20 +2550,23 @@ mod tests {
         providers.register(std::sync::Arc::new(
             crate::providers::mock::MockProvider::new("enabled-id"),
         ));
-        assert_eq!(providers.resolve(model_key).unwrap().name(), "enabled-id");
+        assert!(
+            providers.resolve(model_key).is_none(),
+            "an auth-backed catalog must not remain executable after its auth record disappears"
+        );
     }
 
     #[test]
     fn unregistered_model_returns_zero_budget() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
-        *MODEL_CONFIG.write().unwrap() = None;
+        let _registry = isolated_registry();
+        *REGISTRY_STATE.write().unwrap() = RegistryState::default();
         assert_eq!(model_info("mystery-model").context_budget, 0);
         assert_eq!(model_info("").context_budget, 0);
     }
 
     #[test]
     fn threshold_is_eighty_percent() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "claude-opus-4.7".into(),
@@ -1582,7 +2585,7 @@ mod tests {
 
     #[test]
     fn compaction_trigger_is_near_budget_top() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "claude-opus-4.7".into(),
@@ -1605,7 +2608,7 @@ mod tests {
 
     #[test]
     fn compaction_target_is_lower_than_trigger() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "claude-opus-4.7".into(),
@@ -1630,7 +2633,7 @@ mod tests {
 
     #[test]
     fn alias_resolves_to_real_model() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "claude-opus-4.7".into(),
@@ -1654,7 +2657,7 @@ mod tests {
 
     #[test]
     fn custom_model_overrides_budget() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "my-local-model".into(),
@@ -1674,7 +2677,7 @@ mod tests {
 
     #[test]
     fn compact_threshold_reserves_configured_output_tokens() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "large-output".into(),
@@ -1699,7 +2702,7 @@ mod tests {
 
     #[test]
     fn alias_chains_through_custom_model() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut cfg = ModelConfig::default();
         cfg.aliases.insert(
             "default".into(),
@@ -1725,7 +2728,9 @@ mod tests {
 
     #[test]
     fn discovered_models_survive_set_model_config() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
+        set_discovered_models(vec!["z".into(), "a".into(), "z".into()]);
+        assert_eq!(discovered_models(), ["z", "a", "z"]);
         // Register discovered models first.
         register_discovered(
             "pid-abc",
@@ -1733,11 +2738,15 @@ mod tests {
             &[crate::provider::DiscoveredModel {
                 slug: "codex/gpt-5".to_string(),
                 context_budget: Some(128_000),
-                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
-                    ModelCapabilities::default(),
-                ),
+                thinking: true,
             }],
         );
+        assert!(model_entry("Codex:codex/gpt-5").is_some());
+        assert_eq!(
+            model_entry("Codex:codex/gpt-5").unwrap().model,
+            "Codex:codex/gpt-5"
+        );
+        register_discovered("pid-abc", "Codex", &[]);
         assert!(model_entry("Codex:codex/gpt-5").is_some());
 
         // Simulate config reload from config.toml.
@@ -1761,7 +2770,7 @@ mod tests {
 
     #[test]
     fn reload_replaces_config_models_and_preserves_discovered_models() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let mut initial = ProviderConfig::default();
         initial.models.insert(
             "old-config".into(),
@@ -1771,15 +2780,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        initial.models.insert(
-            "dynamic".into(),
-            ModelEntry {
-                model: "provider/dynamic".into(),
-                discovered: true,
-                ..Default::default()
-            },
-        );
         set_provider_config(initial);
+        register_discovered_details(
+            "dynamic-provider",
+            "Dynamic",
+            &[crate::provider::DiscoveredModelDetails {
+                slug: "provider/dynamic".into(),
+                context_budget: Some(64_000),
+                capability_knowledge: CapabilityKnowledge::Advertised(ModelCapabilities::default()),
+            }],
+        )
+        .unwrap();
 
         reload_from_text(
             r#"
@@ -1791,21 +2802,19 @@ model = "provider/new"
 
         assert!(model_entry("old-config").is_none());
         assert!(model_entry("new-config").is_some());
-        assert!(model_entry("dynamic").is_some());
+        assert!(model_entry("dynami@Dynamic:provider/dynamic").is_some());
     }
 
     #[test]
     fn discovered_models_survive_reload_from_text_alias_crud() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         register_discovered(
             "pid-abc",
             "Codex",
             &[crate::provider::DiscoveredModel {
                 slug: "codex/gpt-5".to_string(),
                 context_budget: Some(128_000),
-                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
-                    ModelCapabilities::default(),
-                ),
+                thinking: true,
             }],
         );
 
@@ -1882,8 +2891,49 @@ enabled = true
     }
 
     #[test]
+    fn model_config_update_preserves_explicit_empty_capability_knowledge() {
+        let _registry = isolated_registry();
+        let mut doc = r#"
+[providers.official]
+kind = "openai"
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+
+        apply_model_config_update(
+            &mut doc,
+            ModelConfigUpdate {
+                old_name: None,
+                name: "known-empty",
+                model: "api/model",
+                provider: Some("official"),
+                context_budget: 128_000,
+                reasoning: ReasoningSelection::ProviderDefault,
+                capabilities: Some(ModelCapabilities::default()),
+                image_detail: None,
+                max_tokens: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        let out = doc.to_string();
+        assert!(out.contains("reasoning_efforts = []"));
+        assert!(out.contains("reasoning_modes = []"));
+        assert!(out.contains("input_modalities = []"));
+        reload_from_text(&out).unwrap();
+        assert_eq!(
+            reasoning_selections_for_model("known-empty")
+                .into_iter()
+                .map(|selection| selection.to_string())
+                .collect::<Vec<_>>(),
+            ["default", "off", "auto"]
+        );
+    }
+
+    #[test]
     fn model_config_reads_reasoning_capabilities_and_legacy_bool() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let cfg = parse_config(
             r#"
 [models.modern]
@@ -1943,7 +2993,7 @@ reasoning_format = "reasoning-effort"
 
     #[test]
     fn known_provider_profile_displays_default_reasoning_without_model_hints() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let cfg = parse_config(
             r#"
 [providers.messages]
@@ -1973,13 +3023,13 @@ smart = { model = "plain" }
         );
         assert_eq!(
             effective_reasoning_for_model("disabled", None).unwrap(),
-            None
+            Some(ReasoningSelection::Disabled)
         );
     }
 
     #[test]
     fn compatible_thinking_profile_limits_shared_model_choices() {
-        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let _registry = isolated_registry();
         let cfg = parse_config(
             r#"
 [providers.openai-compatible]
@@ -2032,6 +3082,466 @@ default_reasoning_effort = "high"
             .unwrap_err()
             .contains("cannot represent effort `high`")
         );
+    }
+
+    #[test]
+    fn provider_catalog_replacement_is_atomic_and_tracks_api_identity() {
+        let _registry = isolated_registry();
+        let original = descriptor(
+            "catalog-provider",
+            "stable",
+            ReasoningWireProfile::CodexResponses,
+        );
+        let first = vec![
+            advertised_model("api/a", 64_000, vec![ReasoningEffort::Low]),
+            advertised_model("api/b", 128_000, vec![ReasoningEffort::High]),
+        ];
+        assert_eq!(
+            replace_provider_catalog(original.clone(), &first).unwrap(),
+            CatalogDelta {
+                added: 2,
+                updated: 0,
+                removed: 0,
+                total: 2,
+            }
+        );
+        let first_revision = model_catalog_revision();
+        assert_eq!(model_entry("stable:api/a").unwrap().model, "api/a");
+
+        let colliding = descriptor(
+            "other-provider",
+            "stable",
+            ReasoningWireProfile::OpenAiOfficial,
+        );
+        assert!(matches!(
+            replace_provider_catalog(colliding, &[advertised_model("api/other", 32_000, vec![])]),
+            Err(CatalogError::NamespaceInUse { .. })
+        ));
+        assert_eq!(model_catalog_revision(), first_revision);
+        assert!(model_entry("stable:api/a").is_some());
+
+        replace_provider_catalog(
+            descriptor("colon-left", "a", ReasoningWireProfile::OpenAiOfficial),
+            &[advertised_model("b:c", 32_000, vec![])],
+        )
+        .unwrap();
+        replace_provider_catalog(
+            descriptor("colon-right", "a:b", ReasoningWireProfile::OpenAiOfficial),
+            &[advertised_model("c", 32_000, vec![])],
+        )
+        .unwrap();
+        assert_eq!(model_entry("a:b:c").unwrap().model, "b:c");
+        assert_eq!(model_entry("a%3Ab:c").unwrap().model, "c");
+
+        let revision_after_colon_namespaces = model_catalog_revision();
+        let duplicate = vec![first[0].clone(), first[0].clone()];
+        assert!(matches!(
+            replace_provider_catalog(original.clone(), &duplicate),
+            Err(CatalogError::DuplicateModel { .. })
+        ));
+        assert_eq!(model_catalog_revision(), revision_after_colon_namespaces);
+        assert!(model_entry("stable:api/b").is_some());
+
+        let second = vec![
+            advertised_model("api/b", 256_000, vec![ReasoningEffort::XHigh]),
+            advertised_model("api/c", 512_000, vec![ReasoningEffort::High]),
+        ];
+        assert_eq!(
+            replace_provider_catalog(original.clone(), &second).unwrap(),
+            CatalogDelta {
+                added: 1,
+                updated: 1,
+                removed: 1,
+                total: 2,
+            }
+        );
+        assert!(model_entry("stable:api/a").is_none());
+        assert_eq!(
+            model_entry("stable:api/b").unwrap().context_budget,
+            Some(256_000)
+        );
+        assert_eq!(model_entry("stable:api/c").unwrap().model, "api/c");
+
+        let renamed_namespace = descriptor(
+            "catalog-provider",
+            "changed",
+            ReasoningWireProfile::CodexResponses,
+        );
+        assert!(matches!(
+            replace_provider_catalog(renamed_namespace, &second),
+            Err(CatalogError::NamespaceChanged { .. })
+        ));
+        assert!(model_entry("stable:api/b").is_some());
+
+        let empty = ProviderDescriptor {
+            wire_profile: ReasoningWireProfile::OpenAiOfficial,
+            ..original
+        };
+        assert_eq!(
+            replace_provider_catalog(empty, &[]).unwrap(),
+            CatalogDelta {
+                added: 0,
+                updated: 0,
+                removed: 2,
+                total: 0,
+            }
+        );
+        assert!(model_entry("stable:api/b").is_none());
+        assert_eq!(
+            reasoning_wire_profile_for_provider("catalog-provider"),
+            ReasoningWireProfile::OpenAiOfficial
+        );
+        assert!(
+            all_provider_groups_with_empty()
+                .iter()
+                .any(|group| group.provider_name == "catalog-provider" && group.models.is_empty())
+        );
+    }
+
+    #[test]
+    fn provider_namespace_prefixes_distinguish_peers_and_normalization_collisions() {
+        assert_eq!(
+            shortest_unique_provider_id(
+                "abcdef-1111",
+                &["abcdef-1111".into(), "abcdef-2222".into()],
+            ),
+            "abcdef1"
+        );
+        assert_eq!(
+            shortest_unique_provider_id("abc-def", &["abc-def".into(), "abcdef".into()]),
+            "abc-def"
+        );
+    }
+
+    #[test]
+    fn config_overlay_uses_identity_and_explicit_empty_capabilities() {
+        let _registry = isolated_registry();
+        replace_provider_catalog(
+            descriptor(
+                "catalog-provider",
+                "stable",
+                ReasoningWireProfile::OpenAiOfficial,
+            ),
+            &[advertised_model(
+                "api/reasoning",
+                128_000,
+                vec![ReasoningEffort::High],
+            )],
+        )
+        .unwrap();
+
+        reload_from_text(
+            r#"
+[models.renamed]
+model = "api/reasoning"
+provider = "catalog-provider"
+reasoning_efforts = []
+"#,
+        )
+        .unwrap();
+
+        assert!(model_entry("stable:api/reasoning").is_none());
+        let renamed = model_entry("renamed").unwrap();
+        assert_eq!(renamed.model, "api/reasoning");
+        assert!(renamed.reasoning_efforts.is_empty());
+        assert_eq!(
+            renamed.input_modalities,
+            vec![InputModality::Text, InputModality::Image]
+        );
+        assert_eq!(
+            reasoning_selections_for_model("renamed")
+                .into_iter()
+                .map(|selection| selection.to_string())
+                .collect::<Vec<_>>(),
+            ["default", "off", "auto"]
+        );
+        assert!(
+            resolve_reasoning_for_model(
+                "renamed",
+                &ReasoningSelection::Effort {
+                    effort: ReasoningEffort::High,
+                    execution_mode: None,
+                },
+            )
+            .unwrap_err()
+            .contains("does not advertise exact reasoning efforts")
+        );
+
+        assert!(reload_from_text("[models.broken]\ncontext_budget = \"large\"").is_err());
+        assert!(model_entry("renamed").is_some());
+        assert!(model_entry("broken").is_none());
+
+        assert!(remove_provider_catalog("catalog-provider"));
+        let remaining = model_entry("renamed").unwrap();
+        assert!(remaining.reasoning_efforts.is_empty());
+        assert!(remaining.input_modalities.is_empty());
+    }
+
+    #[test]
+    fn input_capability_override_does_not_hide_reasoning_fallback() {
+        let _registry = isolated_registry();
+        reload_from_text(
+            r#"
+[providers.official]
+kind = "openai"
+
+[models.vision-only]
+model = "api/vision"
+provider = "official"
+input_modalities = ["text", "image"]
+"#,
+        )
+        .unwrap();
+
+        let choices = reasoning_selections_for_model("vision-only")
+            .into_iter()
+            .map(|selection| selection.to_string())
+            .collect::<Vec<_>>();
+        assert!(choices.contains(&"high".to_string()));
+        assert!(choices.contains(&"xhigh".to_string()));
+        assert!(
+            resolve_reasoning_for_model(
+                "vision-only",
+                &ReasoningSelection::Effort {
+                    effort: ReasoningEffort::High,
+                    execution_mode: None,
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn legacy_and_advertised_empty_catalogs_have_safe_reasoning_choices() {
+        let _registry = isolated_registry();
+        replace_provider_catalog(
+            descriptor(
+                "legacy-provider",
+                "legacy",
+                ReasoningWireProfile::CodexResponses,
+            ),
+            &[crate::provider::DiscoveredModelDetails {
+                slug: "api/legacy".into(),
+                context_budget: Some(64_000),
+                capability_knowledge: CapabilityKnowledge::Legacy { thinking: false },
+            }],
+        )
+        .unwrap();
+        replace_provider_catalog(
+            descriptor(
+                "empty-provider",
+                "empty",
+                ReasoningWireProfile::CodexResponses,
+            ),
+            &[advertised_model("api/empty", 64_000, vec![])],
+        )
+        .unwrap();
+
+        for model in ["legacy:api/legacy", "empty:api/empty"] {
+            assert_eq!(
+                reasoning_selections_for_model(model)
+                    .into_iter()
+                    .map(|selection| selection.to_string())
+                    .collect::<Vec<_>>(),
+                ["default", "off", "auto"]
+            );
+            assert!(
+                resolve_reasoning_for_model(
+                    model,
+                    &ReasoningSelection::Effort {
+                        effort: ReasoningEffort::High,
+                        execution_mode: None,
+                    },
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            effective_reasoning_for_model("legacy:api/legacy", None).unwrap(),
+            Some(ReasoningSelection::Disabled)
+        );
+        assert_eq!(
+            effective_reasoning_for_model("empty:api/empty", None).unwrap(),
+            Some(ReasoningSelection::ProviderDefault)
+        );
+    }
+
+    #[test]
+    fn preset_and_catalog_overlays_do_not_duplicate_renamed_models() {
+        let _registry = isolated_registry();
+        let mut cfg = ProviderConfig::default();
+        for provider in ["first", "second"] {
+            cfg.providers.insert(
+                provider.into(),
+                ProviderEntry {
+                    kind: "openai".into(),
+                    base_url: Some("https://api.openai.com/v1".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        for name in ["renamed", "also-renamed"] {
+            cfg.models.insert(
+                name.into(),
+                ModelEntry {
+                    model: "gpt-4o".into(),
+                    provider: Some("first".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        set_provider_config(cfg);
+
+        let names: BTreeSet<_> = all_model_entries()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(names.contains("renamed"));
+        assert!(names.contains("also-renamed"));
+        assert!(names.contains("second:gpt-4o"));
+        assert!(!names.contains("first:gpt-4o"));
+        assert!(!names.contains("gpt-4o"));
+
+        replace_provider_catalog(
+            descriptor(
+                "catalog-provider",
+                "stable",
+                ReasoningWireProfile::OpenAiOfficial,
+            ),
+            &[advertised_model(
+                "api/reasoning",
+                128_000,
+                vec![ReasoningEffort::High],
+            )],
+        )
+        .unwrap();
+        let mut cfg = ProviderConfig::default();
+        cfg.models.insert(
+            "stable:api/reasoning".into(),
+            ModelEntry {
+                model: "api/different".into(),
+                provider: Some("different-provider".into()),
+                ..Default::default()
+            },
+        );
+        set_provider_config(cfg);
+        let shadow = model_entry("stable:api/reasoning").unwrap();
+        assert_eq!(shadow.model, "api/different");
+        assert!(shadow.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn catalog_rejects_a_registry_key_owned_by_a_different_preset_identity() {
+        let _registry = isolated_registry();
+        let mut cfg = ProviderConfig::default();
+        cfg.providers.insert(
+            "stable".into(),
+            ProviderEntry {
+                kind: "openai".into(),
+                base_url: Some("https://api.openai.com/v1".into()),
+                ..Default::default()
+            },
+        );
+        set_provider_config(cfg);
+
+        assert!(matches!(
+            replace_provider_catalog(
+                descriptor(
+                    "different-provider",
+                    "stable",
+                    ReasoningWireProfile::OpenAiOfficial,
+                ),
+                &[advertised_model("gpt-4o", 128_000, vec![])],
+            ),
+            Err(CatalogError::RegistryKeyInUse { .. })
+        ));
+        assert_eq!(model_entry("stable:gpt-4o").unwrap().model, "gpt-4o");
+    }
+
+    #[test]
+    fn config_reload_rejects_a_preset_key_owned_by_a_different_catalog_identity() {
+        let _registry = isolated_registry();
+        replace_provider_catalog(
+            descriptor(
+                "different-provider",
+                "stable",
+                ReasoningWireProfile::OpenAiOfficial,
+            ),
+            &[advertised_model("gpt-4o", 128_000, vec![])],
+        )
+        .unwrap();
+
+        let error = reload_from_text(
+            r#"
+[providers.stable]
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("already used"));
+        assert!(all_provider_entries().is_empty());
+        assert_eq!(
+            model_entry("stable:gpt-4o").unwrap().provider.as_deref(),
+            Some("different-provider")
+        );
+    }
+
+    #[test]
+    fn preset_keys_and_canonical_aliases_do_not_drift_as_providers_change() {
+        let _registry = isolated_registry();
+        let provider = || ProviderEntry {
+            kind: "openai".into(),
+            base_url: Some("https://api.openai.com/v1".into()),
+            ..Default::default()
+        };
+        let mut one = ProviderConfig::default();
+        one.providers.insert("first".into(), provider());
+        one.aliases.insert(
+            "smart".into(),
+            AliasEntry {
+                model: "first:gpt-4o".into(),
+            },
+        );
+        one.aliases.insert(
+            "legacy".into(),
+            AliasEntry {
+                model: "gpt-4o".into(),
+            },
+        );
+        set_provider_config(one.clone());
+        assert!(model_entry("first:gpt-4o").is_some());
+        assert_eq!(model_entry("smart").unwrap().model, "gpt-4o");
+        assert_eq!(model_entry("legacy").unwrap().model, "gpt-4o");
+
+        replace_provider_catalog(
+            descriptor(
+                "dynamic-provider",
+                "dynamic",
+                ReasoningWireProfile::OpenAiOfficial,
+            ),
+            &[advertised_model("gpt-4o", 128_000, vec![])],
+        )
+        .unwrap();
+        assert_eq!(
+            model_entry("legacy").unwrap().provider.as_deref(),
+            Some("first")
+        );
+
+        let mut two = one.clone();
+        two.providers.insert("second".into(), provider());
+        set_provider_config(two);
+        assert!(model_entry("first:gpt-4o").is_some());
+        assert!(model_entry("second:gpt-4o").is_some());
+        assert_eq!(model_entry("smart").unwrap().model, "gpt-4o");
+        assert!(model_entry("legacy").is_none());
+
+        set_provider_config(one);
+        assert!(model_entry("first:gpt-4o").is_some());
+        assert!(model_entry("second:gpt-4o").is_none());
+        assert_eq!(model_entry("smart").unwrap().model, "gpt-4o");
+        assert_eq!(model_entry("legacy").unwrap().model, "gpt-4o");
     }
 
     #[test]

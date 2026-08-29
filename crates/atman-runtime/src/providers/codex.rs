@@ -311,7 +311,7 @@ impl CodexReasoningLevel {
 
 fn parse_codex_models(
     bytes: &[u8],
-) -> Result<Vec<crate::provider::DiscoveredModel>, ModelDiscoveryError> {
+) -> Result<Vec<crate::provider::DiscoveredModelDetails>, ModelDiscoveryError> {
     let response: CodexModelsResponse = serde_json::from_slice(bytes)
         .map_err(|error| ModelDiscoveryError::InvalidResponse(error.to_string()))?;
     response
@@ -352,7 +352,7 @@ fn parse_codex_models(
                     _ => None,
                 })
                 .collect();
-            Ok(crate::provider::DiscoveredModel {
+            Ok(crate::provider::DiscoveredModelDetails {
                 slug,
                 context_budget: model.context_window,
                 capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
@@ -613,9 +613,23 @@ impl Provider for CodexProvider {
 
     fn discover_models(
         &self,
+    ) -> crate::tool::BoxFut<'static, Vec<crate::provider::DiscoveredModel>> {
+        let discovery = self.try_discover_models();
+        Box::pin(async move {
+            discovery
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(crate::provider::DiscoveredModel::from)
+                .collect()
+        })
+    }
+
+    fn try_discover_models(
+        &self,
     ) -> crate::tool::BoxFut<
         'static,
-        Result<Vec<crate::provider::DiscoveredModel>, ModelDiscoveryError>,
+        Result<Vec<crate::provider::DiscoveredModelDetails>, ModelDiscoveryError>,
     > {
         let access_token = self.access_token.clone();
         let account_id = self.account_id.clone();

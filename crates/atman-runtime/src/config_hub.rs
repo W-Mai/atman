@@ -276,9 +276,56 @@ impl ConfigHub {
         load_auth_from_path(&self.auth_path)
     }
 
+    pub(crate) fn load_auth_model_cache_details(
+        &self,
+        id: &str,
+    ) -> Result<Option<Vec<crate::provider::DiscoveredModelDetails>>, ConfigError> {
+        Ok(load_auth_document_from_path(&self.auth_path)?.model_cache_details(id))
+    }
+
+    pub(crate) fn load_auth_model_namespace(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, ConfigError> {
+        Ok(load_auth_document_from_path(&self.auth_path)?.model_namespace(id))
+    }
+
+    pub(crate) fn ensure_auth_model_namespace(
+        &self,
+        id: &str,
+        model_namespace: &str,
+    ) -> Result<(), ConfigError> {
+        if let Some(existing) = self.load_auth_model_namespace(id)? {
+            if existing == model_namespace {
+                return Ok(());
+            }
+            return Err(ConfigError::Invalid(format!(
+                "provider `{id}` model namespace is already `{existing}`"
+            )));
+        }
+        self.update_auth_document(|document| {
+            document
+                .ensure_model_namespace(id, model_namespace)
+                .map(|_| ())
+                .map_err(ConfigError::Invalid)
+        })
+    }
+
     pub fn update_auth<T>(
         &self,
         mutate: impl FnOnce(&mut crate::auth_store::AuthStore) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        self.update_auth_document(|document| {
+            let mut store = document.legacy_view();
+            let result = mutate(&mut store)?;
+            document.merge_legacy_view(store);
+            Ok(result)
+        })
+    }
+
+    fn update_auth_document<T>(
+        &self,
+        mutate: impl FnOnce(&mut crate::auth_store::AuthStoreDocument) -> Result<T, ConfigError>,
     ) -> Result<T, ConfigError> {
         use fs2::FileExt;
 
@@ -300,9 +347,9 @@ impl ConfigHub {
                 .join(".auth.json.lock"),
         )?;
         lock.lock_exclusive()?;
-        let mut store = load_auth_from_path(&self.auth_path)?;
-        let result = mutate(&mut store)?;
-        self.write_auth(&store)?;
+        let mut document = load_auth_document_from_path(&self.auth_path)?;
+        let result = mutate(&mut document)?;
+        self.write_auth_document(&document)?;
         Ok(result)
     }
 
@@ -311,6 +358,16 @@ impl ConfigHub {
         provider: crate::auth_store::StoredProvider,
     ) -> Result<(), ConfigError> {
         self.update_auth(|store| {
+            if store
+                .providers
+                .iter()
+                .any(|existing| existing.id == provider.id)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "auth provider id {:?} already exists",
+                    provider.id
+                )));
+            }
             store.providers.push(provider);
             Ok(())
         })
@@ -365,6 +422,20 @@ impl ConfigHub {
         cache: crate::auth_store::ModelCache,
     ) -> Result<bool, ConfigError> {
         self.update_auth(|store| Ok(store.update_model_cache(id, cache)))
+    }
+
+    pub(crate) fn update_auth_model_cache_details(
+        &self,
+        id: &str,
+        model_namespace: &str,
+        fetched_at: i64,
+        models: &[crate::provider::DiscoveredModelDetails],
+    ) -> Result<bool, ConfigError> {
+        self.update_auth_document(|document| {
+            document
+                .update_model_cache_details(id, model_namespace, fetched_at, models)
+                .map_err(ConfigError::Invalid)
+        })
     }
 
     pub fn load_or_init_daemon_config(&self) -> Result<DaemonConfig, ConfigError> {
@@ -1066,9 +1137,11 @@ impl ConfigHub {
         };
         mutate(&mut doc)?;
         let new_text = doc.to_string();
+        let prepared = crate::model_registry::prepare_config_text(&new_text)
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         self.write_config_toml(&new_text)?;
-        crate::model_registry::reload_from_text(&new_text)
-            .map_err(|error| ConfigError::Invalid(error.to_string()))
+        crate::model_registry::commit_prepared_config(prepared);
+        Ok(())
     }
 
     fn write_config_toml(&self, text: &str) -> Result<(), ConfigError> {
@@ -1085,8 +1158,11 @@ impl ConfigHub {
         write_sensitive_atomic(path, text.as_bytes())
     }
 
-    fn write_auth(&self, store: &crate::auth_store::AuthStore) -> Result<(), ConfigError> {
-        let json = serde_json::to_vec_pretty(store)
+    fn write_auth_document(
+        &self,
+        document: &crate::auth_store::AuthStoreDocument,
+    ) -> Result<(), ConfigError> {
+        let json = serde_json::to_vec_pretty(document)
             .map_err(|error| ConfigError::Invalid(format!("serialize auth store: {error}")))?;
         write_sensitive_atomic(&self.auth_path, &json)
     }
@@ -1192,11 +1268,17 @@ fn write_unique_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> 
 }
 
 fn load_auth_from_path(path: &Path) -> Result<crate::auth_store::AuthStore, ConfigError> {
+    Ok(load_auth_document_from_path(path)?.legacy_view())
+}
+
+fn load_auth_document_from_path(
+    path: &Path,
+) -> Result<crate::auth_store::AuthStoreDocument, ConfigError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|error| ConfigError::Invalid(format!("parse {}: {error}", path.display()))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(crate::auth_store::AuthStore::default())
+            Ok(crate::auth_store::AuthStoreDocument::default())
         }
         Err(error) => Err(error.into()),
     }
@@ -1373,6 +1455,9 @@ mod tests {
 
     #[test]
     fn provider_reasoning_format_is_written_and_preserved() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_dir, hub) = temp_hub();
         let base = ProviderConfigUpdate {
             name: "gateway",
@@ -1631,6 +1716,35 @@ mod tests {
     }
 
     #[test]
+    fn config_crud_validates_model_semantics_before_disk_or_registry_changes() {
+        let _registry = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = crate::model_registry::ProviderConfig::default();
+        current.models.insert(
+            "current".into(),
+            crate::model_registry::ModelEntry {
+                model: "api/current".into(),
+                ..Default::default()
+            },
+        );
+        crate::model_registry::set_provider_config(current);
+
+        let (_dir, hub) = temp_hub();
+        let invalid = "[models.broken]\nmodel = \"api/broken\"\ncontext_budget = \"large\"\n";
+        write_config(&hub, invalid);
+        let before = std::fs::read(hub.config_toml_path()).unwrap();
+
+        let error = hub.add_alias("smart", "current").unwrap_err();
+
+        assert!(error.to_string().contains("parse config.toml"));
+        assert_eq!(std::fs::read(hub.config_toml_path()).unwrap(), before);
+        assert!(crate::model_registry::model_entry("current").is_some());
+        assert!(crate::model_registry::model_entry("broken").is_none());
+        crate::model_registry::set_provider_config(Default::default());
+    }
+
+    #[test]
     fn theme_preference_defaults_to_auto_when_config_is_missing() {
         let (_dir, hub) = temp_hub();
 
@@ -1695,18 +1809,17 @@ mod tests {
         let cache_hub = hub.clone();
         let cache = std::thread::spawn(move || {
             cache_hub
-                .update_auth_model_cache(
+                .update_auth_model_cache_details(
                     "provider",
-                    crate::auth_store::ModelCache {
-                        schema_version: crate::auth_store::MODEL_CACHE_SCHEMA_VERSION,
-                        fetched_at: 10,
-                        models: vec![crate::auth_store::CachedModel {
-                            slug: "cached-model".into(),
-                            context_budget: Some(8192),
-                            thinking: true,
-                            capabilities: Some(crate::provider::ModelCapabilities::default()),
-                        }],
-                    },
+                    "stable-provider",
+                    10,
+                    &[crate::provider::DiscoveredModelDetails {
+                        slug: "cached-model".into(),
+                        context_budget: Some(8192),
+                        capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                            crate::provider::ModelCapabilities::default(),
+                        ),
+                    }],
                 )
                 .unwrap();
         });
@@ -1744,6 +1857,19 @@ mod tests {
         assert_eq!(
             provider.model_cache.as_ref().unwrap().models[0].slug,
             "cached-model"
+        );
+        assert!(matches!(
+            hub.load_auth_model_cache_details("provider")
+                .unwrap()
+                .unwrap()[0]
+                .capability_knowledge,
+            crate::provider::CapabilityKnowledge::Advertised(_)
+        ));
+        assert_eq!(
+            hub.load_auth_model_namespace("provider")
+                .unwrap()
+                .as_deref(),
+            Some("stable-provider")
         );
         #[cfg(unix)]
         {
@@ -1802,6 +1928,59 @@ mod tests {
             Err(ConfigError::Invalid("reject mutation".into()))
         });
         assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn auth_provider_ids_are_unique_and_duplicate_adds_do_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let hub = ConfigHub::from_auth_path(&path);
+        hub.add_auth_provider(auth_provider("stable-id")).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = hub
+            .add_auth_provider(auth_provider("stable-id"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(hub.load_auth().unwrap().providers.len(), 1);
+    }
+
+    #[test]
+    fn assigning_a_model_namespace_does_not_refresh_an_existing_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let hub = ConfigHub::from_auth_path(&path);
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        assert!(
+            hub.update_auth_model_cache(
+                "provider",
+                crate::auth_store::ModelCache {
+                    fetched_at: 7,
+                    models: vec![],
+                },
+            )
+            .unwrap()
+        );
+
+        hub.ensure_auth_model_namespace("provider", "stable-provider")
+            .unwrap();
+
+        let provider = hub.load_auth().unwrap().providers.remove(0);
+        assert_eq!(provider.model_cache.unwrap().fetched_at, 7);
+        assert_eq!(
+            hub.load_auth_model_namespace("provider")
+                .unwrap()
+                .as_deref(),
+            Some("stable-provider")
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            hub.ensure_auth_model_namespace("provider", "changed")
+                .is_err()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 

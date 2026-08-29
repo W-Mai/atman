@@ -583,9 +583,23 @@ impl Provider for OpenAiProvider {
 
     fn discover_models(
         &self,
+    ) -> crate::tool::BoxFut<'static, Vec<crate::provider::DiscoveredModel>> {
+        let discovery = self.try_discover_models();
+        Box::pin(async move {
+            discovery
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(crate::provider::DiscoveredModel::from)
+                .collect()
+        })
+    }
+
+    fn try_discover_models(
+        &self,
     ) -> crate::tool::BoxFut<
         'static,
-        Result<Vec<crate::provider::DiscoveredModel>, crate::provider::ModelDiscoveryError>,
+        Result<Vec<crate::provider::DiscoveredModelDetails>, crate::provider::ModelDiscoveryError>,
     > {
         let base_url = self.base_url.clone();
         let api_key = self.api_key.clone();
@@ -633,7 +647,7 @@ impl Provider for OpenAiProvider {
                 .map(|m| {
                     let (budget, thinking) =
                         crate::model_registry::lookup_known_model(&m.id).unwrap_or((32_768, false));
-                    crate::provider::DiscoveredModel {
+                    crate::provider::DiscoveredModelDetails {
                         slug: m.id,
                         context_budget: Some(budget),
                         capability_knowledge: crate::provider::CapabilityKnowledge::Legacy {

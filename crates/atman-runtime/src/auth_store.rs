@@ -1,10 +1,12 @@
+use std::collections::{HashMap, VecDeque};
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::config_dir;
 
 const AUTH_FILENAME: &str = "auth.json";
-pub const MODEL_CACHE_SCHEMA_VERSION: u32 = 1;
+const MODEL_CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -15,22 +17,18 @@ pub enum ProviderKind {
     Custom,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCache {
-    #[serde(default)]
-    pub schema_version: u32,
     pub fetched_at: i64,
     pub models: Vec<CachedModel>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CachedModel {
     pub slug: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<u64>,
     pub thinking: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<crate::provider::ModelCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +51,299 @@ pub struct StoredProvider {
 pub struct AuthStore {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<StoredProvider>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct AuthStoreDocument {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    providers: Vec<StoredProviderDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredProviderDocument {
+    id: String,
+    name: String,
+    kind: ProviderKind,
+    access_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    expires_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_cache: Option<ModelCacheDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelCacheDocument {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    schema_version: u32,
+    fetched_at: i64,
+    models: Vec<CachedModelDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedModelDocument {
+    slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_budget: Option<u64>,
+    thinking: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<crate::provider::ModelCapabilities>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+impl AuthStoreDocument {
+    pub(crate) fn legacy_view(&self) -> AuthStore {
+        AuthStore {
+            providers: self
+                .providers
+                .iter()
+                .map(StoredProviderDocument::legacy_view)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn merge_legacy_view(&mut self, store: AuthStore) {
+        let mut previous: HashMap<String, VecDeque<StoredProviderDocument>> = HashMap::new();
+        for provider in self.providers.drain(..) {
+            previous
+                .entry(provider.id.clone())
+                .or_default()
+                .push_back(provider);
+        }
+        self.providers = store
+            .providers
+            .into_iter()
+            .map(
+                |provider| match previous.get_mut(&provider.id).and_then(VecDeque::pop_front) {
+                    Some(document) => document.merge(provider),
+                    None => provider.into(),
+                },
+            )
+            .collect();
+    }
+
+    pub(crate) fn update_model_cache_details(
+        &mut self,
+        provider_id: &str,
+        model_namespace: &str,
+        fetched_at: i64,
+        models: &[crate::provider::DiscoveredModelDetails],
+    ) -> Result<bool, String> {
+        let Some(provider) = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return Ok(false);
+        };
+        assign_model_namespace(provider, provider_id, model_namespace)?;
+        provider.model_cache = Some(ModelCacheDocument::from_details(fetched_at, models));
+        Ok(true)
+    }
+
+    pub(crate) fn ensure_model_namespace(
+        &mut self,
+        provider_id: &str,
+        model_namespace: &str,
+    ) -> Result<bool, String> {
+        let Some(provider) = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return Err(format!("auth provider `{provider_id}` does not exist"));
+        };
+        assign_model_namespace(provider, provider_id, model_namespace)
+    }
+
+    pub(crate) fn model_namespace(&self, provider_id: &str) -> Option<String> {
+        self.providers
+            .iter()
+            .find(|provider| provider.id == provider_id)?
+            .model_namespace
+            .clone()
+    }
+
+    pub(crate) fn model_cache_details(
+        &self,
+        provider_id: &str,
+    ) -> Option<Vec<crate::provider::DiscoveredModelDetails>> {
+        self.providers
+            .iter()
+            .find(|provider| provider.id == provider_id)?
+            .model_cache
+            .as_ref()
+            .map(ModelCacheDocument::details)
+    }
+}
+
+fn assign_model_namespace(
+    provider: &mut StoredProviderDocument,
+    provider_id: &str,
+    model_namespace: &str,
+) -> Result<bool, String> {
+    if let Some(existing) = provider.model_namespace.as_deref() {
+        if existing == model_namespace {
+            return Ok(false);
+        }
+        return Err(format!(
+            "provider `{provider_id}` model namespace is already `{existing}`"
+        ));
+    }
+    provider.model_namespace = Some(model_namespace.to_string());
+    Ok(true)
+}
+
+impl StoredProviderDocument {
+    fn legacy_view(&self) -> StoredProvider {
+        StoredProvider {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            kind: self.kind.clone(),
+            access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            expires_at: self.expires_at,
+            account: self.account.clone(),
+            enabled: self.enabled,
+            model_cache: self
+                .model_cache
+                .as_ref()
+                .map(ModelCacheDocument::legacy_view),
+        }
+    }
+
+    fn merge(mut self, provider: StoredProvider) -> Self {
+        let model_cache = match (provider.model_cache, self.model_cache.take()) {
+            (Some(cache), Some(document)) if document.legacy_view() == cache => Some(document),
+            (Some(cache), _) => Some(cache.into()),
+            (None, _) => None,
+        };
+        Self {
+            id: provider.id,
+            name: provider.name,
+            kind: provider.kind,
+            access_token: provider.access_token,
+            refresh_token: provider.refresh_token,
+            expires_at: provider.expires_at,
+            account: provider.account,
+            enabled: provider.enabled,
+            model_namespace: self.model_namespace,
+            model_cache,
+        }
+    }
+}
+
+impl From<StoredProvider> for StoredProviderDocument {
+    fn from(provider: StoredProvider) -> Self {
+        Self {
+            id: provider.id,
+            name: provider.name,
+            kind: provider.kind,
+            access_token: provider.access_token,
+            refresh_token: provider.refresh_token,
+            expires_at: provider.expires_at,
+            account: provider.account,
+            enabled: provider.enabled,
+            model_namespace: None,
+            model_cache: provider.model_cache.map(ModelCacheDocument::from),
+        }
+    }
+}
+
+impl ModelCacheDocument {
+    fn legacy_view(&self) -> ModelCache {
+        ModelCache {
+            fetched_at: self.fetched_at,
+            models: self
+                .models
+                .iter()
+                .map(CachedModelDocument::legacy_view)
+                .collect(),
+        }
+    }
+
+    fn from_details(fetched_at: i64, models: &[crate::provider::DiscoveredModelDetails]) -> Self {
+        Self {
+            schema_version: MODEL_CACHE_SCHEMA_VERSION,
+            fetched_at,
+            models: models
+                .iter()
+                .map(|model| CachedModelDocument {
+                    slug: model.slug.clone(),
+                    context_budget: model.context_budget,
+                    thinking: model.capability_knowledge.thinking(),
+                    capabilities: model.capability_knowledge.advertised().cloned(),
+                })
+                .collect(),
+        }
+    }
+
+    fn details(&self) -> Vec<crate::provider::DiscoveredModelDetails> {
+        let capabilities_are_current = self.schema_version == MODEL_CACHE_SCHEMA_VERSION;
+        self.models
+            .iter()
+            .map(|model| crate::provider::DiscoveredModelDetails {
+                slug: model.slug.clone(),
+                context_budget: model.context_budget,
+                capability_knowledge: if capabilities_are_current {
+                    model
+                        .capabilities
+                        .clone()
+                        .map(crate::provider::CapabilityKnowledge::Advertised)
+                        .unwrap_or(crate::provider::CapabilityKnowledge::Legacy {
+                            thinking: model.thinking,
+                        })
+                } else {
+                    crate::provider::CapabilityKnowledge::Legacy {
+                        thinking: model.thinking,
+                    }
+                },
+            })
+            .collect()
+    }
+}
+
+impl From<ModelCache> for ModelCacheDocument {
+    fn from(cache: ModelCache) -> Self {
+        Self {
+            schema_version: 0,
+            fetched_at: cache.fetched_at,
+            models: cache
+                .models
+                .into_iter()
+                .map(CachedModelDocument::from)
+                .collect(),
+        }
+    }
+}
+
+impl CachedModelDocument {
+    fn legacy_view(&self) -> CachedModel {
+        CachedModel {
+            slug: self.slug.clone(),
+            context_budget: self.context_budget,
+            thinking: self.thinking,
+        }
+    }
+}
+
+impl From<CachedModel> for CachedModelDocument {
+    fn from(model: CachedModel) -> Self {
+        Self {
+            slug: model.slug,
+            context_budget: model.context_budget,
+            thinking: model.thinking,
+            capabilities: None,
+        }
+    }
 }
 
 impl AuthStore {
@@ -101,48 +392,77 @@ pub fn save_provider_model_cache(
     models: &[crate::provider::DiscoveredModel],
 ) -> Result<()> {
     let cache = ModelCache {
-        schema_version: MODEL_CACHE_SCHEMA_VERSION,
         fetched_at: chrono::Utc::now().timestamp(),
         models: models
             .iter()
             .map(|model| CachedModel {
                 slug: model.slug.clone(),
                 context_budget: model.context_budget,
-                thinking: model.capability_knowledge.thinking(),
-                capabilities: model.capability_knowledge.advertised().cloned(),
+                thinking: model.thinking,
             })
             .collect(),
     };
-    let updated =
-        crate::config_hub::ConfigHub::global()?.update_auth_model_cache(provider_id, cache)?;
+    let _ = crate::config_hub::ConfigHub::global()?.update_auth_model_cache(provider_id, cache)?;
+    Ok(())
+}
+
+/// Save rich discovered model data using the versioned auth.json wire format.
+pub fn save_provider_model_cache_details(
+    provider_id: &str,
+    model_namespace: &str,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<()> {
+    let updated = crate::config_hub::ConfigHub::global()?.update_auth_model_cache_details(
+        provider_id,
+        model_namespace,
+        chrono::Utc::now().timestamp(),
+        models,
+    )?;
     if !updated {
         anyhow::bail!("auth provider `{provider_id}` does not exist");
     }
     Ok(())
 }
 
+/// Load the stable model namespace assigned to one provider.
+pub fn load_provider_model_namespace(provider_id: &str) -> Result<Option<String>> {
+    Ok(crate::config_hub::ConfigHub::global()?.load_auth_model_namespace(provider_id)?)
+}
+
+/// Persist a provider namespace without changing its model cache freshness.
+pub fn ensure_provider_model_namespace(provider_id: &str, model_namespace: &str) -> Result<()> {
+    crate::config_hub::ConfigHub::global()?
+        .ensure_auth_model_namespace(provider_id, model_namespace)?;
+    Ok(())
+}
+
+/// Load rich cached model data for one provider.
+pub fn load_provider_model_cache_details(
+    provider_id: &str,
+) -> Result<Option<Vec<crate::provider::DiscoveredModelDetails>>> {
+    Ok(crate::config_hub::ConfigHub::global()?.load_auth_model_cache_details(provider_id)?)
+}
+
 /// Convert cached models to discovered models for registry hydration.
 pub fn cached_to_discovered(cache: &ModelCache) -> Vec<crate::provider::DiscoveredModel> {
-    let capabilities_are_current = cache.schema_version == MODEL_CACHE_SCHEMA_VERSION;
     cache
         .models
         .iter()
         .map(|m| crate::provider::DiscoveredModel {
             slug: m.slug.clone(),
             context_budget: m.context_budget,
-            capability_knowledge: if capabilities_are_current {
-                m.capabilities
-                    .clone()
-                    .map(crate::provider::CapabilityKnowledge::Advertised)
-                    .unwrap_or(crate::provider::CapabilityKnowledge::Legacy {
-                        thinking: m.thinking,
-                    })
-            } else {
-                crate::provider::CapabilityKnowledge::Legacy {
-                    thinking: m.thinking,
-                }
-            },
+            thinking: m.thinking,
         })
+        .collect()
+}
+
+/// Adapt a legacy public cache into rich models with legacy capability knowledge.
+pub fn cached_to_discovered_details(
+    cache: &ModelCache,
+) -> Vec<crate::provider::DiscoveredModelDetails> {
+    cached_to_discovered(cache)
+        .into_iter()
+        .map(crate::provider::DiscoveredModelDetails::from)
         .collect()
 }
 
@@ -251,8 +571,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_model_cache_preserves_unknown_capabilities() {
-        let cache: ModelCache = serde_json::from_str(
+    fn public_model_cache_retains_the_v1_9_1_shape() {
+        let cache = ModelCache {
+            fetched_at: 10,
+            models: vec![CachedModel {
+                slug: "codex/test".into(),
+                context_budget: Some(8_192),
+                thinking: true,
+            }],
+        };
+
+        let value = serde_json::to_value(cache).unwrap();
+        assert!(value.get("schema_version").is_none());
+        assert!(value["models"][0].get("capabilities").is_none());
+    }
+
+    #[test]
+    fn legacy_model_cache_document_preserves_unknown_capabilities() {
+        let cache: ModelCacheDocument = serde_json::from_str(
             r#"{"fetched_at":10,"models":[{"slug":"codex/test","thinking":true}]}"#,
         )
         .unwrap();
@@ -260,14 +596,14 @@ mod tests {
         assert_eq!(cache.schema_version, 0);
         assert_eq!(cache.models[0].capabilities, None);
         assert_eq!(
-            cached_to_discovered(&cache)[0].capability_knowledge,
+            cache.details()[0].capability_knowledge,
             crate::provider::CapabilityKnowledge::Legacy { thinking: true }
         );
     }
 
     #[test]
     fn unversioned_cache_does_not_trust_a_serialized_empty_capability_object() {
-        let cache: ModelCache = serde_json::from_str(
+        let cache: ModelCacheDocument = serde_json::from_str(
             r#"{
                 "fetched_at": 10,
                 "models": [{
@@ -286,25 +622,25 @@ mod tests {
         assert_eq!(cache.schema_version, 0);
         assert!(cache.models[0].capabilities.is_some());
         assert_eq!(
-            cached_to_discovered(&cache)[0].capability_knowledge,
+            cache.details()[0].capability_knowledge,
             crate::provider::CapabilityKnowledge::Legacy { thinking: true }
         );
     }
 
     #[test]
     fn current_model_cache_distinguishes_explicit_empty_capabilities() {
-        let cache = ModelCache {
-            schema_version: MODEL_CACHE_SCHEMA_VERSION,
-            fetched_at: 10,
-            models: vec![CachedModel {
+        let cache = ModelCacheDocument::from_details(
+            10,
+            &[crate::provider::DiscoveredModelDetails {
                 slug: "codex/test".into(),
                 context_budget: Some(8_192),
-                thinking: false,
-                capabilities: Some(crate::provider::ModelCapabilities::default()),
+                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                    crate::provider::ModelCapabilities::default(),
+                ),
             }],
-        };
+        );
         let json = serde_json::to_string(&cache).unwrap();
-        let decoded: ModelCache = serde_json::from_str(&json).unwrap();
+        let decoded: ModelCacheDocument = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.schema_version, MODEL_CACHE_SCHEMA_VERSION);
         assert_eq!(
@@ -312,10 +648,146 @@ mod tests {
             Some(crate::provider::ModelCapabilities::default())
         );
         assert_eq!(
-            cached_to_discovered(&decoded)[0].capability_knowledge,
+            decoded.details()[0].capability_knowledge,
             crate::provider::CapabilityKnowledge::Advertised(
                 crate::provider::ModelCapabilities::default()
             )
+        );
+    }
+
+    #[test]
+    fn current_wire_cache_is_readable_as_the_public_legacy_dto() {
+        let wire = ModelCacheDocument::from_details(
+            10,
+            &[crate::provider::DiscoveredModelDetails {
+                slug: "codex/test".into(),
+                context_budget: Some(8_192),
+                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                    crate::provider::ModelCapabilities::default(),
+                ),
+            }],
+        );
+
+        let json = serde_json::to_string(&wire).unwrap();
+        let legacy: ModelCache = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(legacy.fetched_at, 10);
+        assert_eq!(legacy.models[0].slug, "codex/test");
+        assert!(!legacy.models[0].thinking);
+    }
+
+    #[test]
+    fn legacy_view_updates_preserve_rich_cache_metadata() {
+        let mut document = AuthStoreDocument::default();
+        document.merge_legacy_view(AuthStore {
+            providers: vec![StoredProvider {
+                id: "provider".into(),
+                name: "Provider".into(),
+                kind: ProviderKind::Codex,
+                access_token: "old".into(),
+                refresh_token: None,
+                expires_at: 1,
+                account: None,
+                enabled: true,
+                model_cache: None,
+            }],
+        });
+        assert!(
+            document
+                .update_model_cache_details(
+                    "provider",
+                    "stable-provider",
+                    10,
+                    &[crate::provider::DiscoveredModelDetails {
+                        slug: "codex/test".into(),
+                        context_budget: Some(8_192),
+                        capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                            crate::provider::ModelCapabilities::default(),
+                        ),
+                    }],
+                )
+                .unwrap()
+        );
+
+        let mut legacy = document.legacy_view();
+        legacy.providers[0].access_token = "new".into();
+        document.merge_legacy_view(legacy);
+
+        assert_eq!(document.legacy_view().providers[0].access_token, "new");
+        assert_eq!(
+            document.model_namespace("provider").as_deref(),
+            Some("stable-provider")
+        );
+        assert!(matches!(
+            document.model_cache_details("provider").unwrap()[0].capability_knowledge,
+            crate::provider::CapabilityKnowledge::Advertised(_)
+        ));
+        assert!(
+            document
+                .update_model_cache_details("provider", "changed", 11, &[])
+                .unwrap_err()
+                .contains("already")
+        );
+        assert_eq!(
+            document.model_namespace("provider").as_deref(),
+            Some("stable-provider")
+        );
+    }
+
+    #[test]
+    fn legacy_duplicate_ids_do_not_cross_wire_rich_cache_metadata() {
+        let provider = |name: &str| StoredProvider {
+            id: "duplicate".into(),
+            name: name.into(),
+            kind: ProviderKind::Codex,
+            access_token: "old".into(),
+            refresh_token: None,
+            expires_at: 1,
+            account: None,
+            enabled: true,
+            model_cache: None,
+        };
+        let details = |capabilities: crate::provider::ModelCapabilities| {
+            ModelCacheDocument::from_details(
+                10,
+                &[crate::provider::DiscoveredModelDetails {
+                    slug: "api/same".into(),
+                    context_budget: Some(8_192),
+                    capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                        capabilities,
+                    ),
+                }],
+            )
+        };
+        let mut first: StoredProviderDocument = provider("first").into();
+        first.model_cache = Some(details(crate::provider::ModelCapabilities::default()));
+        let mut second: StoredProviderDocument = provider("second").into();
+        second.model_cache = Some(details(crate::provider::ModelCapabilities {
+            input_modalities: vec![crate::provider::InputModality::Image],
+            ..Default::default()
+        }));
+        let mut document = AuthStoreDocument {
+            providers: vec![first, second],
+        };
+
+        let mut legacy = document.legacy_view();
+        legacy.providers[0].access_token = "new-first".into();
+        legacy.providers[1].access_token = "new-second".into();
+        document.merge_legacy_view(legacy);
+
+        assert_eq!(document.providers[0].access_token, "new-first");
+        assert_eq!(document.providers[1].access_token, "new-second");
+        assert_eq!(
+            document.providers[0].model_cache.as_ref().unwrap().models[0].capabilities,
+            Some(crate::provider::ModelCapabilities::default())
+        );
+        assert_eq!(
+            document.providers[1].model_cache.as_ref().unwrap().models[0]
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .input_modalities,
+            [crate::provider::InputModality::Image]
         );
     }
 }

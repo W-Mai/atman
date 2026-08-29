@@ -459,7 +459,9 @@ async fn register_providers_from_env(executor: &mut Executor) {
 
 async fn register_providers_from_auth_store(executor: &mut Executor) {
     use atman_runtime::auth_store::ProviderKind;
-    use atman_runtime::auth_store::cached_to_discovered;
+    use atman_runtime::auth_store::{
+        cached_to_discovered_details, load_provider_model_cache_details,
+    };
     let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
         return;
     };
@@ -470,10 +472,37 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
         if p.kind == ProviderKind::Codex {
             // Hydrate cached models immediately so the UI has them from frame 0.
             if let Some(cache) = &p.model_cache {
-                let cached = cached_to_discovered(cache);
-                atman_runtime::model_registry::register_discovered_for_provider(
+                let cached = load_provider_model_cache_details(&p.id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| cached_to_discovered_details(cache));
+                match atman_runtime::model_registry::prepare_discovered_details_for_provider(
                     &p.id, &p.name, &cached,
-                );
+                ) {
+                    Ok(prepared) => {
+                        if let Err(error) =
+                            atman_runtime::auth_store::ensure_provider_model_namespace(
+                                &p.id,
+                                prepared.namespace(),
+                            )
+                        {
+                            atman_runtime::notify!(
+                                warn,
+                                "cached model namespace persistence failed: {error:#}"
+                            );
+                        } else {
+                            atman_runtime::model_registry::commit_prepared_provider_catalog(
+                                prepared,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        atman_runtime::notify!(
+                            warn,
+                            "cached model catalog install failed: {error}"
+                        );
+                    }
+                }
             }
 
             // Create provider (token refresh if needed) without model discovery.
