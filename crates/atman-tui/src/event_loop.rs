@@ -1255,8 +1255,11 @@ pub(crate) async fn run_frames(
             }
             _ = wait_context_change(handle.context_rx.as_mut()) => {
                 if let Some(rx) = handle.context_rx.as_mut() {
-                    app.app.context = rx.borrow().clone();
-                    if app.app.reconcile_input_reasoning() {
+                    if apply_context_snapshot(
+                        &mut app.app,
+                        rx.borrow().clone(),
+                        app.wm.modals.model_picker.is_pending(),
+                    ) {
                         app.app.save_ui_state();
                     }
                 }
@@ -1384,10 +1387,24 @@ pub(crate) async fn run_frames(
                         TuiCommand::OpenModelPicker => {
                             app.wm.modals.model_picker.open();
                         }
+                        TuiCommand::ModelSwitchResult {
+                            request_id,
+                            model,
+                            result,
+                        } => {
+                            app.wm.modals.resolve_model_switch(
+                                &mut app.app,
+                                request_id,
+                                model,
+                                result,
+                            );
+                        }
                         TuiCommand::ProviderModelsUpdated => {
                             app.wm.modals.provider_manager.refresh_list();
                             app.wm.modals.model_manager.refresh();
-                            if app.app.reconcile_input_reasoning() {
+                            if !app.wm.modals.model_picker.is_pending()
+                                && app.app.reconcile_input_reasoning()
+                            {
                                 app.app.save_ui_state();
                             }
                             if app.wm.modals.onboarding_open {
@@ -1454,6 +1471,21 @@ pub(crate) async fn recv_cmd(
     match rx {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+fn apply_context_snapshot(
+    app: &mut AppState,
+    mut context: atman_runtime::ContextSnapshot,
+    model_switch_pending: bool,
+) -> bool {
+    if model_switch_pending {
+        context.model.clone_from(&app.context.model);
+        app.context = context;
+        false
+    } else {
+        app.context = context;
+        app.reconcile_input_reasoning()
     }
 }
 
@@ -1583,4 +1615,30 @@ pub(crate) async fn poll_update_check(
     handle: &mut tokio::task::JoinHandle<Option<String>>,
 ) -> Option<String> {
     handle.await.ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_model_switch_defers_context_model_and_reasoning_changes() {
+        let mut app = AppState::new("session".into(), None);
+        app.context.model = "old-model".into();
+        app.context.tokens_in = 4;
+        app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
+        let incoming = atman_runtime::ContextSnapshot {
+            model: "new-model".into(),
+            tokens_in: 9,
+            ..Default::default()
+        };
+
+        assert!(!apply_context_snapshot(&mut app, incoming, true));
+        assert_eq!(app.context.model, "old-model");
+        assert_eq!(app.context.tokens_in, 9);
+        assert_eq!(
+            app.input_reasoning,
+            Some(atman_runtime::provider::ReasoningSelection::Disabled)
+        );
+    }
 }

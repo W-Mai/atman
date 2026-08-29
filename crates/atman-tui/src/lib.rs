@@ -172,6 +172,7 @@ pub enum TuiControl {
     },
     OnboardingInit,
     SwitchModel {
+        request_id: u64,
         model: String,
     },
     RefreshProviderModels {
@@ -217,6 +218,11 @@ pub enum TuiCommand {
     OpenTrustModePicker,
     OpenThemePicker,
     OpenModelPicker,
+    ModelSwitchResult {
+        request_id: u64,
+        model: String,
+        result: Result<String, String>,
+    },
     ProviderModelsUpdated,
     ProviderTestResult((String, bool)),
     McpTestResult {

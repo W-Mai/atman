@@ -1497,6 +1497,57 @@ mod tests {
         assert!(!input_has_focus(&state));
     }
 
+    #[test]
+    fn pending_model_switch_blocks_submission_routing() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.wm.modals.model_picker.open = true;
+        state
+            .wm
+            .modals
+            .model_picker
+            .begin_switch("provider:model".into())
+            .unwrap();
+        let mut editor = InputEditor::default();
+        editor.insert_str("do not submit yet");
+        let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        let (escape_consumed, commands) =
+            state
+                .wm
+                .dispatch_key(&KeyAction::Escape, &mut state.app, Some(&control_tx));
+        state
+            .wm
+            .apply_commands(&mut state.app, commands, Some(&control_tx));
+        assert!(escape_consumed);
+        assert!(state.wm.modals.model_picker.open);
+
+        let (consumed, commands) =
+            state
+                .wm
+                .dispatch_key(&KeyAction::Submit, &mut state.app, Some(&control_tx));
+        state
+            .wm
+            .apply_commands(&mut state.app, commands, Some(&control_tx));
+        if !consumed {
+            handle_key(
+                KeyAction::Submit,
+                &mut state,
+                &mut editor,
+                &mut interrupt_prompt,
+                Some(&submit_tx),
+                Some(&control_tx),
+            );
+        }
+
+        assert!(consumed);
+        assert!(submit_rx.try_recv().is_err());
+        assert_eq!(editor.buf(), "do not submit yet");
+        assert!(state.wm.modals.model_picker.open);
+        assert!(state.wm.modals.model_picker.is_pending());
+    }
+
     fn pending_permission(revision: u64) -> crate::app::PendingPermission {
         use atman_runtime::event::FlowRunId;
         use atman_runtime::permission::PermissionRequestId;

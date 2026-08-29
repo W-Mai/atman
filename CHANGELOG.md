@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Acknowledged model switching** — the model picker stays pending until the alias update and session context change complete, then applies only the matching success or failure result.
 - **Model overlay isolation** — same-key config entries inherit dynamic catalog metadata only when they name the same non-empty API model and do not conflict on provider.
 - **Typed model discovery** — provider catalogs retain advertised reasoning levels, replace models atomically by provider and API identity, distinguish legacy or explicitly empty capability data, and preserve the last valid cache when discovery fails.
 - **Persistent TUI reasoning preference** — the input composer restores its selected reasoning effort after restart or session changes, captures the displayed effective depth for each submission, and resets incompatible selections when the active model changes.

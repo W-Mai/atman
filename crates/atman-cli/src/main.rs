@@ -2182,46 +2182,22 @@ async fn cmd_repl_once(
                             let _ = crate::init::init_config_dir_with_mode(&dir, None);
                         }
                     }
-                    atman_tui::TuiControl::SwitchModel { model } => {
-                        let info = atman_runtime::model_registry::model_info(&model);
-                        if info.context_budget == 0 {
-                            let _ = session_for_ctrl.stream_tx().send(
-                                atman_runtime::stream::StreamFrame::Note(format!(
-                                    "cannot switch to `{model}` — model or provider is disabled"
-                                )),
-                            );
-                        } else {
-                            match atman_runtime::config_hub::ConfigHub::global()
-                                .and_then(|hub| hub.update_alias(Some("smart"), "smart", &model))
-                            {
-                                Ok(()) => {
-                                    load_model_config_from_disk();
-                                    session_for_ctrl.set_current_model(model.clone());
-                                    let _ = session_for_ctrl.stream_tx().send(
-                                        atman_runtime::stream::StreamFrame::Note(format!(
-                                            "model switched: smart → {model}"
-                                        )),
-                                    );
-                                }
-                                Err(error) => {
-                                    let _ = session_for_ctrl.stream_tx().send(
-                                        atman_runtime::stream::StreamFrame::Notification(
-                                            atman_runtime::stream::NotificationFrame {
-                                                level: atman_runtime::notify::NotifyLevel::Error,
-                                                location:
-                                                    atman_runtime::notify::NotifyLocation::Inline,
-                                                lifecycle:
-                                                    atman_runtime::notify::NotifyLifecycle::Persistent,
-                                                stack: atman_runtime::notify::NotifyStack::Append,
-                                                message: format!(
-                                                    "failed to switch smart model to `{model}`: {error}"
-                                                ),
-                                            },
-                                        ),
-                                    );
-                                }
-                            }
-                        }
+                    atman_tui::TuiControl::SwitchModel { request_id, model } => {
+                        let result = atman_runtime::config_hub::ConfigHub::global()
+                            .map_err(|error| error.to_string())
+                            .and_then(|hub| {
+                                switch_smart_model(
+                                    &hub,
+                                    &providers_for_ctrl,
+                                    &session_for_ctrl,
+                                    &model,
+                                )
+                            });
+                        let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::ModelSwitchResult {
+                            request_id,
+                            model,
+                            result,
+                        });
                     }
                     atman_tui::TuiControl::RefreshProviderModels { provider_id } => {
                         let tx = cmd_tx_for_models.clone();
@@ -2879,6 +2855,26 @@ fn truncate_str(s: &str, max: usize) -> String {
         out.push('…');
         out
     }
+}
+
+fn switch_smart_model(
+    hub: &atman_runtime::config_hub::ConfigHub,
+    providers: &atman_runtime::provider::ProviderRegistry,
+    session: &atman_runtime::Session,
+    requested_model: &str,
+) -> Result<String, String> {
+    let info = atman_runtime::model_registry::model_info(requested_model);
+    if info.context_budget == 0 {
+        return Err("model or provider is disabled".into());
+    }
+    let active_model = info.name;
+    if providers.resolve(&active_model).is_none() {
+        return Err("provider is not available in this process".into());
+    }
+    hub.update_alias(Some("smart"), "smart", &active_model)
+        .map_err(|error| error.to_string())?;
+    session.set_current_model(active_model.clone());
+    Ok(active_model)
 }
 
 fn delete_session_dir(data_root: &std::path::Path, sid: &str) {
@@ -4790,8 +4786,10 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
     }
     let session = std::sync::Arc::new(Session::open_ephemeral());
     let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiControl>();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiCommand>();
     let mut handle = atman_tui::TuiHandle::from_session(session.clone());
     handle.control_tx = Some(ctrl_tx);
+    handle.cmd_rx = Some(cmd_rx);
     let ctrl_session = session.clone();
     let ctrl_task = tokio::spawn(async move {
         while let Some(msg) = ctrl_rx.recv().await {
@@ -4869,6 +4867,13 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     let _ = atman_runtime::config_hub::ConfigHub::global()
                         .and_then(|hub| hub.remove_auth_provider(&id))
                         .map(|_| ());
+                }
+                atman_tui::TuiControl::SwitchModel { request_id, model } => {
+                    let _ = cmd_tx.send(atman_tui::TuiCommand::ModelSwitchResult {
+                        request_id,
+                        model,
+                        result: Err("model switching is unavailable in TUI preview".into()),
+                    });
                 }
                 atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
                     let decision = match edited {
@@ -7211,6 +7216,76 @@ mod tests {
             Some(Value::Str(value)) if value == "high"
         ));
         assert!(second.invocation_env.get("effort").is_none());
+    }
+
+    #[test]
+    fn switch_smart_model_commits_a_concrete_target_before_success() {
+        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(dir.path());
+        hub.upsert_provider(atman_runtime::config_hub::ProviderConfigUpdate {
+            name: "gateway",
+            kind: "openai-compat",
+            api_key: Some("test-key"),
+            api_key_env: None,
+            base_url: Some("http://localhost/v1"),
+            max_tokens: None,
+            reasoning_format: None,
+            enabled: true,
+        })
+        .unwrap();
+        for (name, enabled) in [("old", true), ("new", true), ("disabled", false)] {
+            hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
+                old_name: None,
+                name,
+                model: name,
+                provider: Some("gateway"),
+                context_budget: 128_000,
+                reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
+                capabilities: None,
+                image_detail: None,
+                max_tokens: None,
+                enabled,
+            })
+            .unwrap();
+        }
+        hub.add_alias("smart", "old").unwrap();
+        hub.add_alias("cheap", "smart").unwrap();
+        let session = Session::open_ephemeral();
+        session.set_current_model("old");
+        let providers = atman_runtime::provider::ProviderRegistry::new();
+
+        let before = hub.read_config_toml().unwrap();
+        assert!(switch_smart_model(&hub, &providers, &session, "new").is_err());
+        assert_eq!(hub.read_config_toml().unwrap(), before);
+        assert_eq!(session.last_model(), "old");
+
+        providers.register(std::sync::Arc::new(
+            atman_runtime::providers::mock::MockProvider::new("config:gateway"),
+        ));
+        assert_eq!(
+            switch_smart_model(&hub, &providers, &session, "cheap").unwrap(),
+            "old"
+        );
+        let config =
+            atman_runtime::model_registry::parse_config(&hub.read_config_toml().unwrap()).unwrap();
+        assert_eq!(config.aliases["smart"].model, "old");
+
+        assert_eq!(
+            switch_smart_model(&hub, &providers, &session, "new").unwrap(),
+            "new"
+        );
+        assert_eq!(atman_runtime::model_registry::resolve_alias("smart"), "new");
+        assert_eq!(session.last_model(), "new");
+
+        let before = hub.read_config_toml().unwrap();
+        assert!(switch_smart_model(&hub, &providers, &session, "disabled").is_err());
+        assert_eq!(hub.read_config_toml().unwrap(), before);
+        assert_eq!(session.last_model(), "new");
+
+        atman_runtime::model_registry::set_provider_config(Default::default());
     }
 
     #[test]

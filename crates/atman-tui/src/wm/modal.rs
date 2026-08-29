@@ -246,19 +246,27 @@ impl ModalManager {
             ModalKind::ModelPicker => {
                 if self.model_picker.open {
                     self.model_picker.handle_key(action);
-                    if let Some(model) = self.model_picker.picked.take() {
-                        if let Some(tx) = tx {
-                            let _ = tx.send(crate::TuiControl::SwitchModel {
-                                model: model.clone(),
-                            });
+                    if let Some(request) = self.model_picker.take_switch_request() {
+                        let dispatched = tx.is_some_and(|tx| {
+                            tx.send(crate::TuiControl::SwitchModel {
+                                request_id: request.request_id,
+                                model: request.model.clone(),
+                            })
+                            .is_ok()
+                        });
+                        if !dispatched {
+                            self.model_picker.finish_switch(
+                                request.request_id,
+                                &request.model,
+                                false,
+                            );
+                            app.push_toast(
+                                "model switch is unavailable".to_string(),
+                                crate::app::NoteLevel::Error,
+                                std::time::Duration::from_secs(5),
+                                crate::app::ToastPosition::TopRight,
+                            );
                         }
-                        app.context.model = model.clone();
-                        app.push_toast(
-                            format!("model switched to {model}"),
-                            crate::app::NoteLevel::Success,
-                            std::time::Duration::from_secs(3),
-                            crate::app::ToastPosition::TopRight,
-                        );
                     }
                 }
                 (true, None)
@@ -413,6 +421,42 @@ impl ModalManager {
                 };
                 (result.is_some(), result)
             }
+        }
+    }
+
+    pub fn resolve_model_switch(
+        &mut self,
+        app: &mut crate::app::AppState,
+        request_id: u64,
+        model: String,
+        result: Result<String, String>,
+    ) {
+        let succeeded = result.is_ok();
+        if !self
+            .model_picker
+            .finish_switch(request_id, &model, succeeded)
+        {
+            return;
+        }
+        match result {
+            Ok(active_model) => {
+                app.context.model = active_model.clone();
+                if app.reconcile_input_reasoning() {
+                    app.save_ui_state();
+                }
+                app.push_toast(
+                    format!("model switched to {active_model}"),
+                    crate::app::NoteLevel::Success,
+                    std::time::Duration::from_secs(3),
+                    crate::app::ToastPosition::TopRight,
+                );
+            }
+            Err(error) => app.push_toast(
+                format!("failed to switch to {model}: {error}"),
+                crate::app::NoteLevel::Error,
+                std::time::Duration::from_secs(5),
+                crate::app::ToastPosition::TopRight,
+            ),
         }
     }
 
@@ -990,5 +1034,66 @@ fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
         y: canvas.y + canvas.height.saturating_sub(h) / 2,
         width: w,
         height: h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_switch_result_requires_the_pending_request() {
+        let mut manager = ModalManager::default();
+        manager.model_picker.open = true;
+        let request = manager.model_picker.begin_switch("alias".into()).unwrap();
+        let mut app = crate::app::AppState::new("session".into(), None);
+        app.context.model = "old-model".into();
+        app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
+
+        manager.resolve_model_switch(
+            &mut app,
+            request.request_id + 1,
+            request.model.clone(),
+            Ok("new-model".into()),
+        );
+        manager.resolve_model_switch(
+            &mut app,
+            request.request_id,
+            "other-alias".into(),
+            Ok("new-model".into()),
+        );
+        assert!(manager.model_picker.is_pending());
+        assert!(manager.model_picker.open);
+        assert_eq!(app.context.model, "old-model");
+        assert!(app.toasts.is_empty());
+
+        manager.resolve_model_switch(
+            &mut app,
+            request.request_id,
+            request.model,
+            Err("update rejected".into()),
+        );
+        assert!(!manager.model_picker.is_pending());
+        assert!(manager.model_picker.open);
+        assert_eq!(app.context.model, "old-model");
+        assert_eq!(
+            app.input_reasoning,
+            Some(atman_runtime::provider::ReasoningSelection::Disabled)
+        );
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].level, crate::app::NoteLevel::Error);
+
+        app.input_reasoning = None;
+        let retry = manager.model_picker.begin_switch("alias".into()).unwrap();
+        manager.resolve_model_switch(
+            &mut app,
+            retry.request_id,
+            retry.model,
+            Ok("new-model".into()),
+        );
+        assert!(!manager.model_picker.open);
+        assert_eq!(app.context.model, "new-model");
+        assert_eq!(app.toasts.len(), 2);
+        assert_eq!(app.toasts[1].level, crate::app::NoteLevel::Success);
     }
 }

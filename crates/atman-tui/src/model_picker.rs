@@ -8,25 +8,38 @@ use ratatui::widgets::Paragraph;
 use crate::keys::KeyAction;
 use crate::model_browser::{BrowserAction, BrowserRow, BrowserRowKind, ModelBrowser};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelSwitchRequest {
+    pub request_id: u64,
+    pub model: String,
+}
+
 #[derive(Default)]
 pub struct ModelPicker {
     pub open: bool,
     browser: ModelBrowser,
-    pub picked: Option<String>,
+    picked: Option<String>,
+    pending: Option<ModelSwitchRequest>,
+    next_request_id: u64,
 }
 
 impl ModelPicker {
     pub fn open(&mut self) {
-        self.open_with_model(None);
+        let current = atman_runtime::model_registry::model_info("smart").name;
+        self.open_with_model(Some(&current));
     }
 
-    pub fn open_with_model(&mut self, current: Option<&str>) {
+    fn open_with_model(&mut self, current: Option<&str>) {
         self.open = true;
-        self.refresh(current);
+        if self.pending.is_none() {
+            self.refresh(current);
+        }
     }
 
     pub fn close(&mut self) {
-        self.open = false;
+        if self.pending.is_none() {
+            self.open = false;
+        }
     }
 
     fn refresh(&mut self, current: Option<&str>) {
@@ -66,14 +79,53 @@ impl ModelPicker {
     }
 
     pub fn handle_key(&mut self, action: &KeyAction) {
+        if self.pending.is_some() {
+            return;
+        }
         match self.browser.handle_key(action, 0) {
             BrowserAction::Cancelled => self.close(),
             BrowserAction::Selected => {
                 self.picked = self.browser.selected().map(|row| row.value.clone());
-                self.close();
             }
             BrowserAction::Consumed => {}
         }
+    }
+
+    pub(crate) fn take_switch_request(&mut self) -> Option<ModelSwitchRequest> {
+        let model = self.picked.take()?;
+        self.begin_switch(model)
+    }
+
+    pub(crate) fn begin_switch(&mut self, model: String) -> Option<ModelSwitchRequest> {
+        if self.pending.is_some() {
+            return None;
+        }
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let request = ModelSwitchRequest {
+            request_id: self.next_request_id,
+            model,
+        };
+        self.pending = Some(request.clone());
+        Some(request)
+    }
+
+    pub(crate) fn finish_switch(&mut self, request_id: u64, model: &str, succeeded: bool) -> bool {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id && pending.model == model)
+        {
+            return false;
+        }
+        self.pending = None;
+        if succeeded {
+            self.open = false;
+        }
+        true
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending.is_some()
     }
 }
 
@@ -94,11 +146,19 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
             ])
             .split(area);
 
-        let current_model = atman_runtime::model_registry::model_info("smart").name;
+        let (status, model, color) = if let Some(pending) = &self.pending {
+            ("switching: ", pending.model.clone(), t.warn)
+        } else {
+            (
+                "current: ",
+                atman_runtime::model_registry::model_info("smart").name,
+                t.accent,
+            )
+        };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("current: ", Style::default().fg(t.meta_fg.into())),
-                Span::styled(current_model, Style::default().fg(t.accent.into())),
+                Span::styled(status, Style::default().fg(t.meta_fg.into())),
+                Span::styled(model, Style::default().fg(color.into())),
             ])),
             rows[0],
         );
@@ -120,9 +180,14 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
             .collect::<Vec<_>>();
         f.render_widget(Paragraph::new(lines), rows[1]);
 
+        let help = if self.pending.is_some() {
+            "Waiting for model switch…"
+        } else {
+            "↑↓/j/k navigate · PgUp/PgDn scroll · Enter select · Esc cancel"
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "↑↓/j/k navigate · PgUp/PgDn scroll · Enter select · Esc cancel",
+                help,
                 Style::default().fg(t.meta_fg.into()),
             )))
             .alignment(ratatui::layout::Alignment::Right),
@@ -154,5 +219,51 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
 
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
         t.accent.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picker() -> ModelPicker {
+        ModelPicker {
+            open: true,
+            browser: ModelBrowser::new(
+                vec![BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: "Model".into(),
+                    value: "provider:model".into(),
+                    selectable: true,
+                }],
+                None,
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn selection_stays_open_until_matching_switch_result() {
+        let mut picker = picker();
+        picker.handle_key(&KeyAction::Submit);
+        assert!(picker.open);
+
+        let request = picker.take_switch_request().unwrap();
+        assert!(picker.is_pending());
+        picker.handle_key(&KeyAction::Escape);
+        assert!(picker.open);
+
+        assert!(!picker.finish_switch(request.request_id + 1, &request.model, true));
+        assert!(picker.is_pending());
+        assert!(picker.open);
+
+        assert!(picker.finish_switch(request.request_id, &request.model, false));
+        assert!(!picker.is_pending());
+        assert!(picker.open);
+
+        picker.handle_key(&KeyAction::Submit);
+        let retry = picker.take_switch_request().unwrap();
+        assert!(picker.finish_switch(retry.request_id, &retry.model, true));
+        assert!(!picker.open);
     }
 }
