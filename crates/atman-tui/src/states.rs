@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::sidebar::SidebarMode;
+
+static STATE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn default_true() -> bool {
     true
@@ -40,6 +44,8 @@ pub struct PersistedUiState {
     pub onboarding_skipped: bool,
     #[serde(default)]
     pub hints_dismissed: bool,
+    #[serde(default)]
+    pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
 }
 
 impl Default for PersistedUiState {
@@ -61,6 +67,7 @@ impl Default for PersistedUiState {
             task_panel_collapsed: false,
             onboarding_skipped: false,
             hints_dismissed: false,
+            input_reasoning: None,
         }
     }
 }
@@ -96,12 +103,43 @@ impl PersistedUiState {
         let Some(path) = Self::path() else {
             return Ok(());
         };
+        self.save_to(&path)
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
-        Ok(())
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("states.json");
+        let tmp = parent.join(format!(
+            ".{file_name}.{}.{}.{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            STATE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| -> anyhow::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// Snapshot relevant fields from an AppState for persistence.
@@ -123,6 +161,7 @@ impl PersistedUiState {
             task_panel_collapsed: app.task_panel_collapsed,
             onboarding_skipped: app.onboarding_skipped,
             hints_dismissed: app.hints_dismissed,
+            input_reasoning: app.input_reasoning.clone(),
         }
     }
 
@@ -144,6 +183,7 @@ impl PersistedUiState {
         app.task_panel_collapsed = self.task_panel_collapsed;
         app.onboarding_skipped = self.onboarding_skipped;
         app.hints_dismissed = self.hints_dismissed;
+        app.input_reasoning = self.input_reasoning.clone();
     }
 }
 
@@ -158,6 +198,7 @@ mod tests {
         let back: PersistedUiState = serde_json::from_str(&json).unwrap();
         assert!(back.sidebar_visible);
         assert!(back.mouse_captured);
+        assert_eq!(back.input_reasoning, None);
     }
 
     #[test]
@@ -180,12 +221,42 @@ mod tests {
     }
 
     #[test]
+    fn save_replaces_state_atomically_without_leaving_temp_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("states.json");
+        let state = PersistedUiState {
+            input_reasoning: Some(atman_runtime::provider::ReasoningSelection::Effort {
+                effort: atman_runtime::provider::ReasoningEffort::XHigh,
+                execution_mode: Some(atman_runtime::provider::ReasoningExecutionMode::Pro),
+            }),
+            ..PersistedUiState::default()
+        };
+
+        state.save_to(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back: PersistedUiState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.input_reasoning, state.input_reasoning);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn legacy_json_defaults_input_reasoning() {
+        let state: PersistedUiState =
+            serde_json::from_str(r#"{"sidebar_visible":true,"mouse_captured":true}"#).unwrap();
+
+        assert_eq!(state.input_reasoning, None);
+    }
+
+    #[test]
     fn snapshot_captures_app_state() {
-        let app = crate::app::AppState::new("s".into(), None);
+        let mut app = crate::app::AppState::new("s".into(), None);
+        app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
         let state = PersistedUiState::snapshot(&app);
         assert_eq!(state.sidebar_visible, !app.sidebar_collapsed);
         assert_eq!(state.mouse_captured, app.mouse_captured);
         assert_eq!(state.goal_collapsed, app.goal_collapsed);
+        assert_eq!(state.input_reasoning, app.input_reasoning);
     }
 
     #[test]
@@ -203,6 +274,9 @@ mod tests {
             sidebar_visible: true,
             mouse_captured: true,
             goal_collapsed: true,
+            input_reasoning: Some(atman_runtime::provider::ReasoningSelection::Auto {
+                execution_mode: None,
+            }),
             ..PersistedUiState::default()
         };
         state.apply(&mut app);
@@ -212,5 +286,6 @@ mod tests {
         assert!(!app.sidebar_collapsed);
         assert!(app.mouse_captured);
         assert!(app.goal_collapsed);
+        assert_eq!(app.input_reasoning, state.input_reasoning);
     }
 }

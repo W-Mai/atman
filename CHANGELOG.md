@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Persistent TUI reasoning preference** — the input composer restores its selected reasoning effort after restart or session changes and resets incompatible selections when the active model changes.
 - **Invocation-scoped reasoning effort** — TUI submissions, CLI runs, and daemon requests capture selections per invocation; an LLM helper consumes the value only when it explicitly passes `effort: env("effort")`, while non-opt-in helpers retain their model defaults.
 - **TUI double Ctrl+C exit** — closing a blank TUI releases its submission relay so the REPL exits, while quit confirmation remains scoped to the input editor.
 - **Reasoning profile consistency** — TUI controls, model switches, request validation, and provider serializers share the same wire-profile rules; Anthropic auto reasoning uses adaptive thinking and the effort badge uses the active input-border color.

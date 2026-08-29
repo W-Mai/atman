@@ -1019,8 +1019,11 @@ pub(crate) fn handle_key(
         }
         KeyAction::CycleReasoning => {
             if input_has_focus(app) {
-                app.reconcile_input_reasoning();
-                app.cycle_input_reasoning();
+                let reconciled = app.reconcile_input_reasoning();
+                let cycled = app.cycle_input_reasoning();
+                if reconciled || cycled {
+                    app.save_ui_state();
+                }
                 let reasoning = app
                     .input_reasoning
                     .as_ref()
@@ -1071,7 +1074,9 @@ pub(crate) fn handle_key(
                 editor.reconcile_images(&session.pending_images());
             }
             if let Some(editor_submission) = editor.submit_with_images() {
-                app.reconcile_input_reasoning();
+                if app.reconcile_input_reasoning() {
+                    app.save_ui_state();
+                }
                 let line = editor_submission.text;
                 if !app.has_running_workflow() {
                     app.push_user_turn(line.clone());

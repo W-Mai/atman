@@ -60,6 +60,9 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.context_rx.as_ref() {
         app.app.context = rx.borrow().clone();
     }
+    if app.app.reconcile_input_reasoning() {
+        app.app.save_ui_state();
+    }
     if let Some(rx) = handle.goal_rx.as_ref() {
         app.app.goal = rx.borrow().clone();
     }
@@ -1253,7 +1256,9 @@ pub(crate) async fn run_frames(
             _ = wait_context_change(handle.context_rx.as_mut()) => {
                 if let Some(rx) = handle.context_rx.as_mut() {
                     app.app.context = rx.borrow().clone();
-                    app.app.reconcile_input_reasoning();
+                    if app.app.reconcile_input_reasoning() {
+                        app.app.save_ui_state();
+                    }
                 }
             }
             _ = wait_attach_change(handle.attach_rx.as_mut()) => {
@@ -1382,7 +1387,9 @@ pub(crate) async fn run_frames(
                         TuiCommand::ProviderModelsUpdated => {
                             app.wm.modals.provider_manager.refresh_list();
                             app.wm.modals.model_manager.refresh();
-                            app.app.reconcile_input_reasoning();
+                            if app.app.reconcile_input_reasoning() {
+                                app.app.save_ui_state();
+                            }
                             if app.wm.modals.onboarding_open {
                                 app.wm.modals.onboarding.try_advance_to_model_select();
                             }

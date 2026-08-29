@@ -364,13 +364,18 @@ impl AppState {
         choices
     }
 
-    pub fn cycle_input_reasoning(&mut self) {
+    pub fn cycle_input_reasoning(&mut self) -> bool {
         let choices = self.input_reasoning_choices();
         let index = choices
             .iter()
             .position(|choice| *choice == self.input_reasoning)
             .unwrap_or(0);
-        self.input_reasoning = choices[(index + 1) % choices.len()].clone();
+        let next = choices[(index + 1) % choices.len()].clone();
+        if next == self.input_reasoning {
+            return false;
+        }
+        self.input_reasoning = next;
+        true
     }
 
     pub fn effective_input_reasoning_badge(&self) -> Option<String> {
