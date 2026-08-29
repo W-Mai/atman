@@ -40,12 +40,19 @@ impl TerminalGuard {
         let prev_slot: Arc<Mutex<Option<PanicHook>>> = Arc::new(Mutex::new(Some(prev_hook)));
         let prev_for_hook = Arc::clone(&prev_slot);
         std::panic::set_hook(Box::new(move |info| {
-            let _ = restore_terminal();
-            if let Ok(guard) = prev_for_hook.lock()
-                && let Some(prev) = guard.as_ref()
-            {
-                prev(info);
-            }
+            dispatch_panic_hook(
+                atman_runtime::is_panic_capture_active(),
+                || {
+                    let _ = restore_terminal();
+                },
+                || {
+                    if let Ok(guard) = prev_for_hook.lock()
+                        && let Some(prev) = guard.as_ref()
+                    {
+                        prev(info);
+                    }
+                },
+            );
         }));
 
         enable_raw_mode().context("enable raw mode")?;
@@ -68,6 +75,14 @@ impl TerminalGuard {
             owner: true,
         })
     }
+}
+
+fn dispatch_panic_hook(capture_active: bool, restore: impl FnOnce(), previous: impl FnOnce()) {
+    if capture_active {
+        return;
+    }
+    restore();
+    previous();
 }
 
 impl Drop for TerminalGuard {
@@ -125,5 +140,26 @@ mod tests {
         TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         let _ = restore_terminal();
         assert!(!TERMINAL_ACTIVE.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn captured_panics_skip_terminal_restore_and_previous_hook() {
+        let restores = std::cell::Cell::new(0);
+        let previous_calls = std::cell::Cell::new(0);
+        dispatch_panic_hook(
+            true,
+            || restores.set(restores.get() + 1),
+            || previous_calls.set(previous_calls.get() + 1),
+        );
+        assert_eq!(restores.get(), 0);
+        assert_eq!(previous_calls.get(), 0);
+
+        dispatch_panic_hook(
+            false,
+            || restores.set(restores.get() + 1),
+            || previous_calls.set(previous_calls.get() + 1),
+        );
+        assert_eq!(restores.get(), 1);
+        assert_eq!(previous_calls.get(), 1);
     }
 }

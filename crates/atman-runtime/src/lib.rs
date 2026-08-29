@@ -44,6 +44,16 @@ pub mod nodegraph;
 pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
+mod panic_capture;
+
+/// Reports whether the current thread is inside an active panic-capture
+/// boundary. Panic hooks can use this to skip side effects for a panic that
+/// will be caught.
+#[doc(hidden)]
+pub fn is_panic_capture_active() -> bool {
+    panic_capture::is_active()
+}
+
 pub mod permission;
 pub mod permission_audit;
 pub mod projection;

@@ -28,7 +28,7 @@ const REFRESH_FAILURE_COOLDOWN: std::time::Duration = std::time::Duration::from_
 type RefreshFuture = Pin<Box<dyn Future<Output = Result<TokenResult>> + Send>>;
 type RefreshFn = dyn Fn(String) -> RefreshFuture + Send + Sync;
 type CredentialResult = std::result::Result<OAuthCredential, OAuthCredentialError>;
-type SharedRefreshFuture = Shared<BoxFuture<'static, RefreshFlightResult>>;
+type SharedRefreshFuture = Shared<BoxFuture<'static, SharedRefreshOutcome>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CredentialGateKey {
@@ -36,12 +36,19 @@ struct CredentialGateKey {
     provider_id: String,
 }
 
-static CREDENTIAL_GATES: LazyLock<Mutex<HashMap<CredentialGateKey, Weak<CredentialGate>>>> =
+static CREDENTIAL_GATES: LazyLock<Mutex<HashMap<CredentialGateKey, CredentialGateEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Default)]
 struct CredentialGate {
+    key: CredentialGateKey,
     state: Mutex<CredentialGateState>,
+}
+
+struct CredentialGateEntry {
+    weak: Weak<CredentialGate>,
+    // Quarantined gates stay process-local so provider reconstruction cannot
+    // bypass isolation. Healthy gates remain weak and release runtime state.
+    quarantined: Option<Arc<CredentialGate>>,
 }
 
 #[derive(Default)]
@@ -50,6 +57,68 @@ struct CredentialGateState {
     pending_retry_active: bool,
     failure: Option<CachedRefreshFailure>,
     pending: Option<PendingCredentialCommit>,
+    quarantine: Option<OAuthCredentialError>,
+}
+
+impl CredentialGate {
+    fn ensure_not_quarantined(&self) -> std::result::Result<(), OAuthCredentialError> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &state.quarantine {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
+    fn quarantine(self: &Arc<Self>) -> OAuthCredentialError {
+        let mut gates = CREDENTIAL_GATES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = gates
+            .entry(self.key.clone())
+            .or_insert_with(|| CredentialGateEntry {
+                weak: Arc::downgrade(self),
+                quarantined: None,
+            });
+        entry.weak = Arc::downgrade(self);
+        entry.quarantined = Some(self.clone());
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (error, newly_quarantined) = match &state.quarantine {
+            Some(error) => (error.clone(), false),
+            None => {
+                let error = OAuthCredentialError::Quarantined(self.key.provider_id.clone());
+                state.quarantine = Some(error.clone());
+                (error, true)
+            }
+        };
+        let in_flight = state.in_flight.take();
+        let pending = state.pending.take();
+        state.pending_retry_active = false;
+        state.failure = None;
+        drop(state);
+        drop(gates);
+        drop(in_flight);
+        drop(pending);
+
+        if newly_quarantined {
+            // Keep notification sinks outside the shared refresh completion
+            // path so a slow sink cannot strand credential waiters.
+            let notification = error.clone();
+            let _ = std::thread::Builder::new()
+                .name("atman-oauth-quarantine-notify".into())
+                .spawn(move || {
+                    let _ =
+                        crate::panic_capture::blocking(|| crate::notify!(error, "{notification}"));
+                });
+        }
+        error
+    }
 }
 
 struct CachedRefreshFailure {
@@ -82,6 +151,12 @@ impl PendingCredentialCommit {
 struct RefreshFlightResult {
     result: CredentialResult,
     pending: Option<PendingCredentialCommit>,
+}
+
+#[derive(Clone)]
+enum SharedRefreshOutcome {
+    Complete(RefreshFlightResult),
+    Quarantined(OAuthCredentialError),
 }
 
 impl RefreshFlightResult {
@@ -195,6 +270,10 @@ pub(crate) enum OAuthCredentialError {
         provider_id: String,
         message: String,
     },
+    #[error(
+        "OAuth provider `{0}` was quarantined after an internal credential failure; remove it and sign in again or restart atman"
+    )]
+    Quarantined(String),
     #[error("system clock is before the Unix epoch")]
     Clock,
 }
@@ -235,14 +314,29 @@ impl OAuthCredentialLease {
     pub(crate) async fn acquire(
         &self,
     ) -> std::result::Result<OAuthCredential, OAuthCredentialError> {
+        match crate::panic_capture::future(self.acquire_inner()).await {
+            Ok(result) => result,
+            Err(_) => Err(self.gate.quarantine()),
+        }
+    }
+
+    async fn acquire_inner(&self) -> std::result::Result<OAuthCredential, OAuthCredentialError> {
+        self.gate.ensure_not_quarantined()?;
         let worker = self.refresh_worker();
         let (stored, snapshot) = worker.load_state_async().await?;
         self.discard_stale_pending(&snapshot);
+        self.gate.ensure_not_quarantined()?;
         if !credentials_need_refresh(&stored)? {
+            self.gate.ensure_not_quarantined()?;
             return Ok(credentials_from_provider(stored));
         }
 
-        self.shared_refresh()?.await.result
+        let result = match self.shared_refresh()?.await {
+            SharedRefreshOutcome::Complete(outcome) => outcome.result,
+            SharedRefreshOutcome::Quarantined(error) => Err(error),
+        };
+        self.gate.ensure_not_quarantined()?;
+        result
     }
 
     fn shared_refresh(&self) -> std::result::Result<SharedRefreshFuture, OAuthCredentialError> {
@@ -251,6 +345,9 @@ impl OAuthCredentialLease {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(error) = &state.quarantine {
+            return Err(error.clone());
+        }
         if state.pending_retry_active {
             return Err(state
                 .failure
@@ -304,6 +401,7 @@ impl OAuthCredentialLease {
             expected_kind: self.expected_kind.clone(),
             hub: self.hub.clone(),
             refresher: self.refresher.clone(),
+            gate: self.gate.clone(),
         }
     }
 }
@@ -312,22 +410,16 @@ fn shared_refresh_future(
     worker: OAuthCredentialRefresh,
     pending: Option<PendingCredentialCommit>,
 ) -> SharedRefreshFuture {
-    let pending_on_panic = pending.clone();
-    let provider_id = worker.provider_id.clone();
-    std::panic::AssertUnwindSafe(async move { worker.refresh_serialized(pending).await })
-        .catch_unwind()
+    let gate = worker.gate.clone();
+    crate::panic_capture::future(async move { worker.refresh_serialized(pending).await })
         .map(move |result| match result {
-            Ok(result) => result,
-            Err(_) => {
-                let error = OAuthCredentialError::Task {
-                    provider_id,
-                    message: "refresh task panicked".into(),
-                };
-                match pending_on_panic {
-                    Some(pending) => RefreshFlightResult::pending(error, pending),
-                    None => RefreshFlightResult::complete(Err(error)),
+            Ok(result) => match &result.result {
+                Err(error @ OAuthCredentialError::Quarantined(_)) => {
+                    SharedRefreshOutcome::Quarantined(error.clone())
                 }
-            }
+                _ => SharedRefreshOutcome::Complete(result),
+            },
+            Err(_) => SharedRefreshOutcome::Quarantined(gate.quarantine()),
         })
         .boxed()
         .shared()
@@ -338,7 +430,10 @@ async fn drive_shared_refresh(
     worker: OAuthCredentialRefresh,
     in_flight: SharedRefreshFuture,
 ) {
-    let mut outcome = in_flight.await;
+    let mut outcome = match in_flight.await {
+        SharedRefreshOutcome::Complete(outcome) => outcome,
+        SharedRefreshOutcome::Quarantined(_) => return,
+    };
     loop {
         let retry_pending = outcome.pending.is_some();
         let failure = outcome.result.as_ref().err().cloned();
@@ -347,6 +442,13 @@ async fn drive_shared_refresh(
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.quarantine.is_some() {
+                state.in_flight = None;
+                state.pending_retry_active = false;
+                state.pending = None;
+                state.failure = None;
+                return;
+            }
             state.in_flight = None;
             state.pending_retry_active = false;
             state.pending = outcome.pending;
@@ -374,7 +476,10 @@ async fn drive_shared_refresh(
             state.pending_retry_active = true;
             pending
         };
-        outcome = shared_refresh_future(worker.clone(), Some(pending)).await;
+        outcome = match shared_refresh_future(worker.clone(), Some(pending)).await {
+            SharedRefreshOutcome::Complete(outcome) => outcome,
+            SharedRefreshOutcome::Quarantined(_) => return,
+        };
     }
 }
 
@@ -384,9 +489,48 @@ struct OAuthCredentialRefresh {
     expected_kind: ProviderKind,
     hub: ConfigHub,
     refresher: Arc<RefreshFn>,
+    gate: Arc<CredentialGate>,
+}
+
+enum BlockingOutcome<T> {
+    Complete(T),
+    Quarantined(OAuthCredentialError),
 }
 
 impl OAuthCredentialRefresh {
+    async fn run_blocking<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce() -> T + Send + 'static,
+    ) -> std::result::Result<T, OAuthCredentialError> {
+        self.gate.ensure_not_quarantined()?;
+        let gate = self.gate.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            if let Err(error) = gate.ensure_not_quarantined() {
+                return BlockingOutcome::Quarantined(error);
+            }
+            match crate::panic_capture::blocking(operation) {
+                Ok(value) => BlockingOutcome::Complete(value),
+                Err(_) => BlockingOutcome::Quarantined(gate.quarantine()),
+            }
+        })
+        .await;
+        let value = match outcome {
+            Ok(BlockingOutcome::Complete(value)) => value,
+            Ok(BlockingOutcome::Quarantined(error)) => return Err(error),
+            Err(error) if error.is_panic() => {
+                return Err(self.gate.quarantine());
+            }
+            Err(error) => {
+                return Err(OAuthCredentialError::Task {
+                    provider_id: self.provider_id.clone(),
+                    message: error.to_string(),
+                });
+            }
+        };
+        self.gate.ensure_not_quarantined()?;
+        Ok(value)
+    }
+
     fn load_state(
         &self,
     ) -> std::result::Result<
@@ -425,12 +569,7 @@ impl OAuthCredentialRefresh {
         OAuthCredentialError,
     > {
         let worker = self.clone();
-        tokio::task::spawn_blocking(move || worker.load_state())
-            .await
-            .map_err(|error| OAuthCredentialError::Task {
-                provider_id: self.provider_id.clone(),
-                message: error.to_string(),
-            })?
+        self.run_blocking(move || worker.load_state()).await?
     }
 
     async fn persist_pending(
@@ -441,18 +580,28 @@ impl OAuthCredentialRefresh {
         let provider_id = self.provider_id.clone();
         let snapshot = pending.snapshot.clone();
         let update = pending.update();
-        tokio::task::spawn_blocking(move || {
+        self.run_blocking(move || {
             hub.update_auth_tokens_if_current(&provider_id, &snapshot, update)
         })
-        .await
-        .map_err(|error| OAuthCredentialError::Task {
-            provider_id: self.provider_id.clone(),
-            message: error.to_string(),
-        })?
+        .await?
         .map_err(|error| OAuthCredentialError::Persist {
             provider_id: self.provider_id.clone(),
             message: error.to_string(),
         })
+    }
+
+    async fn acquire_refresh_file_lock(
+        &self,
+    ) -> std::result::Result<RefreshFileLock, OAuthCredentialError> {
+        let path = refresh_lock_path(&self.hub, &self.provider_id);
+        let provider_id = self.provider_id.clone();
+        self.run_blocking(move || open_refresh_file_lock(&path))
+            .await?
+            .map(RefreshFileLock)
+            .map_err(|error| OAuthCredentialError::Lock {
+                provider_id,
+                message: error.to_string(),
+            })
     }
 
     async fn commit_pending(&self, pending: PendingCredentialCommit) -> RefreshFlightResult {
@@ -506,7 +655,7 @@ impl OAuthCredentialRefresh {
         // OAuth refresh tokens may be single-use. Hold the cross-process lock
         // until the replacement token is durably committed. The process-local
         // shared future admits only one leader before this point.
-        let refresh_lock = match acquire_refresh_file_lock(&self.hub, &self.provider_id).await {
+        let refresh_lock = match self.acquire_refresh_file_lock().await {
             Ok(guard) => Arc::new(guard),
             Err(error) => {
                 return RefreshFlightResult::complete(Err(error));
@@ -585,19 +734,32 @@ fn credential_gate(hub: &ConfigHub, provider_id: &str) -> Arc<CredentialGate> {
     let mut gates = CREDENTIAL_GATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    gates.retain(|_, gate| gate.strong_count() > 0);
-    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+    gates.retain(|_, entry| entry.quarantined.is_some() || entry.weak.strong_count() > 0);
+    if let Some(gate) = gates
+        .get(&key)
+        .and_then(|entry| entry.quarantined.clone().or_else(|| entry.weak.upgrade()))
+    {
         return gate;
     }
-    let gate = Arc::new(CredentialGate::default());
-    gates.insert(key, Arc::downgrade(&gate));
+    let gate = Arc::new(CredentialGate {
+        key: key.clone(),
+        state: Mutex::new(CredentialGateState::default()),
+    });
+    gates.insert(
+        key,
+        CredentialGateEntry {
+            weak: Arc::downgrade(&gate),
+            quarantined: None,
+        },
+    );
     gate
 }
 
 fn normalized_auth_path(hub: &ConfigHub) -> PathBuf {
-    let auth_path = hub.auth_path();
+    let auth_path =
+        std::path::absolute(hub.auth_path()).unwrap_or_else(|_| hub.auth_path().to_path_buf());
     let Some(parent) = auth_path.parent() else {
-        return auth_path.to_path_buf();
+        return auth_path;
     };
     match std::fs::canonicalize(parent) {
         Ok(parent) => parent.join(
@@ -605,27 +767,8 @@ fn normalized_auth_path(hub: &ConfigHub) -> PathBuf {
                 .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("auth.json")),
         ),
-        Err(_) => auth_path.to_path_buf(),
+        Err(_) => auth_path,
     }
-}
-
-async fn acquire_refresh_file_lock(
-    hub: &ConfigHub,
-    provider_id: &str,
-) -> std::result::Result<RefreshFileLock, OAuthCredentialError> {
-    let path = refresh_lock_path(hub, provider_id);
-    let provider_id = provider_id.to_string();
-    tokio::task::spawn_blocking(move || open_refresh_file_lock(&path))
-        .await
-        .map_err(|error| OAuthCredentialError::Task {
-            provider_id: provider_id.clone(),
-            message: error.to_string(),
-        })?
-        .map(RefreshFileLock)
-        .map_err(|error| OAuthCredentialError::Lock {
-            provider_id,
-            message: error.to_string(),
-        })
 }
 
 fn refresh_lock_path(hub: &ConfigHub, provider_id: &str) -> PathBuf {
@@ -818,8 +961,10 @@ pub async fn create_oauth_provider_with_hub<P: OAuthProvider>(
     stored: &StoredProvider,
     hub: ConfigHub,
 ) -> Result<(Arc<P>, Vec<DiscoveredModel>)> {
+    let gate = credential_gate(&hub, &stored.id);
     let provider = create_oauth_provider_impl::<P>(stored, hub).await?;
     let models = provider.discover_models().await;
+    gate.ensure_not_quarantined()?;
     Ok((provider, models))
 }
 
@@ -841,11 +986,13 @@ pub async fn create_oauth_provider_with_details_and_hub<P: OAuthProvider>(
     stored: &StoredProvider,
     hub: ConfigHub,
 ) -> Result<(Arc<P>, Vec<DiscoveredModelDetails>)> {
+    let gate = credential_gate(&hub, &stored.id);
     let provider = create_oauth_provider_impl::<P>(stored, hub).await?;
     let models = provider
         .try_discover_models()
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
+    gate.ensure_not_quarantined()?;
     Ok((provider, models))
 }
 
@@ -868,25 +1015,29 @@ pub async fn create_oauth_provider_no_discover_with_hub<P: OAuthProvider>(
 /// Constructs a managed provider without loading or refreshing its credentials.
 ///
 /// Disabled and expired snapshots remain valid until the provider acquires a
-/// credential at a request boundary.
+/// credential at a request boundary. A provider quarantined by a credential
+/// panic cannot be reconstructed in the same process.
 pub fn create_managed_oauth_provider_from_stored<P: OAuthProvider>(
     stored: &StoredProvider,
     hub: ConfigHub,
 ) -> Result<Arc<P>> {
     ensure_provider_kind::<P>(stored)?;
+    let gate = credential_gate(&hub, &stored.id);
+    gate.ensure_not_quarantined()?;
     let provider = P::from_managed_stored(stored, hub).ok_or_else(|| {
         anyhow::anyhow!(
             "provider `{}` does not support managed OAuth credentials",
             stored.id
         )
     })?;
+    gate.ensure_not_quarantined()?;
     Ok(Arc::new(provider))
 }
 
 /// Constructs the managed runtime provider supported by a stored auth record.
 ///
 /// Construction does not load or refresh credentials. The provider resolves
-/// its credential at a request boundary.
+/// its credential at a request boundary. Quarantined provider identities are rejected.
 pub fn create_supported_managed_oauth_provider(
     stored: &StoredProvider,
     hub: ConfigHub,
@@ -904,19 +1055,24 @@ async fn create_oauth_provider_impl<P: OAuthProvider>(
     hub: ConfigHub,
 ) -> Result<Arc<P>> {
     ensure_provider_kind::<P>(stored)?;
+    let gate = credential_gate(&hub, &stored.id);
+    gate.ensure_not_quarantined()?;
     let validator = OAuthCredentialRefresh {
         provider_id: stored.id.clone(),
         expected_kind: P::KIND.clone(),
         hub: hub.clone(),
         refresher: Arc::new(|refresh_token| P::refresh_token(&refresh_token)),
+        gate,
     };
     let (authoritative, _) = validator.load_state_async().await?;
+    validator.gate.ensure_not_quarantined()?;
     let provider = Arc::new(P::from_managed_stored(&authoritative, hub).ok_or_else(|| {
         anyhow::anyhow!(
             "provider `{}` does not support managed OAuth credentials",
             stored.id
         )
     })?);
+    validator.gate.ensure_not_quarantined()?;
     Ok(provider)
 }
 
@@ -1126,6 +1282,91 @@ mod tests {
         fn from_managed_stored(stored: &StoredProvider, hub: ConfigHub) -> Option<Self> {
             Some(Self {
                 lease: OAuthCredentialLease::new::<Self>(&stored.id, hub),
+            })
+        }
+    }
+
+    struct QuarantiningProvider {
+        provider_id: String,
+        hub: ConfigHub,
+    }
+
+    impl Provider for QuarantiningProvider {
+        fn name(&self) -> &str {
+            &self.provider_id
+        }
+
+        fn call<'a>(
+            &'a self,
+            _req: crate::provider::LlmRequest,
+        ) -> crate::tool::BoxFut<
+            'a,
+            std::result::Result<crate::provider::AssistantMessage, crate::error::RuntimeError>,
+        > {
+            Box::pin(async {
+                Err(crate::error::RuntimeError::ToolFailed(
+                    "unused test provider".into(),
+                ))
+            })
+        }
+
+        fn call_streaming(
+            &self,
+            _req: crate::provider::LlmRequest,
+        ) -> crate::event::Observable<crate::provider::AssistantMessage> {
+            panic!("unused test provider")
+        }
+
+        fn discover_models(&self) -> crate::tool::BoxFut<'static, Vec<DiscoveredModel>> {
+            let provider_id = self.provider_id.clone();
+            let hub = self.hub.clone();
+            Box::pin(async move {
+                credential_gate(&hub, &provider_id).quarantine();
+                Vec::new()
+            })
+        }
+
+        fn try_discover_models(
+            &self,
+        ) -> crate::tool::BoxFut<
+            'static,
+            std::result::Result<Vec<DiscoveredModelDetails>, crate::provider::ModelDiscoveryError>,
+        > {
+            let provider_id = self.provider_id.clone();
+            let hub = self.hub.clone();
+            Box::pin(async move {
+                credential_gate(&hub, &provider_id).quarantine();
+                Ok(Vec::new())
+            })
+        }
+    }
+
+    impl OAuthProvider for QuarantiningProvider {
+        const KIND: ProviderKind = ProviderKind::Codex;
+
+        fn authorize_url() -> (String, Pkce, String) {
+            panic!("unused test provider")
+        }
+
+        fn exchange_code(_code: &str, _verifier: &str) -> RefreshFuture {
+            Box::pin(async { panic!("unused test provider") })
+        }
+
+        fn refresh_token(_token: &str) -> RefreshFuture {
+            Box::pin(async { panic!("unused test provider") })
+        }
+
+        fn from_stored(_stored: &StoredProvider) -> Self {
+            panic!("unused test provider")
+        }
+
+        fn from_managed_stored(stored: &StoredProvider, hub: ConfigHub) -> Option<Self> {
+            if stored.id.ends_with("construction") {
+                credential_gate(&hub, &stored.id).quarantine();
+            }
+            Some(Self {
+                provider_id: stored.id.clone(),
+                hub,
             })
         }
     }
@@ -1374,6 +1615,419 @@ mod tests {
         let cooldown_error = lease.acquire().await.unwrap_err().to_string();
         assert_eq!(cooldown_error, expected);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_panic_quarantines_before_shared_completion() {
+        let (_dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Semaphore::new(0));
+        let proceed = Arc::new(Semaphore::new(0));
+        let lease =
+            OAuthCredentialLease::with_refresher("oauth-account", ProviderKind::Codex, hub, {
+                let calls = calls.clone();
+                let started = started.clone();
+                let proceed = proceed.clone();
+                move |_| {
+                    let calls = calls.clone();
+                    let started = started.clone();
+                    let proceed = proceed.clone();
+                    Box::pin(async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.add_permits(1);
+                        proceed.acquire().await.unwrap().forget();
+                        panic!("refresh panic fixture")
+                    })
+                }
+            });
+
+        let flight = lease.shared_refresh().unwrap();
+        let joined = Arc::new(Semaphore::new(0));
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let joined = joined.clone();
+            let mut flight = Box::pin(flight.clone());
+            waiters.push(tokio::spawn(async move {
+                let mut announced = false;
+                std::future::poll_fn(move |context| {
+                    let result = flight.as_mut().poll(context);
+                    if !announced && result.is_pending() {
+                        announced = true;
+                        joined.add_permits(1);
+                    }
+                    result
+                })
+                .await
+            }));
+        }
+        started.acquire().await.unwrap().forget();
+        joined.acquire_many(8).await.unwrap().forget();
+        proceed.add_permits(1);
+
+        let first = waiters.remove(0);
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(2), first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            first_result,
+            SharedRefreshOutcome::Quarantined(OAuthCredentialError::Quarantined(provider))
+                if provider == "oauth-account"
+        ));
+        assert!(matches!(
+            lease.acquire().await,
+            Err(OAuthCredentialError::Quarantined(provider)) if provider == "oauth-account"
+        ));
+        for task in waiters {
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                SharedRefreshOutcome::Quarantined(OAuthCredentialError::Quarantined(provider))
+                    if provider == "oauth-account"
+            ));
+        }
+        tokio::time::sleep(REFRESH_FAILURE_COOLDOWN * 2).await;
+        assert!(matches!(
+            lease.acquire().await,
+            Err(OAuthCredentialError::Quarantined(provider)) if provider == "oauth-account"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn synchronous_refresher_panic_quarantines_provider() {
+        let (_dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        let lease =
+            OAuthCredentialLease::with_refresher("oauth-account", ProviderKind::Codex, hub, |_| {
+                panic!("synchronous refresher panic fixture")
+            });
+
+        assert!(matches!(
+            lease.acquire().await,
+            Err(OAuthCredentialError::Quarantined(provider)) if provider == "oauth-account"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_cannot_drop_refresh_panic_quarantine() {
+        let (_dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Semaphore::new(0));
+        let proceed = Arc::new(Semaphore::new(0));
+        let lease = OAuthCredentialLease::with_refresher(
+            "oauth-account",
+            ProviderKind::Codex,
+            hub.clone(),
+            {
+                let calls = calls.clone();
+                let started = started.clone();
+                let proceed = proceed.clone();
+                move |_| {
+                    let calls = calls.clone();
+                    let started = started.clone();
+                    let proceed = proceed.clone();
+                    Box::pin(async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.add_permits(1);
+                        proceed.acquire().await.unwrap().forget();
+                        panic!("detached refresh panic fixture")
+                    })
+                }
+            },
+        );
+
+        let waiter = tokio::spawn({
+            let lease = lease.clone();
+            async move { lease.acquire().await }
+        });
+        started.acquire().await.unwrap().forget();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        proceed.add_permits(1);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if lease.gate.ensure_not_quarantined().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(lease);
+        let rebuilt =
+            OAuthCredentialLease::with_refresher("oauth-account", ProviderKind::Codex, hub, |_| {
+                Box::pin(async { Ok(refreshed_tokens()) })
+            });
+        assert!(matches!(
+            rebuilt.acquire().await,
+            Err(OAuthCredentialError::Quarantined(provider)) if provider == "oauth-account"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_waiter_cannot_drop_quarantine() {
+        let (_dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        let lease = OAuthCredentialLease::with_refresher(
+            "oauth-account",
+            ProviderKind::Codex,
+            hub.clone(),
+            |_| Box::pin(async { Ok(refreshed_tokens()) }),
+        );
+        let worker = lease.refresh_worker();
+        let gate = lease.gate.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        let waiter = tokio::spawn(async move {
+            let result: std::result::Result<(), OAuthCredentialError> = worker
+                .run_blocking(move || {
+                    let _ = started_tx.send(());
+                    proceed_rx.recv().unwrap();
+                    panic!("blocking credential panic fixture")
+                })
+                .await;
+            result
+        });
+        started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        proceed_tx.send(()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if gate.ensure_not_quarantined().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let rebuilt =
+            OAuthCredentialLease::with_refresher("oauth-account", ProviderKind::Codex, hub, |_| {
+                Box::pin(async { Ok(refreshed_tokens()) })
+            });
+        assert!(matches!(
+            rebuilt.acquire().await,
+            Err(OAuthCredentialError::Quarantined(provider)) if provider == "oauth-account"
+        ));
+    }
+
+    #[tokio::test]
+    async fn quarantine_survives_fresh_credentials_and_is_scoped_by_path_and_id() {
+        let (dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        let lease = OAuthCredentialLease::with_refresher(
+            "oauth-account",
+            ProviderKind::Codex,
+            hub.clone(),
+            |_| Box::pin(async { Ok(refreshed_tokens()) }),
+        );
+        lease.gate.quarantine();
+        assert!(
+            hub.update_auth_tokens(
+                "oauth-account",
+                AuthTokenUpdate {
+                    access_token: "fresh-access".into(),
+                    refresh_token: Some("fresh-refresh".into()),
+                    expires_at: chrono::Utc::now().timestamp() + 3_600,
+                    account: None,
+                },
+            )
+            .unwrap()
+        );
+        drop(lease);
+
+        let reloaded_hub = ConfigHub::from_config_dir(dir.path());
+        let rebuilt = OAuthCredentialLease::with_refresher(
+            "oauth-account",
+            ProviderKind::Codex,
+            reloaded_hub.clone(),
+            |_| panic!("quarantined refresher must not run"),
+        );
+        assert!(matches!(
+            rebuilt.acquire().await,
+            Err(OAuthCredentialError::Quarantined(provider)) if provider == "oauth-account"
+        ));
+
+        let mut peer = expired_provider("peer-account");
+        peer.expires_at = chrono::Utc::now().timestamp() + 3_600;
+        reloaded_hub.add_auth_provider(peer).unwrap();
+        let peer = OAuthCredentialLease::with_refresher(
+            "peer-account",
+            ProviderKind::Codex,
+            reloaded_hub,
+            |_| panic!("fresh peer credentials must not refresh"),
+        );
+        assert_eq!(peer.acquire().await.unwrap().access_token, "access-v1");
+
+        let mut independent = expired_provider("oauth-account");
+        independent.expires_at = chrono::Utc::now().timestamp() + 3_600;
+        let (_other_dir, other_hub) = hub_with_provider(independent);
+        let independent = OAuthCredentialLease::with_refresher(
+            "oauth-account",
+            ProviderKind::Codex,
+            other_hub,
+            |_| panic!("fresh independent credentials must not refresh"),
+        );
+        assert_eq!(
+            independent.acquire().await.unwrap().access_token,
+            "access-v1"
+        );
+    }
+
+    #[test]
+    fn healthy_gate_is_not_pinned_by_the_global_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(dir.path());
+        let gate = credential_gate(&hub, "healthy-account");
+        let weak = Arc::downgrade(&gate);
+
+        drop(gate);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn managed_factories_reject_quarantined_provider() {
+        let (_dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        credential_gate(&hub, "oauth-account").quarantine();
+        let stored = hub.load_auth().unwrap().providers.remove(0);
+
+        let sync_error =
+            create_managed_oauth_provider_from_stored::<ManagedOAuthProvider>(&stored, hub.clone())
+                .err()
+                .expect("quarantined sync factory succeeded");
+        assert!(sync_error.to_string().contains("was quarantined"));
+
+        let async_error =
+            create_oauth_provider_no_discover_with_hub::<ManagedOAuthProvider>(&stored, hub)
+                .await
+                .err()
+                .expect("quarantined async factory succeeded");
+        assert!(async_error.to_string().contains("was quarantined"));
+    }
+
+    #[tokio::test]
+    async fn managed_factories_recheck_quarantine_after_construction() {
+        let (_sync_dir, sync_hub) = hub_with_provider(expired_provider("sync-construction"));
+        let sync_stored = sync_hub.load_auth().unwrap().providers.remove(0);
+        let sync_error = create_managed_oauth_provider_from_stored::<QuarantiningProvider>(
+            &sync_stored,
+            sync_hub,
+        )
+        .err()
+        .expect("sync factory ignored construction-time quarantine");
+        assert!(sync_error.to_string().contains("was quarantined"));
+
+        let (_async_dir, async_hub) = hub_with_provider(expired_provider("async-construction"));
+        let async_stored = async_hub.load_auth().unwrap().providers.remove(0);
+        let async_error = create_oauth_provider_no_discover_with_hub::<QuarantiningProvider>(
+            &async_stored,
+            async_hub,
+        )
+        .await
+        .err()
+        .expect("async factory ignored construction-time quarantine");
+        assert!(async_error.to_string().contains("was quarantined"));
+    }
+
+    #[tokio::test]
+    async fn managed_discovery_factories_recheck_quarantine_before_returning() {
+        let (_legacy_dir, legacy_hub) = hub_with_provider(expired_provider("legacy-discovery"));
+        let legacy_stored = legacy_hub.load_auth().unwrap().providers.remove(0);
+        let legacy_error =
+            create_oauth_provider_with_hub::<QuarantiningProvider>(&legacy_stored, legacy_hub)
+                .await
+                .err()
+                .expect("legacy discovery returned a quarantined provider");
+        assert!(legacy_error.to_string().contains("was quarantined"));
+
+        let (_typed_dir, typed_hub) = hub_with_provider(expired_provider("typed-discovery"));
+        let typed_stored = typed_hub.load_auth().unwrap().providers.remove(0);
+        let typed_error = create_oauth_provider_with_details_and_hub::<QuarantiningProvider>(
+            &typed_stored,
+            typed_hub,
+        )
+        .await
+        .err()
+        .expect("typed discovery returned a quarantined provider");
+        assert!(typed_error.to_string().contains("was quarantined"));
+    }
+
+    #[test]
+    fn quarantine_discards_retry_state_and_releases_refresh_lock() {
+        let (_dir, hub) = hub_with_provider(expired_provider("oauth-account"));
+        let gate = credential_gate(&hub, "oauth-account");
+        let (_, snapshot) = OAuthCredentialRefresh {
+            provider_id: "oauth-account".into(),
+            expected_kind: ProviderKind::Codex,
+            hub: hub.clone(),
+            refresher: Arc::new(|_| Box::pin(async { Ok(refreshed_tokens()) })),
+            gate: gate.clone(),
+        }
+        .load_state()
+        .unwrap();
+        let refresh_lock_path = refresh_lock_path(&hub, "oauth-account");
+        let pending = PendingCredentialCommit {
+            snapshot,
+            access_token: "pending-access".into(),
+            refresh_token: Some("pending-refresh".into()),
+            expires_at: chrono::Utc::now().timestamp() + 3_600,
+            account: None,
+            _refresh_lock: Arc::new(RefreshFileLock(
+                open_refresh_file_lock_with_timeout(
+                    &refresh_lock_path,
+                    std::time::Duration::from_millis(50),
+                )
+                .unwrap(),
+            )),
+        };
+        let in_flight = futures::future::ready(SharedRefreshOutcome::Complete(
+            RefreshFlightResult::complete(Err(OAuthCredentialError::Changed(
+                "oauth-account".into(),
+            ))),
+        ))
+        .boxed()
+        .shared();
+        {
+            let mut state = gate
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.in_flight = Some(in_flight);
+            state.pending_retry_active = true;
+            state.failure = Some(CachedRefreshFailure {
+                until: Instant::now() + REFRESH_FAILURE_COOLDOWN,
+                error: OAuthCredentialError::Changed("oauth-account".into()),
+            });
+            state.pending = Some(pending);
+        }
+
+        gate.quarantine();
+        let state = gate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.in_flight.is_none());
+        assert!(!state.pending_retry_active);
+        assert!(state.failure.is_none());
+        assert!(state.pending.is_none());
+        assert!(matches!(
+            state.quarantine,
+            Some(OAuthCredentialError::Quarantined(ref provider))
+                if provider == "oauth-account"
+        ));
+        drop(state);
+        let _reacquired = RefreshFileLock(
+            open_refresh_file_lock_with_timeout(
+                &refresh_lock_path,
+                std::time::Duration::from_millis(50),
+            )
+            .unwrap(),
+        );
     }
 
     #[tokio::test]
