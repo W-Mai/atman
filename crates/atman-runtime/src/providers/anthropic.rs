@@ -6,8 +6,8 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
 use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
-    TokenUsage, estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
+    ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
 };
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
@@ -48,6 +48,30 @@ impl AnthropicProvider {
         self
     }
 
+    fn validate_reasoning(&self, selection: &ReasoningSelection) -> Result<(), RuntimeError> {
+        if selection.execution_mode().is_some() {
+            return Err(RuntimeError::ToolFailed(
+                "invalid request: Anthropic does not support reasoning execution mode".into(),
+            ));
+        }
+        if let ReasoningSelection::BudgetTokens { tokens } = selection
+            && *tokens < 1024
+        {
+            return Err(RuntimeError::ToolFailed(
+                "invalid request: Anthropic thinking budget must be at least 1024 tokens".into(),
+            ));
+        }
+        if let ReasoningSelection::BudgetTokens { tokens } = selection
+            && *tokens >= self.max_tokens
+        {
+            return Err(RuntimeError::ToolFailed(format!(
+                "invalid request: Anthropic thinking budget ({tokens}) must be lower than max_tokens ({})",
+                self.max_tokens
+            )));
+        }
+        Ok(())
+    }
+
     fn build_body(&self, req: &LlmRequest, stream: bool) -> MessagesRequest {
         let raw_wire: Vec<WireMessage> = req
             .messages
@@ -64,6 +88,7 @@ impl AnthropicProvider {
                 input_schema: t.input_schema.clone(),
             })
             .collect();
+        let (thinking, output_config) = anthropic_reasoning(&req.reasoning, self.max_tokens);
         MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
@@ -71,17 +96,8 @@ impl AnthropicProvider {
             system: req.system.clone(),
             messages: wire_messages,
             tools,
-            thinking: if req.thinking_enabled {
-                Some(ThinkingConfig {
-                    kind: "enabled",
-                    budget_tokens: Some(self.max_tokens.saturating_sub(4096).max(1024)),
-                })
-            } else {
-                Some(ThinkingConfig {
-                    kind: "disabled",
-                    budget_tokens: None,
-                })
-            },
+            thinking,
+            output_config,
             cache_control: if req.cache_prompt {
                 Some(CacheControl { kind: "ephemeral" })
             } else {
@@ -102,6 +118,42 @@ impl AnthropicProvider {
     #[doc(hidden)]
     pub fn wire_body_bytes(&self, req: &LlmRequest, stream: bool) -> Vec<u8> {
         serde_json::to_vec(&self.build_body(req, stream)).expect("serialize wire body")
+    }
+}
+
+fn anthropic_reasoning(
+    selection: &ReasoningSelection,
+    max_tokens: u32,
+) -> (Option<ThinkingConfig>, Option<OutputConfig>) {
+    match selection {
+        ReasoningSelection::ProviderDefault | ReasoningSelection::Disabled => (None, None),
+        ReasoningSelection::Auto { .. } => (
+            Some(ThinkingConfig {
+                kind: "enabled",
+                budget_tokens: Some(max_tokens.saturating_sub(4096).max(1024)),
+            }),
+            None,
+        ),
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::None,
+            ..
+        } => (None, None),
+        ReasoningSelection::Effort { effort, .. } => (
+            Some(ThinkingConfig {
+                kind: "adaptive",
+                budget_tokens: None,
+            }),
+            Some(OutputConfig {
+                effort: effort.to_string(),
+            }),
+        ),
+        ReasoningSelection::BudgetTokens { tokens } => (
+            Some(ThinkingConfig {
+                kind: "enabled",
+                budget_tokens: Some(*tokens),
+            }),
+            None,
+        ),
     }
 }
 
@@ -211,6 +263,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        if let Err(error) = self.validate_reasoning(&req.reasoning) {
+            return Box::pin(async move { Err(error) });
+        }
         let request = self.build_request(&req, false);
         Box::pin(async move {
             let resp = request.send().await.map_err(net_err)?;
@@ -235,6 +290,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+        let validation_error = self.validate_reasoning(&req.reasoning).err();
         let request = self.build_request(&req, true);
         let turn_id = next_turn_id_from_req(&req);
         let tools: Vec<crate::tool::ToolSpec> = req.tools.clone();
@@ -243,6 +299,9 @@ impl Provider for AnthropicProvider {
         let cancel_for_task = cancel.clone();
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
             async move {
+                if let Some(error) = validation_error {
+                    return Err(error);
+                }
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -423,7 +482,7 @@ impl Provider for AnthropicProvider {
 
                 let mut parts: Vec<MessagePart> = Vec::new();
                 if !acc_thinking.is_empty() {
-                    if req.thinking_enabled && acc_signature.is_none() {
+                    if req.reasoning.enabled() && acc_signature.is_none() {
                         return Err(RuntimeError::ThinkingSignatureMissing);
                     }
                     parts.push(MessagePart::Thinking {
@@ -596,6 +655,8 @@ struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
 
@@ -605,6 +666,11 @@ struct ThinkingConfig {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_tokens: Option<u32>,
+}
+
+#[derive(Serialize, Clone)]
+struct OutputConfig {
+    effort: String,
 }
 
 #[derive(Serialize, Clone)]

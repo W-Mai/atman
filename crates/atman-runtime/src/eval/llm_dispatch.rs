@@ -234,7 +234,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
         )));
     }
-    let mut thinking_enabled = model_info.thinking_enabled();
+    let mut reasoning = match crate::model_registry::resolve_reasoning(
+        &model_info.reasoning,
+        &model_info.capabilities,
+    ) {
+        Ok(reasoning) => reasoning,
+        Err(error) => {
+            return Value::Err(RuntimeError::ToolFailed(format!(
+                "model `{model}` reasoning config: {error}"
+            )));
+        }
+    };
     let mut signature_retries: u32 = 0;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
@@ -247,7 +257,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 schema: None,
                 cache_prompt,
                 tools: tool_specs.clone(),
-                thinking_enabled,
+                reasoning: reasoning.clone(),
                 stall_timeout_secs,
             };
             let start = std::time::Instant::now();
@@ -278,7 +288,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         .output
                         .max(crate::provider::estimate_tokens(&am.text_concat())),
                     cache_write: am.token_usage.cache_write,
-                    ..Default::default()
+                    reasoning_tokens: am.token_usage.reasoning_tokens,
                 },
                 Err(_) => crate::provider::TokenUsage {
                     input: crate::provider::estimate_tokens(&prompt),
@@ -459,7 +469,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             last_err = Some(e);
                             continue 'llm_attempts;
                         }
-                        thinking_enabled = false;
+                        if !matches!(reasoning, crate::provider::ReasoningSelection::Auto { .. }) {
+                            last_err = Some(e);
+                            break 'llm_attempts;
+                        }
+                        reasoning = crate::provider::ReasoningSelection::Disabled;
                         if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
                         }
@@ -471,26 +485,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(
                                 "thinking disabled after 3 signature failures".into(),
-                            ));
-                        }
-                        last_err = Some(e);
-                        continue 'llm_attempts;
-                    }
-                    if thinking_enabled
-                        && matches!(e.kind(), crate::error::ErrorKind::InvalidRequest)
-                    {
-                        thinking_enabled = false;
-                        if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
-                        }
-                        crate::notify!(
-                            warn,
-                            location = Inline,
-                            "thinking mode disabled due to API error; retrying…"
-                        );
-                        if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::Note(
-                                "thinking disabled due to API error".into(),
                             ));
                         }
                         last_err = Some(e);

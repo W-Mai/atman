@@ -43,7 +43,7 @@ async fn anthropic_streaming_parses_content_block_delta() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
 
@@ -125,7 +125,7 @@ async fn anthropic_multimodal_request_includes_image_block() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -163,7 +163,7 @@ async fn anthropic_non_streaming_returns_concatenated_text() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -190,7 +190,7 @@ async fn anthropic_http_error_becomes_tool_failed() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -224,7 +224,7 @@ async fn anthropic_real() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
     let value = obs.output.await.unwrap();

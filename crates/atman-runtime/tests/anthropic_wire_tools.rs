@@ -40,7 +40,7 @@ fn request_with_tools() -> LlmRequest {
                 input_schema: serde_json::json!({"type": "object"}),
             },
         ],
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     }
 }
@@ -68,4 +68,29 @@ fn anthropic_wire_body_omits_tools_field_when_list_empty() {
     req.tools.clear();
     let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
     assert!(body.get("tools").is_none(), "body: {body}");
+}
+
+#[test]
+fn anthropic_effort_uses_adaptive_thinking_and_output_config() {
+    let p = provider();
+    let mut req = request_with_tools();
+    req.reasoning = atman_runtime::provider::ReasoningSelection::Effort {
+        effort: atman_runtime::provider::ReasoningEffort::High,
+        execution_mode: None,
+    };
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["output_config"]["effort"], "high");
+    assert!(body["thinking"].get("budget_tokens").is_none());
+}
+
+#[test]
+fn anthropic_budget_uses_legacy_manual_thinking() {
+    let p = provider();
+    let mut req = request_with_tools();
+    req.reasoning = atman_runtime::provider::ReasoningSelection::BudgetTokens { tokens: 8192 };
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(body["thinking"]["budget_tokens"], 8192);
+    assert!(body.get("output_config").is_none());
 }

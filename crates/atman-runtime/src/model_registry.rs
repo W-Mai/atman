@@ -2,13 +2,19 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::auth_store::AuthStore;
+use crate::provider::{
+    ImageDetail, InputModality, ModelCapabilities, ReasoningEffort, ReasoningExecutionMode,
+    ReasoningSelection,
+};
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub name: String,
     pub context_budget: u64,
     pub compact_threshold_ratio: f64,
-    pub thinking_enabled: bool,
+    pub reasoning: ReasoningSelection,
+    pub capabilities: ModelCapabilities,
+    pub image_detail: ImageDetail,
     pub max_output_tokens: Option<u32>,
 }
 
@@ -48,6 +54,15 @@ pub struct ModelEntry {
     pub context_budget: Option<u64>,
     pub compact_threshold_ratio: Option<f64>,
     pub thinking: Option<bool>,
+    pub reasoning: Option<String>,
+    pub reasoning_mode: Option<String>,
+    pub reasoning_budget_tokens: Option<u32>,
+    pub reasoning_efforts: Vec<ReasoningEffort>,
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_modes: Vec<ReasoningExecutionMode>,
+    pub default_reasoning_mode: Option<ReasoningExecutionMode>,
+    pub input_modalities: Vec<InputModality>,
+    pub image_detail: Option<ImageDetail>,
     pub max_tokens: Option<u32>,
     pub enabled: Option<bool>,
     #[allow(dead_code)]
@@ -199,6 +214,11 @@ fn register_discovered_entries(
                 provider: Some(provider_key.to_string()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
+                reasoning_efforts: m.capabilities.reasoning_efforts.clone(),
+                default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
+                reasoning_modes: m.capabilities.reasoning_modes.clone(),
+                default_reasoning_mode: m.capabilities.default_reasoning_mode.clone(),
+                input_modalities: m.capabilities.input_modalities.clone(),
                 enabled: None,
                 discovered: true,
                 ..Default::default()
@@ -218,6 +238,9 @@ pub struct ModelRow {
     pub context_budget: u64,
     pub max_output_tokens: Option<u32>,
     pub thinking: bool,
+    pub reasoning: ReasoningSelection,
+    pub capabilities: ModelCapabilities,
+    pub image_detail: ImageDetail,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +294,9 @@ fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
             context_budget: info.context_budget,
             max_output_tokens: info.max_output_tokens,
             thinking: info.thinking_enabled(),
+            reasoning: info.reasoning.clone(),
+            capabilities: info.capabilities.clone(),
+            image_detail: info.image_detail,
         };
         groups.entry(provider).or_default().push(row);
     }
@@ -390,7 +416,9 @@ pub fn model_info(name: &str) -> ModelInfo {
                     0
                 },
                 compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(0.8),
-                thinking_enabled: entry.thinking.unwrap_or(false),
+                reasoning: reasoning_selection(entry),
+                capabilities: model_capabilities(entry),
+                image_detail: entry.image_detail.unwrap_or_default(),
                 max_output_tokens: entry.max_tokens,
             };
         }
@@ -399,7 +427,9 @@ pub fn model_info(name: &str) -> ModelInfo {
         name: resolved,
         context_budget: 0,
         compact_threshold_ratio: 0.8,
-        thinking_enabled: false,
+        reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+        capabilities: ModelCapabilities::default(),
+        image_detail: ImageDetail::Auto,
         max_output_tokens: None,
     }
 }
@@ -440,7 +470,120 @@ impl ModelInfo {
     }
 
     pub fn thinking_enabled(&self) -> bool {
-        self.thinking_enabled
+        self.reasoning.enabled()
+    }
+}
+
+fn reasoning_selection(entry: &ModelEntry) -> ReasoningSelection {
+    if let Some(tokens) = entry.reasoning_budget_tokens {
+        return ReasoningSelection::BudgetTokens { tokens };
+    }
+    let execution_mode = entry
+        .reasoning_mode
+        .as_deref()
+        .and_then(|value| value.parse().ok());
+    if let Some(value) = entry.reasoning.as_deref() {
+        return match value.trim().to_ascii_lowercase().as_str() {
+            "default" | "provider_default" => ReasoningSelection::ProviderDefault,
+            "off" | "none" | "disabled" => ReasoningSelection::Disabled,
+            "auto" => ReasoningSelection::Auto { execution_mode },
+            _ => value
+                .parse()
+                .map(|effort| ReasoningSelection::Effort {
+                    effort,
+                    execution_mode,
+                })
+                .unwrap_or_default(),
+        };
+    }
+    match entry.thinking {
+        Some(true) => ReasoningSelection::Auto { execution_mode },
+        Some(false) => ReasoningSelection::Disabled,
+        None => ReasoningSelection::ProviderDefault,
+    }
+}
+
+fn model_capabilities(entry: &ModelEntry) -> ModelCapabilities {
+    ModelCapabilities {
+        reasoning_efforts: entry.reasoning_efforts.clone(),
+        default_reasoning_effort: entry.default_reasoning_effort.clone(),
+        reasoning_modes: entry.reasoning_modes.clone(),
+        default_reasoning_mode: entry.default_reasoning_mode.clone(),
+        input_modalities: entry.input_modalities.clone(),
+    }
+}
+
+pub fn resolve_reasoning(
+    selection: &ReasoningSelection,
+    capabilities: &ModelCapabilities,
+) -> Result<ReasoningSelection, String> {
+    let validate_mode = |mode: &Option<ReasoningExecutionMode>| -> Result<(), String> {
+        if let Some(mode) = mode
+            && !capabilities.reasoning_modes.is_empty()
+            && !capabilities.reasoning_modes.contains(mode)
+        {
+            return Err(format!(
+                "reasoning mode `{mode}` is not supported; available: {}",
+                capabilities
+                    .reasoning_modes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(())
+    };
+
+    match selection {
+        ReasoningSelection::ProviderDefault | ReasoningSelection::Disabled => Ok(selection.clone()),
+        ReasoningSelection::Auto { execution_mode } => {
+            validate_mode(execution_mode)?;
+            let mode = execution_mode
+                .clone()
+                .or_else(|| capabilities.default_reasoning_mode.clone());
+            if let Some(effort) = capabilities.default_reasoning_effort.clone() {
+                Ok(ReasoningSelection::Effort {
+                    effort,
+                    execution_mode: mode,
+                })
+            } else {
+                Ok(ReasoningSelection::Auto {
+                    execution_mode: mode,
+                })
+            }
+        }
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::None,
+            ..
+        } => Ok(ReasoningSelection::Disabled),
+        ReasoningSelection::Effort {
+            effort,
+            execution_mode,
+        } => {
+            validate_mode(execution_mode)?;
+            if !capabilities.reasoning_efforts.is_empty()
+                && !capabilities.reasoning_efforts.contains(effort)
+            {
+                return Err(format!(
+                    "reasoning effort `{effort}` is not supported; available: {}",
+                    capabilities
+                        .reasoning_efforts
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            Ok(selection.clone())
+        }
+        ReasoningSelection::BudgetTokens { .. } => {
+            if capabilities.reasoning_efforts.is_empty() {
+                Ok(selection.clone())
+            } else {
+                Err("token-budget reasoning is not supported by this model".into())
+            }
+        }
     }
 }
 
@@ -723,6 +866,24 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
         #[serde(default)]
         thinking: Option<bool>,
         #[serde(default)]
+        reasoning: Option<String>,
+        #[serde(default)]
+        reasoning_mode: Option<String>,
+        #[serde(default)]
+        reasoning_budget_tokens: Option<u32>,
+        #[serde(default)]
+        reasoning_efforts: Vec<ReasoningEffort>,
+        #[serde(default)]
+        default_reasoning_effort: Option<ReasoningEffort>,
+        #[serde(default)]
+        reasoning_modes: Vec<ReasoningExecutionMode>,
+        #[serde(default)]
+        default_reasoning_mode: Option<ReasoningExecutionMode>,
+        #[serde(default)]
+        input_modalities: Vec<InputModality>,
+        #[serde(default)]
+        image_detail: Option<ImageDetail>,
+        #[serde(default)]
         max_tokens: Option<u32>,
         #[serde(default)]
         enabled: Option<bool>,
@@ -772,6 +933,15 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
                 context_budget: m.context_budget,
                 compact_threshold_ratio: m.compact_threshold_ratio,
                 thinking: m.thinking,
+                reasoning: m.reasoning,
+                reasoning_mode: m.reasoning_mode,
+                reasoning_budget_tokens: m.reasoning_budget_tokens,
+                reasoning_efforts: m.reasoning_efforts,
+                default_reasoning_effort: m.default_reasoning_effort,
+                reasoning_modes: m.reasoning_modes,
+                default_reasoning_mode: m.default_reasoning_mode,
+                input_modalities: m.input_modalities,
+                image_detail: m.image_detail,
                 max_tokens: m.max_tokens,
                 enabled: m.enabled,
                 discovered: m.discovered,
@@ -824,7 +994,9 @@ pub struct ModelConfigUpdate<'a> {
     pub model: &'a str,
     pub provider: Option<&'a str>,
     pub context_budget: u64,
-    pub thinking: bool,
+    pub reasoning: ReasoningSelection,
+    pub capabilities: Option<ModelCapabilities>,
+    pub image_detail: Option<ImageDetail>,
     pub max_tokens: Option<u32>,
     pub enabled: bool,
 }
@@ -859,7 +1031,89 @@ pub(crate) fn apply_model_config_update(
             "context_budget",
             toml_edit::value(update.context_budget as i64),
         );
-        entry.insert("thinking", toml_edit::value(update.thinking));
+        entry.remove("thinking");
+        entry.remove("reasoning");
+        entry.remove("reasoning_mode");
+        entry.remove("reasoning_budget_tokens");
+        match &update.reasoning {
+            ReasoningSelection::ProviderDefault => {}
+            ReasoningSelection::Disabled => {
+                entry.insert("reasoning", toml_edit::value("off"));
+            }
+            ReasoningSelection::Auto { execution_mode } => {
+                entry.insert("reasoning", toml_edit::value("auto"));
+                if let Some(mode) = execution_mode {
+                    entry.insert("reasoning_mode", toml_edit::value(mode.to_string()));
+                }
+            }
+            ReasoningSelection::Effort {
+                effort,
+                execution_mode,
+            } => {
+                entry.insert("reasoning", toml_edit::value(effort.to_string()));
+                if let Some(mode) = execution_mode {
+                    entry.insert("reasoning_mode", toml_edit::value(mode.to_string()));
+                }
+            }
+            ReasoningSelection::BudgetTokens { tokens } => {
+                entry.insert(
+                    "reasoning_budget_tokens",
+                    toml_edit::value(i64::from(*tokens)),
+                );
+            }
+        }
+        if let Some(capabilities) = update.capabilities {
+            insert_string_array(
+                entry,
+                "reasoning_efforts",
+                capabilities
+                    .reasoning_efforts
+                    .iter()
+                    .map(ToString::to_string),
+            );
+            if let Some(default) = capabilities.default_reasoning_effort {
+                entry.insert(
+                    "default_reasoning_effort",
+                    toml_edit::value(default.to_string()),
+                );
+            } else {
+                entry.remove("default_reasoning_effort");
+            }
+            insert_string_array(
+                entry,
+                "reasoning_modes",
+                capabilities.reasoning_modes.iter().map(ToString::to_string),
+            );
+            if let Some(default) = capabilities.default_reasoning_mode {
+                entry.insert(
+                    "default_reasoning_mode",
+                    toml_edit::value(default.to_string()),
+                );
+            } else {
+                entry.remove("default_reasoning_mode");
+            }
+            insert_string_array(
+                entry,
+                "input_modalities",
+                capabilities
+                    .input_modalities
+                    .iter()
+                    .map(|modality| match modality {
+                        InputModality::Text => "text".to_string(),
+                        InputModality::Image => "image".to_string(),
+                        InputModality::Audio => "audio".to_string(),
+                    }),
+            );
+        }
+        if let Some(detail) = update.image_detail {
+            let value = match detail {
+                ImageDetail::Auto => "auto",
+                ImageDetail::Low => "low",
+                ImageDetail::High => "high",
+                ImageDetail::Original => "original",
+            };
+            entry.insert("image_detail", toml_edit::value(value));
+        }
         if let Some(max_tokens) = update.max_tokens {
             entry.insert("max_tokens", toml_edit::value(max_tokens as i64));
         } else {
@@ -884,6 +1138,22 @@ pub(crate) fn apply_model_config_update(
         }
     }
     Ok(())
+}
+
+fn insert_string_array(
+    entry: &mut toml_edit::Table,
+    key: &str,
+    values: impl Iterator<Item = String>,
+) {
+    let mut array = toml_edit::Array::new();
+    for value in values {
+        array.push(value);
+    }
+    if array.is_empty() {
+        entry.remove(key);
+    } else {
+        entry.insert(key, toml_edit::value(array));
+    }
 }
 
 pub fn upsert_model_config(update: ModelConfigUpdate<'_>) -> anyhow::Result<()> {
@@ -1088,6 +1358,7 @@ mod tests {
             slug: "codex/gpt-test".into(),
             context_budget: Some(272_000),
             thinking: true,
+            capabilities: ModelCapabilities::default(),
         }];
         assert_eq!(
             shortest_unique_provider_id("1234567-account", &["1234567-account".into()]),
@@ -1294,6 +1565,7 @@ mod tests {
                 slug: "codex/gpt-5".to_string(),
                 context_budget: Some(128_000),
                 thinking: true,
+                capabilities: ModelCapabilities::default(),
             }],
         );
         assert!(model_entry("Codex:codex/gpt-5").is_some());
@@ -1362,6 +1634,7 @@ model = "provider/new"
                 slug: "codex/gpt-5".to_string(),
                 context_budget: Some(128_000),
                 thinking: true,
+                capabilities: ModelCapabilities::default(),
             }],
         );
 
@@ -1408,7 +1681,12 @@ enabled = true
                 model: "new-id",
                 provider: Some("openai"),
                 context_budget: 128_000,
-                thinking: true,
+                reasoning: ReasoningSelection::Effort {
+                    effort: ReasoningEffort::High,
+                    execution_mode: None,
+                },
+                capabilities: None,
+                image_detail: None,
                 max_tokens: Some(4096),
                 enabled: false,
             },
@@ -1427,8 +1705,68 @@ enabled = true
         assert!(!out.contains("[models.old-name]"));
         assert!(out.contains("model = \"new-id\""));
         assert!(out.contains("context_budget = 128000"));
-        assert!(out.contains("thinking = true"));
+        assert!(out.contains("reasoning = \"high\""));
         assert!(out.contains("max_tokens = 4096"));
         assert!(out.contains("enabled = false"));
+    }
+
+    #[test]
+    fn model_config_reads_reasoning_capabilities_and_legacy_bool() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let cfg = parse_config(
+            r#"
+[models.modern]
+model = "gpt-modern"
+reasoning = "xhigh"
+reasoning_mode = "pro"
+reasoning_efforts = ["low", "high", "xhigh"]
+reasoning_modes = ["standard", "pro"]
+input_modalities = ["text", "image"]
+image_detail = "high"
+
+[models.legacy]
+model = "legacy"
+thinking = true
+"#,
+        )
+        .unwrap();
+        set_model_config(cfg);
+
+        let modern = model_info("modern");
+        assert_eq!(
+            modern.reasoning,
+            ReasoningSelection::Effort {
+                effort: ReasoningEffort::XHigh,
+                execution_mode: Some(ReasoningExecutionMode::Pro),
+            }
+        );
+        assert_eq!(
+            modern.capabilities.input_modalities,
+            vec![InputModality::Text, InputModality::Image]
+        );
+        assert_eq!(modern.image_detail, ImageDetail::High);
+        assert_eq!(
+            model_info("legacy").reasoning,
+            ReasoningSelection::Auto {
+                execution_mode: None
+            }
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_known_unsupported_effort() {
+        let capabilities = ModelCapabilities {
+            reasoning_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+            ..Default::default()
+        };
+        let error = resolve_reasoning(
+            &ReasoningSelection::Effort {
+                effort: ReasoningEffort::XHigh,
+                execution_mode: None,
+            },
+            &capabilities,
+        )
+        .unwrap_err();
+        assert!(error.contains("available: low, high"));
     }
 }

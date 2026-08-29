@@ -15,7 +15,7 @@ async fn mock_streaming_emits_chunks_then_done() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
 
@@ -49,7 +49,7 @@ async fn mock_streaming_non_string_value_emits_single_done() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
     let value = obs.output.await.unwrap();
@@ -76,7 +76,7 @@ async fn mock_streaming_cancel_before_await_yields_cancelled_err() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
     obs.cancel.cancel();

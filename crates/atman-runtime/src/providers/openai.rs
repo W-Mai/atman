@@ -6,8 +6,8 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
 use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
-    TokenUsage, estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
+    ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
 };
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
@@ -18,6 +18,14 @@ pub struct OpenAiProvider {
     base_url: String,
     client: reqwest::Client,
     max_tokens: Option<u32>,
+    reasoning_format: OpenAiReasoningFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenAiReasoningFormat {
+    Official,
+    #[default]
+    CompatibleThinking,
 }
 
 impl OpenAiProvider {
@@ -28,6 +36,7 @@ impl OpenAiProvider {
             base_url: "https://api.openai.com/v1".into(),
             client: reqwest::Client::new(),
             max_tokens: None,
+            reasoning_format: OpenAiReasoningFormat::default(),
         }
     }
 
@@ -39,6 +48,40 @@ impl OpenAiProvider {
     pub fn with_max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = Some(n);
         self
+    }
+
+    pub fn with_reasoning_format(mut self, format: OpenAiReasoningFormat) -> Self {
+        self.reasoning_format = format;
+        self
+    }
+
+    fn validate_reasoning(&self, selection: &ReasoningSelection) -> Result<(), RuntimeError> {
+        if selection.execution_mode().is_some() {
+            return Err(RuntimeError::ToolFailed(
+                "invalid request: Chat Completions does not support reasoning execution mode"
+                    .into(),
+            ));
+        }
+        match (self.reasoning_format, selection) {
+            (_, ReasoningSelection::BudgetTokens { .. }) => Err(RuntimeError::ToolFailed(
+                "invalid request: this OpenAI adapter does not support token-budget reasoning"
+                    .into(),
+            )),
+            (
+                OpenAiReasoningFormat::CompatibleThinking,
+                ReasoningSelection::Effort {
+                    effort: ReasoningEffort::None,
+                    ..
+                },
+            ) => Ok(()),
+            (
+                OpenAiReasoningFormat::CompatibleThinking,
+                ReasoningSelection::Effort { effort, .. },
+            ) => Err(RuntimeError::ToolFailed(format!(
+                "invalid request: compatible thinking profile cannot represent effort `{effort}`; use `auto` or select the official OpenAI profile"
+            ))),
+            _ => Ok(()),
+        }
     }
 
     fn build_body(&self, req: &LlmRequest, stream: bool) -> ChatCompletionsRequest {
@@ -66,10 +109,21 @@ impl OpenAiProvider {
                 },
             })
             .collect();
+        let (reasoning_effort, thinking) = match self.reasoning_format {
+            OpenAiReasoningFormat::Official => (official_reasoning_effort(&req.reasoning), None),
+            OpenAiReasoningFormat::CompatibleThinking => {
+                (None, compatible_thinking(&req.reasoning))
+            }
+        };
         ChatCompletionsRequest {
             model: req.model.clone(),
             stream,
-            max_tokens: self.max_tokens,
+            max_tokens: (self.reasoning_format == OpenAiReasoningFormat::CompatibleThinking)
+                .then_some(self.max_tokens)
+                .flatten(),
+            max_completion_tokens: (self.reasoning_format == OpenAiReasoningFormat::Official)
+                .then_some(self.max_tokens)
+                .flatten(),
             messages: wire_messages,
             tools,
             stream_options: if stream {
@@ -79,11 +133,8 @@ impl OpenAiProvider {
             } else {
                 None
             },
-            thinking: if req.thinking_enabled {
-                Some(ThinkingConfig { kind: "enabled" })
-            } else {
-                Some(ThinkingConfig { kind: "disabled" })
-            },
+            reasoning_effort,
+            thinking,
         }
     }
 
@@ -98,6 +149,30 @@ impl OpenAiProvider {
     #[doc(hidden)]
     pub fn wire_body_bytes(&self, req: &LlmRequest, stream: bool) -> Vec<u8> {
         serde_json::to_vec(&self.build_body(req, stream)).expect("serialize wire body")
+    }
+}
+
+fn official_reasoning_effort(selection: &ReasoningSelection) -> Option<String> {
+    match selection {
+        ReasoningSelection::Disabled => Some(ReasoningEffort::None.to_string()),
+        ReasoningSelection::Effort { effort, .. } => Some(effort.to_string()),
+        ReasoningSelection::ProviderDefault
+        | ReasoningSelection::Auto { .. }
+        | ReasoningSelection::BudgetTokens { .. } => None,
+    }
+}
+
+fn compatible_thinking(selection: &ReasoningSelection) -> Option<ThinkingConfig> {
+    match selection {
+        ReasoningSelection::ProviderDefault => None,
+        ReasoningSelection::Disabled
+        | ReasoningSelection::Effort {
+            effort: ReasoningEffort::None,
+            ..
+        } => Some(ThinkingConfig { kind: "disabled" }),
+        ReasoningSelection::Auto { .. }
+        | ReasoningSelection::Effort { .. }
+        | ReasoningSelection::BudgetTokens { .. } => Some(ThinkingConfig { kind: "enabled" }),
     }
 }
 
@@ -231,6 +306,9 @@ impl Provider for OpenAiProvider {
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        if let Err(error) = self.validate_reasoning(&req.reasoning) {
+            return Box::pin(async move { Err(error) });
+        }
         let request = self.build_request(&req, false);
         let turn_id = next_turn_id_from_req(&req);
         Box::pin(async move {
@@ -252,6 +330,7 @@ impl Provider for OpenAiProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+        let validation_error = self.validate_reasoning(&req.reasoning).err();
         let request = self.build_request(&req, true);
         let turn_id = next_turn_id_from_req(&req);
         let streaming_tools = req.tools.clone();
@@ -260,6 +339,9 @@ impl Provider for OpenAiProvider {
         let cancel_for_task = cancel.clone();
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
             async move {
+                if let Some(error) = validation_error {
+                    return Err(error);
+                }
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -511,6 +593,7 @@ impl Provider for OpenAiProvider {
                         slug: m.id,
                         context_budget: Some(budget),
                         thinking,
+                        capabilities: crate::provider::ModelCapabilities::default(),
                     }
                 })
                 .collect()
@@ -650,11 +733,15 @@ struct ChatCompletionsRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireToolSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
 }

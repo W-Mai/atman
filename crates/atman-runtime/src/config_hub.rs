@@ -1662,6 +1662,7 @@ mod tests {
                             slug: "cached-model".into(),
                             context_budget: Some(8192),
                             thinking: true,
+                            capabilities: crate::provider::ModelCapabilities::default(),
                         }],
                     },
                 )
@@ -2471,7 +2472,9 @@ custom_patterns = [{ kind = "ticket", regex = "T-[0-9]+" }]
             model,
             provider: Some("test"),
             context_budget: 100_000,
-            thinking: false,
+            reasoning: crate::provider::ReasoningSelection::Disabled,
+            capabilities: None,
+            image_detail: None,
             max_tokens: None,
             enabled: true,
         }

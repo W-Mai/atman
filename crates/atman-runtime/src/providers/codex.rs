@@ -6,8 +6,8 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable, TurnId};
 use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
-    TokenUsage, estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
+    ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
 };
 use crate::tool::BoxFut;
 use anyhow::Context;
@@ -55,10 +55,7 @@ impl CodexProvider {
             tools,
             stream: true,
             store: false,
-            reasoning: Some(ReasoningConfig {
-                effort: Some("medium".into()),
-                summary: "auto".into(),
-            }),
+            reasoning: build_reasoning_config(&req.reasoning),
             text: Some(TextConfig {
                 verbosity: "medium".into(),
             }),
@@ -76,6 +73,40 @@ impl CodexProvider {
             .header("OpenAI-Beta", "responses=experimental")
             .header("accept", "text/event-stream")
             .json(&body)
+    }
+
+    fn validate_reasoning(selection: &ReasoningSelection) -> Result<(), RuntimeError> {
+        if matches!(selection, ReasoningSelection::BudgetTokens { .. }) {
+            return Err(RuntimeError::ToolFailed(
+                "invalid request: Codex Responses does not support token-budget reasoning".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn build_reasoning_config(selection: &ReasoningSelection) -> Option<ReasoningConfig> {
+    match selection {
+        ReasoningSelection::ProviderDefault => None,
+        ReasoningSelection::Disabled => Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::None.to_string()),
+            mode: None,
+            summary: None,
+        }),
+        ReasoningSelection::Auto { execution_mode } => Some(ReasoningConfig {
+            effort: None,
+            mode: execution_mode.as_ref().map(ToString::to_string),
+            summary: Some("auto".into()),
+        }),
+        ReasoningSelection::Effort {
+            effort,
+            execution_mode,
+        } => Some(ReasoningConfig {
+            effort: Some(effort.to_string()),
+            mode: execution_mode.as_ref().map(ToString::to_string),
+            summary: (!matches!(effort, ReasoningEffort::None)).then(|| "auto".into()),
+        }),
+        ReasoningSelection::BudgetTokens { .. } => None,
     }
 }
 
@@ -254,6 +285,7 @@ impl Provider for CodexProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+        let validation_error = Self::validate_reasoning(&req.reasoning).err();
         let request = self.build_request(&req);
         let turn_id = turn_id_from_req(&req);
         let streaming_tools = req.tools.clone();
@@ -263,6 +295,9 @@ impl Provider for CodexProvider {
 
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
             Box::pin(async move {
+                if let Some(error) = validation_error {
+                    return Err(error);
+                }
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -508,14 +543,37 @@ impl Provider for CodexProvider {
                         return None;
                     }
                     let context_budget = m["context_window"].as_u64();
-                    let thinking = m["supported_reasoning_levels"]
+                    let reasoning_efforts = m["supported_reasoning_levels"]
                         .as_array()
-                        .map(|a: &Vec<serde_json::Value>| !a.is_empty())
-                        .unwrap_or(false);
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|value| value.as_str()?.parse().ok())
+                        .collect::<Vec<_>>();
+                    let thinking = !reasoning_efforts.is_empty();
+                    let input_modalities = m["input_modalities"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|value| match value.as_str()? {
+                            "text" => Some(crate::provider::InputModality::Text),
+                            "image" => Some(crate::provider::InputModality::Image),
+                            "audio" => Some(crate::provider::InputModality::Audio),
+                            _ => None,
+                        })
+                        .collect();
+                    let default_reasoning_effort = m["default_reasoning_level"]
+                        .as_str()
+                        .and_then(|value| value.parse().ok());
                     Some(crate::provider::DiscoveredModel {
                         slug,
                         context_budget,
                         thinking,
+                        capabilities: crate::provider::ModelCapabilities {
+                            reasoning_efforts,
+                            default_reasoning_effort,
+                            input_modalities,
+                            ..Default::default()
+                        },
                     })
                 })
                 .collect()
@@ -749,7 +807,10 @@ struct ResponsesTool {
 struct ReasoningConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
-    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -785,7 +846,7 @@ struct OutputTokensDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_input_tokens;
+    use super::{CodexProvider, normalize_input_tokens};
 
     #[test]
     fn input_tokens_exclude_cached_tokens_for_window_accounting() {
@@ -795,5 +856,46 @@ mod tests {
     #[test]
     fn cached_tokens_cannot_underflow_input_tokens() {
         assert_eq!(normalize_input_tokens(10, 20), 0);
+    }
+
+    #[test]
+    fn reasoning_effort_and_mode_are_not_hardcoded() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let request = crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: Vec::new(),
+            system: None,
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::Effort {
+                effort: crate::provider::ReasoningEffort::XHigh,
+                execution_mode: Some(crate::provider::ReasoningExecutionMode::Pro),
+            },
+            stall_timeout_secs: 0,
+        };
+        let body = serde_json::to_value(provider.build_body(&request)).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["reasoning"]["mode"], "pro");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn provider_default_omits_reasoning_instead_of_forcing_medium() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let request = crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: Vec::new(),
+            system: None,
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let body = serde_json::to_value(provider.build_body(&request)).unwrap();
+        assert!(body.get("reasoning").is_none());
     }
 }

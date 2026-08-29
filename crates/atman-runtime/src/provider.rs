@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -9,6 +12,214 @@ use crate::event::{NodeEvent, Observable};
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::tool::BoxFut;
 use crate::value::Value;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+    Persistent,
+    Custom(String),
+}
+
+impl ReasoningEffort {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+            Self::Persistent => "persistent",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" | "disabled" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            "ultra" => Ok(Self::Ultra),
+            "persistent" => Ok(Self::Persistent),
+            "" => Err("reasoning effort must not be empty".into()),
+            other => Ok(Self::Custom(other.to_string())),
+        }
+    }
+}
+
+impl Serialize for ReasoningEffort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReasoningExecutionMode {
+    Standard,
+    Pro,
+    Custom(String),
+}
+
+impl ReasoningExecutionMode {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Standard => "standard",
+            Self::Pro => "pro",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+impl fmt::Display for ReasoningExecutionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ReasoningExecutionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "standard" => Ok(Self::Standard),
+            "pro" => Ok(Self::Pro),
+            "" => Err("reasoning mode must not be empty".into()),
+            other => Ok(Self::Custom(other.to_string())),
+        }
+    }
+}
+
+impl Serialize for ReasoningExecutionMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningExecutionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningSelection {
+    #[default]
+    ProviderDefault,
+    Disabled,
+    Auto {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_mode: Option<ReasoningExecutionMode>,
+    },
+    Effort {
+        effort: ReasoningEffort,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_mode: Option<ReasoningExecutionMode>,
+    },
+    BudgetTokens {
+        tokens: u32,
+    },
+}
+
+impl ReasoningSelection {
+    pub fn enabled(&self) -> bool {
+        !matches!(self, Self::ProviderDefault | Self::Disabled)
+    }
+
+    pub fn effort(&self) -> Option<&ReasoningEffort> {
+        match self {
+            Self::Effort { effort, .. } => Some(effort),
+            _ => None,
+        }
+    }
+
+    pub fn execution_mode(&self) -> Option<&ReasoningExecutionMode> {
+        match self {
+            Self::Auto { execution_mode } | Self::Effort { execution_mode, .. } => {
+                execution_mode.as_ref()
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    #[default]
+    Text,
+    Image,
+    Audio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    #[default]
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub reasoning_efforts: Vec<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub reasoning_modes: Vec<ReasoningExecutionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_mode: Option<ReasoningExecutionMode>,
+    #[serde(default)]
+    pub input_modalities: Vec<InputModality>,
+}
 
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
@@ -19,7 +230,7 @@ pub struct LlmRequest {
     pub schema: Option<String>,
     pub cache_prompt: bool,
     pub tools: Vec<crate::tool::ToolSpec>,
-    pub thinking_enabled: bool,
+    pub reasoning: ReasoningSelection,
     /// Seconds without a streaming chunk before the call is cancelled and
     /// retried.  Default 120 s.  0 disables stall detection.
     pub stall_timeout_secs: u64,
@@ -115,7 +326,9 @@ pub trait Provider: Send + Sync {
 pub struct DiscoveredModel {
     pub slug: String,
     pub context_budget: Option<u64>,
+    /// Backward-compatible summary for older auth caches and UI code.
     pub thinking: bool,
+    pub capabilities: ModelCapabilities,
 }
 
 pub const DEFAULT_STREAM_BUFFER: usize = 1024;

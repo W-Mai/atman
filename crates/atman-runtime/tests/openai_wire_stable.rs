@@ -74,7 +74,7 @@ fn fixed_request() -> LlmRequest {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     }
 }
@@ -109,7 +109,7 @@ fn openai_wire_body_tool_use_input_key_order_is_stable() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     };
     let body = p.wire_body_bytes(&req, false);
@@ -188,4 +188,35 @@ fn openai_wire_body_prefix_stable_when_new_message_appended() {
             "message {i} drifted when we appended a new turn — breaks OpenAI prefix cache"
         );
     }
+}
+
+#[test]
+fn official_openai_profile_uses_reasoning_effort_and_completion_budget() {
+    let provider = OpenAiProvider::new("openai", "test-key")
+        .with_reasoning_format(atman_runtime::providers::openai::OpenAiReasoningFormat::Official)
+        .with_max_tokens(4096);
+    let mut req = fixed_request();
+    req.reasoning = atman_runtime::provider::ReasoningSelection::Effort {
+        effort: atman_runtime::provider::ReasoningEffort::High,
+        execution_mode: None,
+    };
+    let body: serde_json::Value =
+        serde_json::from_slice(&provider.wire_body_bytes(&req, false)).unwrap();
+    assert_eq!(body["reasoning_effort"], "high");
+    assert_eq!(body["max_completion_tokens"], 4096);
+    assert!(body.get("max_tokens").is_none());
+    assert!(body.get("thinking").is_none());
+}
+
+#[test]
+fn compatible_openai_profile_preserves_toggle_protocol() {
+    let provider = provider();
+    let mut req = fixed_request();
+    req.reasoning = atman_runtime::provider::ReasoningSelection::Auto {
+        execution_mode: None,
+    };
+    let body: serde_json::Value =
+        serde_json::from_slice(&provider.wire_body_bytes(&req, false)).unwrap();
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert!(body.get("reasoning_effort").is_none());
 }

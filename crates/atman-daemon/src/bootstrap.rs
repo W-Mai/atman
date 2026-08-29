@@ -194,7 +194,7 @@ pub fn spawn_mcp_boot(
                                             schema: None,
                                             cache_prompt: false,
                                             tools: Vec::new(),
-                                            thinking_enabled: false,
+                                            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
                                             stall_timeout_secs: 0,
                                         };
                                         let am = provider.call(llm_req).await?;
@@ -552,6 +552,11 @@ fn register_providers_from_config(executor: &mut Executor) {
             }
             "openai" | "openai-compat" => {
                 let mut p = OpenAiProvider::new(&provider_name, &key);
+                p = p.with_reasoning_format(if entry.kind == "openai" {
+                    atman_runtime::providers::openai::OpenAiReasoningFormat::Official
+                } else {
+                    atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
+                });
                 if let Some(url) = &base_url {
                     p = p.with_base_url(url);
                 }

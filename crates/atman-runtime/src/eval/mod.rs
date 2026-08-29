@@ -3236,7 +3236,7 @@ mod sanitize_tests {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: stall_secs,
         }
     }

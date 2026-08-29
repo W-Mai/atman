@@ -26,6 +26,8 @@ pub struct CachedModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<u64>,
     pub thinking: bool,
+    #[serde(default)]
+    pub capabilities: crate::provider::ModelCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +105,7 @@ pub fn save_provider_model_cache(
                 slug: model.slug.clone(),
                 context_budget: model.context_budget,
                 thinking: model.thinking,
+                capabilities: model.capabilities.clone(),
             })
             .collect(),
     };
@@ -119,6 +122,7 @@ pub fn cached_to_discovered(cache: &ModelCache) -> Vec<crate::provider::Discover
             slug: m.slug.clone(),
             context_budget: m.context_budget,
             thinking: m.thinking,
+            capabilities: m.capabilities.clone(),
         })
         .collect()
 }

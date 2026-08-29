@@ -1980,6 +1980,11 @@ async fn cmd_repl_once(
                                             &provider_key,
                                             &resolved_key,
                                         );
+                                    p = p.with_reasoning_format(if provider_type == "openai" {
+                                        atman_runtime::providers::openai::OpenAiReasoningFormat::Official
+                                    } else {
+                                        atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
+                                    });
                                     if !resolved_url.is_empty() {
                                         p = p.with_base_url(&resolved_url);
                                     }
@@ -2065,6 +2070,11 @@ async fn cmd_repl_once(
                                             &provider_key,
                                             &resolved_key,
                                         );
+                                    p = p.with_reasoning_format(if provider_type == "openai" {
+                                        atman_runtime::providers::openai::OpenAiReasoningFormat::Official
+                                    } else {
+                                        atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
+                                    });
                                     if !resolved_url.is_empty() {
                                         p = p.with_base_url(&resolved_url);
                                     }
@@ -2097,7 +2107,15 @@ async fn cmd_repl_once(
                                 model: &model,
                                 provider: provider.as_deref(),
                                 context_budget,
-                                thinking,
+                                reasoning: if thinking {
+                                    atman_runtime::provider::ReasoningSelection::Auto {
+                                        execution_mode: None,
+                                    }
+                                } else {
+                                    atman_runtime::provider::ReasoningSelection::Disabled
+                                },
+                                capabilities: None,
+                                image_detail: None,
                                 max_tokens,
                                 enabled,
                             })
@@ -6931,6 +6949,11 @@ async fn test_provider_endpoint(
     } else {
         Box::new(
             atman_runtime::providers::openai::OpenAiProvider::new(name, api_key)
+                .with_reasoning_format(if provider_type == "openai" {
+                    atman_runtime::providers::openai::OpenAiReasoningFormat::Official
+                } else {
+                    atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
+                })
                 .with_base_url(base_url),
         )
     };

@@ -41,7 +41,7 @@ async fn cache_prompt_true_sends_ephemeral_cache_control() {
             schema: None,
             cache_prompt: true,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -81,7 +81,7 @@ async fn cache_prompt_false_sends_plain_string_content() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await

@@ -628,7 +628,7 @@ async fn generate_llm_summary(
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: crate::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     };
     let outcome = provider.call(req).await?;
@@ -913,7 +913,9 @@ mod tests {
             name: "test".into(),
             context_budget: 100_000,
             compact_threshold_ratio: 0.8,
-            thinking_enabled: false,
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            capabilities: crate::provider::ModelCapabilities::default(),
+            image_detail: crate::provider::ImageDetail::Auto,
             max_output_tokens: Some(10_000),
         };
         let budget = CompactionBudgetContext {
@@ -929,7 +931,9 @@ mod tests {
             name: "test".into(),
             context_budget: 20_000,
             compact_threshold_ratio: 0.8,
-            thinking_enabled: false,
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            capabilities: crate::provider::ModelCapabilities::default(),
+            image_detail: crate::provider::ImageDetail::Auto,
             max_output_tokens: None,
         };
         assert_eq!(

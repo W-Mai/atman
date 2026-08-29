@@ -49,7 +49,7 @@ async fn openai_non_streaming_returns_tool_use_parts_from_tool_calls() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -100,7 +100,7 @@ async fn openai_streaming_accumulates_tool_calls_across_chunks() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
     let am = obs.output.await.expect("streaming call ok");

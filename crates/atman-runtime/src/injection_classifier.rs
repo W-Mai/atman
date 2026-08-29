@@ -122,7 +122,7 @@ impl InjectionClassifier for LlmClassifier {
                 schema: None,
                 cache_prompt: false,
                 tools: Vec::new(),
-                thinking_enabled: false,
+                reasoning: crate::provider::ReasoningSelection::ProviderDefault,
                 stall_timeout_secs: 0,
             };
             let am = match self.provider.call(req).await {

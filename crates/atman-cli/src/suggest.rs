@@ -186,7 +186,7 @@ pub async fn generate_suggestion(
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     };
     if let Some(tx) = token_tx {

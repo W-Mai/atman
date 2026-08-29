@@ -34,7 +34,7 @@ async fn openai_streaming_parses_delta_content() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
 
@@ -90,7 +90,7 @@ data: [DONE]\n\n";
                 "required": ["path"]
             }),
         }],
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
 
@@ -133,7 +133,7 @@ async fn openai_non_streaming_returns_message_content() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -206,7 +206,7 @@ async fn openai_multimodal_request_uses_image_url_parts() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -233,7 +233,7 @@ async fn openai_http_error_becomes_tool_failed() {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
-            thinking_enabled: false,
+            reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         })
         .await
@@ -266,7 +266,7 @@ async fn openai_real() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
-        thinking_enabled: false,
+        reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     });
     let value = obs.output.await.unwrap();
