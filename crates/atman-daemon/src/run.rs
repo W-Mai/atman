@@ -30,6 +30,54 @@ pub struct SpawnedRun {
     pub run_id: ProtoRunId,
 }
 
+#[derive(Clone)]
+struct ProviderCatalogRefreshDispatcher {
+    runtime: tokio::runtime::Handle,
+    lifecycle: atman_runtime::ProviderLifecycle,
+}
+
+impl ProviderCatalogRefreshDispatcher {
+    fn dispatch(&self, plan: Vec<String>) {
+        for provider_id in plan {
+            let lifecycle = self.lifecycle.clone();
+            drop(self.runtime.spawn(async move {
+                let task_provider_id = provider_id.clone();
+                let task = tokio::spawn(async move {
+                    lifecycle
+                        .refresh_models_if_stale(&task_provider_id)
+                        .await
+                });
+                match task.await {
+                    Ok(Ok(
+                        atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::NotNeeded
+                        | atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::AlreadyInFlight,
+                    )) => {}
+                    Ok(Ok(
+                        atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::CatalogUpdated(
+                            delta,
+                        ),
+                    )) => eprintln!(
+                        "[atman-daemon] provider catalog `{provider_id}` refreshed: +{} ~{} -{} ({} total)",
+                        delta.added, delta.updated, delta.removed, delta.total
+                    ),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(
+                        atman_runtime::ProviderLifecycleError::ProviderNotFound { .. }
+                        | atman_runtime::ProviderLifecycleError::ProviderDisabled { .. }
+                        | atman_runtime::ProviderLifecycleError::Stale { .. },
+                    )) => {}
+                    Ok(Err(error)) => eprintln!(
+                        "[atman-daemon] provider catalog `{provider_id}` background refresh failed: {error}"
+                    ),
+                    Err(error) => eprintln!(
+                        "[atman-daemon] provider catalog `{provider_id}` background refresh task failed: {error}"
+                    ),
+                }
+            }));
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct RunOptions {
     pub reasoning: Option<String>,
@@ -121,6 +169,18 @@ impl RunLauncher {
         })
     }
 
+    pub async fn start_provider_catalog_refreshes(&self, state: &DaemonState) -> Result<()> {
+        reload_model_config(self.config_dir.as_deref());
+        let lifecycle = state.provider_lifecycle_for(self.config_dir.as_deref())?;
+        let plan = crate::bootstrap::prepare_auth_provider_runtime(&lifecycle).await?;
+        ProviderCatalogRefreshDispatcher {
+            runtime: tokio::runtime::Handle::current(),
+            lifecycle,
+        }
+        .dispatch(plan);
+        Ok(())
+    }
+
     pub async fn spawn(
         &self,
         state: Arc<DaemonState>,
@@ -162,6 +222,10 @@ impl RunLauncher {
 
         reload_model_config(self.config_dir.as_deref());
         let provider_lifecycle = state.provider_lifecycle_for(self.config_dir.as_deref())?;
+        let provider_catalog_refresh = ProviderCatalogRefreshDispatcher {
+            runtime: tokio::runtime::Handle::current(),
+            lifecycle: provider_lifecycle.clone(),
+        };
 
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
         let hub = match &self.config_dir {
@@ -250,6 +314,7 @@ impl RunLauncher {
                         config_dir,
                         home_dir,
                         Some(state_for_run),
+                        provider_catalog_refresh,
                         invocation_env,
                     )
                     .await
@@ -294,6 +359,7 @@ async fn run_flow_inner(
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     daemon_state: Option<Arc<crate::DaemonState>>,
+    provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
     invocation_env: atman_runtime::InvocationEnv,
 ) -> Result<()> {
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
@@ -323,6 +389,7 @@ async fn run_flow_inner(
         workspace_generation,
     })
     .await?;
+    provider_catalog_refresh.dispatch(outcome.provider_catalog_refresh_plan);
     let mut executor = outcome.executor;
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
 

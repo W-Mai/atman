@@ -145,6 +145,7 @@ pub(crate) struct AuthProviderRuntimeState {
     pub catalog_snapshot: crate::auth_store::AuthProviderCatalogSnapshot,
     pub model_namespace: Option<String>,
     pub model_cache: Option<Vec<crate::provider::DiscoveredModelDetails>>,
+    pub model_cache_freshness: crate::auth_store::ModelCacheFreshness,
     pub provider_ids: Vec<String>,
 }
 
@@ -357,6 +358,14 @@ impl ConfigHub {
         &self,
         id: &str,
     ) -> Result<Option<AuthProviderRuntimeState>, ConfigError> {
+        self.load_or_create_auth_provider_runtime_state_at(id, chrono::Utc::now().timestamp())
+    }
+
+    pub(crate) fn load_or_create_auth_provider_runtime_state_at(
+        &self,
+        id: &str,
+        now: i64,
+    ) -> Result<Option<AuthProviderRuntimeState>, ConfigError> {
         self.update_auth_document_conditionally(|document| {
             let Some(((provider, catalog_snapshot), changed)) =
                 document.ensure_provider_catalog_state(id)
@@ -365,6 +374,17 @@ impl ConfigHub {
             };
             let model_namespace = document.model_namespace(id);
             let model_cache = document.model_cache_details(id);
+            let model_cache_freshness = document
+                .model_cache_freshness(
+                    id,
+                    now,
+                    crate::auth_store::MODEL_CACHE_FRESHNESS_WINDOW_SECONDS,
+                )
+                .ok_or_else(|| {
+                    ConfigError::Invalid(format!(
+                        "auth provider `{id}` disappeared while reading its model cache"
+                    ))
+                })?;
             let provider_ids = sorted_auth_provider_ids(&document.legacy_view());
             Ok((
                 Some(AuthProviderRuntimeState {
@@ -372,6 +392,7 @@ impl ConfigHub {
                     catalog_snapshot,
                     model_namespace,
                     model_cache,
+                    model_cache_freshness,
                     provider_ids,
                 }),
                 changed,

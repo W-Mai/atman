@@ -224,6 +224,10 @@ pub enum TuiCommand {
     ProviderCatalogChanged {
         added_provider: Option<String>,
     },
+    ProviderCatalogRefreshResult {
+        provider_id: String,
+        result: Result<atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome, String>,
+    },
     /// Resolve one mutation by echoing its original request unchanged.
     ProviderMutationResult {
         request: ProviderMutationRequest,

@@ -8,7 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
-- **TUI provider mutation protocol** — `AuthLogin`, `AuthLogout`, and `RefreshProviderModels` are replaced by `TuiControl::MutateProvider` plus a matching `TuiCommand::ProviderMutationResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
+- **Provider lifecycle result surfaces** — `AuthLogin`, `AuthLogout`, and `RefreshProviderModels` are replaced by `TuiControl::MutateProvider`, `TuiCommand::ProviderMutationResult`, and `TuiCommand::ProviderCatalogRefreshResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. `BootstrapOutcome` exposes `provider_catalog_refresh_plan` and is non-exhaustive. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
 
 ### ✨ Features
 
@@ -40,6 +40,7 @@ All notable changes to atman are documented in this file.
 - **Atomic provider activation** — cached provider restore, enable, disable, removal, and catalog hydration use exact auth snapshots, preserve active provider instances, and fail closed on kind or namespace races without network discovery.
 - **Durable provider lifecycle ownership** — executors and daemon runs retain shared provider state, while startup restores cached Codex OAuth catalogs without refreshing expired credentials and rejects malformed auth state before creating a partial registry.
 - **Acknowledged OAuth provider changes** — TUI login, enable, disable, removal, and model refresh operations update auth, live providers, and catalogs through one lifecycle and report matched success or failure results before committing provider UI state. OAuth callback handling stops after the first terminal result, prioritizes cancellation, and bounds server shutdown.
+- **Background provider catalog refresh** — TUI and daemon runtimes use cached OAuth model catalogs immediately, then refresh missing, legacy, incomplete, or expired capability metadata without blocking session or run startup.
 - **Attachment degradation targeting** — provider rejection replaces only the rejected image message instead of matching the same part indexes across unrelated history.
 - **Atomic TUI attachment submission** — each prompt captures its current image set at submit time, preserving later attachments for the next turn and restoring images when submission or routing fails.
 - **Workspace ownership and cleanup safety** — automatic workspaces use runtime-derived session and child-flow ownership, release only clean worktrees, preserve dirty or retained work, and reconcile stale daemon-generation leases as inspectable orphans without automatic deletion.

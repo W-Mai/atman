@@ -425,6 +425,11 @@ impl AppState {
         let Some(selection) = self.input_reasoning.clone() else {
             return false;
         };
+        if atman_runtime::model_registry::reasoning_selection_uses_legacy_capabilities(
+            "smart", &selection,
+        ) {
+            return false;
+        }
         let info = atman_runtime::model_registry::model_info("smart");
         if info.context_budget == 0 {
             return false;
@@ -2114,90 +2119,88 @@ mod tests {
             atman_runtime::model_registry::set_provider_config(
                 atman_runtime::model_registry::ProviderConfig::default(),
             );
+            atman_runtime::model_registry::remove_provider_catalog("test-codex");
+            atman_runtime::model_registry::remove_provider_catalog("test-compatible");
         }
     }
 
     #[test]
-    fn smart_alias_badge_and_effort_reconcile_follow_the_selected_model() {
-        use atman_runtime::model_registry::{
-            AliasEntry, ModelEntry, ProviderConfig, ProviderEntry,
+    fn smart_alias_preserves_unknown_effort_and_resets_known_unsupported_effort() {
+        use atman_runtime::model_registry::{AliasEntry, ProviderConfig};
+        use atman_runtime::provider::{
+            CapabilityKnowledge, DiscoveredModelDetails, ReasoningEffort, ReasoningSelection,
+            ReasoningWireProfile,
         };
-        use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
-        use atman_runtime::providers::openai::OpenAiReasoningFormat;
 
         let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
             .lock()
             .unwrap();
         let _reset = ModelConfigReset;
-        atman_runtime::model_registry::set_provider_config(ProviderConfig {
-            providers: std::collections::HashMap::from([(
-                "official".into(),
-                ProviderEntry {
-                    kind: "openai".into(),
-                    reasoning_format: Some(OpenAiReasoningFormat::Official),
-                    ..Default::default()
+        let install_legacy_catalog = |provider_key: &str, wire_profile| {
+            let prepared = atman_runtime::model_registry::prepare_provider_catalog(
+                atman_runtime::model_registry::ProviderDescriptor {
+                    provider_key: provider_key.into(),
+                    provider_name: provider_key.into(),
+                    namespace: provider_key.into(),
+                    wire_profile,
                 },
-            )]),
-            models: std::collections::HashMap::from([(
-                "official-model".into(),
-                ModelEntry {
-                    model: "vendor/official-model".into(),
-                    provider: Some("official".into()),
+                &[DiscoveredModelDetails {
+                    slug: "legacy-model".into(),
                     context_budget: Some(128_000),
-                    ..Default::default()
-                },
-            )]),
+                    capability_knowledge: CapabilityKnowledge::Legacy { thinking: true },
+                }],
+            )
+            .unwrap();
+            atman_runtime::model_registry::commit_prepared_provider_catalog(prepared);
+        };
+        atman_runtime::model_registry::set_provider_config(ProviderConfig {
             aliases: std::collections::HashMap::from([(
                 "smart".into(),
                 AliasEntry {
-                    model: "official-model".into(),
+                    model: "test-codex:legacy-model".into(),
                 },
             )]),
+            ..Default::default()
         });
+        install_legacy_catalog("test-codex", ReasoningWireProfile::CodexResponses);
 
         let mut app = AppState::new("session".into(), None);
-        assert_eq!(
-            app.effective_input_reasoning_badge().as_deref(),
-            Some("default")
-        );
         app.input_reasoning = Some(ReasoningSelection::Effort {
             effort: ReasoningEffort::High,
             execution_mode: None,
         });
 
+        assert!(!app.reconcile_input_reasoning());
+        assert_eq!(
+            app.input_reasoning,
+            Some(ReasoningSelection::Effort {
+                effort: ReasoningEffort::High,
+                execution_mode: None,
+            })
+        );
+        assert!(app.items.is_empty());
+        assert_eq!(
+            app.input_reasoning_for_submission(),
+            Some(ReasoningSelection::Effort {
+                effort: ReasoningEffort::High,
+                execution_mode: None,
+            })
+        );
+
+        atman_runtime::model_registry::remove_provider_catalog("test-codex");
         atman_runtime::model_registry::set_provider_config(ProviderConfig {
-            providers: std::collections::HashMap::from([(
-                "compatible".into(),
-                ProviderEntry {
-                    kind: "openai-compat".into(),
-                    reasoning_format: Some(OpenAiReasoningFormat::CompatibleThinking),
-                    ..Default::default()
-                },
-            )]),
-            models: std::collections::HashMap::from([(
-                "compatible-model".into(),
-                ModelEntry {
-                    model: "vendor/compatible-model".into(),
-                    provider: Some("compatible".into()),
-                    context_budget: Some(128_000),
-                    thinking: Some(true),
-                    ..Default::default()
-                },
-            )]),
             aliases: std::collections::HashMap::from([(
                 "smart".into(),
                 AliasEntry {
-                    model: "compatible-model".into(),
+                    model: "test-compatible:legacy-model".into(),
                 },
             )]),
+            ..Default::default()
         });
+        install_legacy_catalog("test-compatible", ReasoningWireProfile::CompatibleThinking);
 
         assert!(app.reconcile_input_reasoning());
         assert_eq!(app.input_reasoning, None);
-        assert_eq!(
-            app.effective_input_reasoning_badge().as_deref(),
-            Some("auto")
-        );
         assert!(matches!(
             app.items.last(),
             Some(OutputItem::SystemNote {

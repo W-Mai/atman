@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
             reconciled.len()
         );
     }
+    launcher.start_provider_catalog_refreshes(&state).await?;
     state.set_launcher(launcher);
 
     let config = hub.load_or_init_daemon_config()?;

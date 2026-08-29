@@ -1411,10 +1411,45 @@ pub fn resolve_reasoning_for_model(
     resolve_reasoning_for_resolved(&model, selection)
 }
 
+/// Return whether a wire-valid selection still requires capability fields that are unknown.
+pub fn reasoning_selection_uses_legacy_capabilities(
+    model: &str,
+    selection: &ReasoningSelection,
+) -> bool {
+    let state = REGISTRY_STATE.read().unwrap();
+    let Some(model) = resolved_model_in_state(&state, model) else {
+        return false;
+    };
+    if model
+        .wire_profile
+        .validate(selection, model.entry.max_tokens)
+        .is_err()
+    {
+        return false;
+    }
+    let checks_effort_metadata = matches!(
+        selection,
+        ReasoningSelection::Effort { effort, .. } if !matches!(effort, ReasoningEffort::None)
+    ) || matches!(selection, ReasoningSelection::BudgetTokens { .. });
+    (checks_effort_metadata
+        && matches!(
+            model.capability_knowledge.reasoning_efforts,
+            CapabilityFieldKnowledge::Legacy
+        ))
+        || (selection.execution_mode().is_some()
+            && matches!(
+                model.capability_knowledge.reasoning_modes,
+                CapabilityFieldKnowledge::Legacy
+            ))
+}
+
 fn resolve_reasoning_for_resolved(
     model: &ResolvedModel,
     selection: &ReasoningSelection,
 ) -> Result<ReasoningSelection, String> {
+    model
+        .wire_profile
+        .validate(selection, model.entry.max_tokens)?;
     if let ReasoningSelection::Effort { effort, .. } = selection
         && !matches!(effort, ReasoningEffort::None)
     {

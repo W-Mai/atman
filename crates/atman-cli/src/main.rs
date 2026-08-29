@@ -715,9 +715,19 @@ async fn cmd_run(
 
     load_model_config_from_disk();
 
-    let atman_daemon::bootstrap::BootstrapOutcome { mut executor } =
-        atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
-            .await?;
+    let atman_daemon::bootstrap::BootstrapOutcome {
+        mut executor,
+        provider_catalog_refresh_plan,
+        ..
+    } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
+        .await?;
+    if !mock && let Some(lifecycle) = executor.provider_lifecycle() {
+        consume_provider_catalog_refresh_plan(provider_catalog_refresh_plan, move |provider_id| {
+            let lifecycle = lifecycle.clone();
+            async move { lifecycle.refresh_models_if_stale(&provider_id).await }
+        })
+        .await;
+    }
     executor.source_dir = file.parent().map(|p| p.to_path_buf());
     let _mcp_shutdown = atman_daemon::bootstrap::spawn_mcp_boot(
         executor.clone(),
@@ -1438,6 +1448,7 @@ struct PrebuiltSession {
     intro: Option<atman_tui::app::StartupIntro>,
     /// Notifications collected during boot, for seamless toast continuity.
     boot_notifications: Vec<atman_runtime::notify::Notification>,
+    provider_catalog_refresh_plan: Vec<String>,
     mcp_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -1490,9 +1501,12 @@ async fn prebuild_session(
     emit(BootStepId::OpenSession, false, true);
 
     emit(BootStepId::BuildExecutor, true, false);
-    let atman_daemon::bootstrap::BootstrapOutcome { mut executor } =
-        atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
-            .await?;
+    let atman_daemon::bootstrap::BootstrapOutcome {
+        mut executor,
+        provider_catalog_refresh_plan,
+        ..
+    } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
+        .await?;
     emit(BootStepId::BuildExecutor, false, true);
 
     emit(BootStepId::RegisterProviders, true, false);
@@ -1525,6 +1539,7 @@ async fn prebuild_session(
         root,
         intro,
         boot_notifications: Vec::new(),
+        provider_catalog_refresh_plan,
         mcp_shutdown_tx,
     })
 }
@@ -1625,6 +1640,7 @@ async fn cmd_repl_once(
         root,
         intro,
         boot_notifications,
+        mut provider_catalog_refresh_plan,
         mcp_shutdown_tx,
     } = prebuilt;
 
@@ -1642,6 +1658,19 @@ async fn cmd_repl_once(
             session.forms(),
         ));
         executor.tool_ctx.prompt_resolver = Some(resolver);
+    }
+    if !use_tui {
+        let provider_lifecycle = executor
+            .provider_lifecycle()
+            .context("provider lifecycle unavailable")?;
+        consume_provider_catalog_refresh_plan(
+            std::mem::take(&mut provider_catalog_refresh_plan),
+            move |provider_id| {
+                let lifecycle = provider_lifecycle.clone();
+                async move { lifecycle.refresh_models_if_stale(&provider_id).await }
+            },
+        )
+        .await;
     }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
@@ -1692,6 +1721,24 @@ async fn cmd_repl_once(
         let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
             let mut provider_mutations = tokio::task::JoinSet::new();
+            let mut provider_catalog_refreshes = tokio::task::JoinSet::new();
+            for provider_id in provider_catalog_refresh_plan {
+                let lifecycle = provider_lifecycle_for_ctrl.clone();
+                provider_catalog_refreshes.spawn(async move {
+                    let result = match lifecycle.refresh_models_if_stale(&provider_id).await {
+                        Ok(outcome) => Ok(outcome),
+                        Err(
+                            atman_runtime::ProviderLifecycleError::ProviderNotFound { .. }
+                            | atman_runtime::ProviderLifecycleError::ProviderDisabled { .. }
+                            | atman_runtime::ProviderLifecycleError::Stale { .. },
+                        ) => Ok(
+                            atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::NotNeeded,
+                        ),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    (provider_id, result)
+                });
+            }
             loop {
                 let msg = tokio::select! {
                     message = ctrl_rx.recv() => {
@@ -1716,10 +1763,37 @@ async fn cmd_repl_once(
                                     let _ = tx.send(());
                                 }
                                 provider_mutations.shutdown().await;
+                                provider_catalog_refreshes.shutdown().await;
                                 if error.is_panic() {
                                     std::panic::resume_unwind(error.into_panic());
                                 }
                                 panic!("provider mutation task failed: {error}");
+                            }
+                            None => {}
+                        }
+                        continue;
+                    }
+                    completed = provider_catalog_refreshes.join_next(), if !provider_catalog_refreshes.is_empty() => {
+                        match completed {
+                            Some(Ok((provider_id, result))) => {
+                                let _ = cmd_tx_for_models.send(
+                                    atman_tui::TuiCommand::ProviderCatalogRefreshResult {
+                                        provider_id,
+                                        result,
+                                    },
+                                );
+                            }
+                            Some(Err(error)) => {
+                                session_for_ctrl.cancel_flow();
+                                if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
+                                    let _ = tx.send(());
+                                }
+                                provider_mutations.shutdown().await;
+                                provider_catalog_refreshes.shutdown().await;
+                                if error.is_panic() {
+                                    std::panic::resume_unwind(error.into_panic());
+                                }
+                                panic!("provider catalog refresh task failed: {error}");
                             }
                             None => {}
                         }
@@ -2392,6 +2466,7 @@ async fn cmd_repl_once(
                 }
             }
             provider_mutations.shutdown().await;
+            provider_catalog_refreshes.shutdown().await;
         });
         let session_meta =
             atman_runtime::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
@@ -2863,6 +2938,50 @@ fn spawn_provider_mutation_task<F>(
         let result = future.await.map_err(|error| format!("{error:#}"));
         (request, result)
     });
+}
+
+async fn consume_provider_catalog_refresh_plan<F, Fut>(plan: Vec<String>, mut refresh_provider: F)
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<
+                atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome,
+                atman_runtime::ProviderLifecycleError,
+            >,
+        >,
+{
+    for provider_id in plan {
+        match refresh_provider(provider_id.clone()).await {
+            Ok(
+                atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::NotNeeded
+                | atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::AlreadyInFlight,
+            ) => {}
+            Ok(
+                atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::CatalogUpdated(
+                    delta,
+                ),
+            ) => atman_runtime::notify!(
+                info,
+                location = Log,
+                "provider catalog `{provider_id}` refreshed: +{} ~{} -{} ({} total)",
+                delta.added,
+                delta.updated,
+                delta.removed,
+                delta.total
+            ),
+            Ok(_) => {}
+            Err(
+                atman_runtime::ProviderLifecycleError::ProviderNotFound { .. }
+                | atman_runtime::ProviderLifecycleError::ProviderDisabled { .. }
+                | atman_runtime::ProviderLifecycleError::Stale { .. },
+            ) => {}
+            Err(error) => atman_runtime::notify!(
+                warn,
+                location = Log,
+                "provider catalog `{provider_id}` refresh failed: {error}"
+            ),
+        }
+    }
 }
 
 async fn execute_provider_mutation(
@@ -7334,6 +7453,28 @@ mod tests {
             .await
             .expect("provider mutation future was not dropped")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn plain_repl_refresh_helper_consumes_entire_plan() {
+        use atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome;
+
+        let plan = vec!["provider-a".into(), "provider-b".into()];
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_by_refresh = seen.clone();
+
+        consume_provider_catalog_refresh_plan(plan, move |provider_id| {
+            seen_by_refresh.lock().unwrap().push(provider_id);
+            std::future::ready(Ok::<_, atman_runtime::ProviderLifecycleError>(
+                ProviderCatalogRefreshOutcome::NotNeeded,
+            ))
+        })
+        .await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["provider-a".to_string(), "provider-b".to_string()]
+        );
     }
 
     #[test]

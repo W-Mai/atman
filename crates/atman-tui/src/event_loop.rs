@@ -1402,6 +1402,12 @@ pub(crate) async fn run_frames(
                         TuiCommand::ProviderCatalogChanged { added_provider } => {
                             apply_provider_catalog_changed(&mut app, added_provider);
                         }
+                        TuiCommand::ProviderCatalogRefreshResult {
+                            provider_id,
+                            result,
+                        } => {
+                            apply_provider_catalog_refresh_result(&mut app, &provider_id, result);
+                        }
                         TuiCommand::ProviderMutationResult { request, result } => {
                             apply_provider_mutation_result(&mut app, request, result);
                         }
@@ -1471,6 +1477,38 @@ fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<Stri
             app.wm.modals.onboarding.provider_added(Some(&name));
             app.wm.modals.onboarding.try_advance_to_model_select();
         }
+    }
+}
+
+fn apply_provider_catalog_refresh_result(
+    app: &mut UiState,
+    provider_id: &str,
+    result: Result<atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome, String>,
+) {
+    match result {
+        Ok(atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::AlreadyInFlight) => {}
+        Ok(atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::NotNeeded) => {
+            apply_provider_catalog_changed(app, None);
+        }
+        Ok(atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::CatalogUpdated(
+            delta,
+        )) => {
+            apply_provider_catalog_changed(app, None);
+            app.app.push_toast(
+                format!(
+                    "{provider_id}: models refreshed · +{} ~{} -{} · {} total",
+                    delta.added, delta.updated, delta.removed, delta.total
+                ),
+                app::NoteLevel::Success,
+                std::time::Duration::from_secs(5),
+                app::ToastPosition::TopRight,
+            );
+        }
+        Ok(_) => {}
+        Err(error) => app.app.push_note(
+            format!("{provider_id}: background model refresh failed: {error}"),
+            app::NoteLevel::Error,
+        ),
     }
 }
 
@@ -1822,6 +1860,70 @@ mod tests {
         assert_eq!(
             app.wm.modals.onboarding.step,
             crate::onboarding::OnboardingStep::ModelSelect
+        );
+    }
+
+    #[test]
+    fn background_provider_refresh_is_silent_when_no_longer_needed() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+
+        apply_provider_catalog_refresh_result(
+            &mut app,
+            "provider-id",
+            Ok(atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::NotNeeded),
+        );
+
+        assert!(app.app.items.is_empty());
+        assert!(app.app.toasts.is_empty());
+    }
+
+    #[test]
+    fn background_provider_refresh_failure_is_persistent() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+
+        apply_provider_catalog_refresh_result(
+            &mut app,
+            "provider-id",
+            Err("discovery unavailable".into()),
+        );
+
+        assert!(app.app.toasts.is_empty());
+        assert!(matches!(
+            app.app.items.as_slice(),
+            [app::OutputItem::SystemNote { text, level }]
+                if text.contains("provider-id")
+                    && text.contains("discovery unavailable")
+                    && *level == app::NoteLevel::Error
+        ));
+    }
+
+    #[test]
+    fn background_provider_refresh_success_updates_catalog_without_onboarding() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        app.wm.modals.onboarding_open = true;
+
+        apply_provider_catalog_refresh_result(
+            &mut app,
+            "provider-id",
+            Ok(
+                atman_runtime::provider_lifecycle::ProviderCatalogRefreshOutcome::CatalogUpdated(
+                    atman_runtime::model_registry::CatalogDelta {
+                        added: 2,
+                        updated: 1,
+                        removed: 0,
+                        total: 3,
+                    },
+                ),
+            ),
+        );
+
+        assert!(app.app.items.is_empty());
+        assert_eq!(app.app.toasts.len(), 1);
+        assert_eq!(app.app.toasts[0].level, app::NoteLevel::Success);
+        assert!(app.app.toasts[0].message.contains("+2 ~1 -0 · 3 total"));
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ProviderSelect
         );
     }
 }

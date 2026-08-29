@@ -48,8 +48,11 @@ pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<atman_runtime::re
     Some(Arc::new(redactor))
 }
 
+#[non_exhaustive]
 pub struct BootstrapOutcome {
     pub executor: Executor,
+    /// Provider ids whose restored model catalogs still need a conditional refresh.
+    pub provider_catalog_refresh_plan: Vec<String>,
 }
 
 pub(crate) fn resolve_config_hub(
@@ -316,7 +319,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_web(&executor.tools, web_config.fetch);
     tools::register_web_search(&executor.tools, &web_config.search);
     let auth_hub = resolve_config_hub(opts.config_dir.as_deref())?;
-    register_providers(&mut executor, &auth_hub).await?;
+    let provider_catalog_refresh_plan = register_providers(&mut executor, &auth_hub).await?;
     if let Some(sandbox) =
         build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
     {
@@ -342,7 +345,10 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
             aliases: std::collections::HashMap::new(),
         });
     }
-    Ok(BootstrapOutcome { executor })
+    Ok(BootstrapOutcome {
+        executor,
+        provider_catalog_refresh_plan,
+    })
 }
 
 fn build_sandbox(
@@ -464,12 +470,19 @@ async fn build_rule_fetch(
 async fn register_providers(
     executor: &mut Executor,
     auth_hub: &atman_runtime::config_hub::ConfigHub,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     register_providers_from_config(executor);
     atman_runtime::model_registry::register_all_preset_models();
     let lifecycle = executor.attach_provider_lifecycle(auth_hub.clone())?;
+    prepare_auth_provider_runtime(&lifecycle).await
+}
+
+pub(crate) async fn prepare_auth_provider_runtime(
+    lifecycle: &atman_runtime::ProviderLifecycle,
+) -> Result<Vec<String>> {
     lifecycle.reconcile_inactive_providers()?;
-    restore_providers_from_auth_store(&lifecycle, auth_hub).await
+    restore_providers_from_auth_store(lifecycle, lifecycle.config_hub()).await?;
+    Ok(lifecycle.catalog_refresh_plan())
 }
 
 async fn restore_providers_from_auth_store(
@@ -797,6 +810,8 @@ mod tests {
                     .resolve(&model)
                     .expect("selected config model should resolve to its live provider");
                 assert_eq!(provider.name(), PROVIDER_ID);
+                assert_eq!(outcome.provider_catalog_refresh_plan.len(), 1);
+                assert_eq!(outcome.provider_catalog_refresh_plan[0], PROVIDER_ID);
             });
     }
 

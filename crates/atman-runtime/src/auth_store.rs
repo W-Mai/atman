@@ -7,6 +7,16 @@ use crate::storage::config_dir;
 
 const AUTH_FILENAME: &str = "auth.json";
 const MODEL_CACHE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const MODEL_CACHE_FRESHNESS_WINDOW_SECONDS: i64 = 15 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelCacheFreshness {
+    Fresh,
+    Missing,
+    LegacySchema,
+    MissingCapabilities,
+    Expired,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -281,6 +291,22 @@ impl AuthStoreDocument {
             .model_cache
             .as_ref()
             .map(ModelCacheDocument::details)
+    }
+
+    pub(crate) fn model_cache_freshness(
+        &self,
+        provider_id: &str,
+        now: i64,
+        max_age_seconds: i64,
+    ) -> Option<ModelCacheFreshness> {
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)?;
+        Some(match provider.model_cache.as_ref() {
+            Some(cache) => cache.freshness(now, max_age_seconds),
+            None => ModelCacheFreshness::Missing,
+        })
     }
 
     pub(crate) fn provider_catalog_snapshot(
@@ -559,6 +585,19 @@ impl ModelCacheDocument {
                 },
             })
             .collect()
+    }
+
+    fn freshness(&self, now: i64, max_age_seconds: i64) -> ModelCacheFreshness {
+        if self.schema_version != MODEL_CACHE_SCHEMA_VERSION {
+            return ModelCacheFreshness::LegacySchema;
+        }
+        if self.models.iter().any(|model| model.capabilities.is_none()) {
+            return ModelCacheFreshness::MissingCapabilities;
+        }
+        if now < self.fetched_at || now.saturating_sub(self.fetched_at) >= max_age_seconds {
+            return ModelCacheFreshness::Expired;
+        }
+        ModelCacheFreshness::Fresh
     }
 }
 
@@ -941,6 +980,51 @@ mod tests {
             crate::provider::CapabilityKnowledge::Advertised(
                 crate::provider::ModelCapabilities::default()
             )
+        );
+    }
+
+    #[test]
+    fn model_cache_freshness_requires_current_complete_recent_metadata() {
+        let explicit_empty = crate::provider::DiscoveredModelDetails {
+            slug: "codex/test".into(),
+            context_budget: Some(8_192),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                crate::provider::ModelCapabilities::default(),
+            ),
+        };
+        let fresh = ModelCacheDocument::from_details(100, &[explicit_empty]);
+        let empty = ModelCacheDocument::from_details(100, &[]);
+        let legacy: ModelCacheDocument = serde_json::from_str(
+            r#"{"fetched_at":100,"models":[{"slug":"codex/test","thinking":true}]}"#,
+        )
+        .unwrap();
+        let incomplete: ModelCacheDocument = serde_json::from_str(
+            r#"{
+                "schema_version": 1,
+                "fetched_at": 100,
+                "models": [{"slug":"codex/test","thinking":true}]
+            }"#,
+        )
+        .unwrap();
+        let missing = AuthStoreDocument {
+            providers: vec![provider("missing").into()],
+        };
+
+        assert_eq!(
+            missing.model_cache_freshness("missing", 100, 900),
+            Some(ModelCacheFreshness::Missing)
+        );
+        assert_eq!(fresh.freshness(999, 900), ModelCacheFreshness::Fresh);
+        assert_eq!(empty.freshness(999, 900), ModelCacheFreshness::Fresh);
+        assert_eq!(fresh.freshness(1_000, 900), ModelCacheFreshness::Expired);
+        assert_eq!(fresh.freshness(99, 900), ModelCacheFreshness::Expired);
+        assert_eq!(
+            legacy.freshness(1_000, 900),
+            ModelCacheFreshness::LegacySchema
+        );
+        assert_eq!(
+            incomplete.freshness(1_000, 900),
+            ModelCacheFreshness::MissingCapabilities
         );
     }
 
