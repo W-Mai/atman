@@ -125,6 +125,45 @@ pub(crate) enum AuthModelCacheCommit {
     Changed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthProviderInsertCommit {
+    Inserted,
+    Changed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthProviderRuntimeCommit {
+    Applied { auth_changed: bool },
+    Missing,
+    Disabled,
+    Changed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AuthProviderRuntimeState {
+    pub provider: crate::auth_store::StoredProvider,
+    pub catalog_snapshot: crate::auth_store::AuthProviderCatalogSnapshot,
+    pub model_namespace: Option<String>,
+    pub model_cache: Option<Vec<crate::provider::DiscoveredModelDetails>>,
+    pub provider_ids: Vec<String>,
+}
+
+pub(crate) struct AuthModelCacheUpdate<'a> {
+    pub expected: &'a crate::auth_store::StoredProvider,
+    pub expected_catalog: &'a crate::auth_store::AuthProviderCatalogSnapshot,
+    pub expected_provider_ids: Option<&'a [String]>,
+    pub model_namespace: &'a str,
+    pub fetched_at: i64,
+    pub models: &'a [crate::provider::DiscoveredModelDetails],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthProviderRuntimeDescriptor {
+    pub id: String,
+    pub kind: crate::auth_store::ProviderKind,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigHub {
     config_dir: PathBuf,
@@ -295,6 +334,7 @@ impl ConfigHub {
         Ok(load_auth_document_from_path(&self.auth_path)?.model_cache_details(id))
     }
 
+    #[cfg(test)]
     pub(crate) fn load_or_create_auth_provider_catalog_state(
         &self,
         id: &str,
@@ -310,6 +350,32 @@ impl ConfigHub {
                 return Ok((None, false));
             };
             Ok((Some(state), changed))
+        })
+    }
+
+    pub(crate) fn load_or_create_auth_provider_runtime_state(
+        &self,
+        id: &str,
+    ) -> Result<Option<AuthProviderRuntimeState>, ConfigError> {
+        self.update_auth_document_conditionally(|document| {
+            let Some(((provider, catalog_snapshot), changed)) =
+                document.ensure_provider_catalog_state(id)
+            else {
+                return Ok((None, false));
+            };
+            let model_namespace = document.model_namespace(id);
+            let model_cache = document.model_cache_details(id);
+            let provider_ids = sorted_auth_provider_ids(&document.legacy_view());
+            Ok((
+                Some(AuthProviderRuntimeState {
+                    provider,
+                    catalog_snapshot,
+                    model_namespace,
+                    model_cache,
+                    provider_ids,
+                }),
+                changed,
+            ))
         })
     }
 
@@ -454,27 +520,44 @@ impl ConfigHub {
         fetched_at: i64,
         models: &[crate::provider::DiscoveredModelDetails],
     ) -> Result<(), ConfigError> {
-        self.add_auth_provider_with_model_cache_details_and_then(
-            provider,
-            model_namespace,
-            fetched_at,
-            models,
-            || (),
-        )
+        let (commit, result) = self
+            .add_auth_provider_with_model_cache_details_if_provider_ids_and_then(
+                provider,
+                None,
+                model_namespace,
+                fetched_at,
+                models,
+                || (),
+            )?;
+        match (commit, result) {
+            (AuthProviderInsertCommit::Inserted, Some(())) => Ok(()),
+            (AuthProviderInsertCommit::Changed, _) => {
+                unreachable!("provider ID snapshot was not supplied")
+            }
+            (AuthProviderInsertCommit::Inserted, None) => {
+                unreachable!("provider insertion callback was not run")
+            }
+        }
     }
 
-    pub(crate) fn add_auth_provider_with_model_cache_details_and_then<T>(
+    pub(crate) fn add_auth_provider_with_model_cache_details_if_provider_ids_and_then<T>(
         &self,
         provider: crate::auth_store::StoredProvider,
+        expected_provider_ids: Option<&[String]>,
         model_namespace: &str,
         fetched_at: i64,
         models: &[crate::provider::DiscoveredModelDetails],
         after_write: impl FnOnce() -> T,
-    ) -> Result<T, ConfigError> {
+    ) -> Result<(AuthProviderInsertCommit, Option<T>), ConfigError> {
         self.update_auth_document_conditionally_and_then(
             |document| {
                 let provider_id = provider.id.clone();
                 let mut store = document.legacy_view();
+                if expected_provider_ids
+                    .is_some_and(|expected| sorted_auth_provider_ids(&store) != expected)
+                {
+                    return Ok((AuthProviderInsertCommit::Changed, false));
+                }
                 if store
                     .providers
                     .iter()
@@ -494,11 +577,10 @@ impl ConfigHub {
                         "auth provider `{provider_id}` disappeared during insertion"
                     )));
                 }
-                Ok(((), true))
+                Ok((AuthProviderInsertCommit::Inserted, true))
             },
-            |_| after_write(),
+            |commit| (*commit == AuthProviderInsertCommit::Inserted).then(after_write),
         )
-        .map(|((), result)| result)
     }
 
     pub fn remove_auth_provider(&self, id: &str) -> Result<bool, ConfigError> {
@@ -607,11 +689,14 @@ impl ConfigHub {
         models: &[crate::provider::DiscoveredModelDetails],
     ) -> Result<AuthModelCacheCommit, ConfigError> {
         self.update_auth_model_cache_details_if_enabled_and_then(
-            expected,
-            expected_catalog,
-            model_namespace,
-            fetched_at,
-            models,
+            AuthModelCacheUpdate {
+                expected,
+                expected_catalog,
+                expected_provider_ids: None,
+                model_namespace,
+                fetched_at,
+                models,
+            },
             || (),
         )
         .map(|(commit, _)| commit)
@@ -619,13 +704,17 @@ impl ConfigHub {
 
     pub(crate) fn update_auth_model_cache_details_if_enabled_and_then<T>(
         &self,
-        expected: &crate::auth_store::StoredProvider,
-        expected_catalog: &crate::auth_store::AuthProviderCatalogSnapshot,
-        model_namespace: &str,
-        fetched_at: i64,
-        models: &[crate::provider::DiscoveredModelDetails],
+        update: AuthModelCacheUpdate<'_>,
         after_update: impl FnOnce() -> T,
     ) -> Result<(AuthModelCacheCommit, Option<T>), ConfigError> {
+        let AuthModelCacheUpdate {
+            expected,
+            expected_catalog,
+            expected_provider_ids,
+            model_namespace,
+            fetched_at,
+            models,
+        } = update;
         self.update_auth_document_conditionally_and_then(
             |document| {
                 let store = document.legacy_view();
@@ -645,6 +734,11 @@ impl ConfigHub {
                 {
                     return Ok((AuthModelCacheCommit::Changed, false));
                 }
+                if expected_provider_ids
+                    .is_some_and(|expected| sorted_auth_provider_ids(&store) != expected)
+                {
+                    return Ok((AuthModelCacheCommit::Changed, false));
+                }
                 let updated = document
                     .update_model_cache_details(&expected.id, model_namespace, fetched_at, models)
                     .map_err(ConfigError::Invalid)?;
@@ -655,6 +749,93 @@ impl ConfigHub {
             },
             |commit| (*commit == AuthModelCacheCommit::Updated).then(after_update),
         )
+    }
+
+    pub(crate) fn commit_auth_provider_runtime_if_current_and_then<T>(
+        &self,
+        expected: &crate::auth_store::StoredProvider,
+        expected_catalog: &crate::auth_store::AuthProviderCatalogSnapshot,
+        enable_if_disabled: bool,
+        model_namespace: Option<&str>,
+        expected_provider_ids: Option<&[String]>,
+        after_commit: impl FnOnce() -> T,
+    ) -> Result<(AuthProviderRuntimeCommit, Option<T>), ConfigError> {
+        self.update_auth_document_conditionally_and_then(
+            |document| {
+                let store = document.legacy_view();
+                let Some(provider) = store
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == expected.id)
+                else {
+                    return Ok((AuthProviderRuntimeCommit::Missing, false));
+                };
+                if !auth_provider_matches(provider, expected)
+                    || document.provider_catalog_snapshot(&expected.id).as_ref()
+                        != Some(expected_catalog)
+                {
+                    return Ok((AuthProviderRuntimeCommit::Changed, false));
+                }
+                if !provider.enabled && !enable_if_disabled {
+                    return Ok((AuthProviderRuntimeCommit::Disabled, false));
+                }
+                if let Some(expected_provider_ids) = expected_provider_ids {
+                    let provider_ids = sorted_auth_provider_ids(&store);
+                    if provider_ids != expected_provider_ids {
+                        return Ok((AuthProviderRuntimeCommit::Changed, false));
+                    }
+                }
+
+                let enabled_changed = if enable_if_disabled {
+                    document
+                        .set_provider_enabled(&expected.id, true)
+                        .ok_or_else(|| {
+                            ConfigError::Invalid(format!(
+                                "auth provider `{}` disappeared during activation",
+                                expected.id
+                            ))
+                        })?
+                } else {
+                    false
+                };
+                let namespace_changed = match model_namespace {
+                    Some(namespace) => document
+                        .ensure_model_namespace(&expected.id, namespace)
+                        .map_err(ConfigError::Invalid)?,
+                    None => false,
+                };
+                Ok((
+                    AuthProviderRuntimeCommit::Applied {
+                        auth_changed: enabled_changed || namespace_changed,
+                    },
+                    enabled_changed || namespace_changed,
+                ))
+            },
+            |commit| matches!(commit, AuthProviderRuntimeCommit::Applied { .. }).then(after_commit),
+        )
+    }
+
+    pub(crate) fn with_auth_provider_runtime_descriptors<T>(
+        &self,
+        inspect: impl FnOnce(&[AuthProviderRuntimeDescriptor]) -> T,
+    ) -> Result<T, ConfigError> {
+        self.update_auth_document_conditionally_and_then(
+            |document| {
+                let providers = document
+                    .legacy_view()
+                    .providers
+                    .into_iter()
+                    .map(|provider| AuthProviderRuntimeDescriptor {
+                        id: provider.id,
+                        kind: provider.kind,
+                        enabled: provider.enabled,
+                    })
+                    .collect::<Vec<_>>();
+                Ok((providers, false))
+            },
+            |providers| inspect(providers),
+        )
+        .map(|(_, result)| result)
     }
 
     pub fn load_or_init_daemon_config(&self) -> Result<DaemonConfig, ConfigError> {
@@ -1411,6 +1592,16 @@ fn auth_provider_matches(
     expected: &crate::auth_store::StoredProvider,
 ) -> bool {
     current.id == expected.id && current.name == expected.name && current.kind == expected.kind
+}
+
+fn sorted_auth_provider_ids(store: &crate::auth_store::AuthStore) -> Vec<String> {
+    let mut provider_ids = store
+        .providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    provider_ids
 }
 
 fn dsl_route_source(flow_name: &str, trigger: &str) -> Result<String, ConfigError> {
@@ -2644,11 +2835,14 @@ mod tests {
         let transaction_hub = hub.clone();
         let transaction = std::thread::spawn(move || {
             transaction_hub.update_auth_model_cache_details_if_enabled_and_then(
-                &expected,
-                &expected_catalog,
-                "provider@account",
-                2,
-                &replacement,
+                AuthModelCacheUpdate {
+                    expected: &expected,
+                    expected_catalog: &expected_catalog,
+                    expected_provider_ids: None,
+                    model_namespace: "provider@account",
+                    fetched_at: 2,
+                    models: &replacement,
+                },
                 || {
                     assert_eq!(
                         transaction_hub

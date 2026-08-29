@@ -89,7 +89,10 @@ pub use invocation_env::InvocationEnv;
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use projection::message_window::{TranscriptEntry, replay_transcript_from};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
-pub use provider_lifecycle::{ProviderLifecycle, ProviderLifecycleError, ProviderStateChange};
+pub use provider_lifecycle::{
+    ProviderLifecycle, ProviderLifecycleError, ProviderLifecycleOutcome, ProviderReconcileOutcome,
+    ProviderStateChange,
+};
 pub use session::{
     CompactReviewDecision, CompactReviewMode, CompactReviewRegistry, ContextSnapshot,
     PendingCompactReview, Session, SessionId,

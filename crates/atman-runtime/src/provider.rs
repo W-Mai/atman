@@ -740,9 +740,13 @@ impl ProviderRegistry {
     }
 
     pub fn remove(&self, name: &str) -> bool {
+        self.take_named(name).is_some()
+    }
+
+    pub(crate) fn take_named(&self, name: &str) -> Option<Arc<dyn Provider>> {
         let mut providers = self.providers.write().unwrap();
-        let removed = providers.remove(name).is_some();
-        if removed {
+        let removed = providers.remove(name);
+        if removed.is_some() {
             let mut default = self.default.write().unwrap();
             if default.as_deref() == Some(name) {
                 *default = None;
