@@ -410,11 +410,7 @@ impl AppState {
         }
     }
 
-    /// Materialize the reasoning value shown by the composer for this submission.
-    ///
-    /// `None` remains stored in `input_reasoning` so model-default mode follows
-    /// the active `smart` model. At the submission boundary, however, the TUI's
-    /// visible effective value becomes the immutable invocation snapshot.
+    /// Resolve the composer-visible reasoning into a per-submission value.
     pub(crate) fn input_reasoning_for_submission(
         &self,
     ) -> Option<atman_runtime::provider::ReasoningSelection> {

@@ -508,15 +508,14 @@ pub trait Provider: Send + Sync {
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
 
-    /// Discover available models using the original best-effort API.
+    /// Discover available models without capability provenance.
     fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
         Box::pin(async { vec![] })
     }
 
     /// Discover available models with capability provenance and typed failures.
-    ///
-    /// The default adapts providers implemented against the original API and
-    /// treats their capability data as legacy knowledge.
+    /// The default treats non-empty compatibility results as legacy capability
+    /// data and reports an empty result as unsupported.
     fn try_discover_models(
         &self,
     ) -> BoxFut<'static, Result<Vec<DiscoveredModelDetails>, ModelDiscoveryError>> {

@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use crate::value::Value;
 
-/// Immutable values supplied by the caller for one root flow invocation.
-///
-/// This is Atman runtime data. It never reads the process environment.
+/// Immutable caller-supplied values scoped to one root flow invocation,
+/// independent of the process environment.
 #[derive(Clone, Debug, Default)]
 pub struct InvocationEnv(Arc<BTreeMap<String, Value>>);
 

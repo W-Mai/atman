@@ -251,8 +251,7 @@ pub fn register_provider_entries(entries: Vec<(String, ProviderEntry)>) {
     }
 }
 
-/// Build ModelEntry values from discovered models and register them.
-/// Models are keyed by a stable provider namespace plus the provider API model.
+/// Register a legacy catalog using `<provider_name>:<api_model>` keys.
 pub fn register_discovered(
     _provider_id: &str,
     provider_name: &str,

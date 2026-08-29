@@ -406,7 +406,7 @@ pub fn save_provider_model_cache(
     Ok(())
 }
 
-/// Save rich discovered model data using the versioned auth.json wire format.
+/// Save discovered capability metadata in the versioned auth cache.
 pub fn save_provider_model_cache_details(
     provider_id: &str,
     model_namespace: &str,
@@ -436,7 +436,7 @@ pub fn ensure_provider_model_namespace(provider_id: &str, model_namespace: &str)
     Ok(())
 }
 
-/// Load rich cached model data for one provider.
+/// Load cached models with capability provenance.
 pub fn load_provider_model_cache_details(
     provider_id: &str,
 ) -> Result<Option<Vec<crate::provider::DiscoveredModelDetails>>> {
@@ -456,7 +456,7 @@ pub fn cached_to_discovered(cache: &ModelCache) -> Vec<crate::provider::Discover
         .collect()
 }
 
-/// Adapt a legacy public cache into rich models with legacy capability knowledge.
+/// Adapt the public cache format with legacy capability provenance.
 pub fn cached_to_discovered_details(
     cache: &ModelCache,
 ) -> Vec<crate::provider::DiscoveredModelDetails> {
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn current_model_cache_distinguishes_explicit_empty_capabilities() {
+    fn versioned_model_cache_distinguishes_explicit_empty_capabilities() {
         let cache = ModelCacheDocument::from_details(
             10,
             &[crate::provider::DiscoveredModelDetails {
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn current_wire_cache_is_readable_as_the_public_legacy_dto() {
+    fn versioned_wire_cache_is_readable_as_the_public_dto() {
         let wire = ModelCacheDocument::from_details(
             10,
             &[crate::provider::DiscoveredModelDetails {
@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_view_updates_preserve_rich_cache_metadata() {
+    fn legacy_view_updates_preserve_namespace_and_capability_metadata() {
         let mut document = AuthStoreDocument::default();
         document.merge_legacy_view(AuthStore {
             providers: vec![StoredProvider {
@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_duplicate_ids_do_not_cross_wire_rich_cache_metadata() {
+    fn legacy_duplicate_ids_do_not_cross_wire_capability_metadata() {
         let provider = |name: &str| StoredProvider {
             id: "duplicate".into(),
             name: name.into(),

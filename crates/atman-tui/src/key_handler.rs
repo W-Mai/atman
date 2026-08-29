@@ -1579,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn first_submit_captures_the_displayed_model_reasoning() {
+    fn model_default_submission_captures_effective_reasoning() {
         use atman_runtime::model_registry::{
             AliasEntry, ModelEntry, ProviderConfig, ProviderEntry,
         };

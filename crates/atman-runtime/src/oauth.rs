@@ -89,7 +89,7 @@ pub async fn create_oauth_provider<P: OAuthProvider>(
     Ok((provider, models))
 }
 
-/// Create an OAuth provider and discover rich model capability data.
+/// Create an OAuth provider and discover capability metadata.
 pub async fn create_oauth_provider_with_details<P: OAuthProvider>(
     stored: &StoredProvider,
 ) -> Result<(Arc<P>, Vec<DiscoveredModelDetails>)> {
