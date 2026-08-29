@@ -951,7 +951,8 @@ fn model_entry_to_resolved(
 }
 
 fn entries_have_compatible_identity(base: &ModelEntry, overlay: &ModelEntry) -> bool {
-    (overlay.model.is_empty() || overlay.model == base.model)
+    !overlay.model.is_empty()
+        && overlay.model == base.model
         && overlay
             .provider
             .as_ref()
@@ -3274,6 +3275,67 @@ reasoning_efforts = []
         let remaining = model_entry("renamed").unwrap();
         assert!(remaining.reasoning_efforts.is_empty());
         assert!(remaining.input_modalities.is_empty());
+    }
+
+    #[test]
+    fn same_key_config_requires_api_model_to_inherit_catalog_metadata() {
+        let _registry = isolated_registry();
+        replace_provider_catalog(
+            descriptor(
+                "catalog-provider",
+                "stable",
+                ReasoningWireProfile::OpenAiOfficial,
+            ),
+            &[advertised_model(
+                "api/reasoning",
+                128_000,
+                vec![ReasoningEffort::High],
+            )],
+        )
+        .unwrap();
+
+        reload_from_text(
+            r#"
+[models."stable:api/reasoning"]
+model = "api/reasoning"
+context_budget = 112000
+"#,
+        )
+        .unwrap();
+
+        let bound = model_entry("stable:api/reasoning").unwrap();
+        assert_eq!(bound.model, "api/reasoning");
+        assert_eq!(bound.provider.as_deref(), Some("catalog-provider"));
+        assert_eq!(bound.context_budget, Some(112_000));
+        assert_eq!(bound.reasoning_efforts, vec![ReasoningEffort::High]);
+        assert_eq!(
+            bound.input_modalities,
+            vec![InputModality::Text, InputModality::Image]
+        );
+        assert!(bound.discovered);
+
+        reload_from_text(
+            r#"
+[models."stable:api/reasoning"]
+context_budget = 96000
+"#,
+        )
+        .unwrap();
+
+        let model = model_entry("stable:api/reasoning").unwrap();
+        assert!(model.model.is_empty());
+        assert_eq!(model.provider, None);
+        assert_eq!(model.context_budget, Some(96_000));
+        assert!(model.reasoning_efforts.is_empty());
+        assert!(model.input_modalities.is_empty());
+        assert!(!model.discovered);
+        assert_eq!(
+            reasoning_selections_for_model("stable:api/reasoning")
+                .into_iter()
+                .map(|selection| selection.to_string())
+                .collect::<Vec<_>>(),
+            ["default", "off", "auto"]
+        );
     }
 
     #[test]
