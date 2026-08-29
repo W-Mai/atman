@@ -109,7 +109,6 @@ pub fn spawn_mcp_boot(
                 let tier = cfg.tier;
                 let transport = cfg.transport;
                 tasks.push(tokio::task::spawn_local(async move {
-                    // Connecting
                     session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
                         name: name.clone(),
                         transport,
@@ -470,7 +469,7 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
             continue;
         }
         if p.kind == ProviderKind::Codex {
-            // Hydrate cached models immediately so the UI has them from frame 0.
+            // Hydrate the cached catalog before live provider initialization.
             if let Some(cache) = &p.model_cache {
                 let cached = load_provider_model_cache_details(&p.id)
                     .ok()

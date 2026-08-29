@@ -415,8 +415,8 @@ impl EventSink {
     }
 
     // Best-effort peek for anchor labels. NOT reserved: two peekers see the same value.
-    // Safe today because eval is single-threaded per flow (see tool.rs comment on !Send).
-    // If parallel-tool dispatch is introduced, switch call sites to reserve_seq.
+    // Safe while evaluator dispatch remains sequential per flow. Parallel dispatch must
+    // reserve sequence numbers instead.
     pub fn next_seq_peek(&self) -> u64 {
         self.seq_counter.load(std::sync::atomic::Ordering::SeqCst) + 1
     }

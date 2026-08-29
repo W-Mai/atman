@@ -46,7 +46,6 @@ pub async fn oauth_login<P: OAuthProvider + Provider>(
                         return Err(message);
                     }
 
-                    // Discover models immediately after login.
                     let discover_provider = P::from_stored(&provider);
                     match discover_provider.try_discover_models().await {
                         Ok(models) => {

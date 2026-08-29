@@ -1717,12 +1717,9 @@ pub fn resolve_reasoning(
     }
 }
 
-// Known models table (supplements API discovery)
-
 pub use crate::known_models::{KNOWN_MODELS, lookup_known_model};
-/// Register preset models for a provider whose base_url matches a PROVIDER_PRESETS entry.
-/// Models are marked `discovered = true` so they survive `set_model_config` reloads
-/// but are never written to config.toml. User-defined models in config.toml take priority.
+/// Register derived preset models for a provider with a matching base URL.
+/// User configuration overlays take priority over this layer.
 pub fn register_preset_models_for(provider_name: &str, base_url: &str) {
     let config = {
         let state = REGISTRY_STATE.read().unwrap();
@@ -1742,8 +1739,7 @@ pub fn register_preset_models_for(provider_name: &str, base_url: &str) {
     }
 }
 
-/// Register preset models for all config providers that match a PROVIDER_PRESETS entry.
-/// Called at bootstrap after `register_providers_from_config`.
+/// Register preset models for all configured providers with matching base URLs.
 pub fn register_all_preset_models() {
     let config = REGISTRY_STATE.read().unwrap().config.clone();
     if let Err(error) = install_config_layer(config) {
@@ -1950,8 +1946,6 @@ pub(crate) fn reload_from_text(text: &str) -> anyhow::Result<()> {
 
 /// Unified config parser — parses `[providers.X]`, `[models.X]`, and `[alias.X]`
 /// sections from a TOML string into a [ProviderConfig].
-///
-/// Replaces the per-crate `parse_model_config` functions in CLI and daemon.
 pub fn parse_config(text: &str) -> Option<ProviderConfig> {
     parse_config_layer(text)
         .ok()
@@ -2746,7 +2740,6 @@ mod tests {
         let _registry = isolated_registry();
         set_discovered_models(vec!["z".into(), "a".into(), "z".into()]);
         assert_eq!(discovered_models(), ["z", "a", "z"]);
-        // Register discovered models first.
         register_discovered(
             "pid-abc",
             "Codex",
@@ -2764,7 +2757,6 @@ mod tests {
         register_discovered("pid-abc", "Codex", &[]);
         assert!(model_entry("Codex:codex/gpt-5").is_some());
 
-        // Simulate config reload from config.toml.
         let mut cfg = ModelConfig::default();
         cfg.aliases.insert(
             "cheap".into(),
@@ -2774,12 +2766,10 @@ mod tests {
         );
         set_model_config(cfg);
 
-        // Discovered models should still be there.
         assert!(
             model_entry("Codex:codex/gpt-5").is_some(),
             "discovered models should survive set_model_config"
         );
-        // Alias from config should work.
         assert_eq!(resolve_alias("cheap"), "claude-opus-4.7");
     }
 

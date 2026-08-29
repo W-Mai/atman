@@ -7,10 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::RuntimeError;
 use crate::value::Value;
 
-// `dyn Future` is now `Send` — AST Span was replaced with a custom `Copy + Send + Sync`
-// struct, removing the `proc_macro2::Span` (which held `Rc<()>`).  This means
-// providers, tools, and classifiers can be spawned with `tokio::spawn` instead
-// of requiring `spawn_local` + `LocalSet`.
+/// Sendable boxed future used by provider and tool traits.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub type ToolResult = Result<Value, RuntimeError>;

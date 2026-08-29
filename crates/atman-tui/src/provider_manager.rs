@@ -94,7 +94,6 @@ pub struct ProviderManager {
     pub in_form: bool,
     form_field: usize,
     editing_provider: Option<String>,
-    /// Confirmation dialog state.
     show_confirm: bool,
     confirm_kind: Option<ConfirmKind>,
     confirm_provider_id: Option<String>,
@@ -307,7 +306,6 @@ impl ProviderManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
-        // Confirmation dialog gets first priority.
         if self.show_confirm {
             match action {
                 KeyAction::Char('y') | KeyAction::Char('Y') | KeyAction::Submit => {

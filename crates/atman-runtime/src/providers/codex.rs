@@ -116,7 +116,6 @@ fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
         if m.role == MessageRole::Assistant {
             for p in &m.parts {
                 if let MessagePart::ToolUse { id, name, .. } = p {
-                    // Codex Responses API requires "_" in function names.
                     tool_names.insert(id.clone(), crate::tool_naming::to_wire(name));
                 }
             }
@@ -247,7 +246,6 @@ fn split_assistant_parts(parts: &[MessagePart]) -> (Option<String>, Vec<Assistan
             MessagePart::Text { text: t } => text.push_str(t),
             MessagePart::ToolUse { id, name, input } => tools.push(AssistantSplit {
                 id: id.clone(),
-                // Codex Responses API requires "_" in function names.
                 name: crate::tool_naming::to_wire(name),
                 arguments: serde_json::to_string(input).unwrap_or_default(),
             }),
@@ -263,8 +261,7 @@ fn build_tools(tools: &[crate::tool::ToolSpec]) -> Vec<ResponsesTool> {
         .iter()
         .map(|t| ResponsesTool {
             r#type: "function".into(),
-            // Codex Responses API rejects "." in function names (e.g. "fs.read").
-            // Replace with "_" for outbound, revert on inbound.
+            // Responses function names reject '.', so use the provider-safe mapping.
             name: crate::tool_naming::to_wire(&t.name),
             description: t.description.clone(),
             parameters: t.input_schema.clone(),
@@ -483,7 +480,6 @@ impl Provider for CodexProvider {
                                 }
                                 let slot = &mut partial_tool_calls[idx];
                                 slot.id = item["call_id"].as_str().unwrap_or("").to_string();
-                                // Convert "_" back to "." for atman tool names.
                                 slot.name = item["name"].as_str().unwrap_or("").to_string();
                             }
                         }

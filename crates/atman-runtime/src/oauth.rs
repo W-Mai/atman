@@ -101,8 +101,7 @@ pub async fn create_oauth_provider_with_details<P: OAuthProvider>(
     Ok((provider, models))
 }
 
-/// Same as `create_oauth_provider` but skips `discover_models()`.
-/// Returns an empty model list. Use when discovery will happen in the background.
+/// Create an OAuth provider without model discovery.
 pub async fn create_oauth_provider_no_discover<P: OAuthProvider>(
     stored: &StoredProvider,
 ) -> Result<Arc<P>> {

@@ -8,9 +8,8 @@ use std::sync::{Arc, OnceLock};
 
 mod init;
 mod mcp_templates;
-mod oauth_login;
-// meta_commands now in atman_runtime
 mod migrate_source;
+mod oauth_login;
 mod repl_completer;
 mod suggest;
 mod sync;
@@ -1978,7 +1977,6 @@ async fn cmd_repl_once(
                                     &name, &base_url,
                                 );
                             }
-                            // Register provider instance in ProviderRegistry at runtime
                             let provider_key = format!("config:{name}");
                             let resolved_key = if !api_key.is_empty() {
                                 api_key.clone()
@@ -2074,7 +2072,6 @@ async fn cmd_repl_once(
                             })
                             .is_ok()
                         {
-                            // Re-register provider instance in ProviderRegistry
                             let provider_key = format!("config:{name}");
                             let resolved_key = if !api_key.is_empty() {
                                 api_key.clone()

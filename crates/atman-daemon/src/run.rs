@@ -96,8 +96,6 @@ pub fn reconcile_workspaces(
 }
 
 impl RunLauncher {
-    // Runs on a dedicated blocking thread + current-thread runtime because
-    // atman_dsl::ast::File and Executor are !Send (proc-macro2 spans hold Rc<()>).
     pub async fn spawn(
         &self,
         state: Arc<DaemonState>,

@@ -839,7 +839,6 @@ mod tests {
         }
     }
 
-    /// Helper: build a registry with a "codex" provider and an "openai" default.
     fn fixture_registry() -> ProviderRegistry {
         let reg = ProviderRegistry::new();
         let codex = Arc::new(MockProvider::new("codex"));
@@ -874,7 +873,6 @@ mod tests {
 
     #[test]
     fn resolve_prefix_match_codex_slash_model() {
-        // "codex/gpt-5.6-terra" → split '/' → prefix "codex" → found
         let reg = fixture_registry();
         let p = reg.resolve("codex/gpt-5.6-terra").expect("should resolve");
         assert_eq!(p.name(), "codex");
@@ -912,8 +910,6 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::model_registry::set_provider_config(Default::default());
-        // Simulate the Codex bootstrap: register model entry with provider="codex",
-        // resolve by model name that has no '/' separator.
         crate::model_registry::register_model_entries(vec![(
             "codex-auto-review".into(),
             crate::model_registry::ModelEntry {

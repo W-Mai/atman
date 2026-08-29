@@ -148,8 +148,6 @@ fn anthropic_reasoning(
     }
 }
 
-// Tool name mapping is now shared via crate::tool_naming::to_wire / from_wire
-
 fn build_wire_message(m: &Message, apply_cache_control: bool) -> Result<WireMessage, RuntimeError> {
     let role = match m.role {
         MessageRole::User => "user",
