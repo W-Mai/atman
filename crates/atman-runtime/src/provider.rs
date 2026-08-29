@@ -774,14 +774,14 @@ impl ProviderRegistry {
         if let Some(entry) = crate::model_registry::model_entry(model)
             && let Some(ref provider_name) = entry.provider
         {
+            if let Some(provider) = providers.get(provider_name) {
+                return Some(provider.clone());
+            }
             if !crate::model_registry::is_provider_enabled(provider_name) {
                 return None;
             }
             let config_key = format!("config:{provider_name}");
-            return providers
-                .get(&config_key)
-                .or_else(|| providers.get(provider_name))
-                .cloned();
+            return providers.get(&config_key).cloned();
         }
         if let Some((prefix, _)) = model.split_once('/')
             && let Some(p) = providers.get(prefix)
@@ -955,6 +955,49 @@ mod tests {
         registry_without_target.register(Arc::new(MockProvider::new("gateway")));
         assert!(registry_without_target.resolve("gateway/model").is_none());
         crate::model_registry::set_provider_config(Default::default());
+    }
+
+    #[test]
+    fn resolve_exact_live_provider_does_not_depend_on_global_auth_store() {
+        const PROVIDER_ID: &str = "exact-live-selected-config-provider";
+
+        struct CatalogCleanup;
+
+        impl Drop for CatalogCleanup {
+            fn drop(&mut self) {
+                crate::model_registry::remove_provider_catalog(PROVIDER_ID);
+            }
+        }
+
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::model_registry::remove_provider_catalog(PROVIDER_ID);
+        let _catalog_cleanup = CatalogCleanup;
+        let namespace = "exact-live-selected-config";
+        let prepared = crate::model_registry::prepare_provider_catalog(
+            crate::model_registry::ProviderDescriptor {
+                provider_key: PROVIDER_ID.into(),
+                provider_name: "Selected config OAuth".into(),
+                namespace: namespace.into(),
+                wire_profile: ReasoningWireProfile::CodexResponses,
+            },
+            &[DiscoveredModelDetails {
+                slug: "gpt-selected".into(),
+                context_budget: Some(128_000),
+                capability_knowledge: CapabilityKnowledge::Advertised(ModelCapabilities::default()),
+            }],
+        )
+        .unwrap();
+        crate::model_registry::commit_prepared_provider_catalog(prepared);
+
+        let registry = ProviderRegistry::new();
+        registry.register(Arc::new(MockProvider::new(PROVIDER_ID)));
+
+        let provider = registry
+            .resolve(&format!("{namespace}:gpt-selected"))
+            .expect("live provider membership should authorize resolution");
+        assert_eq!(provider.name(), PROVIDER_ID);
     }
 
     #[test]

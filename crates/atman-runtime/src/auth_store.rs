@@ -31,7 +31,7 @@ pub struct CachedModel {
     pub thinking: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredProvider {
     pub id: String,
     pub name: String,
@@ -47,6 +47,26 @@ pub struct StoredProvider {
     pub model_cache: Option<ModelCache>,
 }
 
+impl std::fmt::Debug for StoredProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProvider")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("access_token", &"[redacted]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("account", &self.account.as_ref().map(|_| "[redacted]"))
+            .field("enabled", &self.enabled)
+            .field("model_cache", &self.model_cache)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthStore {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -59,7 +79,7 @@ pub(crate) struct AuthStoreDocument {
     providers: Vec<StoredProviderDocument>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredProviderDocument {
     id: String,
     name: String,
@@ -72,11 +92,36 @@ struct StoredProviderDocument {
     account: Option<String>,
     enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     catalog_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_cache: Option<ModelCacheDocument>,
+}
+
+impl std::fmt::Debug for StoredProviderDocument {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProviderDocument")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("access_token", &"[redacted]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("account", &self.account.as_ref().map(|_| "[redacted]"))
+            .field("enabled", &self.enabled)
+            .field("credential_revision", &self.credential_revision)
+            .field("catalog_revision", &self.catalog_revision)
+            .field("model_namespace", &self.model_namespace)
+            .field("model_cache", &self.model_cache)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +145,18 @@ struct CachedModelDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthProviderCatalogSnapshot {
     revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthProviderCredentialSnapshot {
+    revision: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AuthCredentialCommit {
+    Updated { provider: StoredProvider },
+    Missing,
+    Changed,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -239,6 +296,23 @@ impl AuthStoreDocument {
         })
     }
 
+    pub(crate) fn provider_credential_state(
+        &self,
+        provider_id: &str,
+    ) -> Option<(StoredProvider, Option<AuthProviderCredentialSnapshot>)> {
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)?;
+        Some((
+            provider.legacy_view(),
+            provider
+                .credential_revision
+                .clone()
+                .map(|revision| AuthProviderCredentialSnapshot { revision }),
+        ))
+    }
+
     pub(crate) fn ensure_provider_catalog_state(
         &mut self,
         provider_id: &str,
@@ -259,6 +333,62 @@ impl AuthStoreDocument {
             ),
             changed,
         ))
+    }
+
+    pub(crate) fn ensure_provider_credential_state(
+        &mut self,
+        provider_id: &str,
+    ) -> Option<((StoredProvider, AuthProviderCredentialSnapshot), bool)> {
+        let provider = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)?;
+        let changed = provider.credential_revision.is_none();
+        let revision = provider
+            .credential_revision
+            .get_or_insert_with(new_credential_revision)
+            .clone();
+        Some((
+            (
+                provider.legacy_view(),
+                AuthProviderCredentialSnapshot { revision },
+            ),
+            changed,
+        ))
+    }
+
+    pub(crate) fn update_provider_credentials(
+        &mut self,
+        provider_id: &str,
+        expected: &AuthProviderCredentialSnapshot,
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_at: i64,
+        account: Option<String>,
+    ) -> AuthCredentialCommit {
+        let Some(provider) = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        else {
+            return AuthCredentialCommit::Missing;
+        };
+        if provider.credential_revision.as_deref() != Some(expected.revision.as_str()) {
+            return AuthCredentialCommit::Changed;
+        }
+
+        provider.access_token = access_token;
+        provider.expires_at = expires_at;
+        if refresh_token.is_some() {
+            provider.refresh_token = refresh_token;
+        }
+        if account.is_some() {
+            provider.account = account;
+        }
+        provider.bump_credential_revision();
+        AuthCredentialCommit::Updated {
+            provider: provider.legacy_view(),
+        }
     }
 }
 
@@ -298,6 +428,11 @@ impl StoredProviderDocument {
     }
 
     fn merge(mut self, provider: StoredProvider) -> Self {
+        let credential_changed = self.kind != provider.kind
+            || self.access_token != provider.access_token
+            || self.refresh_token != provider.refresh_token
+            || self.expires_at != provider.expires_at
+            || self.account != provider.account;
         let catalog_changed = self.name != provider.name
             || self.kind != provider.kind
             || self.enabled != provider.enabled
@@ -316,6 +451,11 @@ impl StoredProviderDocument {
         } else {
             self.catalog_revision
         };
+        let credential_revision = if credential_changed {
+            Some(new_credential_revision())
+        } else {
+            self.credential_revision
+        };
         Self {
             id: provider.id,
             name: provider.name,
@@ -325,6 +465,7 @@ impl StoredProviderDocument {
             expires_at: provider.expires_at,
             account: provider.account,
             enabled: provider.enabled,
+            credential_revision,
             catalog_revision,
             model_namespace: self.model_namespace,
             model_cache,
@@ -333,6 +474,11 @@ impl StoredProviderDocument {
 
     fn bump_catalog_revision(&mut self) {
         self.catalog_revision = Some(new_catalog_revision());
+    }
+
+    fn bump_credential_revision(&mut self) {
+        let revision = new_credential_revision();
+        self.credential_revision = Some(revision);
     }
 }
 
@@ -347,6 +493,7 @@ impl From<StoredProvider> for StoredProviderDocument {
             expires_at: provider.expires_at,
             account: provider.account,
             enabled: provider.enabled,
+            credential_revision: Some(new_credential_revision()),
             catalog_revision: Some(new_catalog_revision()),
             model_namespace: None,
             model_cache: provider.model_cache.map(ModelCacheDocument::from),
@@ -355,6 +502,10 @@ impl From<StoredProvider> for StoredProviderDocument {
 }
 
 fn new_catalog_revision() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn new_credential_revision() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
@@ -571,6 +722,20 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn provider(id: &str) -> StoredProvider {
+        StoredProvider {
+            id: id.into(),
+            name: "OAuth account".into(),
+            kind: ProviderKind::Codex,
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_at: 1,
+            account: Some("account@example.test".into()),
+            enabled: true,
+            model_cache: None,
+        }
+    }
+
     #[test]
     fn load_returns_empty_when_file_missing() {
         let tmp = TempDir::new().unwrap();
@@ -604,6 +769,30 @@ mod tests {
         let loaded: AuthStore = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(loaded.providers.len(), 1);
         assert_eq!(loaded.providers[0].name, "Personal Codex");
+    }
+
+    #[test]
+    fn stored_provider_debug_redacts_credentials() {
+        let provider = provider("debug");
+        let debug = format!("{provider:?}");
+
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("old-access"));
+        assert!(!debug.contains("old-refresh"));
+        assert!(!debug.contains("account@example.test"));
+    }
+
+    #[test]
+    fn auth_store_document_debug_redacts_credentials() {
+        let document = AuthStoreDocument {
+            providers: vec![provider("debug-document").into()],
+        };
+        let debug = format!("{document:?}");
+
+        assert_eq!(debug.matches("[redacted]").count(), 3);
+        assert!(!debug.contains("old-access"));
+        assert!(!debug.contains("old-refresh"));
+        assert!(!debug.contains("account@example.test"));
     }
 
     #[test]
@@ -832,6 +1021,48 @@ mod tests {
             document.model_namespace("provider").as_deref(),
             Some("stable-provider")
         );
+    }
+
+    #[test]
+    fn provider_rename_preserves_credential_cas_and_invalidates_catalog() {
+        let mut document = AuthStoreDocument::default();
+        document.merge_legacy_view(AuthStore {
+            providers: vec![provider("provider")],
+        });
+        let credential = document
+            .provider_credential_state("provider")
+            .unwrap()
+            .1
+            .unwrap();
+        let catalog = document.provider_catalog_snapshot("provider").unwrap();
+
+        let mut legacy = document.legacy_view();
+        legacy.providers[0].name = "Renamed OAuth account".into();
+        document.merge_legacy_view(legacy);
+
+        assert_eq!(
+            document
+                .provider_credential_state("provider")
+                .unwrap()
+                .1
+                .unwrap(),
+            credential
+        );
+        assert_ne!(
+            document.provider_catalog_snapshot("provider").unwrap(),
+            catalog
+        );
+        assert!(matches!(
+            document.update_provider_credentials(
+                "provider",
+                &credential,
+                "fresh-access".into(),
+                Some("fresh-refresh".into()),
+                2,
+                Some("fresh@example.test".into()),
+            ),
+            AuthCredentialCommit::Updated { .. }
+        ));
     }
 
     #[test]

@@ -305,7 +305,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let web_config = load_web_config(opts.config_dir.as_deref());
     tools::register_web(&executor.tools, web_config.fetch);
     tools::register_web_search(&executor.tools, &web_config.search);
-    register_providers_from_env(&mut executor).await;
+    let auth_hub = opts
+        .config_dir
+        .as_deref()
+        .map(atman_runtime::config_hub::ConfigHub::from_config_dir)
+        .or_else(|| atman_runtime::config_hub::ConfigHub::global().ok());
+    register_providers_from_env(&mut executor, auth_hub.as_ref()).await;
     if let Some(sandbox) =
         build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
     {
@@ -450,18 +455,24 @@ async fn build_rule_fetch(
     rule_fetch
 }
 
-async fn register_providers_from_env(executor: &mut Executor) {
+async fn register_providers_from_env(
+    executor: &mut Executor,
+    auth_hub: Option<&atman_runtime::config_hub::ConfigHub>,
+) {
     register_providers_from_config(executor);
     atman_runtime::model_registry::register_all_preset_models();
-    register_providers_from_auth_store(executor).await;
+    if let Some(auth_hub) = auth_hub {
+        register_providers_from_auth_store(executor, auth_hub).await;
+    }
 }
 
-async fn register_providers_from_auth_store(executor: &mut Executor) {
+async fn register_providers_from_auth_store(
+    executor: &mut Executor,
+    hub: &atman_runtime::config_hub::ConfigHub,
+) {
     use atman_runtime::auth_store::ProviderKind;
-    use atman_runtime::auth_store::{
-        cached_to_discovered_details, load_provider_model_cache_details,
-    };
-    let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
+    use atman_runtime::auth_store::cached_to_discovered_details;
+    let Ok(store) = hub.load_auth() else {
         return;
     };
     for p in &store.providers {
@@ -471,19 +482,32 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
         if p.kind == ProviderKind::Codex {
             // Hydrate the cached catalog before live provider initialization.
             if let Some(cache) = &p.model_cache {
-                let cached = load_provider_model_cache_details(&p.id)
+                let cached = hub
+                    .load_auth_model_cache_details(&p.id)
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| cached_to_discovered_details(cache));
-                match atman_runtime::model_registry::prepare_discovered_details_for_provider(
-                    &p.id, &p.name, &cached,
+                let persisted_namespace = match hub.load_auth_model_namespace(&p.id) {
+                    Ok(namespace) => namespace,
+                    Err(error) => {
+                        atman_runtime::notify!(
+                            warn,
+                            "cached model namespace load failed: {error:#}"
+                        );
+                        continue;
+                    }
+                };
+                match atman_runtime::model_registry::prepare_discovered_details_for_provider_with_auth(
+                    &p.id,
+                    &p.name,
+                    &store,
+                    persisted_namespace.as_deref(),
+                    atman_runtime::provider::ReasoningWireProfile::CodexResponses,
+                    &cached,
                 ) {
                     Ok(prepared) => {
                         if let Err(error) =
-                            atman_runtime::auth_store::ensure_provider_model_namespace(
-                                &p.id,
-                                prepared.namespace(),
-                            )
+                            hub.ensure_auth_model_namespace(&p.id, prepared.namespace())
                         {
                             atman_runtime::notify!(
                                 warn,
@@ -504,10 +528,10 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
                 }
             }
 
-            // Create provider (token refresh if needed) without model discovery.
-            match atman_runtime::oauth::create_oauth_provider_no_discover::<
+            // Credential refresh stays at the discovery or inference request boundary.
+            match atman_runtime::oauth::create_oauth_provider_no_discover_with_hub::<
                 atman_runtime::providers::codex::CodexProvider,
-            >(p)
+            >(p, hub.clone())
             .await
             {
                 Ok(provider) => {
@@ -677,6 +701,83 @@ mod tests {
                 max_line_bytes: 111,
             }
         );
+    }
+
+    #[test]
+    fn build_executor_restores_oauth_provider_from_selected_config_dir() {
+        const PROVIDER_ID: &str = "selected-config-oauth";
+
+        struct CatalogCleanup;
+
+        impl Drop for CatalogCleanup {
+            fn drop(&mut self) {
+                atman_runtime::model_registry::remove_provider_catalog(PROVIDER_ID);
+            }
+        }
+
+        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        atman_runtime::model_registry::remove_provider_catalog(PROVIDER_ID);
+        let _catalog_cleanup = CatalogCleanup;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let config = tempfile::tempdir().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                let home = tempfile::tempdir().unwrap();
+                let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
+                hub.add_auth_provider(atman_runtime::auth_store::StoredProvider {
+                    id: PROVIDER_ID.into(),
+                    name: "Selected OAuth".into(),
+                    kind: atman_runtime::auth_store::ProviderKind::Codex,
+                    access_token: "fresh-access".into(),
+                    refresh_token: Some("refresh-token".into()),
+                    expires_at: chrono::Utc::now().timestamp() + 3_600,
+                    account: Some("legacy-account-id".into()),
+                    enabled: true,
+                    model_cache: Some(atman_runtime::auth_store::ModelCache {
+                        fetched_at: 1,
+                        models: vec![atman_runtime::auth_store::CachedModel {
+                            slug: "gpt-selected".into(),
+                            context_budget: Some(128_000),
+                            thinking: true,
+                        }],
+                    }),
+                })
+                .unwrap();
+                hub.ensure_auth_model_namespace(PROVIDER_ID, "selected@OAuth")
+                    .unwrap();
+
+                let outcome = build_executor(BootstrapOptions {
+                    events: EventSink::new(),
+                    mock: false,
+                    config_dir: Some(config.path().to_path_buf()),
+                    project_root: project.path().to_path_buf(),
+                    home_dir: Some(home.path().to_path_buf()),
+                    workspace_generation: "oauth-config-test-generation".into(),
+                })
+                .await
+                .unwrap();
+
+                assert!(outcome.executor.providers.contains(PROVIDER_ID));
+                let model = atman_runtime::model_registry::all_model_entries()
+                    .into_iter()
+                    .find_map(|(name, entry)| {
+                        (entry.provider.as_deref() == Some(PROVIDER_ID)).then_some(name)
+                    })
+                    .expect("selected config catalog should be restored");
+                assert_eq!(model, "selected@OAuth:gpt-selected");
+                let provider = outcome
+                    .executor
+                    .providers
+                    .resolve(&model)
+                    .expect("selected config model should resolve to its live provider");
+                assert_eq!(provider.name(), PROVIDER_ID);
+            });
     }
 
     #[test]

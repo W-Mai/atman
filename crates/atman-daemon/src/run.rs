@@ -449,9 +449,6 @@ fn same_path(a: &Path, b: &Path) -> bool {
 mod tests {
     use super::*;
     use std::process::Command;
-    use std::sync::Mutex;
-
-    static MODEL_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
     fn git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -598,7 +595,9 @@ mod tests {
 
     #[test]
     fn reload_model_config_refreshes_registry_and_ignores_invalid_toml() {
-        let _lock = MODEL_CONFIG_LOCK.lock().unwrap();
+        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         std::fs::write(

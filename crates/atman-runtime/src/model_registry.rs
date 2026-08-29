@@ -275,7 +275,7 @@ pub fn prepare_discovered_details(
     models: &[crate::provider::DiscoveredModelDetails],
 ) -> Result<PreparedProviderCatalog, CatalogError> {
     let profile = reasoning_wire_profile_for_provider(provider_name);
-    prepare_discovered_details_with_profile(provider_id, provider_name, profile, models)
+    prepare_discovered_details_with_global_auth(provider_id, provider_name, profile, models)
 }
 
 pub fn register_discovered_for_provider(
@@ -348,10 +348,51 @@ pub fn prepare_discovered_details_for_provider(
     provider_name: &str,
     models: &[crate::provider::DiscoveredModelDetails],
 ) -> Result<PreparedProviderCatalog, CatalogError> {
-    prepare_discovered_details_with_profile(
+    prepare_discovered_details_with_global_auth(
         provider_key,
         provider_name,
         ReasoningWireProfile::CodexResponses,
+        models,
+    )
+}
+
+fn prepare_discovered_details_with_global_auth(
+    provider_key: &str,
+    provider_name: &str,
+    wire_profile: ReasoningWireProfile,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    let auth = AuthStore::load().map_err(|error| CatalogError::NamespaceStore {
+        message: error.to_string(),
+    })?;
+    let persisted_namespace = crate::auth_store::load_provider_model_namespace(provider_key)
+        .map_err(|error| CatalogError::NamespaceStore {
+            message: error.to_string(),
+        })?;
+    prepare_discovered_details_for_provider_with_auth(
+        provider_key,
+        provider_name,
+        &auth,
+        persisted_namespace.as_deref(),
+        wire_profile,
+        models,
+    )
+}
+
+pub fn prepare_discovered_details_for_provider_with_auth(
+    provider_key: &str,
+    provider_name: &str,
+    auth: &AuthStore,
+    persisted_namespace: Option<&str>,
+    wire_profile: ReasoningWireProfile,
+    models: &[crate::provider::DiscoveredModelDetails],
+) -> Result<PreparedProviderCatalog, CatalogError> {
+    prepare_discovered_details_with_profile(
+        provider_key,
+        provider_name,
+        wire_profile,
+        auth,
+        persisted_namespace,
         models,
     )
 }
@@ -360,6 +401,8 @@ fn prepare_discovered_details_with_profile(
     provider_key: &str,
     provider_name: &str,
     wire_profile: ReasoningWireProfile,
+    auth: &AuthStore,
+    persisted_namespace: Option<&str>,
     models: &[crate::provider::DiscoveredModelDetails],
 ) -> Result<PreparedProviderCatalog, CatalogError> {
     let in_memory_namespace = REGISTRY_STATE
@@ -368,29 +411,24 @@ fn prepare_discovered_details_with_profile(
         .catalogs
         .get(provider_key)
         .map(|catalog| catalog.descriptor.namespace.clone());
-    let persisted_namespace = crate::auth_store::load_provider_model_namespace(provider_key)
-        .map_err(|error| CatalogError::NamespaceStore {
-            message: error.to_string(),
-        })?;
-    if let (Some(current), Some(persisted)) = (&in_memory_namespace, &persisted_namespace)
+    if let (Some(current), Some(persisted)) = (&in_memory_namespace, persisted_namespace)
         && current != persisted
     {
         return Err(CatalogError::NamespaceChanged {
             provider_key: provider_key.to_string(),
             current: current.clone(),
-            requested: persisted.clone(),
+            requested: persisted.to_string(),
         });
     }
-    let model_namespace = if let Some(namespace) = in_memory_namespace.or(persisted_namespace) {
+    let model_namespace = if let Some(namespace) = in_memory_namespace {
         namespace
+    } else if let Some(namespace) = persisted_namespace {
+        namespace.to_string()
     } else {
-        let provider_ids = AuthStore::load()
-            .map_err(|error| CatalogError::NamespaceStore {
-                message: error.to_string(),
-            })?
+        let provider_ids = auth
             .providers
-            .into_iter()
-            .map(|provider| provider.id)
+            .iter()
+            .map(|provider| provider.id.clone())
             .collect::<Vec<_>>();
         let short_id = shortest_unique_provider_id(provider_key, &provider_ids);
         format!("{short_id}@{provider_name}")
@@ -2554,15 +2592,6 @@ mod tests {
         let entry = model_entry(model_key).unwrap();
         assert_eq!(entry.provider.as_deref(), Some("enabled-id"));
         assert_eq!(entry.model, "codex/gpt-test");
-
-        let providers = crate::provider::ProviderRegistry::new();
-        providers.register(std::sync::Arc::new(
-            crate::providers::mock::MockProvider::new("enabled-id"),
-        ));
-        assert!(
-            providers.resolve(model_key).is_none(),
-            "an auth-backed catalog must not remain executable after its auth record disappears"
-        );
     }
 
     #[test]

@@ -288,7 +288,7 @@ impl ConfigHub {
         load_auth_from_path(&self.auth_path)
     }
 
-    pub(crate) fn load_auth_model_cache_details(
+    pub fn load_auth_model_cache_details(
         &self,
         id: &str,
     ) -> Result<Option<Vec<crate::provider::DiscoveredModelDetails>>, ConfigError> {
@@ -313,14 +313,34 @@ impl ConfigHub {
         })
     }
 
-    pub(crate) fn load_auth_model_namespace(
+    pub(crate) fn load_or_create_auth_provider_credential_state(
         &self,
         id: &str,
-    ) -> Result<Option<String>, ConfigError> {
+    ) -> Result<
+        Option<(
+            crate::auth_store::StoredProvider,
+            crate::auth_store::AuthProviderCredentialSnapshot,
+        )>,
+        ConfigError,
+    > {
+        match load_auth_document_from_path(&self.auth_path)?.provider_credential_state(id) {
+            None => return Ok(None),
+            Some((provider, Some(snapshot))) => return Ok(Some((provider, snapshot))),
+            Some((_provider, None)) => {}
+        }
+        self.update_auth_document_conditionally(|document| {
+            let Some((state, changed)) = document.ensure_provider_credential_state(id) else {
+                return Ok((None, false));
+            };
+            Ok((Some(state), changed))
+        })
+    }
+
+    pub fn load_auth_model_namespace(&self, id: &str) -> Result<Option<String>, ConfigError> {
         Ok(load_auth_document_from_path(&self.auth_path)?.model_namespace(id))
     }
 
-    pub(crate) fn ensure_auth_model_namespace(
+    pub fn ensure_auth_model_namespace(
         &self,
         id: &str,
         model_namespace: &str,
@@ -526,6 +546,29 @@ impl ConfigHub {
                 provider.account = update.account;
             }
             Ok(true)
+        })
+    }
+
+    pub(crate) fn update_auth_tokens_if_current(
+        &self,
+        id: &str,
+        expected: &crate::auth_store::AuthProviderCredentialSnapshot,
+        update: AuthTokenUpdate,
+    ) -> Result<crate::auth_store::AuthCredentialCommit, ConfigError> {
+        self.update_auth_document_conditionally(|document| {
+            let commit = document.update_provider_credentials(
+                id,
+                expected,
+                update.access_token,
+                update.refresh_token,
+                update.expires_at,
+                update.account,
+            );
+            let changed = matches!(
+                commit,
+                crate::auth_store::AuthCredentialCommit::Updated { .. }
+            );
+            Ok((commit, changed))
         })
     }
 
@@ -1992,6 +2035,25 @@ mod tests {
             .1
     }
 
+    fn credential_snapshot(
+        hub: &ConfigHub,
+        id: &str,
+    ) -> crate::auth_store::AuthProviderCredentialSnapshot {
+        hub.load_or_create_auth_provider_credential_state(id)
+            .unwrap()
+            .unwrap()
+            .1
+    }
+
+    fn token_update(access_token: &str, refresh_token: &str) -> AuthTokenUpdate {
+        AuthTokenUpdate {
+            access_token: access_token.into(),
+            refresh_token: Some(refresh_token.into()),
+            expires_at: 99,
+            account: Some("account@example.com".into()),
+        }
+    }
+
     #[test]
     fn auth_transactions_preserve_independent_concurrent_updates() {
         let dir = tempfile::tempdir().unwrap();
@@ -2243,6 +2305,219 @@ mod tests {
         let enabled_again = catalog_snapshot(&hub, "provider");
         assert_ne!(enabled_again, disabled);
         assert_ne!(enabled_again, initial);
+    }
+
+    #[test]
+    fn catalog_cache_update_does_not_invalidate_credential_snapshot() {
+        let (_dir, hub) = temp_hub();
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        let expected = credential_snapshot(&hub, "provider");
+
+        assert!(
+            hub.update_auth_model_cache_details(
+                "provider",
+                "provider@account",
+                10,
+                &[crate::provider::DiscoveredModelDetails {
+                    slug: "cached-model".into(),
+                    context_budget: Some(16_384),
+                    capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                        crate::provider::ModelCapabilities::default(),
+                    ),
+                }],
+            )
+            .unwrap()
+        );
+        assert_eq!(credential_snapshot(&hub, "provider"), expected);
+
+        match hub
+            .update_auth_tokens_if_current(
+                "provider",
+                &expected,
+                token_update("fresh-access", "fresh-refresh"),
+            )
+            .unwrap()
+        {
+            crate::auth_store::AuthCredentialCommit::Updated { provider, .. } => {
+                assert_eq!(provider.access_token, "fresh-access");
+                assert_eq!(provider.refresh_token.as_deref(), Some("fresh-refresh"));
+                assert_eq!(
+                    provider.model_cache.as_ref().unwrap().models[0].slug,
+                    "cached-model"
+                );
+            }
+            other => panic!("expected updated credential commit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn credential_snapshot_rejects_token_aba() {
+        let (_dir, hub) = temp_hub();
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        let original = credential_snapshot(&hub, "provider");
+
+        assert!(
+            hub.update_auth_tokens(
+                "provider",
+                token_update("intermediate-access", "intermediate-refresh"),
+            )
+            .unwrap()
+        );
+        assert!(
+            hub.update_auth_tokens(
+                "provider",
+                AuthTokenUpdate {
+                    access_token: "old-access".into(),
+                    refresh_token: Some("old-refresh".into()),
+                    expires_at: 1,
+                    account: Some("old-account".into()),
+                },
+            )
+            .unwrap()
+        );
+        assert_ne!(credential_snapshot(&hub, "provider"), original);
+        let before = std::fs::read(hub.auth_path()).unwrap();
+
+        assert!(matches!(
+            hub.update_auth_tokens_if_current(
+                "provider",
+                &original,
+                token_update("stale-access", "stale-refresh"),
+            )
+            .unwrap(),
+            crate::auth_store::AuthCredentialCommit::Changed
+        ));
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn provider_toggle_aba_preserves_credential_snapshot_but_replacement_invalidates_it() {
+        let (_dir, hub) = temp_hub();
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        let before_toggle = credential_snapshot(&hub, "provider");
+
+        assert!(hub.set_auth_provider_enabled("provider", false).unwrap());
+        assert!(hub.set_auth_provider_enabled("provider", true).unwrap());
+        assert_eq!(credential_snapshot(&hub, "provider"), before_toggle);
+        let commit = hub
+            .update_auth_tokens_if_current(
+                "provider",
+                &before_toggle,
+                token_update("fresh-toggle-access", "fresh-toggle-refresh"),
+            )
+            .unwrap();
+        assert!(matches!(
+            commit,
+            crate::auth_store::AuthCredentialCommit::Updated { .. }
+        ));
+
+        let before_replacement = credential_snapshot(&hub, "provider");
+        assert!(hub.remove_auth_provider("provider").unwrap());
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        assert_ne!(credential_snapshot(&hub, "provider"), before_replacement);
+        assert!(matches!(
+            hub.update_auth_tokens_if_current(
+                "provider",
+                &before_replacement,
+                token_update("stale-replacement-access", "stale-replacement-refresh"),
+            )
+            .unwrap(),
+            crate::auth_store::AuthCredentialCommit::Changed
+        ));
+    }
+
+    #[test]
+    fn credential_commit_persists_rotation_while_disabled_and_reports_missing_provider() {
+        let (_dir, hub) = temp_hub();
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+        let expected = credential_snapshot(&hub, "provider");
+
+        assert!(hub.set_auth_provider_enabled("provider", false).unwrap());
+        assert_eq!(credential_snapshot(&hub, "provider"), expected);
+        match hub
+            .update_auth_tokens_if_current(
+                "provider",
+                &expected,
+                token_update("disabled-access", "disabled-refresh"),
+            )
+            .unwrap()
+        {
+            crate::auth_store::AuthCredentialCommit::Updated { provider } => {
+                assert!(!provider.enabled);
+                assert_eq!(provider.access_token, "disabled-access");
+                assert_eq!(provider.refresh_token.as_deref(), Some("disabled-refresh"));
+            }
+            other => panic!("expected disabled credential rotation to persist, got {other:?}"),
+        }
+        let persisted = hub.load_auth().unwrap().providers.remove(0);
+        assert!(!persisted.enabled);
+        assert_eq!(persisted.access_token, "disabled-access");
+        assert_eq!(persisted.refresh_token.as_deref(), Some("disabled-refresh"));
+
+        assert!(hub.remove_auth_provider("provider").unwrap());
+        let before_missing = std::fs::read(hub.auth_path()).unwrap();
+        assert!(matches!(
+            hub.update_auth_tokens_if_current(
+                "provider",
+                &expected,
+                token_update("missing-access", "missing-refresh"),
+            )
+            .unwrap(),
+            crate::auth_store::AuthCredentialCommit::Missing
+        ));
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), before_missing);
+    }
+
+    #[test]
+    fn legacy_credential_revision_is_lazily_persisted_without_changing_public_auth_shape() {
+        let (_dir, hub) = temp_hub();
+        std::fs::write(
+            hub.auth_path(),
+            r#"{
+                "providers": [{
+                    "id": "legacy",
+                    "name": "Legacy",
+                    "kind": "custom",
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_at": 1,
+                    "account": "account@example.com",
+                    "enabled": true
+                }]
+            }"#,
+        )
+        .unwrap();
+        let legacy = std::fs::read(hub.auth_path()).unwrap();
+
+        let public_before = hub.load_auth().unwrap();
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), legacy);
+        assert_eq!(public_before.providers[0].access_token, "access");
+
+        let first = credential_snapshot(&hub, "legacy");
+        let migrated = std::fs::read(hub.auth_path()).unwrap();
+        assert_ne!(migrated, legacy);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&migrated).unwrap()["providers"][0]
+                .get("credential_revision")
+                .is_some()
+        );
+
+        let peer = ConfigHub::from_auth_path(hub.auth_path());
+        assert_eq!(credential_snapshot(&peer, "legacy"), first);
+        assert_eq!(std::fs::read(hub.auth_path()).unwrap(), migrated);
+
+        let public_after = peer.load_auth().unwrap();
+        assert_eq!(public_after.providers[0].id, "legacy");
+        assert_eq!(public_after.providers[0].access_token, "access");
+        let public_json = serde_json::to_value(public_after).unwrap();
+        assert!(
+            public_json["providers"][0]
+                .get("credential_revision")
+                .is_none()
+        );
+        let parsed_legacy_view: crate::auth_store::AuthStore =
+            serde_json::from_slice(&migrated).unwrap();
+        assert_eq!(parsed_legacy_view.providers[0].id, "legacy");
     }
 
     #[test]

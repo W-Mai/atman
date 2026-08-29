@@ -14,13 +14,63 @@ use crate::tool::BoxFut;
 use anyhow::Context;
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
+const CODEX_MODELS_URL: &str = "https://chatgpt.com/backend-api/wham/models";
+
+#[derive(Clone)]
+enum CodexCredentialSource {
+    Static {
+        access_token: String,
+        account_id: String,
+    },
+    Managed(crate::oauth::OAuthCredentialLease),
+}
+
+struct CodexRequestCredentials {
+    access_token: String,
+    account_id: String,
+}
+
+impl CodexCredentialSource {
+    async fn acquire(&self) -> Result<CodexRequestCredentials, crate::oauth::OAuthCredentialError> {
+        match self {
+            Self::Static {
+                access_token,
+                account_id,
+            } => Ok(CodexRequestCredentials {
+                access_token: access_token.clone(),
+                account_id: account_id.clone(),
+            }),
+            Self::Managed(lease) => {
+                let credential = lease.acquire().await?;
+                let account_id =
+                    oauth_account_id(&credential.access_token, credential.display_account);
+                Ok(CodexRequestCredentials {
+                    access_token: credential.access_token,
+                    account_id,
+                })
+            }
+        }
+    }
+}
+
+fn oauth_account_id(access_token: &str, legacy_account: Option<String>) -> String {
+    crate::oauth::extract_chatgpt_account_id(access_token)
+        .or_else(|| {
+            legacy_account.filter(|account| {
+                let account = account.trim();
+                !account.is_empty() && !account.contains('@')
+            })
+        })
+        .unwrap_or_default()
+}
 
 /// ChatGPT backend provider. Requires `originator: codex_cli_rs` header for Cloudflare.
 pub struct CodexProvider {
     name: String,
-    access_token: String,
-    account_id: String,
+    credentials: CodexCredentialSource,
     client: reqwest::Client,
+    responses_url: String,
+    models_url: String,
 }
 
 impl CodexProvider {
@@ -31,10 +81,40 @@ impl CodexProvider {
     ) -> Self {
         Self {
             name: name.into(),
-            access_token: access_token.into(),
-            account_id: account_id.into(),
+            credentials: CodexCredentialSource::Static {
+                access_token: access_token.into(),
+                account_id: account_id.into(),
+            },
             client: reqwest::Client::new(),
+            responses_url: format!("{CODEX_BASE}/responses"),
+            models_url: CODEX_MODELS_URL.into(),
         }
+    }
+
+    fn from_oauth_store(
+        stored: &crate::auth_store::StoredProvider,
+        hub: crate::config_hub::ConfigHub,
+    ) -> Self {
+        Self {
+            name: stored.id.clone(),
+            credentials: CodexCredentialSource::Managed(crate::oauth::OAuthCredentialLease::new::<
+                Self,
+            >(&stored.id, hub)),
+            client: reqwest::Client::new(),
+            responses_url: format!("{CODEX_BASE}/responses"),
+            models_url: CODEX_MODELS_URL.into(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_endpoints(
+        mut self,
+        responses_url: impl Into<String>,
+        models_url: impl Into<String>,
+    ) -> Self {
+        self.responses_url = responses_url.into();
+        self.models_url = models_url.into();
+        self
     }
 
     fn build_body(&self, req: &LlmRequest) -> Result<ResponsesRequest, RuntimeError> {
@@ -62,19 +142,6 @@ impl CodexProvider {
             }),
             include: Some(vec!["reasoning.encrypted_content".into()]),
         })
-    }
-
-    fn build_request(&self, req: &LlmRequest) -> Result<reqwest::RequestBuilder, RuntimeError> {
-        let body = self.build_body(req)?;
-        Ok(self
-            .client
-            .post(format!("{CODEX_BASE}/responses"))
-            .bearer_auth(&self.access_token)
-            .header("chatgpt-account-id", &self.account_id)
-            .header("originator", "codex_cli_rs")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("accept", "text/event-stream")
-            .json(&body))
     }
 
     fn validate_reasoning(selection: &ReasoningSelection) -> Result<(), RuntimeError> {
@@ -387,16 +454,36 @@ impl Provider for CodexProvider {
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let preflight =
-            Self::validate_reasoning(&req.reasoning).and_then(|()| self.build_request(&req));
+            Self::validate_reasoning(&req.reasoning).and_then(|()| self.build_body(&req));
         let turn_id = turn_id_from_req(&req);
         let streaming_tools = req.tools.clone();
+        let credentials = self.credentials.clone();
+        let client = self.client.clone();
+        let responses_url = self.responses_url.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
 
-        let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
-            Box::pin(async move {
-                let request = preflight?;
+        let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
+            async move {
+                let body = preflight?;
+                let credentials = tokio::select! {
+                    biased;
+                    _ = cancel_for_task.cancelled() => {
+                        return Err(RuntimeError::Cancelled("codex cancelled before authentication".into()));
+                    }
+                    result = credentials.acquire() => result.map_err(credential_err)?,
+                };
+                let mut request = client
+                    .post(responses_url)
+                    .bearer_auth(credentials.access_token)
+                    .header("originator", "codex_cli_rs")
+                    .header("OpenAI-Beta", "responses=experimental")
+                    .header("accept", "text/event-stream")
+                    .json(&body);
+                if !credentials.account_id.is_empty() {
+                    request = request.header("chatgpt-account-id", credentials.account_id);
+                }
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -599,7 +686,8 @@ impl Provider for CodexProvider {
                     model: resp_model.unwrap_or_default(),
                     response_id: resp_id,
                 })
-            });
+            },
+        );
         Observable {
             output,
             events,
@@ -627,15 +715,21 @@ impl Provider for CodexProvider {
         'static,
         Result<Vec<crate::provider::DiscoveredModelDetails>, ModelDiscoveryError>,
     > {
-        let access_token = self.access_token.clone();
-        let account_id = self.account_id.clone();
+        let credentials = self.credentials.clone();
+        let client = self.client.clone();
+        let models_url = self.models_url.clone();
         Box::pin(async move {
-            let client = reqwest::Client::new();
-            let resp = client
-                .get("https://chatgpt.com/backend-api/wham/models")
+            let credentials = credentials.acquire().await.map_err(|error| {
+                ModelDiscoveryError::Transport(format!("codex credentials: {error}"))
+            })?;
+            let mut request = client
+                .get(models_url)
                 .query(&[("client_version", "0.0.0")])
-                .bearer_auth(&access_token)
-                .header("ChatGPT-Account-Id", &account_id)
+                .bearer_auth(credentials.access_token);
+            if !credentials.account_id.is_empty() {
+                request = request.header("ChatGPT-Account-Id", credentials.account_id);
+            }
+            let resp = request
                 .send()
                 .await
                 .map_err(|error| ModelDiscoveryError::Transport(error.to_string()))?;
@@ -655,19 +749,26 @@ impl Provider for CodexProvider {
     }
 
     fn test_connection(&self) -> BoxFut<'_, Result<String, String>> {
-        let access_token = self.access_token.clone();
-        let account_id = self.account_id.clone();
+        let credentials = self.credentials.clone();
+        let models_url = self.models_url.clone();
         let name = self.name.clone();
         Box::pin(async move {
+            let credentials = credentials
+                .acquire()
+                .await
+                .map_err(|error| format!("credentials unavailable — {error}"))?;
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .map_err(|e| e.to_string())?;
-            let resp = client
-                .get("https://chatgpt.com/backend-api/wham/models")
+            let mut request = client
+                .get(models_url)
                 .query(&[("client_version", "0.0.0")])
-                .bearer_auth(&access_token)
-                .header("ChatGPT-Account-Id", &account_id)
+                .bearer_auth(credentials.access_token);
+            if !credentials.account_id.is_empty() {
+                request = request.header("ChatGPT-Account-Id", credentials.account_id);
+            }
+            let resp = request
                 .send()
                 .await
                 .map_err(|e| format!("connection failed — {e}"))?;
@@ -691,6 +792,8 @@ const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const CODEX_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 
 impl crate::oauth::OAuthProvider for CodexProvider {
+    const KIND: crate::auth_store::ProviderKind = crate::auth_store::ProviderKind::Codex;
+
     fn authorize_url() -> (String, crate::oauth::Pkce, String) {
         let pkce = crate::oauth::Pkce::generate();
         let state = crate::oauth::generate_state();
@@ -804,8 +907,15 @@ impl crate::oauth::OAuthProvider for CodexProvider {
     }
 
     fn from_stored(stored: &crate::auth_store::StoredProvider) -> Self {
-        let account_id = stored.account.as_deref().unwrap_or("");
+        let account_id = oauth_account_id(&stored.access_token, stored.account.clone());
         CodexProvider::new(&stored.id, &stored.access_token, account_id)
+    }
+
+    fn from_managed_stored(
+        stored: &crate::auth_store::StoredProvider,
+        hub: crate::config_hub::ConfigHub,
+    ) -> Option<Self> {
+        Some(CodexProvider::from_oauth_store(stored, hub))
     }
 }
 
@@ -825,6 +935,10 @@ fn turn_id_from_req(req: &LlmRequest) -> TurnId {
 
 fn net_err(e: reqwest::Error) -> RuntimeError {
     RuntimeError::ToolFailed(format!("codex net: {e}"))
+}
+
+fn credential_err(error: crate::oauth::OAuthCredentialError) -> RuntimeError {
+    RuntimeError::ToolFailed(format!("codex credentials: {error}"))
 }
 
 fn normalize_input_tokens(total_input: u64, cached_input: u64) -> u64 {
@@ -940,11 +1054,115 @@ struct OutputTokensDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexProvider, normalize_input_tokens, parse_codex_models};
+    use super::{
+        CodexCredentialSource, CodexProvider, normalize_input_tokens, oauth_account_id,
+        parse_codex_models,
+    };
+    use crate::provider::Provider;
+    use base64::Engine;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn request() -> crate::provider::LlmRequest {
+        crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: Vec::new(),
+            system: None,
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        }
+    }
+
+    fn managed_provider(
+        responses_url: String,
+        models_url: String,
+    ) -> (
+        tempfile::TempDir,
+        crate::config_hub::ConfigHub,
+        CodexProvider,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = crate::config_hub::ConfigHub::from_config_dir(dir.path());
+        hub.add_auth_provider(crate::auth_store::StoredProvider {
+            id: "oauth-account".into(),
+            name: "OAuth account".into(),
+            kind: crate::auth_store::ProviderKind::Codex,
+            access_token: "access-v1".into(),
+            refresh_token: Some("refresh-v1".into()),
+            expires_at: chrono::Utc::now().timestamp() - 1,
+            account: Some("display@example.test".into()),
+            enabled: true,
+            model_cache: None,
+        })
+        .unwrap();
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"account-v2"}}"#);
+        let access_token = format!("header.{payload}.signature");
+        let refreshed_access_token = access_token.clone();
+        let lease = crate::oauth::OAuthCredentialLease::with_refresher(
+            "oauth-account",
+            crate::auth_store::ProviderKind::Codex,
+            hub.clone(),
+            move |refresh_token| {
+                assert_eq!(refresh_token, "refresh-v1");
+                let access_token = refreshed_access_token.clone();
+                Box::pin(async move {
+                    Ok(crate::oauth::TokenResult {
+                        access_token,
+                        refresh_token: Some("refresh-v2".into()),
+                        expires_at: chrono::Utc::now().timestamp() + 3_600,
+                        account: Some("display-v2@example.test".into()),
+                    })
+                })
+            },
+        );
+        let provider = CodexProvider {
+            name: "oauth-account".into(),
+            credentials: CodexCredentialSource::Managed(lease),
+            client: reqwest::Client::new(),
+            responses_url: String::new(),
+            models_url: String::new(),
+        }
+        .with_endpoints(responses_url, models_url);
+        (dir, hub, provider, access_token)
+    }
+
+    async fn mount_models_endpoint(server: &MockServer, access_token: &str) {
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", format!("Bearer {access_token}")))
+            .and(header("chatgpt-account-id", "account-v2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{
+                    "slug": "gpt-test",
+                    "supported_reasoning_levels": ["low", "high"]
+                }]
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
 
     #[test]
     fn input_tokens_exclude_cached_tokens_for_window_accounting() {
         assert_eq!(normalize_input_tokens(100_000, 60_000), 40_000);
+    }
+
+    #[test]
+    fn display_email_is_not_used_as_chatgpt_account_id() {
+        assert_eq!(
+            oauth_account_id("not-a-jwt", Some("display@example.test".into())),
+            ""
+        );
+        assert_eq!(
+            oauth_account_id("not-a-jwt", Some("legacy-account-id".into())),
+            "legacy-account-id"
+        );
     }
 
     #[test]
@@ -1065,17 +1283,7 @@ mod tests {
     #[test]
     fn provider_default_omits_reasoning_instead_of_forcing_medium() {
         let provider = CodexProvider::new("codex", "token", "account");
-        let request = crate::provider::LlmRequest {
-            model: "codex/gpt-test".into(),
-            messages: Vec::new(),
-            system: None,
-            input: crate::Value::Unit,
-            schema: None,
-            cache_prompt: false,
-            tools: Vec::new(),
-            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
-            stall_timeout_secs: 0,
-        };
+        let request = request();
         let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
         assert!(body.get("reasoning").is_none());
     }
@@ -1146,5 +1354,106 @@ mod tests {
         assert_eq!(body["instructions"], "stable instructions");
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"], "retained summary");
+    }
+
+    #[tokio::test]
+    async fn streaming_call_acquires_credentials_before_sending_request() {
+        let server = MockServer::start().await;
+        let responses_url = format!("{}/responses", server.uri());
+        let models_url = format!("{}/models", server.uri());
+        let (_dir, _hub, provider, access_token) = managed_provider(responses_url, models_url);
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header(
+                "authorization",
+                format!("Bearer {access_token}"),
+            ))
+            .and(header("chatgpt-account-id", "account-v2"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let observable = provider.call_streaming(request());
+        let message = observable.output.await.unwrap();
+        assert_eq!(message.response_id.as_deref(), Some("response-1"));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_acquires_credentials_at_poll_time() {
+        let server = MockServer::start().await;
+        let responses_url = format!("{}/responses", server.uri());
+        let models_url = format!("{}/models", server.uri());
+        let (_dir, _hub, provider, access_token) = managed_provider(responses_url, models_url);
+        mount_models_endpoint(&server, &access_token).await;
+
+        let discovery = provider.try_discover_models();
+        let models = discovery.await.unwrap();
+        assert_eq!(models[0].slug, "codex/gpt-test");
+    }
+
+    #[tokio::test]
+    async fn connection_test_acquires_credentials_at_request_time() {
+        let server = MockServer::start().await;
+        let responses_url = format!("{}/responses", server.uri());
+        let models_url = format!("{}/models", server.uri());
+        let (_dir, _hub, provider, access_token) = managed_provider(responses_url, models_url);
+        mount_models_endpoint(&server, &access_token).await;
+
+        assert_eq!(
+            provider.test_connection().await.unwrap(),
+            "\"oauth-account\" responded OK"
+        );
+    }
+
+    #[tokio::test]
+    async fn observable_reads_authoritative_credentials_when_polled() {
+        let server = MockServer::start().await;
+        let responses_url = format!("{}/responses", server.uri());
+        let models_url = format!("{}/models", server.uri());
+        let (_dir, hub, provider, _refreshed_token) = managed_provider(responses_url, models_url);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"account-current"}}"#);
+        let current_token = format!("header.{payload}.signature");
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header(
+                "authorization",
+                format!("Bearer {current_token}"),
+            ))
+            .and(header("chatgpt-account-id", "account-current"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-current\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let observable = provider.call_streaming(request());
+        assert!(
+            hub.update_auth_tokens(
+                "oauth-account",
+                crate::config_hub::AuthTokenUpdate {
+                    access_token: current_token,
+                    refresh_token: Some("refresh-current".into()),
+                    expires_at: chrono::Utc::now().timestamp() + 3_600,
+                    account: Some("display-current@example.test".into()),
+                },
+            )
+            .unwrap()
+        );
+
+        let message = observable.output.await.unwrap();
+        assert_eq!(message.response_id.as_deref(), Some("response-current"));
     }
 }

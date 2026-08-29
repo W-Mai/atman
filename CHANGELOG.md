@@ -31,6 +31,7 @@ All notable changes to atman are documented in this file.
 - **Visible LLM failures** — request errors and retry state update a keyed inline session note even when content streaming and message history are disabled.
 - **Codex multimodal request shape** — mixed text and image input is serialized as typed Responses API content instead of a JSON string.
 - **Codex compacted context** — compact summaries and stored system context remain present in Responses API input history.
+- **OAuth credential leases** — long-running Codex providers resolve credentials at request boundaries, refresh expiring tokens with cross-process serialization and conditional persistence, and prefer the account ID carried by the access token.
 - **Attachment degradation targeting** — provider rejection replaces only the rejected image message instead of matching the same part indexes across unrelated history.
 - **Atomic TUI attachment submission** — each prompt captures its current image set at submit time, preserving later attachments for the next turn and restoring images when submission or routing fails.
 - **Workspace ownership and cleanup safety** — automatic workspaces use runtime-derived session and child-flow ownership, release only clean worktrees, preserve dirty or retained work, and reconcile stale daemon-generation leases as inspectable orphans without automatic deletion.
