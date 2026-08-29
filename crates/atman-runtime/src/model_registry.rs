@@ -3497,6 +3497,63 @@ input_modalities = ["text", "image"]
     }
 
     #[test]
+    fn uuid_codex_catalog_uses_advertised_efforts_for_choices_and_validation() {
+        let _registry = isolated_registry();
+        replace_provider_catalog(
+            descriptor(
+                "018f0f2e-7b9a-7fd0-ae41-8c772ccae64b",
+                "account",
+                ReasoningWireProfile::CodexResponses,
+            ),
+            &[advertised_model(
+                "gpt-5.6-sol",
+                272_000,
+                vec![ReasoningEffort::Low, ReasoningEffort::High],
+            )],
+        )
+        .unwrap();
+        let mut config = ProviderConfig::default();
+        config.aliases.insert(
+            "smart".into(),
+            AliasEntry {
+                model: "account:gpt-5.6-sol".into(),
+            },
+        );
+        set_provider_config(config);
+
+        assert_eq!(
+            reasoning_wire_profile_for_model("smart"),
+            ReasoningWireProfile::CodexResponses
+        );
+        assert_eq!(
+            reasoning_selections_for_model("smart")
+                .into_iter()
+                .map(|selection| selection.to_string())
+                .collect::<Vec<_>>(),
+            ["default", "off", "auto", "low", "high"]
+        );
+        assert!(
+            resolve_reasoning_for_model(
+                "smart",
+                &ReasoningSelection::Effort {
+                    effort: ReasoningEffort::High,
+                    execution_mode: None,
+                },
+            )
+            .is_ok()
+        );
+        let error = resolve_reasoning_for_model(
+            "smart",
+            &ReasoningSelection::Effort {
+                effort: ReasoningEffort::XHigh,
+                execution_mode: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("available: low, high"));
+    }
+
+    #[test]
     fn preset_and_catalog_overlays_do_not_duplicate_renamed_models() {
         let _registry = isolated_registry();
         let mut cfg = ProviderConfig::default();
