@@ -1399,23 +1399,11 @@ pub(crate) async fn run_frames(
                                 result,
                             );
                         }
-                        TuiCommand::ProviderModelsUpdated => {
-                            app.wm.modals.provider_manager.refresh_list();
-                            app.wm.modals.model_manager.refresh();
-                            if !app.wm.modals.model_picker.is_pending()
-                                && app.app.reconcile_input_reasoning()
-                            {
-                                app.app.save_ui_state();
-                            }
-                            if app.wm.modals.onboarding_open {
-                                app.wm.modals.onboarding.try_advance_to_model_select();
-                            }
-                            app.app.push_toast(
-                                "models refreshed",
-                                app::NoteLevel::Success,
-                                std::time::Duration::from_secs(3),
-                                app::ToastPosition::TopRight,
-                            );
+                        TuiCommand::ProviderCatalogChanged { added_provider } => {
+                            apply_provider_catalog_changed(&mut app, added_provider);
+                        }
+                        TuiCommand::ProviderMutationResult { request, result } => {
+                            apply_provider_mutation_result(&mut app, request, result);
                         }
                         TuiCommand::ProviderTestResult((msg, ok)) => {
                             let level = if ok {
@@ -1463,6 +1451,96 @@ pub(crate) async fn run_frames(
         }
     }
     Ok(())
+}
+
+fn apply_provider_catalog_changed(app: &mut UiState, added_provider: Option<String>) {
+    app.wm.modals.provider_manager.refresh_list();
+    app.wm.modals.model_manager.refresh();
+    if !app.wm.modals.model_picker.is_pending() && app.app.reconcile_input_reasoning() {
+        app.app.save_ui_state();
+    }
+    if let Some(name) = added_provider {
+        let needs_model = atman_runtime::model_registry::all_provider_groups_with_empty()
+            .into_iter()
+            .find(|group| group.provider_name == name)
+            .is_none_or(|group| group.models.is_empty());
+        if needs_model {
+            app.wm.modals.model_manager.open_with_provider(&name);
+        }
+        if app.wm.modals.onboarding_open {
+            app.wm.modals.onboarding.provider_added(Some(&name));
+            app.wm.modals.onboarding.try_advance_to_model_select();
+        }
+    }
+}
+
+fn apply_provider_mutation_result(
+    app: &mut UiState,
+    request: crate::ProviderMutationRequest,
+    result: Result<crate::ProviderMutationSuccess, String>,
+) {
+    let resolution = app
+        .wm
+        .modals
+        .provider_manager
+        .resolve_mutation(&request, &result);
+    if matches!(
+        resolution,
+        crate::provider_manager::ProviderMutationResolution::Ignored
+    ) {
+        return;
+    }
+    app.wm.modals.model_manager.refresh();
+    if !app.wm.modals.model_picker.is_pending() && app.app.reconcile_input_reasoning() {
+        app.app.save_ui_state();
+    }
+    if let crate::provider_manager::ProviderMutationResolution::Installed { name } = &resolution
+        && app.wm.modals.onboarding_open
+    {
+        app.wm.modals.onboarding.provider_added(Some(name));
+        app.wm.modals.onboarding.try_advance_to_model_select();
+    }
+    let (message, level) = if matches!(
+        resolution,
+        crate::provider_manager::ProviderMutationResolution::ProtocolError
+    ) {
+        (
+            "provider mutation returned a mismatched result".to_string(),
+            app::NoteLevel::Error,
+        )
+    } else {
+        match result {
+            Ok(crate::ProviderMutationSuccess::Installed { name, delta, .. }) => (
+                format!("{name} added · {} models", delta.total),
+                app::NoteLevel::Success,
+            ),
+            Ok(crate::ProviderMutationSuccess::StateChanged { enabled, .. }) => {
+                let message = match enabled {
+                    Some(true) => "provider enabled",
+                    Some(false) => "provider disabled",
+                    None => "provider removed",
+                };
+                (message.to_string(), app::NoteLevel::Success)
+            }
+            Ok(crate::ProviderMutationSuccess::Refreshed { delta, .. }) => (
+                format!(
+                    "models refreshed · +{} ~{} -{} · {} total",
+                    delta.added, delta.updated, delta.removed, delta.total
+                ),
+                app::NoteLevel::Success,
+            ),
+            Err(error) => (
+                format!("provider update failed: {error}"),
+                app::NoteLevel::Error,
+            ),
+        }
+    };
+    app.app.push_toast(
+        message,
+        level,
+        std::time::Duration::from_secs(5),
+        app::ToastPosition::TopRight,
+    );
 }
 
 pub(crate) async fn recv_cmd(
@@ -1639,6 +1717,111 @@ mod tests {
         assert_eq!(
             app.input_reasoning,
             Some(atman_runtime::provider::ReasoningSelection::Disabled)
+        );
+    }
+
+    fn pending_provider_request(
+        app: &mut UiState,
+        action: crate::ProviderMutation,
+    ) -> crate::ProviderMutationRequest {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            app.wm
+                .modals
+                .provider_manager
+                .begin_mutation(action, Some(&tx))
+        );
+        match rx.try_recv().unwrap() {
+            crate::TuiControl::MutateProvider(request) => request,
+            _ => panic!("expected provider mutation"),
+        }
+    }
+
+    #[test]
+    fn provider_login_advances_onboarding_only_after_success() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        app.wm.modals.onboarding_open = true;
+        let action = crate::ProviderMutation::Login {
+            kind: atman_runtime::auth_store::ProviderKind::Codex,
+            name: "OAuth".into(),
+        };
+        let failed_request = pending_provider_request(&mut app, action.clone());
+
+        apply_provider_mutation_result(&mut app, failed_request, Err("login failed".into()));
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ProviderSelect
+        );
+        assert_eq!(app.app.toasts.last().unwrap().level, app::NoteLevel::Error);
+
+        let successful_request = pending_provider_request(&mut app, action);
+        apply_provider_mutation_result(
+            &mut app,
+            successful_request,
+            Ok(crate::ProviderMutationSuccess::Installed {
+                provider_id: "provider-id".into(),
+                name: "OAuth".into(),
+                kind: atman_runtime::auth_store::ProviderKind::Codex,
+                delta: Default::default(),
+            }),
+        );
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ModelSelect
+        );
+        assert_eq!(
+            app.app.toasts.last().unwrap().level,
+            app::NoteLevel::Success
+        );
+    }
+
+    #[test]
+    fn stale_provider_result_is_silent_and_does_not_consume_pending_request() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        let action = crate::ProviderMutation::Refresh {
+            provider_id: "provider-id".into(),
+        };
+        let request = pending_provider_request(&mut app, action);
+        let mut stale = request.clone();
+        stale.request_id += 1;
+
+        apply_provider_mutation_result(
+            &mut app,
+            stale,
+            Ok(crate::ProviderMutationSuccess::Refreshed {
+                provider_id: "provider-id".into(),
+                delta: Default::default(),
+            }),
+        );
+        assert!(app.app.toasts.is_empty());
+
+        apply_provider_mutation_result(
+            &mut app,
+            request,
+            Ok(crate::ProviderMutationSuccess::Refreshed {
+                provider_id: "provider-id".into(),
+                delta: Default::default(),
+            }),
+        );
+        assert_eq!(app.app.toasts.len(), 1);
+        assert!(app.app.toasts[0].message.contains("models refreshed"));
+    }
+
+    #[test]
+    fn only_provider_add_catalog_changes_advance_onboarding() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        app.wm.modals.onboarding_open = true;
+
+        apply_provider_catalog_changed(&mut app, None);
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ProviderSelect
+        );
+
+        apply_provider_catalog_changed(&mut app, Some("Provider".into()));
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ModelSelect
         );
     }
 }

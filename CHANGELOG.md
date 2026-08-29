@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **TUI provider mutation protocol** — `AuthLogin`, `AuthLogout`, and `RefreshProviderModels` are replaced by `TuiControl::MutateProvider` plus a matching `TuiCommand::ProviderMutationResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
+
 ### ✨ Features
 
 - **Provider-aware reasoning controls** — model settings, DSL calls, TUI submissions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
@@ -34,6 +38,7 @@ All notable changes to atman are documented in this file.
 - **OAuth credential leases** — long-running Codex providers resolve credentials at request boundaries, refresh expiring tokens with cross-process serialization and conditional persistence, and prefer the account ID carried by the access token.
 - **Atomic provider activation** — cached provider restore, enable, disable, removal, and catalog hydration use exact auth snapshots, preserve active provider instances, and fail closed on kind or namespace races without network discovery.
 - **Durable provider lifecycle ownership** — executors and daemon runs retain shared provider state, while startup restores cached Codex OAuth catalogs without refreshing expired credentials and rejects malformed auth state before creating a partial registry.
+- **Acknowledged OAuth provider changes** — TUI login, enable, disable, removal, and model refresh operations update auth, live providers, and catalogs through one lifecycle and report matched success or failure results before committing provider UI state. OAuth callback handling stops after the first terminal result, prioritizes cancellation, and bounds server shutdown.
 - **Attachment degradation targeting** — provider rejection replaces only the rejected image message instead of matching the same part indexes across unrelated history.
 - **Atomic TUI attachment submission** — each prompt captures its current image set at submit time, preserving later attachments for the next turn and restoring images when submission or routing fails.
 - **Workspace ownership and cleanup safety** — automatic workspaces use runtime-derived session and child-flow ownership, release only clean worktrees, preserve dirty or retained work, and reconcile stale daemon-generation leases as inspectable orphans without automatic deletion.

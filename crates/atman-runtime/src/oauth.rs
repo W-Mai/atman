@@ -883,6 +883,22 @@ pub fn create_managed_oauth_provider_from_stored<P: OAuthProvider>(
     Ok(Arc::new(provider))
 }
 
+/// Constructs the managed runtime provider supported by a stored auth record.
+///
+/// Construction does not load or refresh credentials. The provider resolves
+/// its credential at a request boundary.
+pub fn create_supported_managed_oauth_provider(
+    stored: &StoredProvider,
+    hub: ConfigHub,
+) -> Result<Arc<dyn Provider>> {
+    match stored.kind {
+        ProviderKind::Codex => Ok(create_managed_oauth_provider_from_stored::<
+            crate::providers::codex::CodexProvider,
+        >(stored, hub)?),
+        ref kind => anyhow::bail!("managed OAuth provider kind `{kind:?}` is not supported"),
+    }
+}
+
 async fn create_oauth_provider_impl<P: OAuthProvider>(
     stored: &StoredProvider,
     hub: ConfigHub,

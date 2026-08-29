@@ -77,8 +77,6 @@ pub struct ProviderManager {
     pub refresh_just_triggered: bool,
     pub test_just_triggered: bool,
     pub test_btn_rect: Option<Rect>,
-    pub add_just_completed: bool,
-    pub last_added_name: Option<String>,
     show_add: bool,
     focus: ProviderFocus,
     add_options: Vec<AddProviderOption>,
@@ -98,6 +96,17 @@ pub struct ProviderManager {
     confirm_kind: Option<ConfirmKind>,
     confirm_provider_id: Option<String>,
     confirm_provider_name: String,
+    next_mutation_request_id: u64,
+    pending_mutation: Option<crate::ProviderMutationRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProviderMutationResolution {
+    Ignored,
+    Failed,
+    ProtocolError,
+    Succeeded,
+    Installed { name: String },
 }
 
 impl ProviderManager {
@@ -146,6 +155,20 @@ impl ProviderManager {
     pub fn close(&mut self) {
         self.open = false;
         self.show_add = false;
+    }
+
+    pub(crate) fn has_pending_mutation(&self) -> bool {
+        self.pending_mutation.is_some()
+    }
+
+    fn pending_help(&self) -> Option<&'static str> {
+        let request = self.pending_mutation.as_ref()?;
+        Some(match &request.action {
+            crate::ProviderMutation::Login { .. } => "waiting for OAuth login…  Esc:hide",
+            crate::ProviderMutation::SetEnabled { .. } => "updating provider state…  Esc:hide",
+            crate::ProviderMutation::Remove { .. } => "removing provider…  Esc:hide",
+            crate::ProviderMutation::Refresh { .. } => "refreshing models…  Esc:hide",
+        })
     }
 
     pub fn refresh_list(&mut self) {
@@ -306,6 +329,12 @@ impl ProviderManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
+        if self.pending_mutation.is_some() {
+            if matches!(action, KeyAction::Escape) {
+                self.open = false;
+            }
+            return Some(ModalAction::Consumed);
+        }
         if self.show_confirm {
             match action {
                 KeyAction::Char('y') | KeyAction::Char('Y') | KeyAction::Submit => {
@@ -394,12 +423,13 @@ impl ProviderManager {
                 ProviderSource::AuthStore { id } => {
                     let new_enabled =
                         !matches!(p.status, ProviderStatus::Active | ProviderStatus::Cached);
-                    if atman_runtime::config_hub::ConfigHub::global()
-                        .and_then(|hub| hub.set_auth_provider_enabled(&id, new_enabled))
-                        .unwrap_or(false)
-                    {
-                        self.refresh_list();
-                    }
+                    self.begin_mutation(
+                        crate::ProviderMutation::SetEnabled {
+                            provider_id: id,
+                            enabled: new_enabled,
+                        },
+                        control_tx,
+                    );
                 }
                 ProviderSource::Config => {
                     let providers = atman_runtime::model_registry::all_provider_entries();
@@ -451,21 +481,22 @@ impl ProviderManager {
 
     fn execute_confirm(
         &mut self,
-        _control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        let provider_id = self.confirm_provider_id.take();
-        let kind = self.confirm_kind.take();
-        self.show_confirm = false;
-
-        let Some(id) = provider_id else { return };
-
-        match kind {
-            Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => {
-                let _ = atman_runtime::config_hub::ConfigHub::global()
-                    .and_then(|hub| hub.remove_auth_provider(&id));
-                self.refresh_list();
-            }
-            None => {}
+        let Some(id) = self.confirm_provider_id.clone() else {
+            return;
+        };
+        let sent = match self.confirm_kind {
+            Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => self.begin_mutation(
+                crate::ProviderMutation::Remove { provider_id: id },
+                control_tx,
+            ),
+            None => false,
+        };
+        if sent {
+            self.confirm_provider_id = None;
+            self.confirm_kind = None;
+            self.show_confirm = false;
         }
     }
 
@@ -478,12 +509,71 @@ impl ProviderManager {
             ..
         }) = self.providers.get(self.selected)
         {
-            if let Some(tx) = control_tx {
-                let _ = tx.send(crate::TuiControl::RefreshProviderModels {
+            if self.begin_mutation(
+                crate::ProviderMutation::Refresh {
                     provider_id: id.clone(),
-                });
+                },
+                control_tx,
+            ) {
                 self.refresh_just_triggered = true;
             }
+        }
+    }
+
+    pub(crate) fn begin_mutation(
+        &mut self,
+        action: crate::ProviderMutation,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        if self.pending_mutation.is_some() {
+            return false;
+        }
+        let Some(tx) = control_tx else {
+            return false;
+        };
+        self.next_mutation_request_id = self.next_mutation_request_id.wrapping_add(1);
+        let request = crate::ProviderMutationRequest {
+            request_id: self.next_mutation_request_id,
+            action,
+        };
+        if tx
+            .send(crate::TuiControl::MutateProvider(request.clone()))
+            .is_err()
+        {
+            return false;
+        }
+        self.pending_mutation = Some(request);
+        true
+    }
+
+    pub(crate) fn resolve_mutation(
+        &mut self,
+        request: &crate::ProviderMutationRequest,
+        result: &Result<crate::ProviderMutationSuccess, String>,
+    ) -> ProviderMutationResolution {
+        if self.pending_mutation.as_ref() != Some(request) {
+            return ProviderMutationResolution::Ignored;
+        }
+        let request = self
+            .pending_mutation
+            .take()
+            .expect("pending request matched");
+        self.refresh_list();
+        let succeeded = match result {
+            Ok(success) if mutation_success_matches(&request.action, success) => true,
+            Ok(_) => return ProviderMutationResolution::ProtocolError,
+            Err(_) => false,
+        };
+        if !succeeded {
+            return ProviderMutationResolution::Failed;
+        }
+        match request.action {
+            crate::ProviderMutation::Login { name, .. } => {
+                self.close();
+                self.name_focused = false;
+                ProviderMutationResolution::Installed { name }
+            }
+            _ => ProviderMutationResolution::Succeeded,
         }
     }
 
@@ -729,16 +819,13 @@ impl ProviderManager {
                         AddProviderKind::Preset(idx) => {
                             let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[idx];
                             if preset.provider_type == "codex" {
-                                if let Some(tx) = control_tx {
-                                    let _ = tx.send(crate::TuiControl::AuthLogin {
+                                self.begin_mutation(
+                                    crate::ProviderMutation::Login {
                                         kind: atman_runtime::auth_store::ProviderKind::Codex,
                                         name: preset.name.to_string(),
-                                    });
-                                }
-                                self.show_add = false;
-                                self.open = false;
-                                self.last_added_name = Some(preset.name.to_string());
-                                self.add_just_completed = true;
+                                    },
+                                    control_tx,
+                                );
                             } else {
                                 self.open_preset_form(idx);
                             }
@@ -792,44 +879,40 @@ impl ProviderManager {
         } else {
             provider_type
         };
-        let is_preset = atman_runtime::model_registry::PROVIDER_PRESETS
-            .iter()
-            .any(|p| p.base_url == base_url);
-        if let Some(tx) = control_tx {
+        let sent = control_tx.is_some_and(|tx| {
             if self.editing_provider.is_some() {
-                let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
+                tx.send(crate::TuiControl::UpdateConfigProvider {
                     name: name.clone(),
-                    provider_type,
-                    api_key,
-                    api_key_env,
-                    base_url,
+                    provider_type: provider_type.clone(),
+                    api_key: api_key.clone(),
+                    api_key_env: api_key_env.clone(),
+                    base_url: base_url.clone(),
                     max_tokens: None,
-                    reasoning_format,
+                    reasoning_format: reasoning_format.clone(),
                     enabled,
-                });
+                })
+                .is_ok()
             } else {
-                let _ = tx.send(crate::TuiControl::AddConfigProvider {
+                tx.send(crate::TuiControl::AddConfigProvider {
                     name: name.clone(),
-                    provider_type,
-                    api_key,
-                    api_key_env,
-                    base_url,
+                    provider_type: provider_type.clone(),
+                    api_key: api_key.clone(),
+                    api_key_env: api_key_env.clone(),
+                    base_url: base_url.clone(),
                     max_tokens: None,
-                    reasoning_format,
+                    reasoning_format: reasoning_format.clone(),
                     enabled,
-                });
+                })
+                .is_ok()
             }
+        });
+        if !sent {
+            return None;
         }
         self.show_add = false;
         self.in_form = false;
         self.editing_provider = None;
-        self.last_added_name = Some(name.clone());
-        self.add_just_completed = true;
-        if !is_preset {
-            Some(ModalAction::OpenModelManager(name))
-        } else {
-            None
-        }
+        None
     }
 
     fn commit_add(
@@ -853,17 +936,56 @@ impl ProviderManager {
             }
             _ => return,
         };
-        if let Some(tx) = control_tx {
-            let _ = tx.send(crate::TuiControl::AuthLogin {
+        self.begin_mutation(
+            crate::ProviderMutation::Login {
                 kind,
                 name: name.clone(),
-            });
-        }
-        self.show_add = false;
-        self.open = false;
-        self.name_focused = false;
-        self.last_added_name = Some(name);
-        self.add_just_completed = true;
+            },
+            control_tx,
+        );
+    }
+}
+
+fn mutation_success_matches(
+    action: &crate::ProviderMutation,
+    success: &crate::ProviderMutationSuccess,
+) -> bool {
+    match (action, success) {
+        (
+            crate::ProviderMutation::Login { kind, name },
+            crate::ProviderMutationSuccess::Installed {
+                name: installed_name,
+                kind: installed_kind,
+                ..
+            },
+        ) => kind == installed_kind && name == installed_name,
+        (
+            crate::ProviderMutation::SetEnabled {
+                provider_id,
+                enabled,
+            },
+            crate::ProviderMutationSuccess::StateChanged {
+                provider_id: changed_id,
+                enabled: Some(changed_enabled),
+                ..
+            },
+        ) => provider_id == changed_id && enabled == changed_enabled,
+        (
+            crate::ProviderMutation::Remove { provider_id },
+            crate::ProviderMutationSuccess::StateChanged {
+                provider_id: changed_id,
+                enabled: None,
+                ..
+            },
+        ) => provider_id == changed_id,
+        (
+            crate::ProviderMutation::Refresh { provider_id },
+            crate::ProviderMutationSuccess::Refreshed {
+                provider_id: refreshed_id,
+                ..
+            },
+        ) => provider_id == refreshed_id,
+        _ => false,
     }
 }
 
@@ -1374,6 +1496,9 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         }
         if self.show_add {
             render_add_dialog(f, area, self, t);
+            if let Some(help) = self.pending_help() {
+                render_pending_help(f, area, help, t);
+            }
             return;
         }
         let rows = Layout::default()
@@ -1401,11 +1526,11 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             columns[0].height,
             t,
         );
-        let help = match self.focus {
+        let help = self.pending_help().unwrap_or(match self.focus {
             ProviderFocus::ProviderList => {
                 "n:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Esc:close"
             }
-        };
+        });
         let footer = Paragraph::new(Line::from(Span::styled(
             help,
             Style::default().fg(t.meta_fg.into()),
@@ -1468,6 +1593,27 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
         t.accent.into()
     }
+}
+
+fn render_pending_help(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    help: &str,
+    theme: &crate::theme::Theme,
+) {
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            help,
+            Style::default().fg(theme.accent.into()),
+        )))
+        .alignment(ratatui::layout::Alignment::Right),
+        Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -1533,5 +1679,343 @@ mod tests {
             "thinking-toggle",
         );
         assert_eq!(manager.reasoning_format_editor.buf(), "thinking-toggle");
+    }
+
+    fn receive_mutation(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::TuiControl>,
+    ) -> crate::ProviderMutationRequest {
+        match rx.try_recv().unwrap() {
+            crate::TuiControl::MutateProvider(request) => request,
+            _ => panic!("expected provider mutation"),
+        }
+    }
+
+    fn begin_codex_login(
+        manager: &mut ProviderManager,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::TuiControl>,
+    ) -> String {
+        manager.open_add();
+        manager.kind_selected = manager
+            .add_options
+            .iter()
+            .position(|option| {
+                matches!(
+                    &option.kind,
+                    AddProviderKind::Preset(index)
+                        if atman_runtime::model_registry::PROVIDER_PRESETS[*index].provider_type
+                            == "codex"
+                )
+            })
+            .unwrap();
+        let name = manager.add_options[manager.kind_selected].label.to_string();
+        manager.handle_add_key(&KeyAction::Submit, Some(tx));
+        name
+    }
+
+    #[test]
+    fn oauth_login_waits_for_the_matching_success_before_closing() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        let name = begin_codex_login(&mut manager, &tx);
+        let request = receive_mutation(&mut rx);
+
+        assert!(manager.open);
+        assert!(manager.show_add);
+        assert_eq!(manager.pending_mutation.as_ref(), Some(&request));
+
+        let result = Ok(crate::ProviderMutationSuccess::Installed {
+            provider_id: "provider-id".into(),
+            name: name.clone(),
+            kind: atman_runtime::auth_store::ProviderKind::Codex,
+            delta: Default::default(),
+        });
+        assert_eq!(
+            manager.resolve_mutation(&request, &result),
+            ProviderMutationResolution::Installed { name }
+        );
+        assert!(!manager.open);
+        assert!(manager.pending_mutation.is_none());
+    }
+
+    #[test]
+    fn oauth_login_failure_keeps_the_form_open_for_retry() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        begin_codex_login(&mut manager, &tx);
+        let request = receive_mutation(&mut rx);
+
+        assert_eq!(
+            manager.resolve_mutation(&request, &Err("login failed".into())),
+            ProviderMutationResolution::Failed
+        );
+        assert!(manager.open);
+        assert!(manager.show_add);
+        assert!(manager.pending_mutation.is_none());
+
+        manager.handle_add_key(&KeyAction::Submit, Some(&tx));
+        let retry = receive_mutation(&mut rx);
+        assert_ne!(retry.request_id, request.request_id);
+    }
+
+    #[test]
+    fn pending_mutation_can_be_hidden_without_losing_its_result() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        let name = begin_codex_login(&mut manager, &tx);
+        let request = receive_mutation(&mut rx);
+
+        manager.handle_key(&KeyAction::Escape, Some(&tx));
+        assert!(!manager.open);
+        assert_eq!(manager.pending_mutation.as_ref(), Some(&request));
+
+        let result = Ok(crate::ProviderMutationSuccess::Installed {
+            provider_id: "provider-id".into(),
+            name: name.clone(),
+            kind: atman_runtime::auth_store::ProviderKind::Codex,
+            delta: Default::default(),
+        });
+        assert_eq!(
+            manager.resolve_mutation(&request, &result),
+            ProviderMutationResolution::Installed { name }
+        );
+        assert!(manager.pending_mutation.is_none());
+    }
+
+    #[test]
+    fn stale_and_mismatched_provider_results_cannot_complete_a_request() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        let name = begin_codex_login(&mut manager, &tx);
+        let request = receive_mutation(&mut rx);
+        let mut stale = request.clone();
+        stale.request_id += 1;
+
+        assert_eq!(
+            manager.resolve_mutation(
+                &stale,
+                &Ok(crate::ProviderMutationSuccess::Installed {
+                    provider_id: "provider-id".into(),
+                    name: name.clone(),
+                    kind: atman_runtime::auth_store::ProviderKind::Codex,
+                    delta: Default::default(),
+                }),
+            ),
+            ProviderMutationResolution::Ignored
+        );
+        assert_eq!(manager.pending_mutation.as_ref(), Some(&request));
+
+        let same_id_different_action = crate::ProviderMutationRequest {
+            request_id: request.request_id,
+            action: crate::ProviderMutation::Refresh {
+                provider_id: "provider-id".into(),
+            },
+        };
+        assert_eq!(
+            manager.resolve_mutation(
+                &same_id_different_action,
+                &Ok(crate::ProviderMutationSuccess::Refreshed {
+                    provider_id: "provider-id".into(),
+                    delta: Default::default(),
+                }),
+            ),
+            ProviderMutationResolution::Ignored
+        );
+        assert_eq!(manager.pending_mutation.as_ref(), Some(&request));
+
+        assert_eq!(
+            manager.resolve_mutation(
+                &request,
+                &Ok(crate::ProviderMutationSuccess::Installed {
+                    provider_id: "provider-id".into(),
+                    name: "different".into(),
+                    kind: atman_runtime::auth_store::ProviderKind::Codex,
+                    delta: Default::default(),
+                }),
+            ),
+            ProviderMutationResolution::ProtocolError
+        );
+        assert!(manager.open);
+        assert!(manager.pending_mutation.is_none());
+    }
+
+    #[test]
+    fn auth_actions_emit_typed_mutations_without_optimistic_state_changes() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager {
+            providers: vec![ProviderEntry {
+                source: ProviderSource::AuthStore {
+                    id: "auth-id".into(),
+                },
+                name: "Auth".into(),
+                kind: "codex".into(),
+                status: ProviderStatus::Cached,
+                detail: String::new(),
+            }],
+            ..Default::default()
+        };
+        manager.toggle_enabled(Some(&tx));
+        let toggle = receive_mutation(&mut rx);
+        assert_eq!(
+            toggle.action,
+            crate::ProviderMutation::SetEnabled {
+                provider_id: "auth-id".into(),
+                enabled: false,
+            }
+        );
+        assert_eq!(manager.providers[0].status, ProviderStatus::Cached);
+
+        let mut remove_manager = ProviderManager {
+            confirm_provider_id: Some("auth-id".into()),
+            confirm_kind: Some(ConfirmKind::Logout),
+            show_confirm: true,
+            ..Default::default()
+        };
+        remove_manager.execute_confirm(Some(&tx));
+        assert_eq!(
+            receive_mutation(&mut rx).action,
+            crate::ProviderMutation::Remove {
+                provider_id: "auth-id".into()
+            }
+        );
+
+        let mut refresh_manager = ProviderManager {
+            providers: manager.providers.clone(),
+            ..Default::default()
+        };
+        refresh_manager.refresh_selected(Some(&tx));
+        assert_eq!(
+            receive_mutation(&mut rx).action,
+            crate::ProviderMutation::Refresh {
+                provider_id: "auth-id".into()
+            }
+        );
+        assert!(refresh_manager.refresh_just_triggered);
+    }
+
+    #[test]
+    fn failed_dispatch_and_pending_request_reject_additional_mutations() {
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(closed_rx);
+        let mut manager = ProviderManager::default();
+        assert!(!manager.begin_mutation(
+            crate::ProviderMutation::Refresh {
+                provider_id: "auth-id".into(),
+            },
+            Some(&closed_tx),
+        ));
+        assert!(manager.pending_mutation.is_none());
+
+        manager.confirm_provider_id = Some("auth-id".into());
+        manager.confirm_provider_name = "Auth".into();
+        manager.confirm_kind = Some(ConfirmKind::Logout);
+        manager.show_confirm = true;
+        manager.execute_confirm(Some(&closed_tx));
+        assert_eq!(manager.confirm_provider_id.as_deref(), Some("auth-id"));
+        assert_eq!(manager.confirm_kind, Some(ConfirmKind::Logout));
+        assert!(manager.show_confirm);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(manager.begin_mutation(
+            crate::ProviderMutation::Refresh {
+                provider_id: "first".into(),
+            },
+            Some(&tx),
+        ));
+        assert!(!manager.begin_mutation(
+            crate::ProviderMutation::Remove {
+                provider_id: "second".into(),
+            },
+            Some(&tx),
+        ));
+        assert_eq!(
+            receive_mutation(&mut rx).action,
+            crate::ProviderMutation::Refresh {
+                provider_id: "first".into()
+            }
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mutation_success_payload_must_match_the_requested_action() {
+        let changed = atman_runtime::provider_lifecycle::ProviderStateChange {
+            auth_changed: true,
+            live_changed: true,
+            catalog_changed: true,
+        };
+        let mismatches = [
+            (
+                crate::ProviderMutation::Login {
+                    kind: atman_runtime::auth_store::ProviderKind::Codex,
+                    name: "provider-a".into(),
+                },
+                crate::ProviderMutationSuccess::Installed {
+                    provider_id: "provider-id".into(),
+                    name: "provider-a".into(),
+                    kind: atman_runtime::auth_store::ProviderKind::AnthropicOauth,
+                    delta: Default::default(),
+                },
+            ),
+            (
+                crate::ProviderMutation::Login {
+                    kind: atman_runtime::auth_store::ProviderKind::Codex,
+                    name: "provider-a".into(),
+                },
+                crate::ProviderMutationSuccess::Installed {
+                    provider_id: "provider-id".into(),
+                    name: "provider-b".into(),
+                    kind: atman_runtime::auth_store::ProviderKind::Codex,
+                    delta: Default::default(),
+                },
+            ),
+            (
+                crate::ProviderMutation::SetEnabled {
+                    provider_id: "provider-a".into(),
+                    enabled: true,
+                },
+                crate::ProviderMutationSuccess::StateChanged {
+                    provider_id: "provider-b".into(),
+                    enabled: Some(true),
+                    change: changed,
+                    catalog: None,
+                },
+            ),
+            (
+                crate::ProviderMutation::SetEnabled {
+                    provider_id: "provider-a".into(),
+                    enabled: false,
+                },
+                crate::ProviderMutationSuccess::StateChanged {
+                    provider_id: "provider-a".into(),
+                    enabled: Some(true),
+                    change: changed,
+                    catalog: None,
+                },
+            ),
+            (
+                crate::ProviderMutation::Remove {
+                    provider_id: "provider-a".into(),
+                },
+                crate::ProviderMutationSuccess::StateChanged {
+                    provider_id: "provider-a".into(),
+                    enabled: Some(false),
+                    change: changed,
+                    catalog: None,
+                },
+            ),
+            (
+                crate::ProviderMutation::Refresh {
+                    provider_id: "provider-a".into(),
+                },
+                crate::ProviderMutationSuccess::Refreshed {
+                    provider_id: "provider-b".into(),
+                    delta: Default::default(),
+                },
+            ),
+        ];
+
+        for (action, success) in mismatches {
+            assert!(!mutation_success_matches(&action, &success));
+        }
     }
 }

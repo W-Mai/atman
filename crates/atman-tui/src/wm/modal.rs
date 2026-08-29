@@ -331,13 +331,6 @@ impl ModalManager {
                     if let Some(ModalAction::OpenModelManager(name)) = pm_action {
                         self.model_manager.open_with_provider(&name);
                     }
-                    if self.provider_manager.add_just_completed {
-                        self.provider_manager.add_just_completed = false;
-                        if self.onboarding_open {
-                            let name = self.provider_manager.last_added_name.take();
-                            self.onboarding.provider_added(name.as_deref());
-                        }
-                    }
                     if self.provider_manager.refresh_just_triggered {
                         self.provider_manager.refresh_just_triggered = false;
                         app.push_toast(
@@ -356,7 +349,10 @@ impl ModalManager {
                             crate::app::ToastPosition::TopRight,
                         );
                     }
-                    if self.onboarding_open && !self.provider_manager.open {
+                    if self.onboarding_open
+                        && !self.provider_manager.open
+                        && !self.provider_manager.has_pending_mutation()
+                    {
                         self.onboarding.check_provider_manager_closed();
                     }
                 }
@@ -1095,5 +1091,33 @@ mod tests {
         assert_eq!(app.context.model, "new-model");
         assert_eq!(app.toasts.len(), 2);
         assert_eq!(app.toasts[1].level, crate::app::NoteLevel::Success);
+    }
+
+    #[test]
+    fn hiding_a_pending_provider_mutation_does_not_fail_onboarding() {
+        let mut manager = ModalManager {
+            onboarding_open: true,
+            ..Default::default()
+        };
+        manager.provider_manager.open();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(manager.provider_manager.begin_mutation(
+            crate::ProviderMutation::Refresh {
+                provider_id: "provider-id".into(),
+            },
+            Some(&tx),
+        ));
+        let mut app = crate::app::AppState::new("session".into(), None);
+
+        manager.handle_key_top(
+            ModalKind::ProviderManager,
+            &crate::keys::KeyAction::Escape,
+            &mut app,
+            Some(&tx),
+        );
+
+        assert!(!manager.provider_manager.open);
+        assert!(manager.provider_manager.has_pending_mutation());
+        assert!(manager.onboarding.error.is_none());
     }
 }

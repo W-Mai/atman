@@ -95,6 +95,7 @@ impl TuiNote {
     }
 }
 
+#[non_exhaustive]
 pub enum TuiControl {
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
@@ -130,10 +131,8 @@ pub enum TuiControl {
         form_id: String,
         submission: atman_runtime::form::FormSubmission,
     },
-    AuthLogin {
-        kind: atman_runtime::auth_store::ProviderKind,
-        name: String,
-    },
+    /// Execute a provider mutation; completed operations return one matching result.
+    MutateProvider(ProviderMutationRequest),
     AddConfigProvider {
         name: String,
         provider_type: String,
@@ -164,9 +163,6 @@ pub enum TuiControl {
         max_tokens: Option<u32>,
         enabled: bool,
     },
-    AuthLogout {
-        id: String,
-    },
     OpenAliasManager {
         model: Option<String>,
     },
@@ -174,9 +170,6 @@ pub enum TuiControl {
     SwitchModel {
         request_id: u64,
         model: String,
-    },
-    RefreshProviderModels {
-        provider_id: String,
     },
     TestProvider {
         name: String,
@@ -212,6 +205,7 @@ pub struct SessionPickerRow {
     pub goal: Option<String>,
 }
 
+#[non_exhaustive]
 pub enum TuiCommand {
     SetSidebar(sidebar::SidebarMode),
     OpenSessionSwitcher,
@@ -223,7 +217,18 @@ pub enum TuiCommand {
         model: String,
         result: Result<String, String>,
     },
-    ProviderModelsUpdated,
+    /// Refresh catalog-backed UI after a successful configuration change.
+    ///
+    /// `added_provider` is `Some` only after a provider was added. Provider
+    /// updates and model changes use `None`.
+    ProviderCatalogChanged {
+        added_provider: Option<String>,
+    },
+    /// Resolve one mutation by echoing its original request unchanged.
+    ProviderMutationResult {
+        request: ProviderMutationRequest,
+        result: Result<ProviderMutationSuccess, String>,
+    },
     ProviderTestResult((String, bool)),
     McpTestResult {
         name: String,
@@ -239,6 +244,69 @@ pub enum TuiCommand {
     McpPromptsResult {
         name: String,
         prompts: Vec<atman_runtime::mcp::McpPrompt>,
+    },
+}
+
+/// Correlates a provider mutation with its eventual host result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProviderMutationRequest {
+    /// Monotonic identifier scoped to the current TUI provider manager.
+    pub request_id: u64,
+    /// Requested provider operation and identity.
+    pub action: ProviderMutation,
+}
+
+impl ProviderMutationRequest {
+    /// Creates a provider mutation request with a host-opaque correlation ID.
+    pub fn new(request_id: u64, action: ProviderMutation) -> Self {
+        Self { request_id, action }
+    }
+}
+
+/// Provider operations delegated by the TUI to its host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProviderMutation {
+    Login {
+        kind: atman_runtime::auth_store::ProviderKind,
+        name: String,
+    },
+    SetEnabled {
+        provider_id: String,
+        enabled: bool,
+    },
+    Remove {
+        provider_id: String,
+    },
+    Refresh {
+        provider_id: String,
+    },
+}
+
+/// A committed provider mutation.
+///
+/// Login results must preserve the requested kind and name. Other results
+/// must preserve the requested provider ID and, for state changes, the
+/// requested enabled value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProviderMutationSuccess {
+    Installed {
+        provider_id: String,
+        name: String,
+        kind: atman_runtime::auth_store::ProviderKind,
+        delta: atman_runtime::model_registry::CatalogDelta,
+    },
+    StateChanged {
+        provider_id: String,
+        enabled: Option<bool>,
+        change: atman_runtime::provider_lifecycle::ProviderStateChange,
+        catalog: Option<atman_runtime::model_registry::CatalogDelta>,
+    },
+    Refreshed {
+        provider_id: String,
+        delta: atman_runtime::model_registry::CatalogDelta,
     },
 }
 

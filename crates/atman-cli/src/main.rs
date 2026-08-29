@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use atman_dsl::parse::parse_file;
-use atman_runtime::provider::Provider;
 use atman_runtime::{Executor, Session, Value};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -1683,13 +1682,50 @@ async fn cmd_repl_once(
         let session_for_ctrl_term_registry = executor.tool_ctx.term_registry.clone();
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
+        let provider_lifecycle_for_ctrl = executor
+            .provider_lifecycle()
+            .context("provider lifecycle unavailable")?;
         let data_root_for_ctrl = root.clone();
         let executor_for_ctrl = executor.clone();
         let tools_for_ctrl = executor.tools.clone();
         let reporter_for_ctrl = reporter.clone();
         let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
-            while let Some(msg) = ctrl_rx.recv().await {
+            let mut provider_mutations = tokio::task::JoinSet::new();
+            loop {
+                let msg = tokio::select! {
+                    message = ctrl_rx.recv() => {
+                        let Some(message) = message else {
+                            break;
+                        };
+                        message
+                    }
+                    completed = provider_mutations.join_next(), if !provider_mutations.is_empty() => {
+                        match completed {
+                            Some(Ok((request, result))) => {
+                                let _ = cmd_tx_for_models.send(
+                                    atman_tui::TuiCommand::ProviderMutationResult {
+                                        request,
+                                        result,
+                                    },
+                                );
+                            }
+                            Some(Err(error)) => {
+                                session_for_ctrl.cancel_flow();
+                                if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
+                                    let _ = tx.send(());
+                                }
+                                provider_mutations.shutdown().await;
+                                if error.is_panic() {
+                                    std::panic::resume_unwind(error.into_panic());
+                                }
+                                panic!("provider mutation task failed: {error}");
+                            }
+                            None => {}
+                        }
+                        continue;
+                    }
+                };
                 match msg {
                     atman_tui::TuiControl::UpdateTrust(mut trust) => {
                         trust.theme = session_for_ctrl.trust_config().theme;
@@ -1911,36 +1947,14 @@ async fn cmd_repl_once(
                         }
                         let _ = session_for_ctrl.forms().submit(&form_id, submission);
                     }
-                    atman_tui::TuiControl::AuthLogin { kind, name } => match kind {
-                        atman_runtime::auth_store::ProviderKind::Codex => {
-                            let name = name.clone();
-                            tokio::task::spawn(async move {
-                                match crate::oauth_login::oauth_login::<
-                                    atman_runtime::providers::codex::CodexProvider,
-                                >(kind, &name)
-                                .await
-                                {
-                                    Ok(p) => atman_runtime::notify!(
-                                        success,
-                                        "Codex logged in as \"{}\" ({})",
-                                        p.name,
-                                        p.account.as_deref().unwrap_or("unknown")
-                                    ),
-                                    Err(e) => {
-                                        atman_runtime::notify!(error, "Codex login error: {e:#}")
-                                    }
-                                }
-                            });
-                        }
-                        _ => atman_runtime::notify!(
-                            warn,
-                            "Auth login for {kind:?} not yet implemented"
-                        ),
-                    },
-                    atman_tui::TuiControl::AuthLogout { id } => {
-                        let _ = atman_runtime::config_hub::ConfigHub::global()
-                            .and_then(|hub| hub.remove_auth_provider(&id))
-                            .map(|_| ());
+                    atman_tui::TuiControl::MutateProvider(request) => {
+                        let lifecycle = provider_lifecycle_for_ctrl.clone();
+                        let action = request.action.clone();
+                        spawn_provider_mutation_task(
+                            &mut provider_mutations,
+                            request,
+                            async move { execute_provider_mutation(&lifecycle, action).await },
+                        );
                     }
                     atman_tui::TuiControl::AddConfigProvider {
                         name,
@@ -1953,8 +1967,8 @@ async fn cmd_repl_once(
                         enabled,
                     } => {
                         let reasoning_format = reasoning_format.parse().ok();
-                        if atman_runtime::config_hub::ConfigHub::global()
-                            .and_then(|hub| {
+                        let update =
+                            atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
                                 hub.upsert_provider(
                                     atman_runtime::config_hub::ProviderConfigUpdate {
                                         name: &name,
@@ -1969,9 +1983,8 @@ async fn cmd_repl_once(
                                         enabled,
                                     },
                                 )
-                            })
-                            .is_ok()
-                        {
+                            });
+                        if update.is_ok() {
                             if !base_url.is_empty() {
                                 atman_runtime::model_registry::register_preset_models_for(
                                     &name, &base_url,
@@ -2037,9 +2050,17 @@ async fn cmd_repl_once(
                                 }
                                 _ => {}
                             }
-                            let _ = cmd_tx_for_models
-                                .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::ProviderCatalogChanged {
+                                    added_provider: Some(name.clone()),
+                                },
+                            );
                             atman_runtime::notify!(success, "Provider \"{name}\" added");
+                        } else if let Err(error) = update {
+                            atman_runtime::notify!(
+                                error,
+                                "Provider \"{name}\" add failed: {error}"
+                            );
                         }
                     }
                     atman_tui::TuiControl::UpdateConfigProvider {
@@ -2053,8 +2074,8 @@ async fn cmd_repl_once(
                         enabled,
                     } => {
                         let reasoning_format = reasoning_format.parse().ok();
-                        if atman_runtime::config_hub::ConfigHub::global()
-                            .and_then(|hub| {
+                        let update =
+                            atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
                                 hub.upsert_provider(
                                     atman_runtime::config_hub::ProviderConfigUpdate {
                                         name: &name,
@@ -2069,9 +2090,8 @@ async fn cmd_repl_once(
                                         enabled,
                                     },
                                 )
-                            })
-                            .is_ok()
-                        {
+                            });
+                        if update.is_ok() {
                             let provider_key = format!("config:{name}");
                             let resolved_key = if !api_key.is_empty() {
                                 api_key.clone()
@@ -2132,9 +2152,17 @@ async fn cmd_repl_once(
                                 }
                                 _ => {}
                             }
-                            let _ = cmd_tx_for_models
-                                .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::ProviderCatalogChanged {
+                                    added_provider: None,
+                                },
+                            );
                             atman_runtime::notify!(success, "Provider \"{name}\" updated");
+                        } else if let Err(error) = update {
+                            atman_runtime::notify!(
+                                error,
+                                "Provider \"{name}\" update failed: {error}"
+                            );
                         }
                     }
                     atman_tui::TuiControl::UpsertConfigModel {
@@ -2162,8 +2190,11 @@ async fn cmd_repl_once(
                             })
                         }) {
                             Ok(()) => {
-                                let _ = cmd_tx_for_models
-                                    .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                                let _ = cmd_tx_for_models.send(
+                                    atman_tui::TuiCommand::ProviderCatalogChanged {
+                                        added_provider: None,
+                                    },
+                                );
                                 atman_runtime::notify!(success, "Model \"{name}\" saved");
                             }
                             Err(e) => {
@@ -2194,55 +2225,6 @@ async fn cmd_repl_once(
                             request_id,
                             model,
                             result,
-                        });
-                    }
-                    atman_tui::TuiControl::RefreshProviderModels { provider_id } => {
-                        let tx = cmd_tx_for_models.clone();
-                        let pid = provider_id.clone();
-                        tokio::spawn(async move {
-                            let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
-                                return;
-                            };
-                            let Some(p) = store.providers.iter().find(|x| x.id == pid) else {
-                                return;
-                            };
-                            let provider = atman_runtime::providers::codex::CodexProvider::new(
-                                &p.id,
-                                &p.access_token,
-                                p.account.as_deref().unwrap_or(""),
-                            );
-                            let models = match provider.try_discover_models().await {
-                                Ok(models) => models,
-                                Err(error) => {
-                                    atman_runtime::notify!(error, "model refresh failed: {error}");
-                                    return;
-                                }
-                            };
-                            let prepared = match atman_runtime::model_registry::prepare_discovered_details_for_provider(
-                                &pid,
-                                &p.name,
-                                &models,
-                            ) {
-                                Ok(prepared) => prepared,
-                                Err(error) => {
-                                    atman_runtime::notify!(error, "model catalog refresh failed: {error}");
-                                    return;
-                                }
-                            };
-                            if let Err(error) =
-                                atman_runtime::auth_store::save_provider_model_cache_details(
-                                    &pid,
-                                    prepared.namespace(),
-                                    &models,
-                                )
-                            {
-                                atman_runtime::notify!(error, "model cache save failed: {error:#}");
-                                return;
-                            }
-                            atman_runtime::model_registry::commit_prepared_provider_catalog(
-                                prepared,
-                            );
-                            let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
                         });
                     }
                     atman_tui::TuiControl::TestProvider {
@@ -2401,8 +2383,15 @@ async fn cmd_repl_once(
                         );
                         let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::McpReloaded);
                     }
+                    _ => {
+                        atman_runtime::notify!(
+                            error,
+                            "TUI control request is unsupported by this host"
+                        );
+                    }
                 }
             }
+            provider_mutations.shutdown().await;
         });
         let session_meta =
             atman_runtime::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
@@ -2703,7 +2692,13 @@ async fn cmd_repl_once(
         }
     }
     if let Some(ct) = ctrl_task {
-        let _ = ct.await;
+        match ct.await {
+            Ok(()) => {}
+            Err(error) if error.is_panic() => {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            Err(error) => return Err(anyhow::anyhow!("TUI control task failed: {error}")),
+        }
     }
     let user_msg_count = session.user_message_count();
     let goal = session.goal();
@@ -2851,6 +2846,95 @@ fn truncate_str(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max).collect();
         out.push('…');
         out
+    }
+}
+
+fn spawn_provider_mutation_task<F>(
+    tasks: &mut tokio::task::JoinSet<(
+        atman_tui::ProviderMutationRequest,
+        Result<atman_tui::ProviderMutationSuccess, String>,
+    )>,
+    request: atman_tui::ProviderMutationRequest,
+    future: F,
+) where
+    F: std::future::Future<Output = Result<atman_tui::ProviderMutationSuccess>> + Send + 'static,
+{
+    tasks.spawn(async move {
+        let result = future.await.map_err(|error| format!("{error:#}"));
+        (request, result)
+    });
+}
+
+async fn execute_provider_mutation(
+    lifecycle: &atman_runtime::provider_lifecycle::ProviderLifecycle,
+    action: atman_tui::ProviderMutation,
+) -> Result<atman_tui::ProviderMutationSuccess> {
+    match action {
+        atman_tui::ProviderMutation::Login { kind, name } => {
+            if kind != atman_runtime::auth_store::ProviderKind::Codex {
+                bail!("OAuth login for {kind:?} is not supported");
+            }
+            let (provider, delta) = crate::oauth_login::oauth_login::<
+                atman_runtime::providers::codex::CodexProvider,
+            >(lifecycle, &name)
+            .await?;
+            Ok(atman_tui::ProviderMutationSuccess::Installed {
+                provider_id: provider.id,
+                name: provider.name,
+                kind: provider.kind,
+                delta,
+            })
+        }
+        atman_tui::ProviderMutation::SetEnabled {
+            provider_id,
+            enabled,
+        } => {
+            if !enabled {
+                let change = lifecycle.disable_provider(&provider_id)?;
+                return Ok(atman_tui::ProviderMutationSuccess::StateChanged {
+                    provider_id,
+                    enabled: Some(false),
+                    change,
+                    catalog: None,
+                });
+            }
+
+            let provider = lifecycle
+                .config_hub()
+                .load_auth()?
+                .providers
+                .into_iter()
+                .find(|provider| provider.id == provider_id)
+                .with_context(|| format!("auth provider `{provider_id}` does not exist"))?;
+            let expected_kind = provider.kind.clone();
+            let live = atman_runtime::oauth::create_supported_managed_oauth_provider(
+                &provider,
+                lifecycle.config_hub().clone(),
+            )?;
+            let outcome = lifecycle
+                .enable_provider(&provider_id, expected_kind, live)
+                .await?;
+            Ok(atman_tui::ProviderMutationSuccess::StateChanged {
+                provider_id,
+                enabled: Some(true),
+                change: outcome.state,
+                catalog: outcome.catalog,
+            })
+        }
+        atman_tui::ProviderMutation::Remove { provider_id } => {
+            let change = lifecycle.remove_provider(&provider_id)?;
+            Ok(atman_tui::ProviderMutationSuccess::StateChanged {
+                provider_id,
+                enabled: None,
+                change,
+                catalog: None,
+            })
+        }
+        atman_tui::ProviderMutation::Refresh { provider_id } => {
+            let delta = lifecycle.refresh_models(&provider_id).await?;
+            Ok(atman_tui::ProviderMutationSuccess::Refreshed { provider_id, delta })
+        }
+        _ => bail!("provider mutation is not supported by this host"),
     }
 }
 
@@ -4840,30 +4924,11 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                 } => {
                     ctrl_session.forms().submit(&form_id, submission);
                 }
-                atman_tui::TuiControl::AuthLogin { kind, name } => {
-                    if kind == atman_runtime::auth_store::ProviderKind::Codex {
-                        let name = name.clone();
-                        tokio::task::spawn(async move {
-                            match crate::oauth_login::oauth_login::<
-                                atman_runtime::providers::codex::CodexProvider,
-                            >(kind, &name)
-                            .await
-                            {
-                                Ok(p) => atman_runtime::notify!(
-                                    success,
-                                    "Codex logged in as \"{}\" ({})",
-                                    p.name,
-                                    p.account.as_deref().unwrap_or("unknown")
-                                ),
-                                Err(e) => atman_runtime::notify!(error, "Codex login error: {e:#}"),
-                            }
-                        });
-                    }
-                }
-                atman_tui::TuiControl::AuthLogout { id } => {
-                    let _ = atman_runtime::config_hub::ConfigHub::global()
-                        .and_then(|hub| hub.remove_auth_provider(&id))
-                        .map(|_| ());
+                atman_tui::TuiControl::MutateProvider(request) => {
+                    let _ = cmd_tx.send(atman_tui::TuiCommand::ProviderMutationResult {
+                        request,
+                        result: Err("provider mutation is unavailable in TUI preview".into()),
+                    });
                 }
                 atman_tui::TuiControl::SwitchModel { request_id, model } => {
                     let _ = cmd_tx.send(atman_tui::TuiCommand::ModelSwitchResult {
@@ -7164,9 +7229,23 @@ mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
 
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    async fn panic_provider_mutation() -> Result<atman_tui::ProviderMutationSuccess> {
+        panic!("provider mutation panic fixture")
+    }
 
     #[tokio::test]
     async fn dropping_tui_submission_sender_closes_repl_input() {
@@ -7213,6 +7292,112 @@ mod tests {
             Some(Value::Str(value)) if value == "high"
         ));
         assert!(second.invocation_env.get("effort").is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_mutation_panic_remains_fatal() {
+        let request = atman_tui::ProviderMutationRequest::new(
+            7,
+            atman_tui::ProviderMutation::Refresh {
+                provider_id: "provider-id".into(),
+            },
+        );
+        let mut tasks = tokio::task::JoinSet::new();
+
+        spawn_provider_mutation_task(&mut tasks, request, panic_provider_mutation());
+
+        let error = tasks.join_next().await.unwrap().unwrap_err();
+        assert!(error.is_panic());
+    }
+
+    #[tokio::test]
+    async fn provider_mutation_shutdown_drops_in_flight_work() {
+        let request = atman_tui::ProviderMutationRequest::new(
+            8,
+            atman_tui::ProviderMutation::Refresh {
+                provider_id: "provider-id".into(),
+            },
+        );
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        spawn_provider_mutation_task(&mut tasks, request, async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<Result<atman_tui::ProviderMutationSuccess>>().await
+        });
+        started_rx.await.unwrap();
+
+        tasks.shutdown().await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("provider mutation future was not dropped")
+            .unwrap();
+    }
+
+    #[test]
+    fn provider_mutations_fail_explicitly_without_partial_runtime_state() {
+        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let config = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
+        let lifecycle = atman_runtime::provider_lifecycle::ProviderLifecycle::new(
+            hub.clone(),
+            atman_runtime::provider::ProviderRegistry::new(),
+        );
+        hub.add_auth_provider(atman_runtime::auth_store::StoredProvider {
+            id: "unsupported".into(),
+            name: "Unsupported".into(),
+            kind: atman_runtime::auth_store::ProviderKind::GitHubCopilot,
+            access_token: "access".into(),
+            refresh_token: None,
+            expires_at: i64::MAX,
+            account: None,
+            enabled: false,
+            model_cache: None,
+        })
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let login_error = runtime
+            .block_on(execute_provider_mutation(
+                &lifecycle,
+                atman_tui::ProviderMutation::Login {
+                    kind: atman_runtime::auth_store::ProviderKind::GitHubCopilot,
+                    name: "Unsupported".into(),
+                },
+            ))
+            .unwrap_err();
+        assert!(login_error.to_string().contains("not supported"));
+
+        let enable_error = runtime
+            .block_on(execute_provider_mutation(
+                &lifecycle,
+                atman_tui::ProviderMutation::SetEnabled {
+                    provider_id: "unsupported".into(),
+                    enabled: true,
+                },
+            ))
+            .unwrap_err();
+        assert!(enable_error.to_string().contains("not supported"));
+        let stored = hub.load_auth().unwrap();
+        assert!(!stored.providers[0].enabled);
+        assert!(!lifecycle.provider_registry().contains("unsupported"));
+
+        let refresh_error = runtime
+            .block_on(execute_provider_mutation(
+                &lifecycle,
+                atman_tui::ProviderMutation::Refresh {
+                    provider_id: "missing".into(),
+                },
+            ))
+            .unwrap_err();
+        assert!(refresh_error.to_string().contains("does not exist"));
     }
 
     #[test]
