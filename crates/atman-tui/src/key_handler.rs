@@ -1093,7 +1093,7 @@ pub(crate) fn handle_key(
                     let submission = crate::TuiSubmission {
                         text: line,
                         images,
-                        reasoning: app.input_reasoning.clone(),
+                        reasoning: app.input_reasoning_for_submission(),
                     };
                     if let Err(error) = tx.send(submission)
                         && let Some(session) = app.session.clone()
@@ -1391,6 +1391,14 @@ mod tests {
     use super::*;
     use crate::history_search_modal::extract_event_text;
 
+    struct ModelConfigReset;
+
+    impl Drop for ModelConfigReset {
+        fn drop(&mut self) {
+            atman_runtime::model_registry::set_provider_config(Default::default());
+        }
+    }
+
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
@@ -1568,6 +1576,75 @@ mod tests {
             Some(atman_runtime::provider::ReasoningSelection::Disabled)
         );
         assert_eq!(session.pending_image_count(), 1);
+    }
+
+    #[test]
+    fn first_submit_captures_the_displayed_model_reasoning() {
+        use atman_runtime::model_registry::{
+            AliasEntry, ModelEntry, ProviderConfig, ProviderEntry,
+        };
+        use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
+        use atman_runtime::providers::openai::OpenAiReasoningFormat;
+
+        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ModelConfigReset;
+        atman_runtime::model_registry::set_provider_config(ProviderConfig {
+            providers: std::collections::HashMap::from([(
+                "gateway".into(),
+                ProviderEntry {
+                    kind: "openai".into(),
+                    reasoning_format: Some(OpenAiReasoningFormat::Official),
+                    ..Default::default()
+                },
+            )]),
+            models: std::collections::HashMap::from([(
+                "reasoning-model".into(),
+                ModelEntry {
+                    model: "vendor/reasoning-model".into(),
+                    provider: Some("gateway".into()),
+                    context_budget: Some(128_000),
+                    reasoning: Some("ultra".into()),
+                    ..Default::default()
+                },
+            )]),
+            aliases: std::collections::HashMap::from([(
+                "smart".into(),
+                AliasEntry {
+                    model: "reasoning-model".into(),
+                },
+            )]),
+        });
+
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        assert_eq!(state.app.input_reasoning, None);
+        assert_eq!(
+            state.app.effective_input_reasoning_badge().as_deref(),
+            Some("ultra")
+        );
+        let mut editor = InputEditor::default();
+        editor.insert_str("first request after restart");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            Some(&tx),
+            None,
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap().reasoning,
+            Some(ReasoningSelection::Effort {
+                effort: ReasoningEffort::Ultra,
+                execution_mode: None,
+            })
+        );
+        assert_eq!(state.app.input_reasoning, None);
     }
 
     #[test]

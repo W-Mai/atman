@@ -328,6 +328,12 @@ pub struct AppState {
     last_lag_count: u64,
 }
 
+enum InputReasoningResolution {
+    ModelUnavailable,
+    Resolved(Option<atman_runtime::provider::ReasoningSelection>),
+    Invalid(atman_runtime::provider::ReasoningSelection),
+}
+
 pub use atman_runtime::stream::frame_run_id;
 
 impl AppState {
@@ -379,20 +385,43 @@ impl AppState {
     }
 
     pub fn effective_input_reasoning_badge(&self) -> Option<String> {
+        match self.resolve_input_reasoning() {
+            InputReasoningResolution::ModelUnavailable => None,
+            InputReasoningResolution::Resolved(selection) => {
+                selection.map(|selection| selection.to_string())
+            }
+            InputReasoningResolution::Invalid(selection) => Some(format!("{selection} !")),
+        }
+    }
+
+    fn resolve_input_reasoning(&self) -> InputReasoningResolution {
         let info = atman_runtime::model_registry::model_info("smart");
         if info.context_budget == 0 {
-            return None;
+            return InputReasoningResolution::ModelUnavailable;
         }
         match atman_runtime::model_registry::effective_reasoning_for_model(
             "smart",
             self.input_reasoning.as_ref(),
         ) {
-            Ok(selection) => selection.map(|selection| selection.to_string()),
-            Err(_) => self
-                .input_reasoning
-                .clone()
-                .or(Some(info.reasoning))
-                .map(|selection| format!("{selection} !")),
+            Ok(selection) => InputReasoningResolution::Resolved(selection),
+            Err(_) => InputReasoningResolution::Invalid(
+                self.input_reasoning.clone().unwrap_or(info.reasoning),
+            ),
+        }
+    }
+
+    /// Materialize the reasoning value shown by the composer for this submission.
+    ///
+    /// `None` remains stored in `input_reasoning` so model-default mode follows
+    /// the active `smart` model. At the submission boundary, however, the TUI's
+    /// visible effective value becomes the immutable invocation snapshot.
+    pub(crate) fn input_reasoning_for_submission(
+        &self,
+    ) -> Option<atman_runtime::provider::ReasoningSelection> {
+        match self.resolve_input_reasoning() {
+            InputReasoningResolution::ModelUnavailable => self.input_reasoning.clone(),
+            InputReasoningResolution::Resolved(selection) => selection,
+            InputReasoningResolution::Invalid(selection) => Some(selection),
         }
     }
 
