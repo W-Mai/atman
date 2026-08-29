@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **TUI double Ctrl+C exit** — closing a blank TUI releases its submission relay so the REPL exits, while quit confirmation remains scoped to the input editor.
 - **Reasoning profile consistency** — TUI controls, model switches, request validation, and provider serializers share the same wire-profile rules; Anthropic auto reasoning uses adaptive thinking and the effort badge uses the active input-border color.
 - **Visible LLM failures** — request errors and retry state update a keyed inline session note even when content streaming and message history are disabled.
 - **Codex multimodal request shape** — mixed text and image input is serialized as typed Responses API content instead of a JSON string.

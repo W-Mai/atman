@@ -1639,18 +1639,7 @@ async fn cmd_repl_once(
     let flow_names = discover_flow_names();
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ReplInput>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
-        let (tui_submit_tx, mut tui_submit_rx) =
-            mpsc::unbounded_channel::<atman_tui::TuiSubmission>();
-        let input_tx_for_tui = input_tx.clone();
-        let session_for_submit = session.clone();
-        tokio::spawn(async move {
-            while let Some(submission) = tui_submit_rx.recv().await {
-                if let Err(mut error) = input_tx_for_tui.send(ReplInput::from_tui(submission)) {
-                    error.0.restore_images(&session_for_submit);
-                    break;
-                }
-            }
-        });
+        let tui_submit_tx = spawn_tui_submission_bridge(input_tx, session.clone());
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
         let sh_tx_shared: std::sync::Arc<
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -2988,6 +2977,23 @@ impl std::ops::Deref for ReplInput {
     fn deref(&self) -> &Self::Target {
         &self.text
     }
+}
+
+fn spawn_tui_submission_bridge(
+    input_tx: tokio::sync::mpsc::UnboundedSender<ReplInput>,
+    session: std::sync::Arc<Session>,
+) -> tokio::sync::mpsc::UnboundedSender<atman_tui::TuiSubmission> {
+    let (tui_submit_tx, mut tui_submit_rx) =
+        tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiSubmission>();
+    tokio::spawn(async move {
+        while let Some(submission) = tui_submit_rx.recv().await {
+            if let Err(mut error) = input_tx.send(ReplInput::from_tui(submission)) {
+                error.0.restore_images(&session);
+                break;
+            }
+        }
+    });
+    tui_submit_tx
 }
 
 fn spawn_stdin_reader(
@@ -7094,6 +7100,20 @@ mod tests {
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    #[tokio::test]
+    async fn dropping_tui_submission_sender_closes_repl_input() {
+        let session = std::sync::Arc::new(Session::open_ephemeral());
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tui_submit_tx = spawn_tui_submission_bridge(input_tx, session);
+
+        drop(tui_submit_tx);
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+            .await
+            .expect("submission bridge kept the REPL input channel open");
+        assert!(received.is_none());
+    }
 
     #[test]
     fn submitted_image_snapshot_does_not_drain_new_pending_images() {

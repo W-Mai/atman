@@ -1297,7 +1297,9 @@ pub(crate) fn handle_key(
         }
         KeyAction::Interrupt => {
             // Ctrl+C priority: clear input first, then stop flow, then quit.
-            if !editor.buf().is_empty() {
+            if !input_has_focus(app) {
+                *interrupt_prompt = None;
+            } else if !editor.buf().is_empty() {
                 editor.clear();
                 edited = true;
                 *interrupt_prompt = None;
@@ -1338,6 +1340,13 @@ pub(crate) fn handle_key(
         }
         app.refresh_popup(editor.buf());
     }
+}
+
+pub(crate) fn input_has_focus(app: &UiState) -> bool {
+    app.wm.focused_id().is_none()
+        && !app.wm.any_modal_open()
+        && app.mcp_add_form.is_none()
+        && app.modal_notification.is_none()
 }
 
 fn reasoning_choices(
@@ -1396,6 +1405,67 @@ mod tests {
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    #[test]
+    fn empty_input_exits_on_second_interrupt() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Interrupt,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            None,
+        );
+        assert!(interrupt_prompt.is_some());
+        assert!(!state.app.should_quit);
+
+        handle_key(
+            KeyAction::Interrupt,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            None,
+        );
+        assert!(state.app.should_quit);
+    }
+
+    #[test]
+    fn interrupt_is_inert_while_floating_panel_has_focus() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.wm.open(
+            "cheatsheet",
+            crate::wm::ContentKey::Cheatsheet,
+            crate::wm::WindowContent::Cheatsheet,
+            "Keybindings",
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Interrupt,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            None,
+        );
+
+        assert!(interrupt_prompt.is_none());
+        assert!(!state.app.should_quit);
+    }
+
+    #[test]
+    fn modal_state_is_not_input_focus() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.wm.modals.theme_picker_open = true;
+        assert!(!input_has_focus(&state));
+    }
 
     fn pending_permission(revision: u64) -> crate::app::PendingPermission {
         use atman_runtime::event::FlowRunId;
