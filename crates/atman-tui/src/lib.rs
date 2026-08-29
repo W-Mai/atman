@@ -158,7 +158,7 @@ pub enum TuiControl {
         model: String,
         provider: Option<String>,
         context_budget: u64,
-        thinking: bool,
+        reasoning: atman_runtime::provider::ReasoningSelection,
         max_tokens: Option<u32>,
         enabled: bool,
     },

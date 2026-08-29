@@ -234,8 +234,34 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
         )));
     }
+    let has_images = final_messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| matches!(part, crate::message::MessagePart::Image { .. }))
+    });
+    if has_images
+        && !model_info.capabilities.input_modalities.is_empty()
+        && !model_info
+            .capabilities
+            .input_modalities
+            .contains(&crate::provider::InputModality::Image)
+    {
+        return Value::Err(RuntimeError::AttachmentError {
+            reason: format!("model `{model}` does not advertise image input support"),
+        });
+    }
+    let requested_reasoning = args
+        .reasoning
+        .clone()
+        .or_else(|| {
+            ctx.session_runtime
+                .as_ref()
+                .and_then(|session| session.reasoning_override())
+        })
+        .unwrap_or_else(|| model_info.reasoning.clone());
     let mut reasoning = match crate::model_registry::resolve_reasoning(
-        &model_info.reasoning,
+        &requested_reasoning,
         &model_info.capabilities,
     ) {
         Ok(reasoning) => reasoning,
@@ -248,7 +274,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let mut signature_retries: u32 = 0;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
-            let sanitized_messages = sanitize_tool_pairs(final_messages.clone());
+            let mut sanitized_messages = sanitize_tool_pairs(final_messages.clone());
+            for message in &mut sanitized_messages {
+                for part in &mut message.parts {
+                    if let crate::message::MessagePart::Image { source } = part
+                        && matches!(source.detail, crate::provider::ImageDetail::Auto)
+                    {
+                        source.detail = model_info.image_detail;
+                    }
+                }
+            }
             let req = crate::provider::LlmRequest {
                 model: api_model.clone(),
                 messages: sanitized_messages,

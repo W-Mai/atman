@@ -34,18 +34,27 @@ impl CompactionBudgetContext {
 
 pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut chars = 0usize;
+    let mut fixed_tokens = 0u64;
     for part in &msg.parts {
         chars += match part {
             MessagePart::CompactSummary { summary, .. } => summary.len(),
             MessagePart::Text { text } => text.len(),
             MessagePart::Thinking { thinking, .. } => thinking.len(),
             MessagePart::ToolResult { content, .. } => content.len(),
-            MessagePart::Image { .. } => 512,
+            MessagePart::Image { source } => {
+                fixed_tokens = fixed_tokens.saturating_add(match source.detail {
+                    crate::provider::ImageDetail::Low => 85,
+                    crate::provider::ImageDetail::Auto => 1_024,
+                    crate::provider::ImageDetail::High => 1_536,
+                    crate::provider::ImageDetail::Original => 2_048,
+                });
+                0
+            }
             MessagePart::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
         };
     }
     chars = chars.saturating_add(estimate_role_overhead(msg.role));
-    (chars as f64 / 3.5).ceil() as u64
+    (chars as f64 / 3.5).ceil() as u64 + fixed_tokens
 }
 
 fn estimate_role_overhead(role: MessageRole) -> usize {

@@ -78,6 +78,7 @@ reply = llm.call(
     model: "smart",
     context: "session",
     system: @"prompts/system.md",
+    reasoning: "high",
     retry: 3,
     stall_timeout: 120,
     tools: ["fs.read", "bash.spawn", "mcp.*"],
@@ -86,7 +87,11 @@ reply = llm.call(
 
 `llm.call` accepts `model`, `prompt`, `messages`, `system`, `input`, `context`,
 `cache`, `retry`, `retry_classified`, `context_budget`, `stall_timeout`, `tools`,
-and `fallback`. `fallback` is evaluated before the call; use an explicit
+`reasoning`, `reasoning_budget`, `thinking`, and `fallback`. `reasoning` accepts
+`default`, `off`, `auto`, an effort such as `high`, or an effort and execution
+mode such as `high@pro`. `reasoning_budget` is a positive token count for
+providers that expose budget-based thinking. `thinking` remains a boolean
+compatibility input. `fallback` is evaluated before the call; use an explicit
 `when result.is_err()` path when the fallback itself has side effects.
 
 Structured extraction is a normal tool call:

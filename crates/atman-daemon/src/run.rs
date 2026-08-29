@@ -30,6 +30,26 @@ pub struct SpawnedRun {
     pub run_id: ProtoRunId,
 }
 
+#[derive(Default)]
+pub struct RunOptions {
+    pub reasoning: Option<String>,
+    pub images: Vec<atman_proto::InlineImage>,
+}
+
+fn apply_run_options(session: &atman_runtime::Session, options: RunOptions) -> Result<()> {
+    if let Some(reasoning) = options.reasoning {
+        session.set_reasoning_override(Some(
+            reasoning
+                .parse()
+                .map_err(|error: String| anyhow::anyhow!("invalid reasoning override: {error}"))?,
+        ));
+    }
+    for image in options.images {
+        session.queue_image_base64(&image.data_base64, image.name.as_deref())?;
+    }
+    Ok(())
+}
+
 struct RegistryCleanup {
     state: Arc<DaemonState>,
     session_id: ProtoSessionId,
@@ -81,6 +101,24 @@ impl RunLauncher {
         args: Vec<(String, atman_runtime::Value)>,
         owner_principal: &str,
     ) -> Result<SpawnedRun> {
+        self.spawn_as_with_options(
+            state,
+            flow_path,
+            args,
+            owner_principal,
+            RunOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn spawn_as_with_options(
+        &self,
+        state: Arc<DaemonState>,
+        flow_path: &str,
+        args: Vec<(String, atman_runtime::Value)>,
+        owner_principal: &str,
+        options: RunOptions,
+    ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
 
@@ -118,6 +156,7 @@ impl RunLauncher {
             )
             .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
         );
+        apply_run_options(&session, options)?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
@@ -299,7 +338,20 @@ async fn run_flow_inner(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text.clone());
+    let mut parts: Vec<atman_runtime::message::MessagePart> = session
+        .take_pending_images()
+        .into_iter()
+        .map(|source| atman_runtime::message::MessagePart::Image { source })
+        .collect();
+    parts.push(atman_runtime::message::MessagePart::Text {
+        text: user_text.clone(),
+    });
+    let user_msg = atman_runtime::message::Message {
+        role: atman_runtime::message::MessageRole::User,
+        parts,
+        turn_id: turn_id.clone(),
+        origin: atman_runtime::message::MessageOrigin::User,
+    };
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
@@ -547,5 +599,30 @@ mod tests {
         let preserved = atman_runtime::model_registry::model_info("daemon-reload");
         assert_eq!(preserved.name, "daemon-reload");
         assert_eq!(preserved.context_budget, 4242);
+    }
+
+    #[test]
+    fn run_options_apply_reasoning_and_image_inputs() {
+        let session = atman_runtime::Session::open_ephemeral();
+        apply_run_options(
+            &session,
+            RunOptions {
+                reasoning: Some("high@pro".into()),
+                images: vec![atman_proto::InlineImage {
+                    data_base64: "iVBORw0KGgo=".into(),
+                    name: Some("input.png".into()),
+                }],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.reasoning_override(),
+            Some(atman_runtime::provider::ReasoningSelection::Effort {
+                effort: atman_runtime::provider::ReasoningEffort::High,
+                execution_mode: Some(atman_runtime::provider::ReasoningExecutionMode::Pro,),
+            })
+        );
+        assert_eq!(session.pending_image_count(), 1);
     }
 }

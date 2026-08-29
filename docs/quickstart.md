@@ -77,6 +77,23 @@ export OPENAI_API_KEY="sk-..."
 
 Optionally point at a compat gateway with `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
 
+Model reasoning and image defaults can be configured per model:
+
+```toml
+[models.smart]
+provider = "anthropic"
+model = "claude-opus-4-6"
+context_budget = 200000
+reasoning = "high"
+input_modalities = ["text", "image"]
+image_detail = "auto"
+```
+
+Reasoning can also be selected for one run with `--reasoning high`; repeat
+`--image path/to/image.png` to attach images. In the TUI, Cmd+V, Ctrl+V, or Alt+V
+attaches the clipboard image, Alt+Delete removes the latest pending image, and
+Ctrl+T cycles the session reasoning override.
+
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
 
 ```toml

@@ -1110,6 +1110,7 @@ mod tests {
                     data: ImageData::Path {
                         path: PathBuf::from("/tmp/x.png"),
                     },
+                    detail: atman_runtime::provider::ImageDetail::Auto,
                 },
             },
         ])];

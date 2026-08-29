@@ -872,12 +872,12 @@ pub(crate) fn apply_envelope_to_messages(
             reason,
             ..
         } => {
-            if let Some((_, msg)) = acc.iter_mut().find(|(s, _)| *s == *message_seq) {
-                if let Some(part) = msg.parts.get_mut(*part_index) {
-                    *part = MessagePart::Text {
-                        text: format!("[attachment unavailable: {} — {}]", file_basename, reason),
-                    };
-                }
+            if let Some((_, message)) = acc.iter_mut().find(|(seq, _)| *seq == *message_seq)
+                && let Some(part) = message.parts.get_mut(*part_index)
+            {
+                *part = MessagePart::Text {
+                    text: format!("[attachment unavailable: {} — {}]", file_basename, reason),
+                };
             }
         }
         _ => {}

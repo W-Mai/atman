@@ -1063,7 +1063,7 @@ pub(super) async fn call_and_maybe_stream(
         let count = sess.record_attachment_degrade(reason);
         if count > 0 {
             let _ = sess.stream_tx().send(crate::stream::StreamFrame::Note(format!(
-                "attachment degraded ({reason}); {count} image part(s) replaced. re-issue your last message to retry without them."
+                "attachment rejected ({reason}); {count} image part(s) replaced with a history marker. re-attach the image to retry."
             )));
         }
     }
@@ -1859,18 +1859,24 @@ async fn eval_message_node<'a>(
         }
     };
 
-    let mut parts: Vec<MessagePart> = attachment_paths
-        .into_iter()
-        .map(|path| {
-            let media_type = guess_image_mime(&path).unwrap_or_else(|| "image/png".to_string());
-            MessagePart::Image {
-                source: ImageSource {
-                    media_type,
-                    data: ImageData::Path { path },
-                },
+    let mut parts: Vec<MessagePart> =
+        Vec::with_capacity(attachment_paths.len() + usize::from(text.is_some()));
+    for path in attachment_paths {
+        let source = if let Some(session) = ctx.session_runtime.as_ref() {
+            match session.import_image_path(&path) {
+                Ok(source) => source,
+                Err(error) => return Value::Err(error),
             }
-        })
-        .collect();
+        } else {
+            let media_type = guess_image_mime(&path).unwrap_or_else(|| "image/png".to_string());
+            ImageSource {
+                media_type,
+                data: ImageData::Path { path },
+                detail: crate::provider::ImageDetail::Auto,
+            }
+        };
+        parts.push(MessagePart::Image { source });
+    }
     if let Some(t) = text {
         parts.push(MessagePart::Text { text: t });
     }

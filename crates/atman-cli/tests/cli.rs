@@ -551,7 +551,7 @@ fn repl_attach_list_shows_pending_paths() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let img = data.path().join("a.png");
-    std::fs::write(&img, b"fake").unwrap();
+    std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -755,7 +755,7 @@ fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
     )
     .unwrap();
     let img = data.path().join("pic.png");
-    std::fs::write(&img, b"fake").unwrap();
+    std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -790,9 +790,11 @@ fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             if v["type"] == "user_msg"
                 && let Some(parts) = v["message"]["parts"].as_array()
-                && parts.iter().any(|p| p["type"] == "image")
+                && let Some(image) = parts.iter().find(|p| p["type"] == "image")
             {
-                found_image = true;
+                found_image = image["source"]["data"]["kind"] == "artifact";
+                let path = image["source"]["data"]["path"].as_str().unwrap();
+                assert!(std::path::Path::new(path).is_file());
             }
         }
     }
@@ -804,7 +806,7 @@ fn repl_attach_clear_empties_pending() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let img = data.path().join("b.png");
-    std::fs::write(&img, b"fake").unwrap();
+    std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -840,7 +842,7 @@ fn repl_attach_command_accepts_existing_file() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let img = data.path().join("pic.png");
-    std::fs::write(&img, b"fake").unwrap();
+    std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())

@@ -286,13 +286,13 @@ Three memory layers:
 
 ```text
 atman                              # REPL (TUI)
-atman run <file.at> [--flow <name>] [--mock] [--ephemeral]
+atman run <file.at> [--flow <name>] [--reasoning <level>] [--image <path>]... [--mock] [--ephemeral]
 atman logs tail [session] [--follow]
 atman session list | show | search | sanitize
 atman cost [session] [--all]
 atman upgrade [--yes] [--verbose] [--no-modify-path]
 atman monitor [--port 65098]       # web UI
-atman daemon start | stop | status | run
+atman daemon start | stop | status | run [--reasoning <level>] [--image <path>]...
 atman flow snapshot | versions | diff | rollback | lint | test
 atman sync init | push | pull      # git-based cross-machine memory sync
 atman migrate list | import [--from opencode|kiro]
@@ -312,7 +312,10 @@ api_key = "..."
 base_url = "https://..."
 context_budget = 1000000
 max_tokens = 393216
-thinking = true
+reasoning = "high"
+reasoning_mode = "pro"
+input_modalities = ["text", "image"]
+image_detail = "auto"
 
 [alias.smart]
 model = "deepseek/deepseek-v4-pro"
@@ -332,6 +335,21 @@ mode = "auto"             # auto | dark | light | wuxia
 ```
 
 Provider env vars: `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_BASE_URL`.
+
+Reasoning values include `default`, `off`, `auto`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`, `ultra`, and `persistent`. Provider and model capability
+checks reject unsupported efforts or execution modes before the request is sent.
+Anthropic models with explicit thinking budgets can use
+`reasoning_budget_tokens = 4096`. The legacy `thinking = true|false` setting is
+still accepted.
+
+The TUI imports a clipboard image with Cmd+V, Ctrl+V, or Alt+V; Alt+Delete removes
+the latest pending image. Images are copied into the session attachment store by
+content digest before the user turn is written. Ctrl+T cycles the current
+session's reasoning override. CLI and daemon runs accept repeatable `--image`
+arguments and the same `--reasoning` values. A flow can override the selection
+per call with `llm.call(reasoning: "high@pro")` or
+`llm.call(reasoning_budget: 4096)`.
 
 ## Architecture
 

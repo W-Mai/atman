@@ -15,6 +15,7 @@ pub struct LlmNodeArgs {
     pub context_mode: String,
     pub fallback_value: Option<crate::value::Value>,
     pub tool_specs: Vec<crate::tool::ToolSpec>,
+    pub reasoning: Option<crate::provider::ReasoningSelection>,
     pub stall_timeout_secs: u64,
 }
 
@@ -33,6 +34,8 @@ pub fn parse_llm_args_from_toolargs(
     let mut context_budget: Option<u64> = None;
     let mut context_mode = String::from("none");
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
+    let mut reasoning: Option<crate::provider::ReasoningSelection> = None;
+    let mut legacy_thinking: Option<bool> = None;
     let mut stall_timeout_secs: u64 = 120;
     let mut fallback_value: Option<crate::value::Value> = None;
     for (k, v) in &args.named {
@@ -181,6 +184,46 @@ pub fn parse_llm_args_from_toolargs(
                     });
                 }
             },
+            "reasoning" => match v {
+                Value::Str(value) => {
+                    reasoning = Some(value.parse().map_err(|error: String| {
+                        RuntimeError::ToolFailed(format!("llm.reasoning: {error}"))
+                    })?);
+                }
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "string (default, off, auto, effort, effort@mode, or budget:N)"
+                            .into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            },
+            "reasoning_budget" => match v {
+                Value::Int(tokens) if *tokens > 0 => {
+                    let tokens =
+                        u32::try_from(*tokens).map_err(|_| RuntimeError::TypeMismatch {
+                            expected: "positive int within u32 range (reasoning token budget)"
+                                .into(),
+                            actual: tokens.to_string(),
+                        })?;
+                    reasoning = Some(crate::provider::ReasoningSelection::BudgetTokens { tokens });
+                }
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "positive int (reasoning token budget)".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            },
+            "thinking" => match v {
+                Value::Bool(enabled) => legacy_thinking = Some(*enabled),
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "bool (legacy thinking toggle)".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            },
             "stall_timeout" => match v {
                 Value::Int(n) if *n >= 0 => stall_timeout_secs = *n as u64,
                 other => {
@@ -216,6 +259,17 @@ pub fn parse_llm_args_from_toolargs(
         context_mode,
         fallback_value,
         tool_specs,
+        reasoning: reasoning.or_else(|| {
+            legacy_thinking.map(|enabled| {
+                if enabled {
+                    crate::provider::ReasoningSelection::Auto {
+                        execution_mode: None,
+                    }
+                } else {
+                    crate::provider::ReasoningSelection::Disabled
+                }
+            })
+        }),
         stall_timeout_secs,
     })
 }
@@ -264,4 +318,53 @@ fn wildcard_prefix_value(s: &str) -> Option<String> {
             format!("{prefix}.")
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(named: Vec<(String, Value)>) -> Result<LlmNodeArgs, RuntimeError> {
+        parse_llm_args_from_toolargs(
+            &ToolArgs {
+                positional: Vec::new(),
+                named,
+            },
+            &crate::tool::ToolRegistry::new(),
+        )
+    }
+
+    #[test]
+    fn parses_exact_reasoning_selection() {
+        let args = parse(vec![("reasoning".into(), Value::Str("high@pro".into()))]).unwrap();
+        assert_eq!(
+            args.reasoning,
+            Some(crate::provider::ReasoningSelection::Effort {
+                effort: crate::provider::ReasoningEffort::High,
+                execution_mode: Some(crate::provider::ReasoningExecutionMode::Pro),
+            })
+        );
+    }
+
+    #[test]
+    fn exact_reasoning_takes_precedence_over_legacy_thinking() {
+        let args = parse(vec![
+            ("thinking".into(), Value::Bool(true)),
+            ("reasoning".into(), Value::Str("off".into())),
+        ])
+        .unwrap();
+        assert_eq!(
+            args.reasoning,
+            Some(crate::provider::ReasoningSelection::Disabled)
+        );
+    }
+
+    #[test]
+    fn rejects_reasoning_budget_outside_u32_range() {
+        let result = parse(vec![(
+            "reasoning_budget".into(),
+            Value::Int(i64::from(u32::MAX) + 1),
+        )]);
+        assert!(matches!(result, Err(RuntimeError::TypeMismatch { .. })));
+    }
 }

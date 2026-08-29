@@ -107,6 +107,7 @@ async fn anthropic_multimodal_request_includes_image_block() {
                     data: atman_runtime::message::ImageData::Path {
                         path: img_path.clone(),
                     },
+                    detail: atman_runtime::provider::ImageDetail::Auto,
                 },
             },
             atman_runtime::message::MessagePart::Text {

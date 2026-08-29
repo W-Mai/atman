@@ -138,6 +138,8 @@ pub struct Session {
     injection_queue: Mutex<Vec<Injection>>,
     injection_tx: broadcast::Sender<Injection>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
+    pending_images: Mutex<Vec<crate::message::ImageSource>>,
+    reasoning_override: std::sync::RwLock<Option<crate::provider::ReasoningSelection>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     output_store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
     fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
@@ -525,6 +527,7 @@ type ImagePart = (usize, String);
 #[derive(Debug, Clone)]
 struct LastImageUserMsg {
     message_seq: u64,
+    message_turn_id: crate::event::TurnId,
     images: Vec<ImagePart>,
 }
 
@@ -834,6 +837,8 @@ impl Session {
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             last_image_user_msg: Mutex::new(None),
+            pending_images: Mutex::new(Vec::new()),
+            reasoning_override: std::sync::RwLock::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
@@ -1009,6 +1014,8 @@ impl Session {
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             last_image_user_msg: Mutex::new(None),
+            pending_images: Mutex::new(Vec::new()),
+            reasoning_override: std::sync::RwLock::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
@@ -1059,6 +1066,8 @@ impl Session {
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             last_image_user_msg: Mutex::new(None),
+            pending_images: Mutex::new(Vec::new()),
+            reasoning_override: std::sync::RwLock::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
@@ -1465,6 +1474,102 @@ impl Session {
         &self.sink
     }
 
+    pub fn import_image_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<crate::message::ImageSource, crate::error::RuntimeError> {
+        crate::attachment_store::AttachmentStore::at(&self.dir).import_path(path)
+    }
+
+    pub fn import_image_bytes(
+        &self,
+        bytes: &[u8],
+        name: Option<&str>,
+    ) -> Result<crate::message::ImageSource, crate::error::RuntimeError> {
+        crate::attachment_store::AttachmentStore::at(&self.dir).import_bytes(bytes, name)
+    }
+
+    pub fn import_image_base64(
+        &self,
+        data: &str,
+        name: Option<&str>,
+    ) -> Result<crate::message::ImageSource, crate::error::RuntimeError> {
+        crate::attachment_store::AttachmentStore::at(&self.dir).import_base64(data, name)
+    }
+
+    pub fn queue_image_bytes(
+        &self,
+        bytes: &[u8],
+        name: Option<&str>,
+    ) -> Result<usize, crate::error::RuntimeError> {
+        let source = self.import_image_bytes(bytes, name)?;
+        Ok(self.queue_image_source(source))
+    }
+
+    pub fn queue_image_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<usize, crate::error::RuntimeError> {
+        let source = self.import_image_path(path)?;
+        Ok(self.queue_image_source(source))
+    }
+
+    pub fn queue_image_base64(
+        &self,
+        data: &str,
+        name: Option<&str>,
+    ) -> Result<usize, crate::error::RuntimeError> {
+        let source = self.import_image_base64(data, name)?;
+        Ok(self.queue_image_source(source))
+    }
+
+    fn queue_image_source(&self, source: crate::message::ImageSource) -> usize {
+        let mut pending = self.pending_images.lock().unwrap();
+        pending.push(source);
+        let count = pending.len();
+        let _ = self.watch.attach.send(count);
+        count
+    }
+
+    pub fn pop_pending_image(&self) -> Option<crate::message::ImageSource> {
+        let mut pending = self.pending_images.lock().unwrap();
+        let removed = pending.pop();
+        let _ = self.watch.attach.send(pending.len());
+        removed
+    }
+
+    pub fn take_pending_images(&self) -> Vec<crate::message::ImageSource> {
+        let images = std::mem::take(&mut *self.pending_images.lock().unwrap());
+        let _ = self.watch.attach.send(0);
+        images
+    }
+
+    pub fn clear_pending_images(&self) {
+        self.pending_images.lock().unwrap().clear();
+        let _ = self.watch.attach.send(0);
+    }
+
+    pub fn pending_image_names(&self) -> Vec<String> {
+        self.pending_images
+            .lock()
+            .unwrap()
+            .iter()
+            .map(crate::attachment_store::display_name)
+            .collect()
+    }
+
+    pub fn pending_image_count(&self) -> usize {
+        self.pending_images.lock().unwrap().len()
+    }
+
+    pub fn set_reasoning_override(&self, selection: Option<crate::provider::ReasoningSelection>) {
+        *self.reasoning_override.write().unwrap() = selection;
+    }
+
+    pub fn reasoning_override(&self) -> Option<crate::provider::ReasoningSelection> {
+        self.reasoning_override.read().unwrap().clone()
+    }
+
     /// Single-writer append. Emits the matching event before the in-memory push
     /// so events.jsonl remains the authority (§I5).
     pub fn append_message(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
@@ -1504,16 +1609,18 @@ impl Session {
                 reason: reason.into(),
             });
         }
-        if let Ok(mut msgs) = self.messages.lock() {
-            for m in msgs.iter_mut() {
-                for (part_index, basename) in &entry.images {
-                    if let Some(part) = m.parts.get_mut(*part_index)
-                        && matches!(part, crate::message::MessagePart::Image { .. })
-                    {
-                        *part = crate::message::MessagePart::Text {
-                            text: format!("[attachment unavailable: {basename} — {reason}]"),
-                        };
-                    }
+        if let Ok(mut messages) = self.messages.lock()
+            && let Some(message) = messages.iter_mut().find(|message| {
+                message.role == MessageRole::User && message.turn_id == entry.message_turn_id
+            })
+        {
+            for (part_index, basename) in &entry.images {
+                if let Some(part) = message.parts.get_mut(*part_index)
+                    && matches!(part, crate::message::MessagePart::Image { .. })
+                {
+                    *part = crate::message::MessagePart::Text {
+                        text: format!("[attachment unavailable: {basename} — {reason}]"),
+                    };
                 }
             }
         }
@@ -2041,6 +2148,9 @@ impl AppendMessageCommand {
                                 .unwrap_or("unknown")
                                 .to_string(),
                             crate::message::ImageData::Base64 { .. } => "base64".into(),
+                            crate::message::ImageData::Artifact { .. } => {
+                                crate::attachment_store::display_name(source)
+                            }
                         };
                         Some((i, basename))
                     }
@@ -2050,6 +2160,7 @@ impl AppendMessageCommand {
             if !images.is_empty() {
                 *session.last_image_user_msg.lock().unwrap() = Some(LastImageUserMsg {
                     message_seq: seq,
+                    message_turn_id: msg.turn_id.clone(),
                     images,
                 });
             }
@@ -2967,6 +3078,40 @@ mod tests {
     }
 
     #[test]
+    fn attachment_degrade_updates_only_the_target_user_message() {
+        fn image_message(path: &str) -> Message {
+            Message {
+                role: MessageRole::User,
+                parts: vec![crate::message::MessagePart::Image {
+                    source: crate::message::ImageSource {
+                        media_type: "image/png".into(),
+                        data: crate::message::ImageData::Path { path: path.into() },
+                        detail: crate::provider::ImageDetail::Auto,
+                    },
+                }],
+                turn_id: TurnId::now(),
+                origin: crate::message::MessageOrigin::User,
+            }
+        }
+
+        let session = Session::open_ephemeral();
+        session.append_message(image_message("/tmp/first.png"), None);
+        session.append_message(image_message("/tmp/second.png"), None);
+
+        assert_eq!(session.record_attachment_degrade("invalid_image"), 1);
+        let messages = session.messages_handle();
+        let messages = messages.lock().unwrap();
+        assert!(matches!(
+            messages[0].parts[0],
+            crate::message::MessagePart::Image { .. }
+        ));
+        assert!(matches!(
+            &messages[1].parts[0],
+            crate::message::MessagePart::Text { text } if text.contains("second.png")
+        ));
+    }
+
+    #[test]
     fn replay_messages_from_old_format_no_seq_no_ts() {
         let dir = TempDir::new().unwrap();
         // Old-style JSONL: no seq, no ts on events
@@ -2991,25 +3136,19 @@ mod tests {
     }
 
     #[test]
-    fn replay_messages_from_applies_attachment_degrade() {
+    fn replay_messages_from_applies_attachment_degrade_event() {
         let dir = TempDir::new().unwrap();
         let user_msg = r#"{"type":"user_msg","seq":5,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"image","source":{"media_type":"image/png","data":{"kind":"path","path":"/tmp/photo.png"}}},{"type":"text","text":"describe"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
         let degrade = r#"{"type":"attachment_degraded","seq":6,"turn_id":null,"flow_run_id":null,"message_seq":5,"part_index":0,"file_basename":"photo.png","reason":"image_too_large","ts":"2026-07-07T00:00:01Z"}"#;
         write_events(dir.path(), &[user_msg, degrade]);
         let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
-        assert_eq!(msgs.len(), 1, "only the user message (patched)");
+        assert_eq!(msgs.len(), 1, "only the user message");
         assert_eq!(msgs[0].parts.len(), 2);
-        match &msgs[0].parts[0] {
-            crate::message::MessagePart::Text { text } => {
-                assert!(text.contains("photo.png"), "expected basename: {text}");
-                assert!(text.contains("image_too_large"), "expected reason: {text}");
-                assert!(
-                    text.starts_with("[attachment unavailable"),
-                    "expected stub prefix: {text}"
-                );
-            }
-            other => panic!("expected Text stub, got {other:?}"),
-        }
+        assert!(matches!(
+            &msgs[0].parts[0],
+            crate::message::MessagePart::Text { text }
+                if text.contains("photo.png") && text.contains("image_too_large")
+        ));
         assert!(
             matches!(msgs[0].parts[1], crate::message::MessagePart::Text { .. }),
             "second part should remain text"

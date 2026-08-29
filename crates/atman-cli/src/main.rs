@@ -35,6 +35,10 @@ enum Cmd {
         mock: bool,
         #[arg(long)]
         ephemeral: bool,
+        #[arg(long, value_name = "LEVEL")]
+        reasoning: Option<String>,
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<PathBuf>,
         args: Vec<String>,
     },
     Logs {
@@ -206,6 +210,10 @@ enum DaemonAction {
         follow: bool,
         #[arg(long, default_value_t = 65099)]
         port: u16,
+        #[arg(long, value_name = "LEVEL")]
+        reasoning: Option<String>,
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<PathBuf>,
     },
 }
 
@@ -362,8 +370,10 @@ async fn async_main() -> Result<()> {
             flow,
             mock,
             ephemeral,
+            reasoning,
+            images,
             args,
-        }) => cmd_run(file, flow, mock, ephemeral, args).await,
+        }) => cmd_run(file, flow, mock, ephemeral, reasoning, images, args).await,
         Some(Cmd::Logs {
             action:
                 LogsAction::Tail {
@@ -435,12 +445,25 @@ async fn async_main() -> Result<()> {
         Some(Cmd::Migrate { action }) => cmd_migrate(action).await,
         Some(Cmd::Mcp { action }) => cmd_mcp(action).await,
         Some(Cmd::Daemon {
-            action: DaemonAction::Run { file, follow, port },
-        }) => cmd_daemon_run(file, follow, port).await,
+            action:
+                DaemonAction::Run {
+                    file,
+                    follow,
+                    port,
+                    reasoning,
+                    images,
+                },
+        }) => cmd_daemon_run(file, follow, port, reasoning, images).await,
     }
 }
 
-async fn cmd_daemon_run(file: PathBuf, follow: bool, port: u16) -> Result<()> {
+async fn cmd_daemon_run(
+    file: PathBuf,
+    follow: bool,
+    port: u16,
+    reasoning: Option<String>,
+    images: Vec<PathBuf>,
+) -> Result<()> {
     let cfg_path = atman_daemon::config::default_config_path()?;
     let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
         .load_or_init_daemon_config()?;
@@ -453,11 +476,27 @@ async fn cmd_daemon_run(file: PathBuf, follow: bool, port: u16) -> Result<()> {
         std::env::current_dir()?.join(&file)
     };
 
+    let images = images
+        .into_iter()
+        .map(|path| {
+            let source = atman_runtime::attachment_store::AttachmentStore::at("")
+                .import_path(&path)
+                .with_context(|| format!("reading image {}", path.display()))?;
+            Ok(serde_json::json!({
+                "data_base64": atman_runtime::attachment_store::image_base64(&source)?,
+                "name": path.file_name().and_then(|name| name.to_str()),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "run_flow",
-        "params": {"flow_path": abs.to_string_lossy()}
+        "params": {
+            "flow_path": abs.to_string_lossy(),
+            "reasoning": reasoning,
+            "images": images,
+        }
     });
     let resp = client
         .post(format!("{base}/rpc"))
@@ -619,6 +658,8 @@ async fn cmd_run(
     flow_name: Option<String>,
     mock: bool,
     ephemeral: bool,
+    reasoning: Option<String>,
+    images: Vec<PathBuf>,
     raw_args: Vec<String>,
 ) -> Result<()> {
     let source =
@@ -655,6 +696,13 @@ async fn cmd_run(
         )
         .with_context(|| format!("opening session under {}", root.display()))?
     });
+    if let Some(reasoning) = reasoning {
+        session.set_reasoning_override(Some(
+            reasoning
+                .parse()
+                .map_err(|error: String| anyhow::anyhow!("invalid --reasoning value: {error}"))?,
+        ));
+    }
 
     if let Some(path) = session.events_path() {
         atman_runtime::notify!(
@@ -709,7 +757,21 @@ async fn cmd_run(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text.clone());
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    for image in images {
+        parts.push(atman_runtime::message::MessagePart::Image {
+            source: session.import_image_path(image)?,
+        });
+    }
+    parts.push(atman_runtime::message::MessagePart::Text {
+        text: user_text.clone(),
+    });
+    let user_msg = atman_runtime::message::Message {
+        role: atman_runtime::message::MessageRole::User,
+        parts,
+        turn_id: turn_id.clone(),
+        origin: atman_runtime::message::MessageOrigin::User,
+    };
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
@@ -1068,7 +1130,7 @@ async fn cmd_session_gc() -> Result<()> {
 }
 
 async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
-    use atman_runtime::message::{ImageData, MessagePart};
+    use atman_runtime::message::MessagePart;
 
     let root = data_dir()?;
     let dir = root.join("sessions").join(&sid);
@@ -1112,52 +1174,13 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
             if already_degraded.contains(&(seq, idx)) {
                 continue;
             }
-            match &source.data {
-                ImageData::Path { path } => {
-                    let (basename, reason) = match std::fs::metadata(path) {
-                        Ok(meta) if meta.is_file() => {
-                            let bn = path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let ext = path
-                                .extension()
-                                .and_then(|s| s.to_str())
-                                .map(str::to_ascii_lowercase)
-                                .unwrap_or_default();
-                            let mime = &source.media_type;
-                            let mime_ok = match ext.as_str() {
-                                "png" => mime == "image/png",
-                                "jpg" | "jpeg" => mime == "image/jpeg",
-                                "gif" => mime == "image/gif",
-                                "webp" => mime == "image/webp",
-                                _ => true,
-                            };
-                            if !mime_ok {
-                                (bn, "sanitize:mime_mismatch".to_string())
-                            } else {
-                                continue;
-                            }
-                        }
-                        Ok(_) => (
-                            path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            "sanitize:not_a_file".to_string(),
-                        ),
-                        Err(_) => (
-                            path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            "sanitize:file_not_found".to_string(),
-                        ),
-                    };
-                    findings.push((seq, idx, basename, reason));
-                }
-                ImageData::Base64 { .. } => {}
+            if let Err(error) = atman_runtime::attachment_store::image_bytes(source) {
+                findings.push((
+                    seq,
+                    idx,
+                    atman_runtime::attachment_store::display_name(source),
+                    format!("sanitize:{error}"),
+                ));
             }
         }
     }
@@ -1388,11 +1411,6 @@ fn split_quoted_args(input: &str) -> Vec<String> {
         out.push(cur);
     }
     out
-}
-
-#[derive(Default)]
-struct PendingUserMessage {
-    attachments: Vec<std::path::PathBuf>,
 }
 
 struct PrebuiltSession {
@@ -2096,7 +2114,7 @@ async fn cmd_repl_once(
                         model,
                         provider,
                         context_budget,
-                        thinking,
+                        reasoning,
                         max_tokens,
                         enabled,
                     } => {
@@ -2107,13 +2125,7 @@ async fn cmd_repl_once(
                                 model: &model,
                                 provider: provider.as_deref(),
                                 context_budget,
-                                reasoning: if thinking {
-                                    atman_runtime::provider::ReasoningSelection::Auto {
-                                        execution_mode: None,
-                                    }
-                                } else {
-                                    atman_runtime::provider::ReasoningSelection::Disabled
-                                },
+                                reasoning,
                                 capabilities: None,
                                 image_detail: None,
                                 max_tokens,
@@ -2428,7 +2440,6 @@ async fn cmd_repl_once(
         spawn_stream_consumer(&session, printer).await;
         (None, None, None, None)
     };
-    let mut pending = PendingUserMessage::default();
     let mut pushback: VecDeque<String> = VecDeque::new();
     let sid = session.id().to_string();
 
@@ -2531,7 +2542,7 @@ async fn cmd_repl_once(
                 }
                 "attach" => {
                     let arg = trimmed.strip_prefix("attach").unwrap_or("").trim();
-                    handle_attach_builtin(arg, &mut pending, &session, &reporter);
+                    handle_attach_builtin(arg, &session, &reporter);
                 }
                 "copy" => {
                     let arg = trimmed.strip_prefix("copy").unwrap_or("").trim();
@@ -2567,7 +2578,6 @@ async fn cmd_repl_once(
             classifier.as_ref(),
             &text,
             atman_runtime::message::MessageOrigin::User,
-            &mut pending,
             kind,
             &mut input_rx,
             &mut pushback,
@@ -2596,7 +2606,6 @@ async fn cmd_repl_once(
                                     classifier.as_ref(),
                                     &event_text,
                                     atman_runtime::message::MessageOrigin::Watcher,
-                                    &mut pending,
                                     TurnKind::Bare(route),
                                     &mut input_rx,
                                     &mut pushback,
@@ -3070,17 +3079,26 @@ async fn run_turn_with_interjection(
     >,
     raw_line: &str,
     origin: atman_runtime::message::MessageOrigin,
-    pending: &mut PendingUserMessage,
     kind: TurnKind,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     pushback: &mut std::collections::VecDeque<String>,
     reporter: &Reporter,
 ) {
     let (text, inline_attachments) = extract_at_paths(raw_line);
-    let mut attachments = std::mem::take(&mut pending.attachments);
-    attachments.extend(inline_attachments);
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = build_user_message(&text, &attachments, turn_id.clone(), origin);
+    let user_msg = match build_user_message(
+        &session,
+        &text,
+        &inline_attachments,
+        turn_id.clone(),
+        origin,
+    ) {
+        Ok(message) => message,
+        Err(error) => {
+            reporter.error(format!("[atman] {error}"));
+            return;
+        }
+    };
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
@@ -3303,48 +3321,34 @@ fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
 }
 
 fn build_user_message(
+    session: &Session,
     text: &str,
     attachments: &[std::path::PathBuf],
     turn_id: atman_runtime::event::TurnId,
     origin: atman_runtime::message::MessageOrigin,
-) -> atman_runtime::message::Message {
-    use atman_runtime::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
-    let mut parts: Vec<MessagePart> = Vec::new();
+) -> Result<atman_runtime::message::Message, atman_runtime::RuntimeError> {
+    use atman_runtime::message::{Message, MessagePart, MessageRole};
+    let mut imported = Vec::with_capacity(attachments.len());
     for path in attachments {
-        let media_type = guess_image_mime(path).unwrap_or_else(|| "image/png".to_string());
-        parts.push(MessagePart::Image {
-            source: ImageSource {
-                media_type,
-                data: ImageData::Path { path: path.clone() },
-            },
+        imported.push(MessagePart::Image {
+            source: session.import_image_path(path)?,
         });
     }
+    let mut parts: Vec<MessagePart> = session
+        .take_pending_images()
+        .into_iter()
+        .map(|source| MessagePart::Image { source })
+        .collect();
+    parts.extend(imported);
     if !text.is_empty() {
         parts.push(MessagePart::Text { text: text.into() });
     }
-    Message {
+    Ok(Message {
         role: MessageRole::User,
         parts,
         turn_id,
         origin,
-    }
-}
-
-fn guess_image_mime(path: &std::path::Path) -> Option<String> {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())?
-        .to_ascii_lowercase();
-    Some(
-        match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            _ => return None,
-        }
-        .to_string(),
-    )
+    })
 }
 
 struct SessionRow {
@@ -3660,27 +3664,22 @@ fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {
     }
 }
 
-fn handle_attach_builtin(
-    arg: &str,
-    pending: &mut PendingUserMessage,
-    session: &Session,
-    reporter: &Reporter,
-) {
+fn handle_attach_builtin(arg: &str, session: &Session, reporter: &Reporter) {
     match arg {
         "" => {
             reporter.error(":attach <path>  |  :attach clear  |  :attach list");
         }
         "clear" => {
-            pending.attachments.clear();
-            session.set_attach_count(0);
+            session.clear_pending_images();
             reporter.info("[atman] pending attachments cleared");
         }
         "list" => {
-            if pending.attachments.is_empty() {
+            let names = session.pending_image_names();
+            if names.is_empty() {
                 reporter.info("[atman] no pending attachments");
             } else {
-                for (i, p) in pending.attachments.iter().enumerate() {
-                    reporter.info(format!("  {i}: {}", p.display()));
+                for (i, name) in names.iter().enumerate() {
+                    reporter.info(format!("  {i}: {name}"));
                 }
             }
         }
@@ -3690,13 +3689,15 @@ fn handle_attach_builtin(
                 reporter.error(format!(":attach: file not found: {}", expanded.display()));
                 return;
             }
-            pending.attachments.push(expanded.clone());
-            session.set_attach_count(pending.attachments.len());
-            reporter.info(format!(
-                "[atman] attached {} (pending count: {})",
-                expanded.display(),
-                pending.attachments.len()
-            ));
+            match session.queue_image_path(&expanded) {
+                Ok(count) => reporter.info(format!(
+                    "[atman] attached {} (pending count: {count})",
+                    expanded.display(),
+                )),
+                Err(error) => {
+                    reporter.error(format!(":attach: {error}"));
+                }
+            }
         }
     }
 }
@@ -5589,12 +5590,10 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
                 .context_budget
                 .map(|b| b.to_string())
                 .unwrap_or_else(|| "builtin".into());
-            let thinking = if entry.thinking.unwrap_or(false) {
-                " thinking"
-            } else {
-                ""
-            };
-            println!("  {name:<28} budget={budget}{thinking}");
+            let reasoning = atman_runtime::model_registry::model_info(name)
+                .reasoning
+                .to_string();
+            println!("  {name:<28} budget={budget} reasoning={reasoning}");
         }
         if !mc.aliases.is_empty() {
             println!("aliases:");

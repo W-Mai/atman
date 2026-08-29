@@ -9,6 +9,29 @@ use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use crate::model_browser::{BrowserRow, BrowserRowKind, ModelBrowser};
 
+const REASONING_CHOICES: &[&str] = &[
+    "default",
+    "off",
+    "auto",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+    "persistent",
+    "budget:4096",
+];
+
+fn reasoning_label(selection: &atman_runtime::provider::ReasoningSelection) -> String {
+    selection.to_string()
+}
+
+fn parse_reasoning(value: &str) -> Option<atman_runtime::provider::ReasoningSelection> {
+    value.parse().ok()
+}
+
 #[derive(Default)]
 pub struct ModelManager {
     pub open: bool,
@@ -158,7 +181,7 @@ impl ModelManager {
         self.model_editor = InputEditor::default();
         self.context_budget_editor = InputEditor::default();
         self.thinking_editor = InputEditor::default();
-        self.thinking_editor.insert_str("false");
+        self.thinking_editor.insert_str("default");
         self.max_tokens_editor = InputEditor::default();
     }
 
@@ -192,7 +215,7 @@ impl ModelManager {
             .insert_str(&model.context_budget.to_string());
         self.thinking_editor = InputEditor::default();
         self.thinking_editor
-            .insert_str(if model.thinking { "true" } else { "false" });
+            .insert_str(&reasoning_label(&model.reasoning));
         self.max_tokens_editor = InputEditor::default();
         if let Some(mt) = entry.max_tokens {
             self.max_tokens_editor.insert_str(&mt.to_string());
@@ -233,13 +256,14 @@ impl ModelManager {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if !self.show_form || self.form_field == 2 || self.form_field == 4 {
+        if !self.show_form || self.form_field == 2 {
             return;
         }
         let editor = match self.form_field {
             0 => &mut self.name_editor,
             1 => &mut self.model_editor,
             3 => &mut self.context_budget_editor,
+            4 => &mut self.thinking_editor,
             5 => &mut self.max_tokens_editor,
             _ => return,
         };
@@ -292,10 +316,17 @@ impl ModelManager {
                         self.selected_provider = providers[selected].to_string();
                     }
                 } else {
-                    let mut selected = usize::from(self.thinking_editor.buf().trim() == "true");
-                    crate::directional_selector::move_wrapped(&mut selected, 2, direction);
+                    let mut selected = REASONING_CHOICES
+                        .iter()
+                        .position(|choice| *choice == self.thinking_editor.buf().trim())
+                        .unwrap_or(0);
+                    crate::directional_selector::move_wrapped(
+                        &mut selected,
+                        REASONING_CHOICES.len(),
+                        direction,
+                    );
                     self.thinking_editor
-                        .replace_with(if selected == 0 { "false" } else { "true" });
+                        .replace_with(REASONING_CHOICES[selected]);
                 }
             }
             KeyAction::CursorLeft
@@ -307,12 +338,13 @@ impl ModelManager {
             | KeyAction::DeleteWordBackward
             | KeyAction::Char(_)
             | KeyAction::Newline
-                if matches!(self.form_field, 0 | 1 | 3 | 5) =>
+                if matches!(self.form_field, 0 | 1 | 3 | 4 | 5) =>
             {
                 let editor = match self.form_field {
                     0 => &mut self.name_editor,
                     1 => &mut self.model_editor,
                     3 => &mut self.context_budget_editor,
+                    4 => &mut self.thinking_editor,
                     5 => &mut self.max_tokens_editor,
                     _ => unreachable!(),
                 };
@@ -338,7 +370,9 @@ impl ModelManager {
             .trim()
             .parse()
             .unwrap_or(32768);
-        let thinking = self.thinking_editor.buf().trim() == "true";
+        let Some(reasoning) = parse_reasoning(self.thinking_editor.buf()) else {
+            return;
+        };
         let max_tokens: Option<u32> = self.max_tokens_editor.buf().trim().parse().ok();
 
         let Some(tx) = control_tx else {
@@ -358,7 +392,7 @@ impl ModelManager {
                 Some(provider)
             },
             context_budget,
-            thinking,
+            reasoning,
             max_tokens,
             enabled: true,
         });
@@ -484,8 +518,8 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
                 Span::styled(atman_runtime::humanize::format_count(m.context_budget), val),
             ]));
             detail_lines.push(Line::from(vec![
-                Span::styled(" Thinking: ", label),
-                Span::styled(if m.thinking { "yes" } else { "no" }, val),
+                Span::styled(" Reasoning:", label),
+                Span::styled(format!(" {}", reasoning_label(&m.reasoning)), val),
             ]));
             let slug = m.slug.clone();
             let entries = atman_runtime::model_registry::all_model_entries();
@@ -589,7 +623,7 @@ impl ModelManager {
                 "Context Budget",
                 self.context_budget_editor.buf().to_string(),
             ),
-            ("Thinking", self.thinking_editor.buf().to_string()),
+            ("Reasoning", self.thinking_editor.buf().to_string()),
             ("Max Tokens", self.max_tokens_editor.buf().to_string()),
         ];
         let label_style = Style::default().fg(t.meta_fg.into());
@@ -614,13 +648,14 @@ impl ModelManager {
                 ])),
                 Rect { y, ..inner },
             );
-            if active && i != 2 && i != 4 {
+            if active && i != 2 {
                 let prefix = format!(" {label:<16}");
                 let prefix_w = crate::width::width(&prefix) as u16;
                 let cursor_w = match i {
                     0 => self.name_editor.cursor_display_col(),
                     1 => self.model_editor.cursor_display_col(),
                     3 => self.context_budget_editor.cursor_display_col(),
+                    4 => self.thinking_editor.cursor_display_col(),
                     5 => self.max_tokens_editor.cursor_display_col(),
                     _ => 0,
                 } as u16;
@@ -689,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn form_directional_selectors_switch_provider_and_thinking() {
+    fn form_directional_selectors_switch_provider_and_reasoning() {
         let mut manager = ModelManager {
             groups: vec![provider_group("alpha"), provider_group("beta")],
             show_form: true,
@@ -702,9 +737,24 @@ mod tests {
         assert_eq!(manager.selected_provider, "beta");
 
         manager.form_field = 4;
-        manager.thinking_editor.replace_with("false");
+        manager.thinking_editor.replace_with("default");
         manager.handle_key(&KeyAction::CursorRight, None);
-        assert_eq!(manager.thinking_editor.buf(), "true");
+        assert_eq!(manager.thinking_editor.buf(), "off");
+    }
+
+    #[test]
+    fn reasoning_field_parses_effort_mode_and_budget() {
+        assert_eq!(
+            parse_reasoning("high@pro"),
+            Some(atman_runtime::provider::ReasoningSelection::Effort {
+                effort: atman_runtime::provider::ReasoningEffort::High,
+                execution_mode: Some(atman_runtime::provider::ReasoningExecutionMode::Pro),
+            })
+        );
+        assert_eq!(
+            parse_reasoning("budget:4096"),
+            Some(atman_runtime::provider::ReasoningSelection::BudgetTokens { tokens: 4096 })
+        );
     }
 
     fn provider_group(name: &str) -> atman_runtime::model_registry::ProviderGroup {

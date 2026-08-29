@@ -958,6 +958,103 @@ pub(crate) fn handle_key(
     }
     let mut edited = false;
     match action {
+        KeyAction::PasteImage => {
+            let Some(session) = app.session.clone() else {
+                app.push_note(
+                    "image paste requires an active session",
+                    app::NoteLevel::Warn,
+                );
+                return;
+            };
+            match crate::clipboard::read_image_png().and_then(|bytes| {
+                session
+                    .queue_image_bytes(&bytes, Some("clipboard.png"))
+                    .map_err(Into::into)
+            }) {
+                Ok(count) => {
+                    app.attach_count = count;
+                    app.push_note(
+                        format!("attached clipboard image ({count} pending)"),
+                        app::NoteLevel::Info,
+                    );
+                }
+                Err(error) => app.push_note(
+                    format!("clipboard does not contain a usable image: {error}"),
+                    app::NoteLevel::Warn,
+                ),
+            }
+            *interrupt_prompt = None;
+        }
+        KeyAction::RemoveAttachment => {
+            let Some(session) = app.session.clone() else {
+                return;
+            };
+            match session.pop_pending_image() {
+                Some(source) => {
+                    let count = session.pending_image_count();
+                    app.attach_count = count;
+                    app.push_note(
+                        format!(
+                            "removed attachment {} ({} pending)",
+                            atman_runtime::attachment_store::display_name(&source),
+                            count
+                        ),
+                        app::NoteLevel::Info,
+                    );
+                }
+                None => app.push_note("no pending image attachment", app::NoteLevel::Warn),
+            }
+            *interrupt_prompt = None;
+        }
+        KeyAction::CycleReasoning => {
+            use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
+            let Some(session) = app.session.clone() else {
+                return;
+            };
+            let choices = [
+                None,
+                Some(ReasoningSelection::Disabled),
+                Some(ReasoningSelection::Auto {
+                    execution_mode: None,
+                }),
+                Some(ReasoningSelection::Effort {
+                    effort: ReasoningEffort::Low,
+                    execution_mode: None,
+                }),
+                Some(ReasoningSelection::Effort {
+                    effort: ReasoningEffort::Medium,
+                    execution_mode: None,
+                }),
+                Some(ReasoningSelection::Effort {
+                    effort: ReasoningEffort::High,
+                    execution_mode: None,
+                }),
+                Some(ReasoningSelection::Effort {
+                    effort: ReasoningEffort::XHigh,
+                    execution_mode: None,
+                }),
+                Some(ReasoningSelection::Effort {
+                    effort: ReasoningEffort::Max,
+                    execution_mode: None,
+                }),
+            ];
+            let current = session.reasoning_override();
+            let index = choices
+                .iter()
+                .position(|choice| *choice == current)
+                .unwrap_or(0);
+            let next = choices[(index + 1) % choices.len()].clone();
+            session.set_reasoning_override(next.clone());
+            app.push_note(
+                format!(
+                    "session reasoning: {}",
+                    next.map(|selection| selection.to_string())
+                        .unwrap_or_else(|| "model default".into())
+                ),
+                app::NoteLevel::Info,
+            );
+            *interrupt_prompt = None;
+        }
         KeyAction::Char(c) => {
             editor.insert_char(c);
             *interrupt_prompt = None;

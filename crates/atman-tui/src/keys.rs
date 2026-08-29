@@ -37,11 +37,17 @@ pub enum KeyAction {
     CoursePrefill,
     RedirectPrefill,
     HardStop,
+    PasteImage,
+    RemoveAttachment,
+    CycleReasoning,
     Ignore,
 }
 
 pub fn map(ev: KeyEvent) -> KeyAction {
     use KeyCode::*;
+    if ev.code == Char('v') && ev.modifiers.contains(KeyModifiers::SUPER) {
+        return KeyAction::PasteImage;
+    }
     let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
     let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
     let alt = ev.modifiers.contains(KeyModifiers::ALT);
@@ -57,6 +63,9 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('p'), true, _, _) => KeyAction::OpenCommandPalette,
         (Char('k'), true, _, _) => KeyAction::SearchHistory,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
+        (Char('v'), true, _, _) | (Char('v'), false, _, true) => KeyAction::PasteImage,
+        (Char('t'), true, _, _) => KeyAction::CycleReasoning,
+        (Delete, false, _, true) => KeyAction::RemoveAttachment,
         (Backspace, _, _, true) => KeyAction::DeleteWordBackward,
         (Char('a'), true, _, _) => KeyAction::CursorHome,
         (Char('e'), true, _, _) => KeyAction::CursorEnd,
@@ -173,6 +182,30 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::PageDown, KeyModifiers::NONE)),
             KeyAction::PageDown
+        );
+    }
+
+    #[test]
+    fn image_attachment_shortcuts_map() {
+        assert_eq!(
+            map(ke(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            KeyAction::PasteImage
+        );
+        assert_eq!(
+            map(ke(KeyCode::Char('v'), KeyModifiers::ALT)),
+            KeyAction::PasteImage
+        );
+        assert_eq!(
+            map(ke(KeyCode::Char('v'), KeyModifiers::SUPER)),
+            KeyAction::PasteImage
+        );
+        assert_eq!(
+            map(ke(KeyCode::Delete, KeyModifiers::ALT)),
+            KeyAction::RemoveAttachment
+        );
+        assert_eq!(
+            map(ke(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            KeyAction::CycleReasoning
         );
     }
 }

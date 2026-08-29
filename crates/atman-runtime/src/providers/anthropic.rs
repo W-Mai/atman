@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
+use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
     ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
@@ -72,12 +72,12 @@ impl AnthropicProvider {
         Ok(())
     }
 
-    fn build_body(&self, req: &LlmRequest, stream: bool) -> MessagesRequest {
+    fn build_body(&self, req: &LlmRequest, stream: bool) -> Result<MessagesRequest, RuntimeError> {
         let raw_wire: Vec<WireMessage> = req
             .messages
             .iter()
             .map(|m| build_wire_message(m, false))
-            .collect();
+            .collect::<Result<_, _>>()?;
         let wire_messages = merge_consecutive_same_role(raw_wire);
         let tools: Vec<WireTool> = req
             .tools
@@ -89,7 +89,7 @@ impl AnthropicProvider {
             })
             .collect();
         let (thinking, output_config) = anthropic_reasoning(&req.reasoning, self.max_tokens);
-        MessagesRequest {
+        Ok(MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
             stream,
@@ -103,21 +103,31 @@ impl AnthropicProvider {
             } else {
                 None
             },
-        }
+        })
     }
 
-    fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
-        let body = self.build_body(req, stream);
-        self.client
+    fn build_request(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder, RuntimeError> {
+        let body = self.build_body(req, stream)?;
+        Ok(self
+            .client
             .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.anthropic_version)
-            .json(&body)
+            .json(&body))
     }
 
     #[doc(hidden)]
     pub fn wire_body_bytes(&self, req: &LlmRequest, stream: bool) -> Vec<u8> {
-        serde_json::to_vec(&self.build_body(req, stream)).expect("serialize wire body")
+        serde_json::to_vec(
+            &self
+                .build_body(req, stream)
+                .expect("build Anthropic wire body"),
+        )
+        .expect("serialize wire body")
     }
 }
 
@@ -159,7 +169,7 @@ fn anthropic_reasoning(
 
 // Tool name mapping is now shared via crate::tool_naming::to_wire / from_wire
 
-fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
+fn build_wire_message(m: &Message, apply_cache_control: bool) -> Result<WireMessage, RuntimeError> {
     let role = match m.role {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
@@ -187,14 +197,7 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
                 },
             },
             MessagePart::Image { source } => {
-                let data = match &source.data {
-                    ImageData::Base64 { data } => data.clone(),
-                    ImageData::Path { path } => {
-                        let bytes = std::fs::read(path).unwrap_or_default();
-                        use base64::Engine;
-                        base64::engine::general_purpose::STANDARD.encode(&bytes)
-                    }
-                };
+                let data = crate::attachment_store::image_base64(source)?;
                 ContentPart::Image {
                     source: ImageSourceWire {
                         kind: "base64",
@@ -231,10 +234,10 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
             },
         });
     }
-    WireMessage {
+    Ok(WireMessage {
         role,
         content: MessageContent::Blocks(blocks),
-    }
+    })
 }
 
 fn merge_consecutive_same_role(wire: Vec<WireMessage>) -> Vec<WireMessage> {
@@ -266,7 +269,10 @@ impl Provider for AnthropicProvider {
         if let Err(error) = self.validate_reasoning(&req.reasoning) {
             return Box::pin(async move { Err(error) });
         }
-        let request = self.build_request(&req, false);
+        let request = match self.build_request(&req, false) {
+            Ok(request) => request,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         Box::pin(async move {
             let resp = request.send().await.map_err(net_err)?;
             let status = resp.status();
@@ -290,8 +296,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let validation_error = self.validate_reasoning(&req.reasoning).err();
-        let request = self.build_request(&req, true);
+        let preflight = self
+            .validate_reasoning(&req.reasoning)
+            .and_then(|()| self.build_request(&req, true));
         let turn_id = next_turn_id_from_req(&req);
         let tools: Vec<crate::tool::ToolSpec> = req.tools.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
@@ -299,9 +306,7 @@ impl Provider for AnthropicProvider {
         let cancel_for_task = cancel.clone();
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
             async move {
-                if let Some(error) = validation_error {
-                    return Err(error);
-                }
+                let request = preflight?;
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 

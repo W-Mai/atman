@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
+use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
     ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
@@ -84,7 +84,11 @@ impl OpenAiProvider {
         }
     }
 
-    fn build_body(&self, req: &LlmRequest, stream: bool) -> ChatCompletionsRequest {
+    fn build_body(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<ChatCompletionsRequest, RuntimeError> {
         let mut wire_messages: Vec<ChatMessage> = Vec::new();
         if let Some(sys) = &req.system {
             wire_messages.push(ChatMessage {
@@ -95,7 +99,7 @@ impl OpenAiProvider {
             });
         }
         for m in &req.messages {
-            wire_messages.push(build_wire_message(m));
+            wire_messages.push(build_wire_message(m)?);
         }
         let tools: Vec<WireToolSpec> = req
             .tools
@@ -115,7 +119,7 @@ impl OpenAiProvider {
                 (None, compatible_thinking(&req.reasoning))
             }
         };
-        ChatCompletionsRequest {
+        Ok(ChatCompletionsRequest {
             model: req.model.clone(),
             stream,
             max_tokens: (self.reasoning_format == OpenAiReasoningFormat::CompatibleThinking)
@@ -135,20 +139,30 @@ impl OpenAiProvider {
             },
             reasoning_effort,
             thinking,
-        }
+        })
     }
 
-    fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
-        let body = self.build_body(req, stream);
-        self.client
+    fn build_request(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<reqwest::RequestBuilder, RuntimeError> {
+        let body = self.build_body(req, stream)?;
+        Ok(self
+            .client
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
-            .json(&body)
+            .json(&body))
     }
 
     #[doc(hidden)]
     pub fn wire_body_bytes(&self, req: &LlmRequest, stream: bool) -> Vec<u8> {
-        serde_json::to_vec(&self.build_body(req, stream)).expect("serialize wire body")
+        serde_json::to_vec(
+            &self
+                .build_body(req, stream)
+                .expect("build OpenAI wire body"),
+        )
+        .expect("serialize wire body")
     }
 }
 
@@ -176,8 +190,8 @@ fn compatible_thinking(selection: &ReasoningSelection) -> Option<ThinkingConfig>
     }
 }
 
-fn build_wire_message(m: &Message) -> ChatMessage {
-    match m.role {
+fn build_wire_message(m: &Message) -> Result<ChatMessage, RuntimeError> {
+    Ok(match m.role {
         MessageRole::System => ChatMessage {
             role: "system",
             content: Some(ChatContent::Text(m.text_concat())),
@@ -213,7 +227,7 @@ fn build_wire_message(m: &Message) -> ChatMessage {
             }
         }
         MessageRole::User => {
-            let parts = build_user_parts(&m.parts);
+            let parts = build_user_parts(&m.parts)?;
             let content = if parts.iter().all(|p| matches!(p, ChatPart::Text { .. })) {
                 let joined: String = parts
                     .iter()
@@ -233,10 +247,10 @@ fn build_wire_message(m: &Message) -> ChatMessage {
                 tool_call_id: None,
             }
         }
-    }
+    })
 }
 
-fn build_user_parts(parts: &[MessagePart]) -> Vec<ChatPart> {
+fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError> {
     let mut out = Vec::with_capacity(parts.len());
     for p in parts {
         match p {
@@ -245,25 +259,20 @@ fn build_user_parts(parts: &[MessagePart]) -> Vec<ChatPart> {
             }),
             MessagePart::Text { text } => out.push(ChatPart::Text { text: text.clone() }),
             MessagePart::Image { source } => {
-                let url = match &source.data {
-                    ImageData::Base64 { data } => {
-                        format!("data:{};base64,{}", source.media_type, data)
-                    }
-                    ImageData::Path { path } => {
-                        let bytes = std::fs::read(path).unwrap_or_default();
-                        use base64::Engine;
-                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        format!("data:{};base64,{}", source.media_type, data)
-                    }
-                };
+                let data = crate::attachment_store::image_base64(source)?;
+                let url = format!("data:{};base64,{}", source.media_type, data);
                 out.push(ChatPart::ImageUrl {
-                    image_url: ImageUrl { url },
+                    image_url: ImageUrl {
+                        url,
+                        detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
+                            .then(|| source.detail.as_str()),
+                    },
                 });
             }
             _ => {}
         }
     }
-    out
+    Ok(out)
 }
 
 fn extract_tool_result(m: &Message) -> (String, String) {
@@ -309,7 +318,10 @@ impl Provider for OpenAiProvider {
         if let Err(error) = self.validate_reasoning(&req.reasoning) {
             return Box::pin(async move { Err(error) });
         }
-        let request = self.build_request(&req, false);
+        let request = match self.build_request(&req, false) {
+            Ok(request) => request,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         let turn_id = next_turn_id_from_req(&req);
         Box::pin(async move {
             let resp = request.send().await.map_err(net_err)?;
@@ -330,8 +342,9 @@ impl Provider for OpenAiProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let validation_error = self.validate_reasoning(&req.reasoning).err();
-        let request = self.build_request(&req, true);
+        let preflight = self
+            .validate_reasoning(&req.reasoning)
+            .and_then(|()| self.build_request(&req, true));
         let turn_id = next_turn_id_from_req(&req);
         let streaming_tools = req.tools.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
@@ -339,9 +352,7 @@ impl Provider for OpenAiProvider {
         let cancel_for_task = cancel.clone();
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
             async move {
-                if let Some(error) = validation_error {
-                    return Err(error);
-                }
+                let request = preflight?;
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -800,6 +811,8 @@ enum ChatPart {
 #[derive(Serialize)]
 struct ImageUrl {
     url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'static str>,
 }
 
 #[derive(Serialize)]

@@ -188,6 +188,7 @@ async fn openai_multimodal_request_uses_image_url_parts() {
                     data: atman_runtime::message::ImageData::Path {
                         path: img_path.clone(),
                     },
+                    detail: atman_runtime::provider::ImageDetail::Auto,
                 },
             },
             atman_runtime::message::MessagePart::Text {

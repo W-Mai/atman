@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable, TurnId};
-use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
+use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
     ReasoningSelection, StopReason, TokenUsage, estimate_tokens,
@@ -36,7 +36,7 @@ impl CodexProvider {
         }
     }
 
-    fn build_body(&self, req: &LlmRequest) -> ResponsesRequest {
+    fn build_body(&self, req: &LlmRequest) -> Result<ResponsesRequest, RuntimeError> {
         let model = req
             .model
             .split_once('/')
@@ -45,10 +45,10 @@ impl CodexProvider {
             .unwrap_or(&req.model)
             .to_string();
 
-        let input = build_input_items(req);
+        let input = build_input_items(req)?;
         let tools = build_tools(&req.tools);
 
-        ResponsesRequest {
+        Ok(ResponsesRequest {
             model,
             input,
             instructions: req.system.clone(),
@@ -60,19 +60,20 @@ impl CodexProvider {
                 verbosity: "medium".into(),
             }),
             include: Some(vec!["reasoning.encrypted_content".into()]),
-        }
+        })
     }
 
-    fn build_request(&self, req: &LlmRequest) -> reqwest::RequestBuilder {
-        let body = self.build_body(req);
-        self.client
+    fn build_request(&self, req: &LlmRequest) -> Result<reqwest::RequestBuilder, RuntimeError> {
+        let body = self.build_body(req)?;
+        Ok(self
+            .client
             .post(format!("{CODEX_BASE}/responses"))
             .bearer_auth(&self.access_token)
             .header("chatgpt-account-id", &self.account_id)
             .header("originator", "codex_cli_rs")
             .header("OpenAI-Beta", "responses=experimental")
             .header("accept", "text/event-stream")
-            .json(&body)
+            .json(&body))
     }
 
     fn validate_reasoning(selection: &ReasoningSelection) -> Result<(), RuntimeError> {
@@ -110,7 +111,7 @@ fn build_reasoning_config(selection: &ReasoningSelection) -> Option<ReasoningCon
     }
 }
 
-fn build_input_items(req: &LlmRequest) -> Vec<InputItem> {
+fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
     let mut tool_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for m in &req.messages {
@@ -129,7 +130,7 @@ fn build_input_items(req: &LlmRequest) -> Vec<InputItem> {
     for m in &req.messages {
         match m.role {
             MessageRole::User => {
-                let content = build_user_content(&m.parts);
+                let content = build_user_content(&m.parts)?;
                 items.push(InputItem {
                     role: Some("user".into()),
                     content: Some(content),
@@ -145,7 +146,7 @@ fn build_input_items(req: &LlmRequest) -> Vec<InputItem> {
                 if let Some(t) = text {
                     items.push(InputItem {
                         role: Some("assistant".into()),
-                        content: Some(t),
+                        content: Some(InputContent::Text(t)),
                         item_type: Some("message".into()),
                         call_id: None,
                         name: None,
@@ -186,46 +187,51 @@ fn build_input_items(req: &LlmRequest) -> Vec<InputItem> {
                     }
                 }
             }
-            MessageRole::System => {}
+            MessageRole::System => {
+                let content = build_user_content(&m.parts)?;
+                items.push(InputItem {
+                    role: Some("user".into()),
+                    content: Some(content),
+                    item_type: Some("message".into()),
+                    call_id: None,
+                    name: None,
+                    arguments: None,
+                    output: None,
+                });
+            }
         }
     }
 
-    items
+    Ok(items)
 }
 
-fn build_user_content(parts: &[MessagePart]) -> String {
-    let mut parts_out: Vec<serde_json::Value> = Vec::new();
+fn build_user_content(parts: &[MessagePart]) -> Result<InputContent, RuntimeError> {
+    let mut parts_out: Vec<ResponseInputContent> = Vec::new();
     for p in parts {
         match p {
             MessagePart::Text { text } => {
-                parts_out.push(serde_json::json!({"type": "input_text", "text": text}));
+                parts_out.push(ResponseInputContent::InputText { text: text.clone() });
             }
             MessagePart::Image { source } => {
-                let data = match &source.data {
-                    ImageData::Base64 { data } => data.clone(),
-                    ImageData::Path { path } => {
-                        let bytes = std::fs::read(path).unwrap_or_default();
-                        use base64::Engine;
-                        base64::engine::general_purpose::STANDARD.encode(&bytes)
-                    }
-                };
-                parts_out.push(serde_json::json!({
-                    "type": "input_image",
-                    "image_url": format!("data:{};base64,{}", source.media_type, data)
-                }));
+                let data = crate::attachment_store::image_base64(source)?;
+                parts_out.push(ResponseInputContent::InputImage {
+                    image_url: format!("data:{};base64,{}", source.media_type, data),
+                    detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
+                        .then(|| source.detail.as_str()),
+                });
             }
             MessagePart::CompactSummary { summary, .. } => {
-                parts_out.push(serde_json::json!({"type": "input_text", "text": summary}));
+                parts_out.push(ResponseInputContent::InputText {
+                    text: summary.clone(),
+                });
             }
             _ => {}
         }
     }
-    if parts_out.len() == 1
-        && parts_out[0].get("type").and_then(|v| v.as_str()) == Some("input_text")
-    {
-        parts_out[0]["text"].as_str().unwrap_or("").to_string()
+    if let [ResponseInputContent::InputText { text }] = parts_out.as_slice() {
+        Ok(InputContent::Text(text.clone()))
     } else {
-        serde_json::to_string(&parts_out).unwrap_or_default()
+        Ok(InputContent::Parts(parts_out))
     }
 }
 
@@ -285,8 +291,8 @@ impl Provider for CodexProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let validation_error = Self::validate_reasoning(&req.reasoning).err();
-        let request = self.build_request(&req);
+        let preflight =
+            Self::validate_reasoning(&req.reasoning).and_then(|()| self.build_request(&req));
         let turn_id = turn_id_from_req(&req);
         let streaming_tools = req.tools.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
@@ -295,9 +301,7 @@ impl Provider for CodexProvider {
 
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
             Box::pin(async move {
-                if let Some(error) = validation_error {
-                    return Err(error);
-                }
+                let request = preflight?;
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -311,6 +315,11 @@ impl Provider for CodexProvider {
                 let status = resp.status();
                 if !status.is_success() {
                     let body_text = resp.text().await.unwrap_or_default();
+                    if let Some(reason) =
+                        super::classify_attachment_error(status.as_u16(), &body_text)
+                    {
+                        return Err(RuntimeError::AttachmentError { reason });
+                    }
                     return Err(RuntimeError::ToolFailed(format!(
                         "codex http {status}: {body_text}"
                     )));
@@ -780,7 +789,7 @@ struct InputItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<InputContent>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     item_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -791,6 +800,26 @@ struct InputItem {
     arguments: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum InputContent {
+    Text(String),
+    Parts(Vec<ResponseInputContent>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResponseInputContent {
+    InputText {
+        text: String,
+    },
+    InputImage {
+        image_url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<&'static str>,
+    },
 }
 
 #[derive(Serialize)]
@@ -875,7 +904,7 @@ mod tests {
             },
             stall_timeout_secs: 0,
         };
-        let body = serde_json::to_value(provider.build_body(&request)).unwrap();
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
         assert_eq!(body["reasoning"]["effort"], "xhigh");
         assert_eq!(body["reasoning"]["mode"], "pro");
         assert_eq!(body["reasoning"]["summary"], "auto");
@@ -895,7 +924,75 @@ mod tests {
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
         };
-        let body = serde_json::to_value(provider.build_body(&request)).unwrap();
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn mixed_user_content_is_a_typed_array_not_a_json_string() {
+        use base64::Engine;
+
+        let provider = CodexProvider::new("codex", "token", "account");
+        let image = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n");
+        let request = crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: vec![crate::message::Message {
+                role: crate::message::MessageRole::User,
+                parts: vec![
+                    crate::message::MessagePart::Image {
+                        source: crate::message::ImageSource {
+                            media_type: "image/png".into(),
+                            data: crate::message::ImageData::Base64 { data: image },
+                            detail: crate::provider::ImageDetail::High,
+                        },
+                    },
+                    crate::message::MessagePart::Text {
+                        text: "describe".into(),
+                    },
+                ],
+                turn_id: crate::event::TurnId::now(),
+                origin: crate::message::MessageOrigin::User,
+            }],
+            system: None,
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
+        assert!(body["input"][0]["content"].is_array());
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
+        assert_eq!(body["input"][0]["content"][0]["detail"], "high");
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_text");
+    }
+
+    #[test]
+    fn compact_summary_is_preserved_as_input_context() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let request = crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: vec![crate::message::Message::system_compact_summary(
+                crate::event::TurnId::now(),
+                "retained summary",
+                1,
+                9,
+                9,
+            )],
+            system: Some("stable instructions".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
+        assert_eq!(body["instructions"], "stable instructions");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"], "retained summary");
     }
 }

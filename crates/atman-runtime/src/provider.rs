@@ -188,6 +188,67 @@ impl ReasoningSelection {
     }
 }
 
+impl std::fmt::Display for ReasoningSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderDefault => f.write_str("default"),
+            Self::Disabled => f.write_str("off"),
+            Self::Auto { execution_mode } => {
+                f.write_str("auto")?;
+                if let Some(mode) = execution_mode {
+                    write!(f, "@{mode}")?;
+                }
+                Ok(())
+            }
+            Self::Effort {
+                effort,
+                execution_mode,
+            } => {
+                effort.fmt(f)?;
+                if let Some(mode) = execution_mode {
+                    write!(f, "@{mode}")?;
+                }
+                Ok(())
+            }
+            Self::BudgetTokens { tokens } => write!(f, "budget:{tokens}"),
+        }
+    }
+}
+
+impl std::str::FromStr for ReasoningSelection {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "default" | "provider_default") {
+            return Ok(Self::ProviderDefault);
+        }
+        if matches!(value.as_str(), "off" | "disabled" | "none") {
+            return Ok(Self::Disabled);
+        }
+        if let Some(tokens) = value.strip_prefix("budget:") {
+            let tokens: u32 = tokens
+                .parse()
+                .map_err(|_| format!("invalid reasoning token budget `{tokens}`"))?;
+            if tokens == 0 {
+                return Err("reasoning token budget must be positive".into());
+            }
+            return Ok(Self::BudgetTokens { tokens });
+        }
+        let (level, execution_mode) = match value.split_once('@') {
+            Some((level, mode)) => (level, Some(mode.parse()?)),
+            None => (value.as_str(), None),
+        };
+        if level == "auto" {
+            return Ok(Self::Auto { execution_mode });
+        }
+        Ok(Self::Effort {
+            effort: level.parse()?,
+            execution_mode,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum InputModality {
@@ -205,6 +266,17 @@ pub enum ImageDetail {
     Low,
     High,
     Original,
+}
+
+impl ImageDetail {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Original => "original",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -511,5 +583,30 @@ mod tests {
             .resolve("codex-auto-review")
             .expect("should resolve via model registry provider field");
         assert_eq!(p.name(), "codex");
+    }
+
+    #[test]
+    fn reasoning_selection_string_round_trips() {
+        for value in [
+            "default",
+            "off",
+            "auto",
+            "auto@pro",
+            "minimal",
+            "high@standard",
+            "xhigh",
+            "max",
+            "ultra",
+            "persistent",
+            "budget:4096",
+        ] {
+            let parsed: ReasoningSelection = value.parse().unwrap();
+            assert_eq!(parsed.to_string(), value);
+        }
+    }
+
+    #[test]
+    fn reasoning_selection_rejects_zero_budget() {
+        assert!("budget:0".parse::<ReasoningSelection>().is_err());
     }
 }

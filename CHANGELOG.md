@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Provider-aware reasoning controls** — model settings, DSL calls, TUI sessions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
+- **Multimodal image input** — OpenAI Chat Completions, Codex Responses, and Anthropic Messages accept persistent image attachments from TUI clipboard paste, CLI paths, daemon requests, and DSL messages.
 - **Central permission control** — broker-backed approvals expose stable request and group identities, optimistic revisions, scoped grants, structured audit events, daemon RPCs, and TUI approval controls.
 - **Central tool authorization** — tool calls use trusted flow identity, structured resource provenance, and per-invocation approval before filesystem, repository, process, terminal, task, or network side effects.
 - **Strict process sandboxing** — controlled background and terminal processes fail closed on sandbox denial, preserve process and log lifecycle guarantees, and never retry with reduced restrictions.
@@ -16,6 +18,9 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Codex multimodal request shape** — mixed text and image input is serialized as typed Responses API content instead of a JSON string.
+- **Codex compacted context** — compact summaries and stored system context remain present in Responses API input history.
+- **Attachment degradation targeting** — provider rejection replaces only the rejected image message instead of matching the same part indexes across unrelated history.
 - **Workspace ownership and cleanup safety** — automatic workspaces use runtime-derived session and child-flow ownership, release only clean worktrees, preserve dirty or retained work, and reconcile stale daemon-generation leases as inspectable orphans without automatic deletion.
 
 ## [1.9.1] — 2026-08-23

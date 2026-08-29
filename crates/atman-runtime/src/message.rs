@@ -103,13 +103,29 @@ pub enum MessagePart {
 pub struct ImageSource {
     pub media_type: String,
     pub data: ImageData,
+    #[serde(default, skip_serializing_if = "is_auto_image_detail")]
+    pub detail: crate::provider::ImageDetail,
+}
+
+fn is_auto_image_detail(detail: &crate::provider::ImageDetail) -> bool {
+    matches!(detail, crate::provider::ImageDetail::Auto)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageData {
-    Base64 { data: String },
-    Path { path: PathBuf },
+    Base64 {
+        data: String,
+    },
+    Path {
+        path: PathBuf,
+    },
+    Artifact {
+        id: String,
+        path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 impl Message {
@@ -296,6 +312,7 @@ mod tests {
                         data: ImageData::Path {
                             path: PathBuf::from("/tmp/x.png"),
                         },
+                        detail: crate::provider::ImageDetail::Auto,
                     },
                 },
                 MessagePart::Text { text: "b".into() },

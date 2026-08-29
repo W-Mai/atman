@@ -69,7 +69,14 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     let req = JsonRpcRequest::new(
         1,
         methods::RUN_FLOW,
-        serde_json::json!({"flow_path": flow_path.to_string_lossy()}),
+        serde_json::json!({
+            "flow_path": flow_path.to_string_lossy(),
+            "reasoning": "high@pro",
+            "images": [{
+                "data_base64": "iVBORw0KGgo=",
+                "name": "daemon-input.png"
+            }]
+        }),
     );
     let resp = dispatch(state.clone(), req).await;
     let result = resp.result.expect("run_flow ok");
@@ -97,6 +104,23 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    let events = std::fs::read_to_string(&events_path).unwrap();
+    let image_source = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "user_msg")
+        .and_then(|event| {
+            event["message"]["parts"]
+                .as_array()?
+                .iter()
+                .find(|part| part["type"] == "image")
+                .map(|part| part["source"].clone())
+        })
+        .expect("daemon user message image");
+    assert_eq!(image_source["data"]["kind"], "artifact");
+    let artifact_path = image_source["data"]["path"].as_str().unwrap();
+    assert!(std::path::Path::new(artifact_path).is_file());
 
     let list_req = JsonRpcRequest::new(2, methods::LIST_SESSIONS, serde_json::json!({}));
     let list_resp = dispatch(state, list_req).await;

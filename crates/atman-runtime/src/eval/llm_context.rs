@@ -107,6 +107,7 @@ mod tests {
             context_mode: "session".into(),
             fallback_value: None,
             tool_specs: Vec::new(),
+            reasoning: None,
             stall_timeout_secs: 0,
         }
     }

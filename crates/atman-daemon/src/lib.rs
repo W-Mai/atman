@@ -329,7 +329,16 @@ pub async fn dispatch_as(
                         .map(|(k, v)| (k, atman_runtime::Value::from_json(v)))
                         .collect();
                     match launcher
-                        .spawn_as(state.clone(), &p.flow_path, args, principal_id)
+                        .spawn_as_with_options(
+                            state.clone(),
+                            &p.flow_path,
+                            args,
+                            principal_id,
+                            crate::run::RunOptions {
+                                reasoning: p.reasoning,
+                                images: p.images,
+                            },
+                        )
                         .await
                     {
                         Ok(spawned) => {

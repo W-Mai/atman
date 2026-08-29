@@ -173,6 +173,17 @@ pub struct RunFlowRequest {
     #[serde(default)]
     #[schema(value_type = Object)]
     pub args: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<InlineImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InlineImage {
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -360,6 +371,8 @@ mod tests {
         let req: RunFlowRequest = serde_json::from_str(s).unwrap();
         assert_eq!(req.flow_path, "examples/hello.at");
         assert!(req.args.is_empty());
+        assert!(req.reasoning.is_none());
+        assert!(req.images.is_empty());
     }
 
     #[test]
