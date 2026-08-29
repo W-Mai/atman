@@ -206,6 +206,11 @@ fn register_discovered_entries(
         .iter()
         .map(|m| {
             let name = format!("{model_namespace}:{}", m.slug);
+            let capabilities = m
+                .capability_knowledge
+                .advertised()
+                .cloned()
+                .unwrap_or_default();
             let entry = ModelEntry {
                 model: if api_model_uses_registry_key {
                     name.clone()
@@ -214,12 +219,12 @@ fn register_discovered_entries(
                 },
                 provider: Some(provider_key.to_string()),
                 context_budget: m.context_budget,
-                thinking: Some(m.thinking),
-                reasoning_efforts: m.capabilities.reasoning_efforts.clone(),
-                default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
-                reasoning_modes: m.capabilities.reasoning_modes.clone(),
-                default_reasoning_mode: m.capabilities.default_reasoning_mode.clone(),
-                input_modalities: m.capabilities.input_modalities.clone(),
+                thinking: Some(m.capability_knowledge.thinking()),
+                reasoning_efforts: capabilities.reasoning_efforts,
+                default_reasoning_effort: capabilities.default_reasoning_effort,
+                reasoning_modes: capabilities.reasoning_modes,
+                default_reasoning_mode: capabilities.default_reasoning_mode,
+                input_modalities: capabilities.input_modalities,
                 enabled: None,
                 discovered: true,
                 ..Default::default()
@@ -1520,8 +1525,9 @@ mod tests {
         let models = vec![crate::provider::DiscoveredModel {
             slug: "codex/gpt-test".into(),
             context_budget: Some(272_000),
-            thinking: true,
-            capabilities: ModelCapabilities::default(),
+            capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                ModelCapabilities::default(),
+            ),
         }];
         assert_eq!(
             shortest_unique_provider_id("1234567-account", &["1234567-account".into()]),
@@ -1727,8 +1733,9 @@ mod tests {
             &[crate::provider::DiscoveredModel {
                 slug: "codex/gpt-5".to_string(),
                 context_budget: Some(128_000),
-                thinking: true,
-                capabilities: ModelCapabilities::default(),
+                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                    ModelCapabilities::default(),
+                ),
             }],
         );
         assert!(model_entry("Codex:codex/gpt-5").is_some());
@@ -1796,8 +1803,9 @@ model = "provider/new"
             &[crate::provider::DiscoveredModel {
                 slug: "codex/gpt-5".to_string(),
                 context_budget: Some(128_000),
-                thinking: true,
-                capabilities: ModelCapabilities::default(),
+                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                    ModelCapabilities::default(),
+                ),
             }],
         );
 

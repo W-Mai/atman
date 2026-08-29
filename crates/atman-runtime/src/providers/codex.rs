@@ -6,8 +6,9 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable, TurnId};
 use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, ReasoningEffort,
-    ReasoningSelection, ReasoningWireProfile, StopReason, TokenUsage, estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, ModelDiscoveryError, Provider,
+    ReasoningEffort, ReasoningSelection, ReasoningWireProfile, StopReason, TokenUsage,
+    estimate_tokens,
 };
 use crate::tool::BoxFut;
 use anyhow::Context;
@@ -271,6 +272,106 @@ fn build_tools(tools: &[crate::tool::ToolSpec]) -> Vec<ResponsesTool> {
         .collect()
 }
 
+#[derive(Deserialize)]
+struct CodexModelsResponse {
+    models: Vec<CodexModelResponse>,
+}
+
+#[derive(Deserialize)]
+struct CodexModelResponse {
+    slug: String,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexReasoningLevel>,
+    #[serde(default)]
+    default_reasoning_level: Option<ReasoningEffort>,
+    #[serde(default)]
+    input_modalities: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CodexReasoningLevel {
+    Name(String),
+    Detail {
+        effort: String,
+        #[serde(default, rename = "description")]
+        _description: Option<String>,
+    },
+}
+
+impl CodexReasoningLevel {
+    fn effort(self) -> String {
+        match self {
+            Self::Name(effort) | Self::Detail { effort, .. } => effort,
+        }
+    }
+}
+
+fn parse_codex_models(
+    bytes: &[u8],
+) -> Result<Vec<crate::provider::DiscoveredModel>, ModelDiscoveryError> {
+    let response: CodexModelsResponse = serde_json::from_slice(bytes)
+        .map_err(|error| ModelDiscoveryError::InvalidResponse(error.to_string()))?;
+    response
+        .models
+        .into_iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let raw_slug = model.slug.trim();
+            if raw_slug.is_empty() {
+                return Err(ModelDiscoveryError::InvalidResponse(format!(
+                    "models[{index}].slug must not be empty"
+                )));
+            }
+            let slug = if raw_slug.starts_with("codex/") {
+                raw_slug.to_string()
+            } else {
+                format!("codex/{raw_slug}")
+            };
+            let reasoning_efforts = model
+                .supported_reasoning_levels
+                .into_iter()
+                .map(|level| {
+                    let raw = level.effort();
+                    raw.parse().map_err(|error| {
+                        ModelDiscoveryError::InvalidResponse(format!(
+                            "models[{index}] has invalid reasoning effort `{raw}`: {error}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let input_modalities = model
+                .input_modalities
+                .into_iter()
+                .filter_map(|value| match value.as_str() {
+                    "text" => Some(crate::provider::InputModality::Text),
+                    "image" => Some(crate::provider::InputModality::Image),
+                    "audio" => Some(crate::provider::InputModality::Audio),
+                    _ => None,
+                })
+                .collect();
+            Ok(crate::provider::DiscoveredModel {
+                slug,
+                context_budget: model.context_window,
+                capability_knowledge: crate::provider::CapabilityKnowledge::Advertised(
+                    crate::provider::ModelCapabilities {
+                        reasoning_efforts,
+                        default_reasoning_effort: model.default_reasoning_level,
+                        input_modalities,
+                        ..Default::default()
+                    },
+                ),
+            })
+        })
+        .collect()
+}
+
+fn discovery_error_body(body: &str) -> String {
+    body.chars().take(512).collect()
+}
+
 impl Provider for CodexProvider {
     fn name(&self) -> &str {
         &self.name
@@ -512,77 +613,34 @@ impl Provider for CodexProvider {
 
     fn discover_models(
         &self,
-    ) -> crate::tool::BoxFut<'static, Vec<crate::provider::DiscoveredModel>> {
+    ) -> crate::tool::BoxFut<
+        'static,
+        Result<Vec<crate::provider::DiscoveredModel>, ModelDiscoveryError>,
+    > {
         let access_token = self.access_token.clone();
         let account_id = self.account_id.clone();
         Box::pin(async move {
             let client = reqwest::Client::new();
-            let resp = match client
+            let resp = client
                 .get("https://chatgpt.com/backend-api/wham/models")
                 .query(&[("client_version", "0.0.0")])
                 .bearer_auth(&access_token)
                 .header("ChatGPT-Account-Id", &account_id)
                 .send()
                 .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    crate::notify!(
-                        warn,
-                        location = Inline,
-                        stack = dedupe("codex.models.fetch_failed", 60_000),
-                        "fetch codex models failed: {e:#}"
-                    );
-                    return vec![];
-                }
-            };
-            let Ok(body) = resp.json::<serde_json::Value>().await else {
-                return vec![];
-            };
-            let Some(list) = body["models"].as_array() else {
-                return vec![];
-            };
-            list.iter()
-                .filter_map(|m| {
-                    let slug = format!("codex/{}", m["slug"].as_str()?);
-                    if slug.is_empty() {
-                        return None;
-                    }
-                    let context_budget = m["context_window"].as_u64();
-                    let reasoning_efforts = m["supported_reasoning_levels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|value| value.as_str()?.parse().ok())
-                        .collect::<Vec<_>>();
-                    let thinking = !reasoning_efforts.is_empty();
-                    let input_modalities = m["input_modalities"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|value| match value.as_str()? {
-                            "text" => Some(crate::provider::InputModality::Text),
-                            "image" => Some(crate::provider::InputModality::Image),
-                            "audio" => Some(crate::provider::InputModality::Audio),
-                            _ => None,
-                        })
-                        .collect();
-                    let default_reasoning_effort = m["default_reasoning_level"]
-                        .as_str()
-                        .and_then(|value| value.parse().ok());
-                    Some(crate::provider::DiscoveredModel {
-                        slug,
-                        context_budget,
-                        thinking,
-                        capabilities: crate::provider::ModelCapabilities {
-                            reasoning_efforts,
-                            default_reasoning_effort,
-                            input_modalities,
-                            ..Default::default()
-                        },
-                    })
-                })
-                .collect()
+                .map_err(|error| ModelDiscoveryError::Transport(error.to_string()))?;
+            let status = resp.status();
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|error| ModelDiscoveryError::Transport(error.to_string()))?;
+            if !status.is_success() {
+                return Err(ModelDiscoveryError::Http {
+                    status: status.as_u16(),
+                    body: discovery_error_body(&String::from_utf8_lossy(&bytes)),
+                });
+            }
+            parse_codex_models(&bytes)
         })
     }
 
@@ -872,7 +930,7 @@ struct OutputTokensDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexProvider, normalize_input_tokens};
+    use super::{CodexProvider, normalize_input_tokens, parse_codex_models};
 
     #[test]
     fn input_tokens_exclude_cached_tokens_for_window_accounting() {
@@ -882,6 +940,93 @@ mod tests {
     #[test]
     fn cached_tokens_cannot_underflow_input_tokens() {
         assert_eq!(normalize_input_tokens(10, 20), 0);
+    }
+
+    #[test]
+    fn model_catalog_parses_object_reasoning_levels() {
+        let models = parse_codex_models(
+            br#"{
+                "models": [{
+                    "slug": "gpt-test",
+                    "context_window": 272000,
+                    "supported_reasoning_levels": [
+                        {"effort":"low","description":"Fast"},
+                        {"effort":"medium","description":"Balanced"},
+                        {"effort":"high","description":"Deep"},
+                        {"effort":"xhigh","description":"Deeper"},
+                        {"effort":"max","description":"Maximum"},
+                        {"effort":"ultra","description":"Extended"}
+                    ],
+                    "default_reasoning_level": "medium",
+                    "input_modalities": ["text", "image"]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "codex/gpt-test");
+        assert_eq!(models[0].context_budget, Some(272_000));
+        assert!(models[0].capability_knowledge.thinking());
+        let capabilities = models[0].capability_knowledge.advertised().unwrap();
+        assert_eq!(
+            capabilities.reasoning_efforts,
+            vec![
+                crate::provider::ReasoningEffort::Low,
+                crate::provider::ReasoningEffort::Medium,
+                crate::provider::ReasoningEffort::High,
+                crate::provider::ReasoningEffort::XHigh,
+                crate::provider::ReasoningEffort::Max,
+                crate::provider::ReasoningEffort::Ultra,
+            ]
+        );
+        assert_eq!(
+            capabilities.default_reasoning_effort,
+            Some(crate::provider::ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            capabilities.input_modalities,
+            vec![
+                crate::provider::InputModality::Text,
+                crate::provider::InputModality::Image,
+            ]
+        );
+    }
+
+    #[test]
+    fn model_catalog_accepts_legacy_string_reasoning_levels() {
+        let models = parse_codex_models(
+            br#"{
+                "models": [{
+                    "slug": "codex/legacy-test",
+                    "supported_reasoning_levels": ["low", "high"]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(models[0].slug, "codex/legacy-test");
+        assert_eq!(
+            models[0]
+                .capability_knowledge
+                .advertised()
+                .unwrap()
+                .reasoning_efforts,
+            vec![
+                crate::provider::ReasoningEffort::Low,
+                crate::provider::ReasoningEffort::High,
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_model_catalog_is_not_treated_as_an_empty_catalog() {
+        let error = parse_codex_models(br#"{"unexpected":[]}"#).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::provider::ModelDiscoveryError::InvalidResponse(_)
+        ));
     }
 
     #[test]

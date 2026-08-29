@@ -1698,12 +1698,13 @@ mod tests {
                 .update_auth_model_cache(
                     "provider",
                     crate::auth_store::ModelCache {
+                        schema_version: crate::auth_store::MODEL_CACHE_SCHEMA_VERSION,
                         fetched_at: 10,
                         models: vec![crate::auth_store::CachedModel {
                             slug: "cached-model".into(),
                             context_budget: Some(8192),
                             thinking: true,
-                            capabilities: crate::provider::ModelCapabilities::default(),
+                            capabilities: Some(crate::provider::ModelCapabilities::default()),
                         }],
                     },
                 )

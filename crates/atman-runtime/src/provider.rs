@@ -508,8 +508,10 @@ pub trait Provider: Send + Sync {
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
 
-    fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
-        Box::pin(async { vec![] })
+    fn discover_models(
+        &self,
+    ) -> BoxFut<'static, Result<Vec<DiscoveredModel>, ModelDiscoveryError>> {
+        Box::pin(async { Err(ModelDiscoveryError::Unsupported) })
     }
 
     fn test_connection(&self) -> BoxFut<'_, Result<String, String>> {
@@ -517,13 +519,53 @@ pub trait Provider: Send + Sync {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ModelDiscoveryError {
+    #[error("model discovery is not supported by this provider")]
+    Unsupported,
+    #[error("model discovery transport failed: {0}")]
+    Transport(String),
+    #[error("model discovery returned HTTP {status}: {body}")]
+    Http { status: u16, body: String },
+    #[error("model discovery returned an invalid response: {0}")]
+    InvalidResponse(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscoveredModel {
     pub slug: String,
     pub context_budget: Option<u64>,
-    /// Backward-compatible summary for older auth caches and UI code.
-    pub thinking: bool,
-    pub capabilities: ModelCapabilities,
+    pub capability_knowledge: CapabilityKnowledge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityKnowledge {
+    Legacy { thinking: bool },
+    Advertised(ModelCapabilities),
+}
+
+impl CapabilityKnowledge {
+    pub fn thinking(&self) -> bool {
+        match self {
+            Self::Legacy { thinking } => *thinking,
+            Self::Advertised(capabilities) => {
+                capabilities
+                    .reasoning_efforts
+                    .iter()
+                    .chain(capabilities.default_reasoning_effort.iter())
+                    .any(|effort| !matches!(effort, ReasoningEffort::None))
+                    || !capabilities.reasoning_modes.is_empty()
+                    || capabilities.default_reasoning_mode.is_some()
+            }
+        }
+    }
+
+    pub fn advertised(&self) -> Option<&ModelCapabilities> {
+        match self {
+            Self::Legacy { .. } => None,
+            Self::Advertised(capabilities) => Some(capabilities),
+        }
+    }
 }
 
 pub const DEFAULT_STREAM_BUFFER: usize = 1024;

@@ -43,22 +43,35 @@ pub async fn oauth_login<P: OAuthProvider + Provider>(
 
                     // Discover models immediately after login.
                     let discover_provider = P::from_stored(&provider);
-                    let models = discover_provider.discover_models().await;
-                    if !models.is_empty() {
-                        let _ = atman_runtime::auth_store::save_provider_model_cache(&id, &models);
-                        if provider.kind == ProviderKind::Codex {
-                            atman_runtime::model_registry::register_discovered_for_provider(
-                                &id,
-                                &provider.name,
-                                &models,
-                            );
-                        } else {
-                            atman_runtime::model_registry::register_discovered(
-                                &id,
-                                &provider.name,
-                                &models,
-                            );
+                    match discover_provider.discover_models().await {
+                        Ok(models) => {
+                            match atman_runtime::auth_store::save_provider_model_cache(&id, &models)
+                            {
+                                Ok(()) => {
+                                    if provider.kind == ProviderKind::Codex {
+                                        atman_runtime::model_registry::register_discovered_for_provider(
+                                            &id,
+                                            &provider.name,
+                                            &models,
+                                        );
+                                    } else {
+                                        atman_runtime::model_registry::register_discovered(
+                                            &id,
+                                            &provider.name,
+                                            &models,
+                                        );
+                                    }
+                                }
+                                Err(error) => atman_runtime::notify!(
+                                    error,
+                                    "model cache save failed after login: {error:#}"
+                                ),
+                            }
                         }
+                        Err(error) => atman_runtime::notify!(
+                            warn,
+                            "model discovery failed after login: {error}"
+                        ),
                     }
 
                     let _ = tx.send(Ok(provider));

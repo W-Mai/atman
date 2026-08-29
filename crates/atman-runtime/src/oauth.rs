@@ -134,7 +134,10 @@ async fn create_oauth_provider_impl<P: OAuthProvider>(
 
     let provider = P::from_stored(&updated);
     let models = if discover {
-        provider.discover_models().await
+        provider
+            .discover_models()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?
     } else {
         vec![]
     };

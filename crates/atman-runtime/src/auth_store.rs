@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::storage::config_dir;
 
 const AUTH_FILENAME: &str = "auth.json";
+pub const MODEL_CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -16,6 +17,8 @@ pub enum ProviderKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCache {
+    #[serde(default)]
+    pub schema_version: u32,
     pub fetched_at: i64,
     pub models: Vec<CachedModel>,
 }
@@ -26,8 +29,8 @@ pub struct CachedModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<u64>,
     pub thinking: bool,
-    #[serde(default)]
-    pub capabilities: crate::provider::ModelCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::provider::ModelCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,31 +101,47 @@ pub fn save_provider_model_cache(
     models: &[crate::provider::DiscoveredModel],
 ) -> Result<()> {
     let cache = ModelCache {
+        schema_version: MODEL_CACHE_SCHEMA_VERSION,
         fetched_at: chrono::Utc::now().timestamp(),
         models: models
             .iter()
             .map(|model| CachedModel {
                 slug: model.slug.clone(),
                 context_budget: model.context_budget,
-                thinking: model.thinking,
-                capabilities: model.capabilities.clone(),
+                thinking: model.capability_knowledge.thinking(),
+                capabilities: model.capability_knowledge.advertised().cloned(),
             })
             .collect(),
     };
-    crate::config_hub::ConfigHub::global()?.update_auth_model_cache(provider_id, cache)?;
+    let updated =
+        crate::config_hub::ConfigHub::global()?.update_auth_model_cache(provider_id, cache)?;
+    if !updated {
+        anyhow::bail!("auth provider `{provider_id}` does not exist");
+    }
     Ok(())
 }
 
 /// Convert cached models to discovered models for registry hydration.
 pub fn cached_to_discovered(cache: &ModelCache) -> Vec<crate::provider::DiscoveredModel> {
+    let capabilities_are_current = cache.schema_version == MODEL_CACHE_SCHEMA_VERSION;
     cache
         .models
         .iter()
         .map(|m| crate::provider::DiscoveredModel {
             slug: m.slug.clone(),
             context_budget: m.context_budget,
-            thinking: m.thinking,
-            capabilities: m.capabilities.clone(),
+            capability_knowledge: if capabilities_are_current {
+                m.capabilities
+                    .clone()
+                    .map(crate::provider::CapabilityKnowledge::Advertised)
+                    .unwrap_or(crate::provider::CapabilityKnowledge::Legacy {
+                        thinking: m.thinking,
+                    })
+            } else {
+                crate::provider::CapabilityKnowledge::Legacy {
+                    thinking: m.thinking,
+                }
+            },
         })
         .collect()
 }
@@ -229,5 +248,74 @@ mod tests {
         let json = r#"{"providers": []}"#;
         let store: AuthStore = serde_json::from_str(json).unwrap();
         assert!(store.providers.is_empty());
+    }
+
+    #[test]
+    fn legacy_model_cache_preserves_unknown_capabilities() {
+        let cache: ModelCache = serde_json::from_str(
+            r#"{"fetched_at":10,"models":[{"slug":"codex/test","thinking":true}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(cache.schema_version, 0);
+        assert_eq!(cache.models[0].capabilities, None);
+        assert_eq!(
+            cached_to_discovered(&cache)[0].capability_knowledge,
+            crate::provider::CapabilityKnowledge::Legacy { thinking: true }
+        );
+    }
+
+    #[test]
+    fn unversioned_cache_does_not_trust_a_serialized_empty_capability_object() {
+        let cache: ModelCache = serde_json::from_str(
+            r#"{
+                "fetched_at": 10,
+                "models": [{
+                    "slug": "codex/test",
+                    "thinking": true,
+                    "capabilities": {
+                        "reasoning_efforts": [],
+                        "reasoning_modes": [],
+                        "input_modalities": []
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(cache.schema_version, 0);
+        assert!(cache.models[0].capabilities.is_some());
+        assert_eq!(
+            cached_to_discovered(&cache)[0].capability_knowledge,
+            crate::provider::CapabilityKnowledge::Legacy { thinking: true }
+        );
+    }
+
+    #[test]
+    fn current_model_cache_distinguishes_explicit_empty_capabilities() {
+        let cache = ModelCache {
+            schema_version: MODEL_CACHE_SCHEMA_VERSION,
+            fetched_at: 10,
+            models: vec![CachedModel {
+                slug: "codex/test".into(),
+                context_budget: Some(8_192),
+                thinking: false,
+                capabilities: Some(crate::provider::ModelCapabilities::default()),
+            }],
+        };
+        let json = serde_json::to_string(&cache).unwrap();
+        let decoded: ModelCache = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.schema_version, MODEL_CACHE_SCHEMA_VERSION);
+        assert_eq!(
+            decoded.models[0].capabilities,
+            Some(crate::provider::ModelCapabilities::default())
+        );
+        assert_eq!(
+            cached_to_discovered(&decoded)[0].capability_knowledge,
+            crate::provider::CapabilityKnowledge::Advertised(
+                crate::provider::ModelCapabilities::default()
+            )
+        );
     }
 }

@@ -583,13 +583,15 @@ impl Provider for OpenAiProvider {
 
     fn discover_models(
         &self,
-    ) -> crate::tool::BoxFut<'static, Vec<crate::provider::DiscoveredModel>> {
+    ) -> crate::tool::BoxFut<
+        'static,
+        Result<Vec<crate::provider::DiscoveredModel>, crate::provider::ModelDiscoveryError>,
+    > {
         let base_url = self.base_url.clone();
         let api_key = self.api_key.clone();
         Box::pin(async move {
             #[derive(serde::Deserialize)]
             struct ModelsResponse {
-                #[serde(default)]
                 data: Vec<ModelEntry>,
             }
             #[derive(serde::Deserialize)]
@@ -600,21 +602,32 @@ impl Provider for OpenAiProvider {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
-                .unwrap_or_default();
-            let resp = match client
+                .map_err(|error| {
+                    crate::provider::ModelDiscoveryError::Transport(error.to_string())
+                })?;
+            let resp = client
                 .get(format!("{base_url}/models"))
                 .bearer_auth(&api_key)
                 .send()
                 .await
-            {
-                Ok(r) if r.status().is_success() => r,
-                _ => return vec![],
-            };
-            let body: ModelsResponse = match resp.json().await {
-                Ok(b) => b,
-                Err(_) => return vec![],
-            };
-            body.data
+                .map_err(|error| {
+                    crate::provider::ModelDiscoveryError::Transport(error.to_string())
+                })?;
+            let status = resp.status();
+            let bytes = resp.bytes().await.map_err(|error| {
+                crate::provider::ModelDiscoveryError::Transport(error.to_string())
+            })?;
+            if !status.is_success() {
+                return Err(crate::provider::ModelDiscoveryError::Http {
+                    status: status.as_u16(),
+                    body: String::from_utf8_lossy(&bytes).chars().take(512).collect(),
+                });
+            }
+            let body: ModelsResponse = serde_json::from_slice(&bytes).map_err(|error| {
+                crate::provider::ModelDiscoveryError::InvalidResponse(error.to_string())
+            })?;
+            Ok(body
+                .data
                 .into_iter()
                 .filter(|m| !m.id.starts_with("ft:"))
                 .map(|m| {
@@ -623,11 +636,12 @@ impl Provider for OpenAiProvider {
                     crate::provider::DiscoveredModel {
                         slug: m.id,
                         context_budget: Some(budget),
-                        thinking,
-                        capabilities: crate::provider::ModelCapabilities::default(),
+                        capability_knowledge: crate::provider::CapabilityKnowledge::Legacy {
+                            thinking,
+                        },
                     }
                 })
-                .collect()
+                .collect())
         })
     }
 

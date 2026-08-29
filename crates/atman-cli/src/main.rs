@@ -2238,16 +2238,22 @@ async fn cmd_repl_once(
                                 &p.access_token,
                                 p.account.as_deref().unwrap_or(""),
                             );
-                            let models: Vec<atman_runtime::provider::DiscoveredModel> =
-                                provider.discover_models().await;
-                            if !models.is_empty() {
-                                let _ = atman_runtime::auth_store::save_provider_model_cache(
-                                    &pid, &models,
-                                );
-                                atman_runtime::model_registry::register_discovered_for_provider(
-                                    &pid, &p.name, &models,
-                                );
+                            let models = match provider.discover_models().await {
+                                Ok(models) => models,
+                                Err(error) => {
+                                    atman_runtime::notify!(error, "model refresh failed: {error}");
+                                    return;
+                                }
+                            };
+                            if let Err(error) =
+                                atman_runtime::auth_store::save_provider_model_cache(&pid, &models)
+                            {
+                                atman_runtime::notify!(error, "model cache save failed: {error:#}");
+                                return;
                             }
+                            atman_runtime::model_registry::register_discovered_for_provider(
+                                &pid, &p.name, &models,
+                            );
                             let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
                         });
                     }
