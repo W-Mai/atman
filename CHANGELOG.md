@@ -21,6 +21,7 @@ All notable changes to atman are documented in this file.
 - **Codex multimodal request shape** — mixed text and image input is serialized as typed Responses API content instead of a JSON string.
 - **Codex compacted context** — compact summaries and stored system context remain present in Responses API input history.
 - **Attachment degradation targeting** — provider rejection replaces only the rejected image message instead of matching the same part indexes across unrelated history.
+- **Atomic TUI attachment submission** — each prompt captures its current image set at submit time, preserving later attachments for the next turn and restoring images when submission or routing fails.
 - **Workspace ownership and cleanup safety** — automatic workspaces use runtime-derived session and child-flow ownership, release only clean worktrees, preserve dirty or retained work, and reconcile stale daemon-generation leases as inspectable orphans without automatic deletion.
 
 ## [1.9.1] — 2026-08-23

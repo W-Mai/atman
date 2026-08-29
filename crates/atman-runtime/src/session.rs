@@ -1544,6 +1544,15 @@ impl Session {
         images
     }
 
+    pub fn restore_pending_images(&self, mut images: Vec<crate::message::ImageSource>) -> usize {
+        let mut pending = self.pending_images.lock().unwrap();
+        images.append(&mut pending);
+        *pending = images;
+        let count = pending.len();
+        let _ = self.watch.attach.send(count);
+        count
+    }
+
     pub fn clear_pending_images(&self) {
         self.pending_images.lock().unwrap().clear();
         let _ = self.watch.attach.send(0);

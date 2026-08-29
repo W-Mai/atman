@@ -550,7 +550,7 @@ pub(crate) fn handle_key(
     app: &mut UiState,
     editor: &mut InputEditor,
     interrupt_prompt: &mut Option<std::time::Instant>,
-    submit_tx: Option<&mpsc::UnboundedSender<String>>,
+    submit_tx: Option<&mpsc::UnboundedSender<crate::TuiSubmission>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
     // MCP add form intercepts all keys when open
@@ -1094,7 +1094,22 @@ pub(crate) fn handle_key(
                     app.push_user_turn(line.clone());
                 }
                 if let Some(tx) = submit_tx {
-                    let _ = tx.send(line);
+                    let images = if line.trim_start().starts_with(':') {
+                        Vec::new()
+                    } else {
+                        app.session
+                            .as_ref()
+                            .map(|session| session.take_pending_images())
+                            .unwrap_or_default()
+                    };
+                    let submission = crate::TuiSubmission { text: line, images };
+                    if let Err(error) = tx.send(submission)
+                        && let Some(session) = app.session.as_ref()
+                    {
+                        app.attach_count = session.restore_pending_images(error.0.images);
+                    } else if let Some(session) = app.session.as_ref() {
+                        app.attach_count = session.pending_image_count();
+                    }
                 }
             }
             *interrupt_prompt = None;
@@ -1363,6 +1378,10 @@ mod tests {
     use super::*;
     use crate::history_search_modal::extract_event_text;
 
+    const PNG_BYTES: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    ];
+
     fn pending_permission(revision: u64) -> crate::app::PendingPermission {
         use atman_runtime::event::FlowRunId;
         use atman_runtime::permission::PermissionRequestId;
@@ -1401,6 +1420,65 @@ mod tests {
                 at: chrono::Utc::now(),
             },
         }
+    }
+
+    #[test]
+    fn submit_captures_the_current_attachment_snapshot() {
+        let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+        session
+            .queue_image_bytes(PNG_BYTES, Some("first.png"))
+            .unwrap();
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.session = Some(session.clone());
+        state.app.attach_count = 1;
+        let mut editor = InputEditor::default();
+        editor.insert_str("/agent inspect");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            Some(&tx),
+            None,
+        );
+        session
+            .queue_image_bytes(&[PNG_BYTES, &[0x01]].concat(), Some("second.png"))
+            .unwrap();
+
+        let submission = rx.try_recv().unwrap();
+        assert_eq!(submission.text, "/agent inspect");
+        assert_eq!(submission.images.len(), 1);
+        assert_eq!(session.pending_image_count(), 1);
+    }
+
+    #[test]
+    fn failed_submit_restores_captured_attachments() {
+        let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
+        session
+            .queue_image_bytes(PNG_BYTES, Some("clipboard.png"))
+            .unwrap();
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.session = Some(session.clone());
+        let mut editor = InputEditor::default();
+        editor.insert_str("/agent inspect");
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            Some(&tx),
+            None,
+        );
+
+        assert_eq!(session.pending_image_count(), 1);
+        assert_eq!(state.app.attach_count, 1);
     }
 
     #[test]

@@ -234,6 +234,12 @@ pub enum TuiCommand {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct TuiSubmission {
+    pub text: String,
+    pub images: Vec<atman_runtime::message::ImageSource>,
+}
+
 pub struct TuiHandle {
     pub session_id: String,
     pub session_dir: String,
@@ -242,7 +248,7 @@ pub struct TuiHandle {
     pub goal: Option<String>,
     pub stream_rx: broadcast::Receiver<StreamFrame>,
     pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
-    pub submit_tx: Option<mpsc::UnboundedSender<String>>,
+    pub submit_tx: Option<mpsc::UnboundedSender<TuiSubmission>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     pub control_tx: Option<mpsc::UnboundedSender<TuiControl>>,

@@ -1637,8 +1637,20 @@ async fn cmd_repl_once(
     }
 
     let flow_names = discover_flow_names();
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ReplInput>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
+        let (tui_submit_tx, mut tui_submit_rx) =
+            mpsc::unbounded_channel::<atman_tui::TuiSubmission>();
+        let input_tx_for_tui = input_tx.clone();
+        let session_for_submit = session.clone();
+        tokio::spawn(async move {
+            while let Some(submission) = tui_submit_rx.recv().await {
+                if let Err(mut error) = input_tx_for_tui.send(ReplInput::from_tui(submission)) {
+                    error.0.restore_images(&session_for_submit);
+                    break;
+                }
+            }
+        });
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
         let sh_tx_shared: std::sync::Arc<
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -2375,7 +2387,7 @@ async fn cmd_repl_once(
                 .task_registry
                 .as_ref()
                 .map(|tr| tr.subscribe()),
-            submit_tx: Some(input_tx),
+            submit_tx: Some(tui_submit_tx),
             note_rx: Some(note_rx),
             shutdown_rx: Some(sh_rx),
             control_tx: Some(ctrl_tx),
@@ -2440,11 +2452,11 @@ async fn cmd_repl_once(
         spawn_stream_consumer(&session, printer).await;
         (None, None, None, None)
     };
-    let mut pushback: VecDeque<String> = VecDeque::new();
+    let mut pushback: VecDeque<ReplInput> = VecDeque::new();
     let sid = session.id().to_string();
 
     loop {
-        let line = if let Some(l) = pushback.pop_front() {
+        let mut line = if let Some(l) = pushback.pop_front() {
             l
         } else {
             tokio::select! {
@@ -2459,9 +2471,12 @@ async fn cmd_repl_once(
             }
         };
         if line.trim().is_empty() {
+            line.restore_images(&session);
             continue;
         }
-        if let Some(rest) = line.strip_prefix(':') {
+        if line.starts_with(':') {
+            line.restore_images(&session);
+            let rest = line.strip_prefix(':').unwrap_or_default();
             let trimmed = rest.trim();
             let Some(mc) = atman_runtime::meta_commands::match_command(trimmed) else {
                 reporter.error(format!("unknown `:{trimmed}` — try `:help`"));
@@ -2555,21 +2570,23 @@ async fn cmd_repl_once(
         let (text, kind) = if let Some(rest) = line.strip_prefix('/') {
             (rest.trim().to_string(), TurnKind::Slash)
         } else {
-            let trimmed = line.trim();
-            let route = match resolve_route(trimmed) {
+            let trimmed = line.trim().to_string();
+            let route = match resolve_route(&trimmed) {
                 Ok(Some(route)) => route,
                 Ok(None) => {
+                    line.restore_images(&session);
                     reporter.info(
                         "[atman] no route matched. add a route to ~/.config/atman/routes.at, or use `/name args...`.",
                     );
                     continue;
                 }
                 Err(error) => {
+                    line.restore_images(&session);
                     reporter.error(format!("error: {error}"));
                     continue;
                 }
             };
-            (trimmed.to_string(), TurnKind::Bare(route))
+            (trimmed, TurnKind::Bare(route))
         };
         run_turn_with_interjection(
             session.clone(),
@@ -2577,6 +2594,7 @@ async fn cmd_repl_once(
             &lifecycles,
             classifier.as_ref(),
             &text,
+            line.images.take(),
             atman_runtime::message::MessageOrigin::User,
             kind,
             &mut input_rx,
@@ -2605,6 +2623,7 @@ async fn cmd_repl_once(
                                     &lifecycles,
                                     classifier.as_ref(),
                                     &event_text,
+                                    None,
                                     atman_runtime::message::MessageOrigin::Watcher,
                                     TurnKind::Bare(route),
                                     &mut input_rx,
@@ -2900,8 +2919,49 @@ fn strip_atman_tag(s: &str) -> &str {
 
 type ExternalPrinter = Box<dyn rustyline::ExternalPrinter + Send>;
 
+#[derive(Debug)]
+struct ReplInput {
+    text: String,
+    images: Option<Vec<atman_runtime::message::ImageSource>>,
+}
+
+impl ReplInput {
+    fn text(text: String) -> Self {
+        Self { text, images: None }
+    }
+
+    fn from_tui(submission: atman_tui::TuiSubmission) -> Self {
+        Self {
+            text: submission.text,
+            images: Some(submission.images),
+        }
+    }
+
+    fn has_images(&self) -> bool {
+        self.images
+            .as_ref()
+            .is_some_and(|images| !images.is_empty())
+    }
+
+    fn restore_images(&mut self, session: &Session) {
+        if let Some(images) = self.images.take()
+            && !images.is_empty()
+        {
+            session.restore_pending_images(images);
+        }
+    }
+}
+
+impl std::ops::Deref for ReplInput {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
 fn spawn_stdin_reader(
-    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<ReplInput>,
     printer_tx: tokio::sync::oneshot::Sender<Option<ExternalPrinter>>,
 ) {
     let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
@@ -2913,7 +2973,7 @@ fn spawn_stdin_reader(
             let locked = stdin.lock();
             for line in locked.lines() {
                 let Ok(l) = line else { break };
-                if tx.send(l).is_err() {
+                if tx.send(ReplInput::text(l)).is_err() {
                     break;
                 }
             }
@@ -2944,7 +3004,7 @@ fn spawn_stdin_reader(
             loop {
                 match editor.readline("atman> ") {
                     Ok(l) => {
-                        if tx.send(l).is_err() {
+                        if tx.send(ReplInput::text(l)).is_err() {
                             break;
                         }
                     }
@@ -3078,10 +3138,11 @@ async fn run_turn_with_interjection(
         &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
     >,
     raw_line: &str,
+    submitted_images: Option<Vec<atman_runtime::message::ImageSource>>,
     origin: atman_runtime::message::MessageOrigin,
     kind: TurnKind,
-    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    pushback: &mut std::collections::VecDeque<String>,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
+    pushback: &mut std::collections::VecDeque<ReplInput>,
     reporter: &Reporter,
 ) {
     let (text, inline_attachments) = extract_at_paths(raw_line);
@@ -3090,11 +3151,15 @@ async fn run_turn_with_interjection(
         &session,
         &text,
         &inline_attachments,
+        submitted_images.as_deref(),
         turn_id.clone(),
         origin,
     ) {
         Ok(message) => message,
         Err(error) => {
+            if let Some(images) = submitted_images {
+                session.restore_pending_images(images);
+            }
             reporter.error(format!("[atman] {error}"));
             return;
         }
@@ -3127,7 +3192,9 @@ async fn run_turn_with_interjection(
             biased;
             r = &mut flow_fut => break r,
             Some(line) = input_rx.recv() => {
-                if !consume_interjection_input(&line, &session, classifier, reporter).await {
+                if line.has_images()
+                    || !consume_interjection_input(&line, &session, classifier, reporter).await
+                {
                     pushback.push_back(line);
                 }
             }
@@ -3324,6 +3391,7 @@ fn build_user_message(
     session: &Session,
     text: &str,
     attachments: &[std::path::PathBuf],
+    submitted_images: Option<&[atman_runtime::message::ImageSource]>,
     turn_id: atman_runtime::event::TurnId,
     origin: atman_runtime::message::MessageOrigin,
 ) -> Result<atman_runtime::message::Message, atman_runtime::RuntimeError> {
@@ -3334,8 +3402,10 @@ fn build_user_message(
             source: session.import_image_path(path)?,
         });
     }
-    let mut parts: Vec<MessagePart> = session
-        .take_pending_images()
+    let pending = submitted_images
+        .map(<[atman_runtime::message::ImageSource]>::to_vec)
+        .unwrap_or_else(|| session.take_pending_images());
+    let mut parts: Vec<MessagePart> = pending
         .into_iter()
         .map(|source| MessagePart::Image { source })
         .collect();
@@ -3805,7 +3875,7 @@ fn write_osc52(payload: &str) {
 async fn handle_suggest(
     executor: &Executor,
     session: &Session,
-    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
     reporter: &Reporter,
 ) -> Result<()> {
     let events = session
@@ -6972,6 +7042,56 @@ async fn test_provider_endpoint(
 mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
+
+    const PNG_BYTES: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    ];
+
+    #[test]
+    fn submitted_image_snapshot_does_not_drain_new_pending_images() {
+        let session = Session::open_ephemeral();
+        let submitted = session
+            .import_image_bytes(PNG_BYTES, Some("submitted.png"))
+            .unwrap();
+        session
+            .queue_image_bytes(&[PNG_BYTES, &[0x01]].concat(), Some("next.png"))
+            .unwrap();
+
+        let message = build_user_message(
+            &session,
+            "inspect",
+            &[],
+            Some(std::slice::from_ref(&submitted)),
+            atman_runtime::event::TurnId::now(),
+            atman_runtime::message::MessageOrigin::User,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &message.parts[0],
+            atman_runtime::message::MessagePart::Image { source } if source == &submitted
+        ));
+        assert_eq!(session.pending_image_count(), 1);
+    }
+
+    #[test]
+    fn restoring_repl_images_keeps_them_before_new_pending_images() {
+        let session = Session::open_ephemeral();
+        let first = session
+            .import_image_bytes(PNG_BYTES, Some("first.png"))
+            .unwrap();
+        let mut input = ReplInput {
+            text: "/agent inspect".into(),
+            images: Some(vec![first.clone()]),
+        };
+        session
+            .queue_image_bytes(&[PNG_BYTES, &[0x01]].concat(), Some("second.png"))
+            .unwrap();
+
+        input.restore_images(&session);
+
+        assert_eq!(session.take_pending_images()[0], first);
+    }
 
     #[test]
     fn interjection_modes_build_expected_classifier() {
