@@ -865,6 +865,24 @@ pub async fn create_oauth_provider_no_discover_with_hub<P: OAuthProvider>(
     create_oauth_provider_impl::<P>(stored, hub).await
 }
 
+/// Constructs a managed provider without loading or refreshing its credentials.
+///
+/// Disabled and expired snapshots remain valid until the provider acquires a
+/// credential at a request boundary.
+pub fn create_managed_oauth_provider_from_stored<P: OAuthProvider>(
+    stored: &StoredProvider,
+    hub: ConfigHub,
+) -> Result<Arc<P>> {
+    ensure_provider_kind::<P>(stored)?;
+    let provider = P::from_managed_stored(stored, hub).ok_or_else(|| {
+        anyhow::anyhow!(
+            "provider `{}` does not support managed OAuth credentials",
+            stored.id
+        )
+    })?;
+    Ok(Arc::new(provider))
+}
+
 async fn create_oauth_provider_impl<P: OAuthProvider>(
     stored: &StoredProvider,
     hub: ConfigHub,
@@ -1873,6 +1891,25 @@ mod tests {
         .unwrap();
 
         assert!(error.to_string().contains("use a managed provider"));
+    }
+
+    #[tokio::test]
+    async fn inert_managed_factory_does_not_refresh_or_require_an_enabled_provider() {
+        MANAGED_REFRESH_CALLS.store(0, Ordering::SeqCst);
+        let mut stored = expired_provider("inert-managed-oauth");
+        stored.enabled = false;
+        let (_dir, hub) = hub_with_provider(stored.clone());
+
+        let provider =
+            create_managed_oauth_provider_from_stored::<ManagedOAuthProvider>(&stored, hub)
+                .unwrap();
+
+        assert_eq!(MANAGED_REFRESH_CALLS.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            provider.acquire().await,
+            Err(OAuthCredentialError::Disabled(provider)) if provider == "inert-managed-oauth"
+        ));
+        assert_eq!(MANAGED_REFRESH_CALLS.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -82,7 +82,7 @@ pub use eval::{EvalCtx, eval_expr};
 pub use event::{
     Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
 };
-pub use executor::{Executor, RootInvocation};
+pub use executor::{Executor, ProviderLifecycleAlreadyAttached, RootInvocation};
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
 pub use injection::{Injection, InjectionId, InjectionSource, InjectionState};
 pub use invocation_env::InvocationEnv;

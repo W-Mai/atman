@@ -695,12 +695,17 @@ pub fn user_text_message(text: impl Into<String>) -> Message {
 pub struct ProviderRegistry {
     providers: std::sync::Arc<std::sync::RwLock<HashMap<String, Arc<dyn Provider>>>>,
     default: std::sync::Arc<std::sync::RwLock<Option<String>>>,
+    lifecycle_owner:
+        std::sync::Arc<std::sync::Mutex<Option<crate::provider_lifecycle::ProviderLifecycleOwner>>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct WeakProviderRegistry {
     providers: std::sync::Weak<std::sync::RwLock<HashMap<String, Arc<dyn Provider>>>>,
     default: std::sync::Weak<std::sync::RwLock<Option<String>>>,
+    lifecycle_owner: std::sync::Weak<
+        std::sync::Mutex<Option<crate::provider_lifecycle::ProviderLifecycleOwner>>,
+    >,
 }
 
 impl ProviderRegistry {
@@ -763,10 +768,44 @@ impl ProviderRegistry {
         Arc::ptr_eq(&self.providers, &other.providers)
     }
 
+    pub(crate) fn attach_provider_lifecycle(
+        &self,
+        hub: crate::config_hub::ConfigHub,
+    ) -> Option<crate::provider_lifecycle::ProviderLifecycle> {
+        let mut owner = self
+            .lifecycle_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.is_some() {
+            return None;
+        }
+        let (lifecycle, replaced) =
+            crate::provider_lifecycle::ProviderLifecycle::new_deferred(hub, self.clone());
+        *owner = Some(lifecycle.owner());
+        drop(owner);
+        drop(replaced);
+        Some(lifecycle)
+    }
+
+    pub(crate) fn provider_lifecycle(
+        &self,
+    ) -> Option<crate::provider_lifecycle::ProviderLifecycle> {
+        let owner = self
+            .lifecycle_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        Some(crate::provider_lifecycle::ProviderLifecycle::from_owner(
+            owner,
+            self.clone(),
+        ))
+    }
+
     pub(crate) fn downgrade(&self) -> WeakProviderRegistry {
         WeakProviderRegistry {
             providers: Arc::downgrade(&self.providers),
             default: Arc::downgrade(&self.default),
+            lifecycle_owner: Arc::downgrade(&self.lifecycle_owner),
         }
     }
 
@@ -805,6 +844,7 @@ impl WeakProviderRegistry {
         Some(ProviderRegistry {
             providers: self.providers.upgrade()?,
             default: self.default.upgrade()?,
+            lifecycle_owner: self.lifecycle_owner.upgrade()?,
         })
     }
 }
@@ -813,8 +853,40 @@ impl WeakProviderRegistry {
 mod tests {
     use super::*;
     use crate::providers::mock::MockProvider;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct LegacyDiscoveryProvider;
+
+    struct OwnerLockProbeProvider {
+        name: String,
+        lifecycle_owner:
+            Arc<std::sync::Mutex<Option<crate::provider_lifecycle::ProviderLifecycleOwner>>>,
+        owner_was_unlocked: Arc<AtomicBool>,
+    }
+
+    impl Drop for OwnerLockProbeProvider {
+        fn drop(&mut self) {
+            self.owner_was_unlocked
+                .store(self.lifecycle_owner.try_lock().is_ok(), Ordering::SeqCst);
+        }
+    }
+
+    impl Provider for OwnerLockProbeProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn call<'a>(
+            &'a self,
+            _req: LlmRequest,
+        ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+            Box::pin(async { unreachable!("not used by owner lock test") })
+        }
+
+        fn call_streaming(&self, _req: LlmRequest) -> Observable<AssistantMessage> {
+            unreachable!("not used by owner lock test")
+        }
+    }
 
     impl Provider for LegacyDiscoveryProvider {
         fn name(&self) -> &str {
@@ -873,6 +945,66 @@ mod tests {
             provider.try_discover_models().await.unwrap_err(),
             ModelDiscoveryError::Unsupported
         );
+    }
+
+    #[test]
+    fn lifecycle_attach_drops_replaced_providers_after_unlocking_the_owner() {
+        const PROVIDER_ID: &str = "owner-lock-provider";
+
+        struct CatalogCleanup;
+
+        impl Drop for CatalogCleanup {
+            fn drop(&mut self) {
+                crate::model_registry::remove_provider_catalog(PROVIDER_ID);
+            }
+        }
+
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::model_registry::remove_provider_catalog(PROVIDER_ID);
+        let _catalog_cleanup = CatalogCleanup;
+        let config = tempfile::tempdir().unwrap();
+        let hub = crate::config_hub::ConfigHub::from_config_dir(config.path());
+        let root =
+            crate::provider_lifecycle::ProviderLifecycle::new(hub.clone(), ProviderRegistry::new());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(root.install_pre_discovered_provider(
+                crate::auth_store::StoredProvider {
+                    id: PROVIDER_ID.into(),
+                    name: "Owner Lock".into(),
+                    kind: crate::auth_store::ProviderKind::Codex,
+                    access_token: "access".into(),
+                    refresh_token: None,
+                    expires_at: i64::MAX,
+                    account: None,
+                    enabled: true,
+                    model_cache: None,
+                },
+                Arc::new(MockProvider::new(PROVIDER_ID)),
+                vec![DiscoveredModelDetails {
+                    slug: "owner-lock-model".into(),
+                    context_budget: Some(128_000),
+                    capability_knowledge: CapabilityKnowledge::Legacy { thinking: true },
+                }],
+            ))
+            .unwrap();
+
+        let target = ProviderRegistry::new();
+        let owner_was_unlocked = Arc::new(AtomicBool::new(false));
+        target.register(Arc::new(OwnerLockProbeProvider {
+            name: PROVIDER_ID.into(),
+            lifecycle_owner: target.lifecycle_owner.clone(),
+            owner_was_unlocked: owner_was_unlocked.clone(),
+        }));
+
+        let attached = target.attach_provider_lifecycle(hub).unwrap();
+        assert!(owner_was_unlocked.load(Ordering::SeqCst));
+        drop(attached);
+        root.remove_provider(PROVIDER_ID).unwrap();
     }
 
     #[test]

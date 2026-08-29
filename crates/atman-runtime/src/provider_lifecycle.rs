@@ -62,6 +62,12 @@ pub struct ProviderLifecycle {
     state: Arc<Mutex<LifecycleState>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ProviderLifecycleOwner {
+    hub: ConfigHub,
+    state: Arc<Mutex<LifecycleState>>,
+}
+
 #[derive(Default)]
 struct LifecycleState {
     generations: HashMap<String, u64>,
@@ -120,6 +126,15 @@ static LIFECYCLE_COORDINATORS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<Lifecy
 
 impl ProviderLifecycle {
     pub fn new(hub: ConfigHub, providers: ProviderRegistry) -> Self {
+        let (lifecycle, replaced) = Self::new_deferred(hub, providers);
+        drop(replaced);
+        lifecycle
+    }
+
+    pub(crate) fn new_deferred(
+        hub: ConfigHub,
+        providers: ProviderRegistry,
+    ) -> (Self, Vec<Arc<dyn Provider>>) {
         let state = shared_lifecycle_state(&hub);
         let replaced = {
             let mut shared = state
@@ -144,12 +159,14 @@ impl ProviderLifecycle {
             }
             replaced
         };
-        drop(replaced);
-        Self {
-            hub,
-            providers,
-            state,
-        }
+        (
+            Self {
+                hub,
+                providers,
+                state,
+            },
+            replaced,
+        )
     }
 
     pub fn config_hub(&self) -> &ConfigHub {
@@ -158,6 +175,21 @@ impl ProviderLifecycle {
 
     pub fn provider_registry(&self) -> &ProviderRegistry {
         &self.providers
+    }
+
+    pub(crate) fn owner(&self) -> ProviderLifecycleOwner {
+        ProviderLifecycleOwner {
+            hub: self.hub.clone(),
+            state: self.state.clone(),
+        }
+    }
+
+    pub(crate) fn from_owner(owner: ProviderLifecycleOwner, providers: ProviderRegistry) -> Self {
+        Self {
+            hub: owner.hub,
+            providers,
+            state: owner.state,
+        }
     }
 
     pub async fn install_provider(

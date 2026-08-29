@@ -13,11 +13,9 @@ use atman_daemon::{
 async fn multi_client_run_and_sse_stream_share_session() {
     let tmp = tempfile::tempdir().unwrap();
     let daemon = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
-    daemon.set_launcher(Arc::new(RunLauncher {
-        project_root: std::env::current_dir().unwrap(),
-        config_dir: None,
-        home_dir: None,
-    }));
+    daemon.set_launcher(Arc::new(
+        RunLauncher::new(std::env::current_dir().unwrap(), None, None).unwrap(),
+    ));
 
     let cfg_path = tmp.path().join("daemon.toml");
     let cfg = DaemonConfig::load_or_init(&cfg_path).unwrap();

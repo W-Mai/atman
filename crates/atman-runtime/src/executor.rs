@@ -7,6 +7,7 @@ use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
 use crate::exec::exec_flow_with_siblings;
 use crate::invocation_env::InvocationEnv;
 use crate::provider::ProviderRegistry;
+use crate::provider_lifecycle::ProviderLifecycle;
 use crate::session::Session;
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
@@ -29,6 +30,10 @@ pub struct Executor {
     /// When set, relative `@` paths are resolved against this directory.
     pub source_dir: Option<std::path::PathBuf>,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("executor already has a provider lifecycle")]
+pub struct ProviderLifecycleAlreadyAttached;
 
 impl Executor {
     pub fn new() -> Self {
@@ -55,6 +60,19 @@ impl Executor {
             safety: None,
             source_dir: None,
         }
+    }
+
+    pub fn attach_provider_lifecycle(
+        &mut self,
+        hub: crate::config_hub::ConfigHub,
+    ) -> Result<ProviderLifecycle, ProviderLifecycleAlreadyAttached> {
+        self.providers
+            .attach_provider_lifecycle(hub)
+            .ok_or(ProviderLifecycleAlreadyAttached)
+    }
+
+    pub fn provider_lifecycle(&self) -> Option<ProviderLifecycle> {
+        self.providers.provider_lifecycle()
     }
 
     pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {
@@ -400,5 +418,48 @@ impl Executor {
 impl Default for Executor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attached_provider_lifecycle_uses_and_retains_the_executor_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut executor = Executor::new();
+        let lifecycle = executor
+            .attach_provider_lifecycle(crate::config_hub::ConfigHub::from_config_dir(dir.path()))
+            .unwrap();
+
+        assert!(
+            lifecycle
+                .provider_registry()
+                .shares_storage_with(&executor.providers)
+        );
+        executor.tool_ctx = ToolCtx::new();
+        assert!(executor.provider_lifecycle().is_some());
+        let cloned = executor.clone();
+        drop(lifecycle);
+        drop(executor);
+        assert!(cloned.provider_lifecycle().is_some());
+    }
+
+    #[test]
+    fn provider_lifecycle_rejects_repeated_attachment() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut executor = Executor::new();
+        executor
+            .attach_provider_lifecycle(crate::config_hub::ConfigHub::from_config_dir(first.path()))
+            .unwrap();
+
+        assert!(matches!(
+            executor.attach_provider_lifecycle(crate::config_hub::ConfigHub::from_config_dir(
+                second.path()
+            )),
+            Err(ProviderLifecycleAlreadyAttached)
+        ));
     }
 }

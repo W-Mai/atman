@@ -52,6 +52,16 @@ pub struct BootstrapOutcome {
     pub executor: Executor,
 }
 
+pub(crate) fn resolve_config_hub(
+    config_dir: Option<&Path>,
+) -> Result<atman_runtime::config_hub::ConfigHub> {
+    match config_dir {
+        Some(dir) => Ok(atman_runtime::config_hub::ConfigHub::from_config_dir(dir)),
+        None => atman_runtime::config_hub::ConfigHub::global()
+            .map_err(|error| anyhow::anyhow!("resolve config hub: {error}")),
+    }
+}
+
 /// Spawn background MCP connections on a single thread using cooperative
 /// concurrency (tokio::task::spawn_local).  Each enabled server connects
 /// independently — fast servers don't wait for slow ones.  Tools are
@@ -305,12 +315,8 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let web_config = load_web_config(opts.config_dir.as_deref());
     tools::register_web(&executor.tools, web_config.fetch);
     tools::register_web_search(&executor.tools, &web_config.search);
-    let auth_hub = opts
-        .config_dir
-        .as_deref()
-        .map(atman_runtime::config_hub::ConfigHub::from_config_dir)
-        .or_else(|| atman_runtime::config_hub::ConfigHub::global().ok());
-    register_providers_from_env(&mut executor, auth_hub.as_ref()).await;
+    let auth_hub = resolve_config_hub(opts.config_dir.as_deref())?;
+    register_providers(&mut executor, &auth_hub).await?;
     if let Some(sandbox) =
         build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
     {
@@ -455,98 +461,103 @@ async fn build_rule_fetch(
     rule_fetch
 }
 
-async fn register_providers_from_env(
+async fn register_providers(
     executor: &mut Executor,
-    auth_hub: Option<&atman_runtime::config_hub::ConfigHub>,
-) {
+    auth_hub: &atman_runtime::config_hub::ConfigHub,
+) -> Result<()> {
     register_providers_from_config(executor);
     atman_runtime::model_registry::register_all_preset_models();
-    if let Some(auth_hub) = auth_hub {
-        register_providers_from_auth_store(executor, auth_hub).await;
-    }
+    let lifecycle = executor.attach_provider_lifecycle(auth_hub.clone())?;
+    lifecycle.reconcile_inactive_providers()?;
+    restore_providers_from_auth_store(&lifecycle, auth_hub).await
 }
 
-async fn register_providers_from_auth_store(
-    executor: &mut Executor,
+async fn restore_providers_from_auth_store(
+    lifecycle: &atman_runtime::ProviderLifecycle,
     hub: &atman_runtime::config_hub::ConfigHub,
-) {
+) -> Result<()> {
     use atman_runtime::auth_store::ProviderKind;
-    use atman_runtime::auth_store::cached_to_discovered_details;
-    let Ok(store) = hub.load_auth() else {
-        return;
-    };
-    for p in &store.providers {
-        if !p.enabled {
-            continue;
+    let store = hub.load_auth().context("load auth providers")?;
+    for p in store.providers {
+        if p.enabled && p.kind == ProviderKind::Codex {
+            restore_cached_codex_provider(lifecycle, hub, p).await?;
         }
-        if p.kind == ProviderKind::Codex {
-            // Hydrate the cached catalog before live provider initialization.
-            if let Some(cache) = &p.model_cache {
-                let cached = hub
-                    .load_auth_model_cache_details(&p.id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| cached_to_discovered_details(cache));
-                let persisted_namespace = match hub.load_auth_model_namespace(&p.id) {
-                    Ok(namespace) => namespace,
+    }
+    Ok(())
+}
+
+async fn restore_cached_codex_provider(
+    lifecycle: &atman_runtime::ProviderLifecycle,
+    hub: &atman_runtime::config_hub::ConfigHub,
+    mut record: atman_runtime::auth_store::StoredProvider,
+) -> Result<()> {
+    use atman_runtime::ProviderLifecycleError;
+    use atman_runtime::auth_store::ProviderKind;
+
+    for attempt in 0..2 {
+        let provider = atman_runtime::oauth::create_managed_oauth_provider_from_stored::<
+            atman_runtime::providers::codex::CodexProvider,
+        >(&record, hub.clone())?;
+        match lifecycle
+            .restore_provider(&record.id, ProviderKind::Codex, provider)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(
+                ProviderLifecycleError::ProviderNotFound { .. }
+                | ProviderLifecycleError::ProviderDisabled { .. }
+                | ProviderLifecycleError::Stale { .. },
+            ) => {
+                let current = match reload_cached_codex_provider_after_conflict(
+                    hub,
+                    &record.id,
+                    attempt == 0,
+                ) {
+                    Ok(current) => current,
                     Err(error) => {
-                        atman_runtime::notify!(
-                            warn,
-                            "cached model namespace load failed: {error:#}"
-                        );
-                        continue;
+                        let _ = lifecycle.reconcile_inactive_providers();
+                        return Err(error);
                     }
                 };
-                match atman_runtime::model_registry::prepare_discovered_details_for_provider_with_auth(
-                    &p.id,
-                    &p.name,
-                    &store,
-                    persisted_namespace.as_deref(),
-                    atman_runtime::provider::ReasoningWireProfile::CodexResponses,
-                    &cached,
-                ) {
-                    Ok(prepared) => {
-                        if let Err(error) =
-                            hub.ensure_auth_model_namespace(&p.id, prepared.namespace())
-                        {
-                            atman_runtime::notify!(
-                                warn,
-                                "cached model namespace persistence failed: {error:#}"
-                            );
-                        } else {
-                            atman_runtime::model_registry::commit_prepared_provider_catalog(
-                                prepared,
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        atman_runtime::notify!(
-                            warn,
-                            "cached model catalog install failed: {error}"
-                        );
+                match current {
+                    Some(current) => record = current,
+                    _ => {
+                        lifecycle.reconcile_inactive_providers()?;
+                        return Ok(());
                     }
                 }
             }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("cached provider restore attempts are bounded")
+}
 
-            // Credential refresh stays at the discovery or inference request boundary.
-            match atman_runtime::oauth::create_oauth_provider_no_discover_with_hub::<
-                atman_runtime::providers::codex::CodexProvider,
-            >(p, hub.clone())
-            .await
-            {
-                Ok(provider) => {
-                    executor.providers.register(provider);
+fn reload_cached_codex_provider_after_conflict(
+    hub: &atman_runtime::config_hub::ConfigHub,
+    provider_id: &str,
+    retry_available: bool,
+) -> Result<Option<atman_runtime::auth_store::StoredProvider>> {
+    use atman_runtime::auth_store::ProviderKind;
+
+    let current = hub
+        .load_auth()
+        .context("reload auth providers after restore conflict")?
+        .providers
+        .into_iter()
+        .find(|provider| provider.id == provider_id);
+    match current {
+        Some(current) if current.enabled && current.kind == ProviderKind::Codex => {
+            if retry_available {
+                Ok(Some(current))
+            } else {
+                Err(atman_runtime::ProviderLifecycleError::Stale {
+                    id: provider_id.to_string(),
                 }
-                Err(e) => {
-                    atman_runtime::notify!(
-                        warn,
-                        "codex provider {} ({}) failed to init: {e:#}",
-                        p.name,
-                        p.id
-                    );
-                }
+                .into())
             }
         }
+        _ => Ok(None),
     }
 }
 
@@ -734,9 +745,9 @@ mod tests {
                     id: PROVIDER_ID.into(),
                     name: "Selected OAuth".into(),
                     kind: atman_runtime::auth_store::ProviderKind::Codex,
-                    access_token: "fresh-access".into(),
-                    refresh_token: Some("refresh-token".into()),
-                    expires_at: chrono::Utc::now().timestamp() + 3_600,
+                    access_token: "expired-access".into(),
+                    refresh_token: None,
+                    expires_at: chrono::Utc::now().timestamp() - 3_600,
                     account: Some("legacy-account-id".into()),
                     enabled: true,
                     model_cache: Some(atman_runtime::auth_store::ModelCache {
@@ -764,6 +775,15 @@ mod tests {
                 .unwrap();
 
                 assert!(outcome.executor.providers.contains(PROVIDER_ID));
+                assert_eq!(
+                    outcome
+                        .executor
+                        .provider_lifecycle()
+                        .unwrap()
+                        .config_hub()
+                        .config_dir(),
+                    config.path()
+                );
                 let model = atman_runtime::model_registry::all_model_entries()
                     .into_iter()
                     .find_map(|(name, entry)| {
@@ -778,6 +798,91 @@ mod tests {
                     .expect("selected config model should resolve to its live provider");
                 assert_eq!(provider.name(), PROVIDER_ID);
             });
+    }
+
+    #[test]
+    fn build_executor_rejects_malformed_auth_state() {
+        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let config = tempfile::tempdir().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                std::fs::write(config.path().join("auth.json"), b"{not-json").unwrap();
+
+                let result = build_executor(BootstrapOptions {
+                    events: EventSink::new(),
+                    mock: false,
+                    config_dir: Some(config.path().to_path_buf()),
+                    project_root: project.path().to_path_buf(),
+                    home_dir: None,
+                    workspace_generation: "malformed-auth-test".into(),
+                })
+                .await;
+
+                let error = result.err().expect("malformed auth must fail bootstrap");
+                let rendered = format!("{error:#}");
+                assert!(rendered.contains("auth.json"), "{rendered}");
+            });
+    }
+
+    #[test]
+    fn cached_provider_conflict_reload_is_authoritative_and_bounded() {
+        const PROVIDER_ID: &str = "restore-conflict-oauth";
+
+        let config = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
+        hub.add_auth_provider(atman_runtime::auth_store::StoredProvider {
+            id: PROVIDER_ID.into(),
+            name: "Restore Conflict".into(),
+            kind: atman_runtime::auth_store::ProviderKind::Codex,
+            access_token: "old-access".into(),
+            refresh_token: None,
+            expires_at: 1,
+            account: None,
+            enabled: true,
+            model_cache: None,
+        })
+        .unwrap();
+        hub.update_auth_tokens(
+            PROVIDER_ID,
+            atman_runtime::config_hub::AuthTokenUpdate {
+                access_token: "current-access".into(),
+                refresh_token: Some("current-refresh".into()),
+                expires_at: 2,
+                account: Some("current-account".into()),
+            },
+        )
+        .unwrap();
+
+        let current = reload_cached_codex_provider_after_conflict(&hub, PROVIDER_ID, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.access_token, "current-access");
+        assert_eq!(current.refresh_token.as_deref(), Some("current-refresh"));
+        let exhausted =
+            reload_cached_codex_provider_after_conflict(&hub, PROVIDER_ID, false).unwrap_err();
+        assert!(matches!(
+            exhausted.downcast_ref::<atman_runtime::ProviderLifecycleError>(),
+            Some(atman_runtime::ProviderLifecycleError::Stale { id }) if id == PROVIDER_ID
+        ));
+
+        hub.set_auth_provider_enabled(PROVIDER_ID, false).unwrap();
+        assert!(
+            reload_cached_codex_provider_after_conflict(&hub, PROVIDER_ID, true)
+                .unwrap()
+                .is_none()
+        );
+        hub.remove_auth_provider(PROVIDER_ID).unwrap();
+        assert!(
+            reload_cached_codex_provider_after_conflict(&hub, PROVIDER_ID, true)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

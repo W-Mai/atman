@@ -19,11 +19,7 @@ async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
     )
     .unwrap();
     let state = Arc::new(DaemonState::new(data_dir.clone()));
-    let launcher = RunLauncher {
-        project_root: project_root.clone(),
-        config_dir: Some(config_dir),
-        home_dir: None,
-    };
+    let launcher = RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap();
 
     launcher
         .spawn(
@@ -52,11 +48,8 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
 
-    let launcher = Arc::new(RunLauncher {
-        project_root: std::env::current_dir().unwrap(),
-        config_dir: None,
-        home_dir: None,
-    });
+    let launcher =
+        Arc::new(RunLauncher::new(std::env::current_dir().unwrap(), None, None).unwrap());
     state.set_launcher(launcher);
 
     let flow_path = repo_root().join("examples/hello.at");

@@ -19,6 +19,7 @@ pub struct DaemonState {
     live: Mutex<HashMap<SessionId, LiveSessionEntry>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
+    provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
 }
 
 #[derive(Clone)]
@@ -52,6 +53,7 @@ impl DaemonState {
             live: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
+            provider_lifecycles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,6 +67,24 @@ impl DaemonState {
 
     pub fn launcher(&self) -> Option<std::sync::Arc<crate::run::RunLauncher>> {
         self.launcher.lock().unwrap().clone()
+    }
+
+    pub(crate) fn provider_lifecycle_for(
+        &self,
+        config_dir: Option<&Path>,
+    ) -> Result<atman_runtime::ProviderLifecycle> {
+        let hub = crate::bootstrap::resolve_config_hub(config_dir)?;
+        let key = hub.config_dir().to_path_buf();
+        let mut lifecycles = self.provider_lifecycles.lock().unwrap();
+        Ok(lifecycles
+            .entry(key)
+            .or_insert_with(|| {
+                atman_runtime::ProviderLifecycle::new(
+                    hub,
+                    atman_runtime::provider::ProviderRegistry::new(),
+                )
+            })
+            .clone())
     }
 
     pub fn data_dir(&self) -> &Path {

@@ -51,11 +51,7 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
         data_dir,
         DAEMON_GENERATION.into(),
     ));
-    let launcher = RunLauncher {
-        project_root: project_root.clone(),
-        config_dir: Some(config_dir),
-        home_dir: None,
-    };
+    let launcher = RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap();
     let spawned = launcher
         .spawn(state.clone(), root_path.to_str().unwrap(), Vec::new())
         .await
