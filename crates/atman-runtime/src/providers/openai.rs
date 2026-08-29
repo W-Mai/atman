@@ -21,11 +21,50 @@ pub struct OpenAiProvider {
     reasoning_format: OpenAiReasoningFormat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OpenAiReasoningFormat {
+    #[serde(rename = "reasoning-effort", alias = "official")]
     Official,
     #[default]
+    #[serde(rename = "thinking-toggle", alias = "compatible-thinking")]
     CompatibleThinking,
+}
+
+impl OpenAiReasoningFormat {
+    pub fn for_provider_kind(kind: &str) -> Self {
+        if kind == "openai" {
+            Self::Official
+        } else {
+            Self::CompatibleThinking
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Official => "reasoning-effort",
+            Self::CompatibleThinking => "thinking-toggle",
+        }
+    }
+}
+
+impl std::fmt::Display for OpenAiReasoningFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for OpenAiReasoningFormat {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "reasoning-effort" | "official" => Ok(Self::Official),
+            "thinking-toggle" | "compatible-thinking" => Ok(Self::CompatibleThinking),
+            _ => Err(format!(
+                "invalid reasoning format `{value}`; expected `reasoning-effort` or `thinking-toggle`"
+            )),
+        }
+    }
 }
 
 impl OpenAiProvider {

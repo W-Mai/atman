@@ -552,11 +552,11 @@ fn register_providers_from_config(executor: &mut Executor) {
             }
             "openai" | "openai-compat" => {
                 let mut p = OpenAiProvider::new(&provider_name, &key);
-                p = p.with_reasoning_format(if entry.kind == "openai" {
-                    atman_runtime::providers::openai::OpenAiReasoningFormat::Official
-                } else {
-                    atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
-                });
+                p = p.with_reasoning_format(entry.reasoning_format.unwrap_or_else(|| {
+                    atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
+                        &entry.kind,
+                    )
+                }));
                 if let Some(url) = &base_url {
                     p = p.with_base_url(url);
                 }

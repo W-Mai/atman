@@ -141,6 +141,7 @@ pub enum TuiControl {
         api_key_env: String,
         base_url: String,
         max_tokens: Option<u32>,
+        reasoning_format: String,
         enabled: bool,
     },
     UpdateConfigProvider {
@@ -150,6 +151,7 @@ pub enum TuiControl {
         api_key_env: String,
         base_url: String,
         max_tokens: Option<u32>,
+        reasoning_format: String,
         enabled: bool,
     },
     UpsertConfigModel {

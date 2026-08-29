@@ -90,6 +90,7 @@ pub(crate) async fn run_frames(
             .filter(|s| !s.trim().is_empty())
             .collect();
         editor.seed_history(past);
+        editor.reconcile_images(&sess.pending_images());
     }
     let (mut key_events, reader_shutdown) = spawn_event_reader();
     // Flush stale input events accumulated during boot animation.
@@ -1257,6 +1258,9 @@ pub(crate) async fn run_frames(
             _ = wait_attach_change(handle.attach_rx.as_mut()) => {
                 if let Some(rx) = handle.attach_rx.as_mut() {
                     app.app.attach_count = *rx.borrow();
+                }
+                if let Some(session) = handle.session.as_ref() {
+                    editor.reconcile_images(&session.pending_images());
                 }
             }
             _ = wait_todos_change(handle.todos_rx.as_mut()) => {

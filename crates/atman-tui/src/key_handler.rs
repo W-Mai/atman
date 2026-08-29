@@ -940,6 +940,12 @@ pub(crate) fn handle_key(
             KeyAction::Tab => {
                 if let Some(item) = app.popup.accept() {
                     editor.replace_with(&item.insert);
+                    if let Some(session) = app.session.as_ref() {
+                        for source in editor.prune_missing_image_references() {
+                            session.remove_pending_image(&source);
+                        }
+                        app.attach_count = session.pending_image_count();
+                    }
                 }
                 app.refresh_popup(editor.buf());
                 return;
@@ -968,13 +974,15 @@ pub(crate) fn handle_key(
             };
             match crate::clipboard::read_image_png().and_then(|bytes| {
                 session
-                    .queue_image_bytes(&bytes, Some("clipboard.png"))
+                    .import_image_bytes(&bytes, Some("clipboard.png"))
                     .map_err(Into::into)
             }) {
-                Ok(count) => {
+                Ok(source) => {
+                    let count = session.queue_image_source(source.clone());
+                    let number = editor.attach_image(source);
                     app.attach_count = count;
                     app.push_note(
-                        format!("attached clipboard image ({count} pending)"),
+                        format!("attached clipboard image as [image {number}] ({count} pending)"),
                         app::NoteLevel::Info,
                     );
                 }
@@ -989,8 +997,10 @@ pub(crate) fn handle_key(
             let Some(session) = app.session.clone() else {
                 return;
             };
-            match session.pop_pending_image() {
+            editor.reconcile_images(&session.pending_images());
+            match editor.remove_last_image() {
                 Some(source) => {
+                    session.remove_pending_image(&source);
                     let count = session.pending_image_count();
                     app.attach_count = count;
                     app.push_note(
@@ -1007,37 +1017,10 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::CycleReasoning => {
-            use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
             let Some(session) = app.session.clone() else {
                 return;
             };
-            let choices = [
-                None,
-                Some(ReasoningSelection::Disabled),
-                Some(ReasoningSelection::Auto {
-                    execution_mode: None,
-                }),
-                Some(ReasoningSelection::Effort {
-                    effort: ReasoningEffort::Low,
-                    execution_mode: None,
-                }),
-                Some(ReasoningSelection::Effort {
-                    effort: ReasoningEffort::Medium,
-                    execution_mode: None,
-                }),
-                Some(ReasoningSelection::Effort {
-                    effort: ReasoningEffort::High,
-                    execution_mode: None,
-                }),
-                Some(ReasoningSelection::Effort {
-                    effort: ReasoningEffort::XHigh,
-                    execution_mode: None,
-                }),
-                Some(ReasoningSelection::Effort {
-                    effort: ReasoningEffort::Max,
-                    execution_mode: None,
-                }),
-            ];
+            let choices = reasoning_choices(&session);
             let current = session.reasoning_override();
             let index = choices
                 .iter()
@@ -1089,7 +1072,11 @@ pub(crate) fn handle_key(
             edited = true;
         }
         KeyAction::Submit => {
-            if let Some(line) = editor.submit() {
+            if let Some(session) = app.session.as_ref() {
+                editor.reconcile_images(&session.pending_images());
+            }
+            if let Some(editor_submission) = editor.submit_with_images() {
+                let line = editor_submission.text;
                 if !app.has_running_workflow() {
                     app.push_user_turn(line.clone());
                 }
@@ -1104,12 +1091,18 @@ pub(crate) fn handle_key(
                     };
                     let submission = crate::TuiSubmission { text: line, images };
                     if let Err(error) = tx.send(submission)
-                        && let Some(session) = app.session.as_ref()
+                        && let Some(session) = app.session.clone()
                     {
                         app.attach_count = session.restore_pending_images(error.0.images);
-                    } else if let Some(session) = app.session.as_ref() {
+                        editor.reconcile_images(&session.pending_images());
+                    } else if let Some(session) = app.session.clone() {
                         app.attach_count = session.pending_image_count();
+                        if !editor_submission.images.is_empty() {
+                            editor.reconcile_images(&session.pending_images());
+                        }
                     }
+                } else if let Some(session) = app.session.clone() {
+                    editor.reconcile_images(&session.pending_images());
                 }
             }
             *interrupt_prompt = None;
@@ -1336,8 +1329,73 @@ pub(crate) fn handle_key(
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
     }
     if edited {
+        if let Some(session) = app.session.as_ref() {
+            for source in editor.prune_missing_image_references() {
+                session.remove_pending_image(&source);
+            }
+            app.attach_count = session.pending_image_count();
+        }
         app.refresh_popup(editor.buf());
     }
+}
+
+fn reasoning_choices(
+    session: &atman_runtime::Session,
+) -> Vec<Option<atman_runtime::provider::ReasoningSelection>> {
+    use atman_runtime::provider::{ReasoningEffort, ReasoningSelection};
+
+    let info = atman_runtime::model_registry::model_info(&session.last_model());
+    let mut choices = vec![
+        None,
+        Some(ReasoningSelection::Disabled),
+        Some(ReasoningSelection::Auto {
+            execution_mode: None,
+        }),
+    ];
+    let openai_reasoning_format = atman_runtime::model_registry::model_entry(&session.last_model())
+        .and_then(|model| model.provider)
+        .and_then(|provider| {
+            atman_runtime::model_registry::all_provider_entries()
+                .into_iter()
+                .find(|(name, _)| name == &provider)
+                .and_then(|(_, entry)| {
+                    matches!(entry.kind.as_str(), "openai" | "openai-compat").then(|| {
+                        entry.reasoning_format.unwrap_or_else(|| {
+                            atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
+                                &entry.kind,
+                            )
+                        })
+                    })
+                })
+        });
+    let fallback_efforts = [
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::Ultra,
+    ];
+    let efforts = match openai_reasoning_format {
+        Some(atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking) => &[],
+        Some(atman_runtime::providers::openai::OpenAiReasoningFormat::Official)
+            if info.capabilities.reasoning_efforts.is_empty() =>
+        {
+            fallback_efforts.as_slice()
+        }
+        _ => info.capabilities.reasoning_efforts.as_slice(),
+    };
+    for effort in efforts {
+        let selection = Some(ReasoningSelection::Effort {
+            effort: effort.clone(),
+            execution_mode: None,
+        });
+        if !choices.contains(&selection) {
+            choices.push(selection);
+        }
+    }
+    choices
 }
 
 // The outgoing tui exits fast; the incoming tui plays the fade+slide

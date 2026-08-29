@@ -1942,8 +1942,10 @@ async fn cmd_repl_once(
                         api_key_env,
                         base_url,
                         max_tokens,
+                        reasoning_format,
                         enabled,
                     } => {
+                        let reasoning_format = reasoning_format.parse().ok();
                         if atman_runtime::config_hub::ConfigHub::global()
                             .and_then(|hub| {
                                 hub.upsert_provider(
@@ -1956,6 +1958,7 @@ async fn cmd_repl_once(
                                         base_url: (!base_url.is_empty())
                                             .then_some(base_url.as_str()),
                                         max_tokens,
+                                        reasoning_format,
                                         enabled,
                                     },
                                 )
@@ -2010,11 +2013,14 @@ async fn cmd_repl_once(
                                             &provider_key,
                                             &resolved_key,
                                         );
-                                    p = p.with_reasoning_format(if provider_type == "openai" {
-                                        atman_runtime::providers::openai::OpenAiReasoningFormat::Official
-                                    } else {
-                                        atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
-                                    });
+                                    p = p.with_reasoning_format(reasoning_format.unwrap_or_else(
+                                        || {
+                                            configured_openai_reasoning_format(
+                                                &name,
+                                                &provider_type,
+                                            )
+                                        },
+                                    ));
                                     if !resolved_url.is_empty() {
                                         p = p.with_base_url(&resolved_url);
                                     }
@@ -2037,8 +2043,10 @@ async fn cmd_repl_once(
                         api_key_env,
                         base_url,
                         max_tokens,
+                        reasoning_format,
                         enabled,
                     } => {
+                        let reasoning_format = reasoning_format.parse().ok();
                         if atman_runtime::config_hub::ConfigHub::global()
                             .and_then(|hub| {
                                 hub.upsert_provider(
@@ -2051,6 +2059,7 @@ async fn cmd_repl_once(
                                         base_url: (!base_url.is_empty())
                                             .then_some(base_url.as_str()),
                                         max_tokens,
+                                        reasoning_format,
                                         enabled,
                                     },
                                 )
@@ -2100,11 +2109,14 @@ async fn cmd_repl_once(
                                             &provider_key,
                                             &resolved_key,
                                         );
-                                    p = p.with_reasoning_format(if provider_type == "openai" {
-                                        atman_runtime::providers::openai::OpenAiReasoningFormat::Official
-                                    } else {
-                                        atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
-                                    });
+                                    p = p.with_reasoning_format(reasoning_format.unwrap_or_else(
+                                        || {
+                                            configured_openai_reasoning_format(
+                                                &name,
+                                                &provider_type,
+                                            )
+                                        },
+                                    ));
                                     if !resolved_url.is_empty() {
                                         p = p.with_base_url(&resolved_url);
                                     }
@@ -7003,6 +7015,24 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn configured_openai_reasoning_format(
+    provider_name: &str,
+    provider_type: &str,
+) -> atman_runtime::providers::openai::OpenAiReasoningFormat {
+    atman_runtime::model_registry::all_provider_entries()
+        .into_iter()
+        .find_map(|(name, entry)| {
+            (name == provider_name)
+                .then_some(entry.reasoning_format)
+                .flatten()
+        })
+        .unwrap_or_else(|| {
+            atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
+                provider_type,
+            )
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn test_provider_endpoint(
     name: &str,
@@ -7018,11 +7048,11 @@ async fn test_provider_endpoint(
     } else {
         Box::new(
             atman_runtime::providers::openai::OpenAiProvider::new(name, api_key)
-                .with_reasoning_format(if provider_type == "openai" {
-                    atman_runtime::providers::openai::OpenAiReasoningFormat::Official
-                } else {
-                    atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking
-                })
+                .with_reasoning_format(
+                    atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
+                        provider_type,
+                    ),
+                )
                 .with_base_url(base_url),
         )
     };

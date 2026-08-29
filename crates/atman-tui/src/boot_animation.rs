@@ -276,6 +276,7 @@ fn render(
             0,
             0,
             &atman_runtime::trust::TrustConfig::default(),
+            None,
         ),
         splash.input_slot,
     );

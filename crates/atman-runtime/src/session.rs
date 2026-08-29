@@ -1523,7 +1523,7 @@ impl Session {
         Ok(self.queue_image_source(source))
     }
 
-    fn queue_image_source(&self, source: crate::message::ImageSource) -> usize {
+    pub fn queue_image_source(&self, source: crate::message::ImageSource) -> usize {
         let mut pending = self.pending_images.lock().unwrap();
         pending.push(source);
         let count = pending.len();
@@ -1536,6 +1536,16 @@ impl Session {
         let removed = pending.pop();
         let _ = self.watch.attach.send(pending.len());
         removed
+    }
+
+    pub fn remove_pending_image(&self, source: &crate::message::ImageSource) -> bool {
+        let mut pending = self.pending_images.lock().unwrap();
+        let Some(index) = pending.iter().position(|candidate| candidate == source) else {
+            return false;
+        };
+        pending.remove(index);
+        let _ = self.watch.attach.send(pending.len());
+        true
     }
 
     pub fn take_pending_images(&self) -> Vec<crate::message::ImageSource> {
@@ -1565,6 +1575,10 @@ impl Session {
             .iter()
             .map(crate::attachment_store::display_name)
             .collect()
+    }
+
+    pub fn pending_images(&self) -> Vec<crate::message::ImageSource> {
+        self.pending_images.lock().unwrap().clone()
     }
 
     pub fn pending_image_count(&self) -> usize {

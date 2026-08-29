@@ -196,13 +196,23 @@ pub fn compute_content_rect(transcript: Rect) -> Rect {
 }
 
 pub fn compute_approvals_rect(transcript: Rect, input_rect: Rect, rows: u16) -> Option<Rect> {
+    compute_stacked_rect(transcript, input_rect, None, rows)
+}
+
+pub fn compute_stacked_rect(
+    transcript: Rect,
+    input_rect: Rect,
+    below: Option<Rect>,
+    rows: u16,
+) -> Option<Rect> {
     if rows == 0 {
         return None;
     }
     let inset: u16 = 4;
     let width = input_rect.width.saturating_sub(inset * 2).max(20);
     let x = input_rect.x + (input_rect.width.saturating_sub(width)) / 2;
-    let above_input = input_rect.y.saturating_sub(rows);
+    let base_y = below.map(|rect| rect.y).unwrap_or(input_rect.y);
+    let above_input = base_y.saturating_sub(rows);
     if above_input <= transcript.y {
         return None;
     }
@@ -222,23 +232,7 @@ pub fn compute_injection_rect(
     approvals_rect: Option<Rect>,
     rows: u16,
 ) -> Option<Rect> {
-    if rows == 0 {
-        return None;
-    }
-    let inset: u16 = 4;
-    let width = input_rect.width.saturating_sub(inset * 2).max(20);
-    let x = input_rect.x + (input_rect.width.saturating_sub(width)) / 2;
-    let base_y = approvals_rect.map(|r| r.y).unwrap_or(input_rect.y);
-    let above = base_y.saturating_sub(rows);
-    if above <= transcript.y {
-        return None;
-    }
-    Some(Rect {
-        x,
-        y: above,
-        width,
-        height: rows,
-    })
+    compute_stacked_rect(transcript, input_rect, approvals_rect, rows)
 }
 
 #[cfg(test)]

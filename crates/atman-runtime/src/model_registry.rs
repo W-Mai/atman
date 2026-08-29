@@ -44,6 +44,7 @@ pub struct ProviderEntry {
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
+    pub reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
     pub enabled: Option<bool>,
 }
 
@@ -850,6 +851,8 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
         #[serde(default)]
         max_tokens: Option<u32>,
         #[serde(default)]
+        reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
+        #[serde(default)]
         enabled: Option<bool>,
     }
 
@@ -919,6 +922,7 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
                 api_key_env: p.api_key_env,
                 base_url: p.base_url,
                 max_tokens: p.max_tokens,
+                reasoning_format: p.reasoning_format,
                 enabled: p.enabled,
             },
         );
@@ -982,6 +986,7 @@ pub fn upsert_provider_config(
             api_key_env,
             base_url,
             max_tokens,
+            reasoning_format: None,
             enabled,
         })
         .map_err(Into::into)
@@ -1750,6 +1755,23 @@ thinking = true
             ReasoningSelection::Auto {
                 execution_mode: None
             }
+        );
+    }
+
+    #[test]
+    fn provider_config_reads_explicit_reasoning_wire_format() {
+        let cfg = parse_config(
+            r#"
+[providers.openai-compatible]
+kind = "openai-compat"
+reasoning_format = "reasoning-effort"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.providers["openai-compatible"].reasoning_format,
+            Some(crate::providers::openai::OpenAiReasoningFormat::Official)
         );
     }
 

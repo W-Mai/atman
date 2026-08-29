@@ -106,6 +106,7 @@ pub struct ProviderConfigUpdate<'a> {
     pub api_key_env: Option<&'a str>,
     pub base_url: Option<&'a str>,
     pub max_tokens: Option<u32>,
+    pub reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
     pub enabled: bool,
 }
 
@@ -856,6 +857,17 @@ impl ConfigHub {
                 .get_mut("providers")
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| ConfigError::Invalid("providers is not a table".into()))?;
+            let reasoning_format = update
+                .reasoning_format
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    providers
+                        .get(update.name)
+                        .and_then(toml_edit::Item::as_table)
+                        .and_then(|entry| entry.get("reasoning_format"))
+                        .and_then(toml_edit::Item::as_str)
+                        .map(str::to_string)
+                });
             let mut entry = toml_edit::Table::new();
             entry.insert("kind", toml_edit::value(update.kind));
             insert_nonempty(&mut entry, "api_key", update.api_key);
@@ -863,6 +875,9 @@ impl ConfigHub {
             insert_nonempty(&mut entry, "base_url", update.base_url);
             if let Some(value) = update.max_tokens {
                 entry.insert("max_tokens", toml_edit::value(i64::from(value)));
+            }
+            if let Some(value) = reasoning_format {
+                entry.insert("reasoning_format", toml_edit::value(value));
             }
             entry.insert("enabled", toml_edit::value(update.enabled));
             providers.insert(update.name, toml_edit::Item::Table(entry));
@@ -1354,6 +1369,32 @@ mod tests {
         assert!(hub.validate_setting_mutation("trust.mode", "allow").is_ok());
         assert!(hub.validate_setting_mutation("trust.mode", " ").is_err());
         assert!(hub.validate_setting_mutation("missing", "x").is_err());
+    }
+
+    #[test]
+    fn provider_reasoning_format_is_written_and_preserved() {
+        let (_dir, hub) = temp_hub();
+        let base = ProviderConfigUpdate {
+            name: "gateway",
+            kind: "openai-compat",
+            api_key: None,
+            api_key_env: Some("GATEWAY_KEY"),
+            base_url: Some("https://gateway.example/v1"),
+            max_tokens: None,
+            reasoning_format: Some(crate::providers::openai::OpenAiReasoningFormat::Official),
+            enabled: true,
+        };
+        hub.upsert_provider(base).unwrap();
+        hub.upsert_provider(ProviderConfigUpdate {
+            reasoning_format: None,
+            enabled: false,
+            ..base
+        })
+        .unwrap();
+
+        let config = std::fs::read_to_string(hub.config_toml_path()).unwrap();
+        assert!(config.contains("reasoning_format = \"reasoning-effort\""));
+        assert!(config.contains("enabled = false"));
     }
 
     #[test]

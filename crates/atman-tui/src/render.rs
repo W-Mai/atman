@@ -46,6 +46,19 @@ pub(crate) fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> 
         && row < rect.y.saturating_add(rect.height)
 }
 
+fn effective_reasoning_badge(app: &crate::app::AppState) -> Option<String> {
+    use atman_runtime::provider::ReasoningSelection;
+
+    let session = app.session.as_ref()?;
+    let info = atman_runtime::model_registry::model_info(&session.last_model());
+    let override_selection = session.reasoning_override();
+    let supports_reasoning = override_selection.is_some()
+        || !matches!(&info.reasoning, ReasoningSelection::ProviderDefault)
+        || !info.capabilities.reasoning_efforts.is_empty()
+        || info.capabilities.default_reasoning_effort.is_some();
+    supports_reasoning.then(|| override_selection.unwrap_or(info.reasoning).to_string())
+}
+
 // Startup input eases from the overlay's centered slot to the normal
 // bottom position. 300 ms sits inside the 200–400 ms band that feels
 // like a real transition rather than a snap or a lag.
@@ -198,6 +211,13 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         // title + N items + 2 for block borders
         (app.pending_injections.len() as u16).min(5) + 3
     };
+    let attachment_rows: u16 = if editor.pending_images().is_empty() {
+        0
+    } else {
+        let visible = editor.pending_images().len().min(4) as u16;
+        let overflow = u16::from(editor.pending_images().len() > 4);
+        visible + overflow + 2
+    };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect =
         layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
@@ -249,7 +269,10 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
     let visible_rows = input_buf_lines.max(3);
     let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
-    let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
+    let attachments_rect =
+        layout::compute_stacked_rect(l.transcript, input_rect, None, attachment_rows);
+    let approvals_rect =
+        layout::compute_stacked_rect(l.transcript, input_rect, attachments_rect, approvals_rows);
     app.input_rect = Some(input_rect);
     f.render_widget(
         status::render_bar(status::StatusInputs {
@@ -465,6 +488,40 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             intro_progress,
         );
     }
+    if let Some(area) = attachments_rect {
+        sanitize_widget_edges(f, area);
+        f.render_widget(ratatui::widgets::Clear, area);
+        let theme = crate::theme::theme();
+        let mut lines: Vec<ratatui::text::Line<'_>> = editor
+            .pending_images()
+            .iter()
+            .take(4)
+            .map(|image| {
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(
+                        format!(" {} ", image.marker),
+                        ratatui::style::Style::default().fg(theme.accent.into()),
+                    ),
+                    ratatui::text::Span::raw(crate::width::truncate(
+                        &image.name,
+                        area.width.saturating_sub(16) as usize,
+                    )),
+                ])
+            })
+            .collect();
+        if editor.pending_images().len() > 4 {
+            lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!(" +{} more", editor.pending_images().len() - 4),
+                ratatui::style::Style::default().fg(theme.subtle_fg.into()),
+            )));
+        }
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(ratatui::style::Style::default().fg(theme.accent.into()))
+            .title(format!(" images · {} ", editor.pending_images().len()));
+        f.render_widget(ratatui::widgets::Paragraph::new(lines).block(block), area);
+    }
     if let Some(area) = approvals_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
@@ -480,7 +537,12 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     }
     // Render injection queue above approvals bar / input box.
     let injections_rect = if injection_rows > 0 {
-        layout::compute_injection_rect(l.transcript, input_rect, approvals_rect, injection_rows)
+        layout::compute_injection_rect(
+            l.transcript,
+            input_rect,
+            approvals_rect.or(attachments_rect),
+            injection_rows,
+        )
     } else {
         None
     };
@@ -534,6 +596,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     } else {
         target_border
     };
+    let reasoning_badge = effective_reasoning_badge(app);
     f.render_widget(
         input_paragraph(
             editor.buf(),
@@ -542,6 +605,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             app.pending_below_rows().min(u16::MAX as u32) as u16,
             scroll_row.min(u16::MAX as u32) as u16,
             &app.trust,
+            reasoning_badge.as_deref(),
         ),
         input_rect,
     );

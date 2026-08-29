@@ -77,6 +77,16 @@ export OPENAI_API_KEY="sk-..."
 
 Optionally point at a compat gateway with `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
 
+Compatible OpenAI gateways that implement `reasoning_effort` can select that
+wire format independently of the endpoint type:
+
+```toml
+[providers.gateway]
+kind = "openai-compat"
+base_url = "https://gateway.example/v1"
+reasoning_format = "reasoning-effort"
+```
+
 Model reasoning and image defaults can be configured per model:
 
 ```toml
@@ -91,8 +101,10 @@ image_detail = "auto"
 
 Reasoning can also be selected for one run with `--reasoning high`; repeat
 `--image path/to/image.png` to attach images. In the TUI, Cmd+V, Ctrl+V, or Alt+V
-attaches the clipboard image, Alt+Delete removes the latest pending image, and
-Ctrl+T cycles the session reasoning override.
+attaches the clipboard image. Its `[image N]` reference and attachment bar remain
+visible until submit; deleting the reference removes that image. Alt+Delete
+removes the latest pending image. The input border shows the effective reasoning
+depth, and Ctrl+T cycles the session override.
 
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
 

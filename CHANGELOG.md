@@ -10,6 +10,8 @@ All notable changes to atman are documented in this file.
 
 - **Provider-aware reasoning controls** — model settings, DSL calls, TUI sessions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
 - **Multimodal image input** — OpenAI Chat Completions, Codex Responses, and Anthropic Messages accept persistent image attachments from TUI clipboard paste, CLI paths, daemon requests, and DSL messages.
+- **TUI generation controls** — the input border displays the effective reasoning depth, while pending images use a dedicated attachment bar and removable `[image N]` editor references.
+- **Compatible-provider reasoning format** — OpenAI-compatible providers can select `thinking-toggle` or `reasoning-effort` independently of their endpoint type.
 - **Central permission control** — broker-backed approvals expose stable request and group identities, optimistic revisions, scoped grants, structured audit events, daemon RPCs, and TUI approval controls.
 - **Central tool authorization** — tool calls use trusted flow identity, structured resource provenance, and per-invocation approval before filesystem, repository, process, terminal, task, or network side effects.
 - **Strict process sandboxing** — controlled background and terminal processes fail closed on sandbox denial, preserve process and log lifecycle guarantees, and never retry with reduced restrictions.

@@ -306,10 +306,13 @@ REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:att
 `~/.config/atman/config.toml`:
 
 ```toml
+[providers.openai-compatible]
+kind = "openai-compat"
+base_url = "https://gateway.example/v1"
+reasoning_format = "reasoning-effort"
+
 [models."deepseek/deepseek-v4-pro"]
-provider = "anthropic"
-api_key = "..."
-base_url = "https://..."
+provider = "openai-compatible"
 context_budget = 1000000
 max_tokens = 393216
 reasoning = "high"
@@ -343,12 +346,20 @@ Anthropic models with explicit thinking budgets can use
 `reasoning_budget_tokens = 4096`. The legacy `thinking = true|false` setting is
 still accepted.
 
-The TUI imports a clipboard image with Cmd+V, Ctrl+V, or Alt+V; Alt+Delete removes
-the latest pending image. Images are copied into the session attachment store by
-content digest before the user turn is written. Ctrl+T cycles the current
-session's reasoning override. CLI and daemon runs accept repeatable `--image`
-arguments and the same `--reasoning` values. A flow can override the selection
-per call with `llm.call(reasoning: "high@pro")` or
+OpenAI-compatible providers default to `reasoning_format = "thinking-toggle"`,
+which can represent only default/off/auto. Set `reasoning-effort` when the
+gateway implements Chat Completions `reasoning_effort`; the provider manager
+exposes the same setting as **Reasoning wire**.
+
+The TUI imports a clipboard image with Cmd+V, Ctrl+V, or Alt+V. Pending images
+appear in a bar above the input and as stable `[image N]` references in the
+editor; deleting a reference removes that image, while Alt+Delete removes the
+latest one. Images are copied into the session attachment store by content
+digest before the user turn is written. The effective reasoning depth appears
+at the input's top-right corner, and Ctrl+T cycles the current session override.
+CLI and daemon runs accept repeatable `--image` arguments and the same
+`--reasoning` values. A flow can override the selection per call with
+`llm.call(reasoning: "high@pro")` or
 `llm.call(reasoning_budget: 4096)`.
 
 ## Architecture

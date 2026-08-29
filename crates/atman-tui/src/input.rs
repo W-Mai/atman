@@ -14,6 +14,7 @@ pub fn input_paragraph<'a>(
     pending_below: u16,
     scroll_row: u16,
     trust: &'a atman_runtime::trust::TrustConfig,
+    reasoning: Option<&'a str>,
 ) -> Paragraph<'a> {
     let display = trust.display();
     let mode_color = display.color.ratatui();
@@ -45,13 +46,22 @@ pub fn input_paragraph<'a>(
         Style::default().fg(t.subtle_fg.into()),
     ))
     .right_aligned();
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(title_span)
         .title_bottom(hint_line)
         .padding(ratatui::widgets::Padding::horizontal(1));
+    if let Some(reasoning) = reasoning {
+        block = block.title(
+            Line::from(Span::styled(
+                format!(" reasoning: {reasoning} "),
+                Style::default().fg(t.accent.into()),
+            ))
+            .right_aligned(),
+        );
+    }
 
     let raw_lines: Vec<&str> = if input.is_empty() {
         vec![""]
@@ -318,6 +328,20 @@ pub struct PastedEntry {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingImageRef {
+    pub number: u32,
+    pub marker: String,
+    pub name: String,
+    pub source: atman_runtime::message::ImageSource,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorSubmission {
+    pub text: String,
+    pub images: Vec<atman_runtime::message::ImageSource>,
+}
+
 // Paste larger than these gets folded into a placeholder so the editor
 // doesn't drown in a hundred-line dump. Numbers match Gemini CLI.
 const PASTE_FOLD_LINE_THRESHOLD: usize = 5;
@@ -332,6 +356,8 @@ pub struct InputEditor {
     stashed: Option<String>,
     pending_pastes: Vec<PastedEntry>,
     next_paste_index: u32,
+    pending_images: Vec<PendingImageRef>,
+    next_image_index: u32,
 }
 
 impl InputEditor {
@@ -612,13 +638,22 @@ impl InputEditor {
     }
 
     pub fn submit(&mut self) -> Option<String> {
+        self.submit_with_images().map(|submission| submission.text)
+    }
+
+    pub fn submit_with_images(&mut self) -> Option<EditorSubmission> {
         let raw = std::mem::take(&mut self.buf);
         self.cursor = 0;
         self.history_idx = None;
         self.stashed = None;
         let pending = std::mem::take(&mut self.pending_pastes);
+        let pending_images = std::mem::take(&mut self.pending_images);
         self.next_paste_index = 0;
+        self.next_image_index = 0;
         let mut line = raw;
+        for image in &pending_images {
+            remove_marker_text(&mut line, &image.marker);
+        }
         for PastedEntry {
             placeholder,
             content,
@@ -626,13 +661,19 @@ impl InputEditor {
         {
             line = line.replacen(placeholder, content, 1);
         }
-        if line.trim().is_empty() {
+        if line.trim().is_empty() && pending_images.is_empty() {
             return None;
         }
-        if self.history.last().is_none_or(|prev| prev != &line) {
+        if !line.trim().is_empty() && self.history.last().is_none_or(|prev| prev != &line) {
             self.history.push(line.clone());
         }
-        Some(line)
+        Some(EditorSubmission {
+            text: line,
+            images: pending_images
+                .into_iter()
+                .map(|image| image.source)
+                .collect(),
+        })
     }
 
     pub fn expand_paste_at_cursor(&mut self) -> bool {
@@ -686,6 +727,102 @@ impl InputEditor {
         &self.pending_pastes
     }
 
+    pub fn pending_images(&self) -> &[PendingImageRef] {
+        &self.pending_images
+    }
+
+    pub fn attach_image(&mut self, source: atman_runtime::message::ImageSource) -> u32 {
+        self.next_image_index += 1;
+        let number = self.next_image_index;
+        let marker = format!("[image {number}]");
+        let name = atman_runtime::attachment_store::display_name(&source);
+        let prefix = if self.cursor > 0
+            && !self.buf[..self.cursor]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            " "
+        } else {
+            ""
+        };
+        let suffix = if self.cursor == self.buf.len()
+            || !self.buf[self.cursor..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            " "
+        } else {
+            ""
+        };
+        self.insert_str(&format!("{prefix}{marker}{suffix}"));
+        self.pending_images.push(PendingImageRef {
+            number,
+            marker,
+            name,
+            source,
+        });
+        number
+    }
+
+    pub fn remove_last_image(&mut self) -> Option<atman_runtime::message::ImageSource> {
+        let image = self.pending_images.pop()?;
+        self.remove_image_marker(&image.marker);
+        Some(image.source)
+    }
+
+    pub fn prune_missing_image_references(&mut self) -> Vec<atman_runtime::message::ImageSource> {
+        let mut removed = Vec::new();
+        self.pending_images.retain(|image| {
+            if self.buf.contains(&image.marker) {
+                true
+            } else {
+                removed.push(image.source.clone());
+                false
+            }
+        });
+        removed
+    }
+
+    pub fn reconcile_images(&mut self, sources: &[atman_runtime::message::ImageSource]) {
+        let mut matched = vec![false; sources.len()];
+        let mut removed_markers = Vec::new();
+        self.pending_images.retain(|image| {
+            let match_index = sources.iter().enumerate().find_map(|(index, source)| {
+                (!matched[index] && source == &image.source).then_some(index)
+            });
+            if let Some(index) = match_index {
+                matched[index] = true;
+                true
+            } else {
+                removed_markers.push(image.marker.clone());
+                false
+            }
+        });
+        for marker in removed_markers {
+            self.remove_image_marker(&marker);
+        }
+        for (index, source) in sources.iter().enumerate() {
+            if !matched[index] {
+                self.attach_image(source.clone());
+            }
+        }
+    }
+
+    fn remove_image_marker(&mut self, marker: &str) {
+        let Some((remove_start, end)) = marker_removal_range(&self.buf, marker) else {
+            return;
+        };
+        self.buf.drain(remove_start..end);
+        if self.cursor > remove_start {
+            self.cursor = self
+                .cursor
+                .saturating_sub(end - remove_start)
+                .max(remove_start);
+        }
+    }
+
     pub fn history_up(&mut self) {
         if self.history.is_empty() {
             return;
@@ -724,6 +861,27 @@ impl InputEditor {
     }
 }
 
+fn remove_marker_text(text: &mut String, marker: &str) {
+    let Some((remove_start, end)) = marker_removal_range(text, marker) else {
+        return;
+    };
+    text.drain(remove_start..end);
+}
+
+fn marker_removal_range(text: &str, marker: &str) -> Option<(usize, usize)> {
+    let start = text.find(marker)?;
+    let marker_end = start + marker.len();
+    let has_leading_space = start > 0 && text[..start].ends_with(' ');
+    let has_trailing_space = text[marker_end..].starts_with(' ');
+    if has_trailing_space && marker_end + 1 < text.len() {
+        Some((start, marker_end + 1))
+    } else if has_leading_space {
+        Some((start - 1, marker_end + usize::from(has_trailing_space)))
+    } else {
+        Some((start, marker_end + usize::from(has_trailing_space)))
+    }
+}
+
 fn word_boundary_backward(s: &str, cursor: usize) -> usize {
     let bytes = s.as_bytes();
     let mut i = cursor;
@@ -740,6 +898,18 @@ fn word_boundary_backward(s: &str, cursor: usize) -> usize {
 mod tests {
     use super::*;
 
+    fn image(name: &str) -> atman_runtime::message::ImageSource {
+        atman_runtime::message::ImageSource {
+            media_type: "image/png".into(),
+            data: atman_runtime::message::ImageData::Artifact {
+                id: name.into(),
+                path: std::path::PathBuf::from(name),
+                name: Some(name.into()),
+            },
+            detail: atman_runtime::provider::ImageDetail::Auto,
+        }
+    }
+
     #[test]
     fn insert_and_backspace_maintain_cursor() {
         let mut ed = InputEditor::default();
@@ -750,6 +920,36 @@ mod tests {
         ed.backspace();
         assert_eq!(ed.buf(), "h");
         assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn image_references_are_stable_and_delete_the_attachment() {
+        let mut editor = InputEditor::default();
+        editor.attach_image(image("one.png"));
+        editor.attach_image(image("two.png"));
+        assert_eq!(editor.buf(), "[image 1] [image 2] ");
+
+        let marker_start = editor.buf().find("[image 1]").unwrap();
+        editor.set_cursor(marker_start + "[image 1]".len());
+        editor.backspace();
+        let removed = editor.prune_missing_image_references();
+
+        assert_eq!(removed, vec![image("one.png")]);
+        assert_eq!(editor.pending_images().len(), 1);
+        assert_eq!(editor.pending_images()[0].number, 2);
+    }
+
+    #[test]
+    fn image_markers_are_not_submitted_as_user_text() {
+        let mut editor = InputEditor::default();
+        editor.attach_image(image("one.png"));
+        editor.insert_str("describe it");
+
+        let submission = editor.submit_with_images().unwrap();
+
+        assert_eq!(submission.text, "describe it");
+        assert_eq!(submission.images, vec![image("one.png")]);
+        assert!(editor.pending_images().is_empty());
     }
 
     #[test]
