@@ -1375,7 +1375,7 @@ pub(crate) async fn run_frames(
                             }
                         }
                         TuiCommand::OpenTrustModePicker => {
-                            app.wm.modals.trust_mode_picker_open = true;
+                            app.wm.modals.open_trust_mode_picker(&mut app.app);
                         }
                         TuiCommand::OpenThemePicker => {
                             app.wm.modals.theme_picker_open = true;

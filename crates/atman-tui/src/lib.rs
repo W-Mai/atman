@@ -97,6 +97,7 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
+    Submit(TuiSubmission),
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
     HardStop,

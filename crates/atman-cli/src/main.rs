@@ -1685,7 +1685,7 @@ async fn cmd_repl_once(
     let flow_names = discover_flow_names();
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ReplInput>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
-        let tui_submit_tx = spawn_tui_submission_bridge(input_tx, session.clone());
+        let tui_submit_tx = spawn_tui_submission_bridge(input_tx.clone(), session.clone());
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
         let sh_tx_shared: std::sync::Arc<
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -1708,6 +1708,7 @@ async fn cmd_repl_once(
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let cmd_tx_for_models = cmd_tx.clone();
         let session_for_ctrl = std::sync::Arc::clone(&session);
+        let input_tx_for_ctrl = input_tx.clone();
         let session_for_ctrl_term_registry = executor.tool_ctx.term_registry.clone();
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
@@ -1722,6 +1723,7 @@ async fn cmd_repl_once(
         let ctrl_task = tokio::spawn(async move {
             let mut provider_mutations = tokio::task::JoinSet::new();
             let mut provider_catalog_refreshes = tokio::task::JoinSet::new();
+            let mut trust_update_error: Option<String> = None;
             for provider_id in provider_catalog_refresh_plan {
                 let lifecycle = provider_lifecycle_for_ctrl.clone();
                 provider_catalog_refreshes.spawn(async move {
@@ -1801,6 +1803,22 @@ async fn cmd_repl_once(
                     }
                 };
                 match msg {
+                    atman_tui::TuiControl::Submit(submission) => {
+                        if let Some(error) = trust_update_error.take() {
+                            if !submission.images.is_empty() {
+                                session_for_ctrl.restore_pending_images(submission.images);
+                            }
+                            reporter_for_ctrl.error(format!(
+                                "input not submitted because the trust policy update failed: {error}"
+                            ));
+                            continue;
+                        }
+                        if let Err(mut error) =
+                            input_tx_for_ctrl.send(ReplInput::from_tui(submission))
+                        {
+                            error.0.restore_images(&session_for_ctrl);
+                        }
+                    }
                     atman_tui::TuiControl::UpdateTrust(mut trust) => {
                         trust.theme = session_for_ctrl.trust_config().theme;
                         let result = session_for_ctrl.update_trust(trust, |config| {
@@ -1809,9 +1827,14 @@ async fn cmd_repl_once(
                             hub.set_trust_config(config)
                                 .map_err(|error| std::io::Error::other(error.to_string()))
                         });
-                        if let Err(error) = result {
-                            reporter_for_ctrl
-                                .error(format!("failed to update trust policy: {error}"));
+                        match result {
+                            Ok(()) => trust_update_error = None,
+                            Err(error) => {
+                                let error = error.to_string();
+                                trust_update_error = Some(error.clone());
+                                reporter_for_ctrl
+                                    .error(format!("failed to update trust policy: {error}"));
+                            }
                         }
                     }
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),

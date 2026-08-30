@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Ordered trust-mode submission** — TUI prompts wait behind preceding trust-policy commits, failed policy updates block the affected submission, and every trust picker opens on the active Session mode.
 - **Explicit model routing** — provider resolution honors a model's configured provider before falling back to slash-prefix routing.
 - **Acknowledged model switching** — the model picker stays pending until the alias update and session context change complete, then applies only the matching success or failure result.
 - **Model overlay isolation** — same-key config entries inherit dynamic catalog metadata only when they name the same non-empty API model and do not conflict on provider.

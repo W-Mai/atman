@@ -38,6 +38,15 @@ pub struct ModalManager {
 }
 
 impl ModalManager {
+    pub fn open_trust_mode_picker(&mut self, app: &mut crate::app::AppState) {
+        self.trust_mode_picker_open = true;
+        self.trust_draft = Some(app.trust.clone());
+        app.picker_selected = atman_runtime::trust::TrustMode::all()
+            .iter()
+            .position(|mode| *mode == app.trust.mode)
+            .unwrap_or_default();
+    }
+
     pub fn cursor_visible(&self, kind: ModalKind) -> bool {
         match kind {
             ModalKind::ProviderManager => self.provider_manager.in_form,
@@ -951,6 +960,7 @@ impl ModalManager {
         match action {
             crate::keys::KeyAction::Escape => {
                 self.trust_mode_picker_open = false;
+                self.trust_draft = None;
             }
             crate::keys::KeyAction::HistoryUp | crate::keys::KeyAction::CursorLeft => {
                 app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
@@ -1031,6 +1041,7 @@ impl ModalManager {
                         app.push_note(&warning, crate::app::NoteLevel::Warn);
                     }
                 }
+                self.trust_draft = None;
             }
             crate::keys::KeyAction::Quit => app.should_quit = true,
             _ => {}
@@ -1062,6 +1073,26 @@ fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trust_picker_starts_from_the_active_session_mode() {
+        let mut manager = ModalManager {
+            trust_draft: Some(atman_runtime::trust::TrustConfig::default()),
+            ..Default::default()
+        };
+        let mut app = crate::app::AppState::new("session".into(), None);
+        app.trust.mode = atman_runtime::trust::TrustMode::Reckless;
+        app.picker_selected = 0;
+
+        manager.open_trust_mode_picker(&mut app);
+
+        assert!(manager.trust_mode_picker_open);
+        assert_eq!(manager.trust_draft, Some(app.trust.clone()));
+        assert_eq!(
+            atman_runtime::trust::TrustMode::all()[app.picker_selected],
+            atman_runtime::trust::TrustMode::Reckless
+        );
+    }
 
     #[test]
     fn model_switch_result_requires_the_pending_request() {

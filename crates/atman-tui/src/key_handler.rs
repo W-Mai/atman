@@ -1081,7 +1081,7 @@ pub(crate) fn handle_key(
                 if !app.has_running_workflow() {
                     app.push_user_turn(line.clone());
                 }
-                if let Some(tx) = submit_tx {
+                if control_tx.is_some() || submit_tx.is_some() {
                     let images = if line.trim_start().starts_with(':') {
                         Vec::new()
                     } else {
@@ -1095,11 +1095,23 @@ pub(crate) fn handle_key(
                         images,
                         reasoning: app.input_reasoning_for_submission(),
                     };
-                    if let Err(error) = tx.send(submission)
-                        && let Some(session) = app.session.clone()
-                    {
-                        app.attach_count = session.restore_pending_images(error.0.images);
-                        editor.reconcile_images(&session.pending_images());
+                    let failed = if let Some(tx) = control_tx {
+                        tx.send(TuiControl::Submit(submission)).err().and_then(
+                            |error| match error.0 {
+                                TuiControl::Submit(submission) => Some(submission),
+                                _ => None,
+                            },
+                        )
+                    } else {
+                        submit_tx
+                            .and_then(|tx| tx.send(submission).err())
+                            .map(|error| error.0)
+                    };
+                    if let Some(failed) = failed {
+                        if let Some(session) = app.session.clone() {
+                            app.attach_count = session.restore_pending_images(failed.images);
+                            editor.reconcile_images(&session.pending_images());
+                        }
                     } else if let Some(session) = app.session.clone() {
                         app.attach_count = session.pending_image_count();
                         if !editor_submission.images.is_empty() {
@@ -1546,6 +1558,74 @@ mod tests {
         assert_eq!(editor.buf(), "do not submit yet");
         assert!(state.wm.modals.model_picker.open);
         assert!(state.wm.modals.model_picker.is_pending());
+    }
+
+    #[test]
+    fn submission_uses_control_channel_when_available() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let mut editor = InputEditor::default();
+        editor.insert_str("run after mode update");
+        let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            Some(&submit_tx),
+            Some(&control_tx),
+        );
+
+        assert!(submit_rx.try_recv().is_err());
+        let TuiControl::Submit(submission) = control_rx.try_recv().unwrap() else {
+            panic!("submission must share the ordered control channel");
+        };
+        assert_eq!(submission.text, "run after mode update");
+    }
+
+    #[test]
+    fn trust_update_precedes_the_following_submission() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let (submit_tx, mut submit_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        state.wm.modals.open_trust_mode_picker(&mut state.app);
+        state.app.picker_selected = atman_runtime::trust::TrustMode::all()
+            .iter()
+            .position(|mode| *mode == atman_runtime::trust::TrustMode::Reckless)
+            .unwrap();
+
+        let (consumed, commands) =
+            state
+                .wm
+                .dispatch_key(&KeyAction::Submit, &mut state.app, Some(&control_tx));
+        state
+            .wm
+            .apply_commands(&mut state.app, commands, Some(&control_tx));
+        assert!(consumed);
+
+        let mut editor = InputEditor::default();
+        editor.insert_str("start the new flow");
+        let mut interrupt_prompt = None;
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            Some(&submit_tx),
+            Some(&control_tx),
+        );
+
+        let TuiControl::UpdateTrust(trust) = control_rx.try_recv().unwrap() else {
+            panic!("trust update must be queued first");
+        };
+        assert_eq!(trust.mode, atman_runtime::trust::TrustMode::Reckless);
+        let TuiControl::Submit(submission) = control_rx.try_recv().unwrap() else {
+            panic!("submission must follow the trust update");
+        };
+        assert_eq!(submission.text, "start the new flow");
+        assert!(submit_rx.try_recv().is_err());
     }
 
     fn pending_permission(revision: u64) -> crate::app::PendingPermission {
