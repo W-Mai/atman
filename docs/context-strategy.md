@@ -67,19 +67,20 @@ data.
 Session appends compare each key against its latest semantic digest. Unchanged
 content is a no-op; changed content receives the next revision and is appended as
 a new internal message. Resume derives the cursor from persisted messages instead
-of resetting revision state.
+of resetting revision state. Clearing a previously live key appends a tombstone;
+an initially absent key does not create a record.
 
-When an `llm.call` runs with a session runtime, the runtime appends goal,
-working-directory, active-plan, and model information to its system prompt, even if
-the call itself uses an isolated `prompt:` rather than session messages. The managed
-agent adds a second, workflow-owned layer: it reads `prompts/system.md`, selects
-relevant rules and past confessions, and includes those in its own `system:` value.
-Rules and confessions are therefore selected by the managed workflow, not injected
-automatically by every `llm.call`.
+When an `llm.call` runs with a session runtime, goal, working directory, active plan,
+and model information are synchronized into `session.*` records. The current user
+message enters history first; changed records append after it and remain in the same
+event, compaction, checkpoint, and resume stream. Isolated prompts and explicit
+message lists receive only the latest live runtime records, not conversational
+history. The managed agent still selects relevant rules and past confessions in its
+workflow-owned system layer.
 
 The stable system template does not contain a working-directory placeholder. Root
-calls receive one working-directory block from session context; spawned flows receive
-one block resolved from their effective tool workspace. This prevents duplicate root
+calls append one workspace record from session metadata; spawned flows append one to
+their local history from the effective tool workspace. This prevents duplicate root
 context and literal placeholders in child requests.
 
 ## Message selection
@@ -88,10 +89,10 @@ The flow chooses one message source:
 
 | Form | Messages sent |
 |---|---|
-| `messages: [...]` | Exactly the explicit message list. Cannot be combined with `prompt:` or `context:`. |
+| `messages: [...]` | The latest live runtime records followed by the explicit message list. Cannot be combined with `prompt:` or `context:`. |
 | `context: "session"` | The current session message window. An optional `prompt:` is appended as a user message. |
-| `context: "session_recent(n)"` | The last `n` messages from the current session window. |
-| `prompt: "..."` | One user message, with no session history. This is also the default when `context:` is omitted. |
+| `context: "session_recent(n)"` | The latest live records followed by the last `n` non-record messages from the current session window. |
+| `prompt: "..."` | The latest live runtime records followed by one user message, with no conversational history. This is also the default when `context:` is omitted. |
 
 The managed `commands/agent.at` uses `context: "session"`. It does **not** feed
 `memory.recent_turns` to the main model as a fixed sliding window.

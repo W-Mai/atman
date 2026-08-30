@@ -220,7 +220,12 @@ async fn invocation_env_is_not_rendered_as_context_or_provider_tool() {
 
     let request = provider.requests().into_iter().next().unwrap();
     assert!(!format!("{:?}", request.messages).contains("high"));
-    assert!(!format!("{:?}{:?}", request.system, request.input).contains("high"));
+    assert!(!request.system.as_deref().is_some_and(|system| {
+        system
+            .split(|character: char| !character.is_alphanumeric())
+            .any(|word| word == "high")
+    }));
+    assert!(matches!(request.input, Value::Unit));
     assert!(request.tools.iter().all(|tool| tool.name != "env"));
     assert!(!format!("{:?}", session.messages_full()).contains("high"));
 }

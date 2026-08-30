@@ -20,33 +20,25 @@ pub fn build_llm_context(
     events: Option<&crate::event::EventSink>,
     flow_run_id: Option<&crate::event::FlowRunId>,
 ) -> Result<LlmContext, Value> {
+    let session_snapshot = if let Some(session) = session {
+        Some(session.messages().to_vec())
+    } else {
+        session_messages_handle.map(|handle| handle.lock().unwrap().clone())
+    };
+    let live_records = session_snapshot
+        .as_deref()
+        .map(crate::context_plan::latest_live_context_record_messages)
+        .unwrap_or_default();
     let (final_messages, prompt_for_budget) = if let Some(msgs) = args.messages_override.clone() {
         let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
-        (msgs, budget_text)
+        let mut messages = live_records;
+        messages.extend(msgs);
+        (messages, budget_text)
     } else if !matches!(context_mode, ContextMode::None) {
-        let mut history = if let Some(session) = session {
-            let all = session.messages();
-            match context_mode {
-                ContextMode::Session => all.to_vec(),
-                ContextMode::SessionRecent(n) => {
-                    let start = all.len().saturating_sub(n);
-                    all[start..].to_vec()
-                }
-                ContextMode::None => Vec::new(),
-            }
-        } else if let Some(handle) = session_messages_handle {
-            let all = handle.lock().unwrap();
-            match context_mode {
-                ContextMode::Session => all.clone(),
-                ContextMode::SessionRecent(n) => {
-                    let start = all.len().saturating_sub(n);
-                    all[start..].to_vec()
-                }
-                ContextMode::None => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
+        let mut history = session_snapshot
+            .as_deref()
+            .map(|messages| project_session_messages(messages, context_mode))
+            .unwrap_or_default();
         let budget_text = args.prompt.clone().unwrap_or_default();
         if let Some(p) = args.prompt.clone()
             && !p.is_empty()
@@ -75,7 +67,9 @@ pub fn build_llm_context(
             }
         }
         let user_msg = crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
-        (vec![user_msg], prompt_text)
+        let mut messages = live_records;
+        messages.push(user_msg);
+        (messages, prompt_text)
     };
     let session_messages_len = final_messages.len();
 
@@ -84,6 +78,32 @@ pub fn build_llm_context(
         budget_text: prompt_for_budget,
         session_messages_len,
     })
+}
+
+pub(super) fn project_session_messages(
+    messages: &[crate::message::Message],
+    context_mode: ContextMode,
+) -> Vec<crate::message::Message> {
+    match context_mode {
+        ContextMode::Session => messages.to_vec(),
+        ContextMode::SessionRecent(n) => {
+            let mut projected = crate::context_plan::latest_live_context_record_messages(messages);
+            let ordinary: Vec<_> = messages
+                .iter()
+                .filter_map(|message| {
+                    let mut message = message.clone();
+                    message.parts.retain(|part| {
+                        !matches!(part, crate::message::MessagePart::ContextRecord(_))
+                    });
+                    (!message.parts.is_empty()).then_some(message)
+                })
+                .collect();
+            let start = ordinary.len().saturating_sub(n);
+            projected.extend_from_slice(&ordinary[start..]);
+            projected
+        }
+        ContextMode::None => crate::context_plan::latest_live_context_record_messages(messages),
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +209,30 @@ mod tests {
 
         assert_eq!(context.messages.len(), 1);
         assert_eq!(context.messages[0].text_concat(), "child");
+    }
+
+    #[test]
+    fn recent_context_projects_only_the_latest_live_record() {
+        let turn_id = TurnId::now();
+        let record = |revision, body| {
+            Message::context_record(
+                turn_id.clone(),
+                crate::context_plan::ContextRecord::new(
+                    "session.goal",
+                    revision,
+                    crate::context_plan::ContextRecordAuthority::User,
+                    crate::context_plan::ContextRecordRetention::Latest,
+                    crate::context_plan::ContextRecordBody::text(body),
+                ),
+            )
+        };
+        let messages = vec![record(1, "old"), record(2, "current"), message("tail")];
+
+        let projected = project_session_messages(&messages, ContextMode::SessionRecent(3));
+
+        assert_eq!(projected.len(), 2);
+        assert!(projected[0].text_concat().contains("current"));
+        assert!(!projected[0].text_concat().contains("old"));
+        assert_eq!(projected[1].text_concat(), "tail");
     }
 }

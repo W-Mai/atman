@@ -23,6 +23,21 @@ impl CapturedProvider {
     fn last_system(&self) -> Option<String> {
         self.last_system.lock().unwrap().clone()
     }
+
+    fn last_messages(&self) -> Vec<Message> {
+        self.last_messages.lock().unwrap().clone()
+    }
+}
+
+fn goal_records(messages: &[Message]) -> Vec<&atman_runtime::ContextRecord> {
+    messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::ContextRecord(record) if record.key() == "session.goal" => Some(record),
+            _ => None,
+        })
+        .collect()
 }
 
 impl atman_runtime::provider::Provider for CapturedProvider {
@@ -80,7 +95,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
 }
 
 #[tokio::test]
-async fn goal_prefix_lands_in_llm_system_prompt() {
+async fn goal_lands_in_llm_context_records() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
@@ -106,18 +121,26 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
     session.end_turn();
 
     let system = provider.last_system().unwrap_or_default();
+    let messages = provider.last_messages();
     assert!(
-        system.contains("ship the atman agent"),
-        "want goal text in system, got: {system}"
+        system.contains("Context records are append-only"),
+        "context record contract missing from system: {system}"
     );
     assert!(
-        system.contains("[session goal]") && system.contains("[/session goal]"),
-        "want goal delimiters, got: {system}"
+        !system.contains("ship the atman agent"),
+        "dynamic goal must not rewrite the stable system head: {system}"
+    );
+    let records = goal_records(&messages);
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0]
+            .render_for_model()
+            .contains("ship the atman agent")
     );
 }
 
 #[tokio::test]
-async fn goal_prefix_prepends_user_system_and_keeps_both() {
+async fn goal_record_keeps_the_user_system_stable() {
     let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
@@ -145,14 +168,18 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
     session.end_turn();
 
     let seen = provider.last_system().unwrap();
+    let messages = provider.last_messages();
     assert!(
         seen.contains("you are a helpful assistant"),
         "user system must stay in system prompt: {seen}"
     );
     assert!(
-        seen.contains("stay minimal"),
-        "goal must be in system: {seen}"
+        !seen.contains("stay minimal"),
+        "goal must not rewrite the system head: {seen}"
     );
+    let records = goal_records(&messages);
+    assert_eq!(records.len(), 1);
+    assert!(records[0].render_for_model().contains("stay minimal"));
 }
 
 #[tokio::test]
@@ -208,12 +235,19 @@ async fn goal_survives_multiple_turns_in_same_session() {
             .await
             .unwrap();
         session.end_turn();
-        let system = provider.last_system().unwrap_or_default();
+        let messages = provider.last_messages();
         assert!(
-            system.contains("persistent goal"),
-            "turn missed goal: {system}"
+            goal_records(&messages)
+                .iter()
+                .any(|record| record.render_for_model().contains("persistent goal")),
+            "turn missed the persistent goal record"
         );
     }
+    assert_eq!(
+        goal_records(&session.messages()).len(),
+        1,
+        "unchanged goal must remain a single canonical record across turns"
+    );
 }
 
 #[tokio::test]

@@ -50,10 +50,23 @@ async fn run_in_turn_appends_assistant_message_to_session() {
     assert!(matches!(&out, Value::Message(message) if message.text_concat() == "hello world"));
 
     let msgs = session.messages();
-    assert_eq!(msgs.len(), 2, "root assistant must stay in session context");
-    assert_eq!(msgs[0].role, MessageRole::User);
-    assert_eq!(msgs[1].role, MessageRole::Assistant);
-    assert_eq!(msgs[1].text_concat(), "hello world");
+    let ordinary: Vec<_> = msgs
+        .iter()
+        .filter(|message| {
+            !message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ContextRecord(_)))
+        })
+        .collect();
+    assert_eq!(
+        ordinary.len(),
+        2,
+        "root assistant must stay in session context"
+    );
+    assert_eq!(ordinary[0].role, MessageRole::User);
+    assert_eq!(ordinary[1].role, MessageRole::Assistant);
+    assert_eq!(ordinary[1].text_concat(), "hello world");
 
     let has_correlated_assistant = session.sink().snapshot().iter().any(|event| {
         matches!(

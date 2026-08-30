@@ -97,15 +97,8 @@ pub(super) fn rebuild_session_llm_messages(
     prompt: Option<&str>,
     extra_messages: &[crate::message::Message],
 ) -> Vec<crate::message::Message> {
-    let mut messages = match context_mode {
-        ContextMode::Session => session.messages().to_vec(),
-        ContextMode::SessionRecent(n) => {
-            let all = session.messages();
-            let start = all.len().saturating_sub(n);
-            all[start..].to_vec()
-        }
-        ContextMode::None => Vec::new(),
-    };
+    let session_messages = session.messages();
+    let mut messages = llm_context::project_session_messages(&session_messages, context_mode);
     if let Some(prompt) = prompt
         && !prompt.is_empty()
     {
@@ -118,23 +111,40 @@ pub(super) fn rebuild_session_llm_messages(
     messages
 }
 
-pub(super) async fn session_system_context(session: &crate::session::Session) -> Vec<String> {
-    let mut parts = Vec::new();
-    if let Some(goal) = session.goal() {
-        parts.push(format!("[session goal]\n{goal}\n[/session goal]"));
-    }
-    if let Some(cwd_note) = working_directory_system_prompt(session) {
-        parts.push(cwd_note);
-    }
-    if let Some(plan) = session.plan_system_prompt().await {
-        parts.push(format!(
-            "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
-        ));
-    }
-    if let Some(model_info) = available_models_system_prompt() {
-        parts.push(model_info);
-    }
-    parts
+pub(super) async fn session_context_record_specs(
+    session: &crate::session::Session,
+) -> Vec<crate::context_plan::ContextRecordSpec> {
+    use crate::context_plan::{
+        ContextRecordAuthority, ContextRecordBody, ContextRecordRetention, ContextRecordSpec,
+    };
+
+    let plan = session.plan_system_prompt().await.map(|plan| {
+        format!("{plan}\n\nCall plan.tick to mark a step done. Call plan.write to revise the plan.")
+    });
+    [
+        ("session.goal", ContextRecordAuthority::User, session.goal()),
+        (
+            "session.workspace",
+            ContextRecordAuthority::Runtime,
+            working_directory_context(session),
+        ),
+        ("session.plan", ContextRecordAuthority::Runtime, plan),
+        (
+            "session.models",
+            ContextRecordAuthority::Runtime,
+            available_models_context(),
+        ),
+    ]
+    .into_iter()
+    .map(|(key, authority, content)| {
+        ContextRecordSpec::new(
+            key,
+            authority,
+            ContextRecordRetention::Latest,
+            content.map_or_else(ContextRecordBody::tombstone, ContextRecordBody::text),
+        )
+    })
+    .collect()
 }
 
 pub(super) fn append_system_context(system: &mut Option<String>, parts: Vec<String>) {
@@ -1130,7 +1140,7 @@ fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String 
     truncate(&parts.join(", "), 4000)
 }
 
-fn available_models_system_prompt() -> Option<String> {
+fn available_models_context() -> Option<String> {
     let mut aliases = crate::model_registry::all_aliases();
     let mut models = crate::model_registry::all_model_entries();
     if aliases.is_empty() && models.is_empty() {
@@ -1138,7 +1148,7 @@ fn available_models_system_prompt() -> Option<String> {
     }
     aliases.sort_by(|a, b| a.0.cmp(&b.0));
     models.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut lines = vec!["[available models]".to_string()];
+    let mut lines = Vec::new();
     if !aliases.is_empty() {
         lines.push(format!(
             "Aliases: {}",
@@ -1173,18 +1183,16 @@ fn available_models_system_prompt() -> Option<String> {
         ));
     }
     lines.push("Use these names or aliases with flow.spawn's model parameter.".into());
-    lines.push("[/available models]".into());
     Some(lines.join("\n"))
 }
 
-fn working_directory_system_prompt(session: &crate::session::Session) -> Option<String> {
+fn working_directory_context(session: &crate::session::Session) -> Option<String> {
     let meta = session.meta()?;
     let cwd = meta
         .start_path
         .as_deref()
         .or(meta.project_root.as_deref())?;
-    let mut lines = vec!["[working directory]".to_string()];
-    lines.push(cwd.display().to_string());
+    let mut lines = vec![cwd.display().to_string()];
     // Live re-detect in case .git/.atman was created after session start.
     let live_root = crate::session_meta::find_project_root(cwd);
     match (&live_root, &meta.project_root) {
@@ -1206,16 +1214,12 @@ fn working_directory_system_prompt(session: &crate::session::Session) -> Option<
             lines.push("(no project root — no .git or .atman found)".into());
         }
     }
-    lines.push("[/working directory]".into());
     Some(lines.join("\n"))
 }
 
-pub(super) fn tool_context_working_directory_system_prompt(ctx: &ToolCtx) -> Option<String> {
+pub(super) fn tool_context_working_directory_context(ctx: &ToolCtx) -> Option<String> {
     let cwd = ctx.resolve_cwd(None).ok()?;
-    Some(format!(
-        "[working directory]\n{}\n[/working directory]",
-        cwd.display()
-    ))
+    Some(cwd.display().to_string())
 }
 
 fn preview_tool_value(v: &Value) -> String {
@@ -2237,15 +2241,16 @@ mod tests {
     }
 
     #[test]
-    fn spawned_tool_context_renders_one_resolved_working_directory_block() {
+    fn spawned_tool_context_resolves_working_directory_record_body() {
         let temp = tempfile::tempdir().unwrap();
         let ctx = authorized_eval_tool_ctx(Some(temp.path()))
             .with_history_segment(crate::tool::HistorySegment::Spawned);
-        let rendered = tool_context_working_directory_system_prompt(&ctx).unwrap();
+        let rendered = tool_context_working_directory_context(&ctx).unwrap();
 
-        assert_eq!(rendered.matches("[working directory]").count(), 1);
-        assert_eq!(rendered.matches("[/working directory]").count(), 1);
-        assert!(rendered.contains(&temp.path().display().to_string()));
+        assert_eq!(
+            std::path::PathBuf::from(&rendered).canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
         assert!(!rendered.contains("{pwd}"));
     }
 

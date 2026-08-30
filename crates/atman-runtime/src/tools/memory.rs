@@ -24,7 +24,7 @@ impl Tool for MemoryGoalGet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Return the current session goal (persistent, auto-injected as system prefix). Empty string when unset.",
+            "Return the current session goal (persistent, exposed to models as an append-only context record). Empty string when unset.",
         )
     }
 
@@ -54,9 +54,9 @@ impl Tool for MemoryGoalSet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Set the session goal — a short directive (1-2 sentences) that atman injects \
-             as a system-prompt prefix on every LLM call. It persists across turns, never \
-             enters message history, and is never compacted.\n\n\
+            "Set the session goal — a short directive (1-2 sentences) that atman appends \
+             to model history as a versioned context record. It persists across turns; \
+             unchanged content is not appended again.\n\n\
              Best practice: set the goal early (right after understanding the user's request), \
              keep it concise and actionable. Update it if the user's intent changes. Clear it \
              when the task is complete. Example: 'Fix the login bug in auth.rs and add a \

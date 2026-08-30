@@ -7,7 +7,7 @@ use crate::value::Value;
 use super::ContextMode;
 use super::{
     StreamCallCtx, is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages,
-    render_injections, session_system_context, tool_context_working_directory_system_prompt,
+    render_injections, session_context_record_specs, tool_context_working_directory_context,
 };
 use super::{append_system_context, call_and_maybe_stream};
 
@@ -75,12 +75,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         })
         .unwrap_or_else(|| model.clone());
     let has_messages_override = args.messages_override.is_some();
-    if let Some(session) = ctx.session_runtime.as_ref() {
-        append_system_context(&mut system, session_system_context(session).await);
-    } else if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
-        && let Some(cwd_note) = tool_context_working_directory_system_prompt(ctx)
+    let turn_id = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
+    if ctx.session_runtime.is_some()
+        || (matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
+            && ctx.session_messages_handle.is_some())
     {
-        append_system_context(&mut system, vec![cwd_note]);
+        append_system_context(
+            &mut system,
+            vec![crate::context_plan::CONTEXT_RECORD_INSTRUCTIONS.to_string()],
+        );
+        sync_runtime_context_records(ctx, &turn_id).await;
     }
     if let Some(budget) = args.context_budget {
         if let Some(p) = args.prompt.as_mut() {
@@ -125,10 +132,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     } else {
         None
     };
-    let turn_id = ctx
-        .turn_id
-        .clone()
-        .unwrap_or_else(crate::event::TurnId::now);
     let llm_context = match llm_context::build_llm_context(
         &args,
         context_mode,
@@ -703,6 +706,37 @@ fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
         .or_else(|| ctx.resolve_cwd(None).ok())
 }
 
+async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::TurnId) {
+    if let Some(session) = ctx.session_runtime.as_ref() {
+        session
+            .append_context_records(turn_id.clone(), session_context_record_specs(session).await);
+        return;
+    }
+    if !matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned) {
+        return;
+    }
+    let Some(messages) = ctx.session_messages_handle.as_ref() else {
+        return;
+    };
+    let workspace = tool_context_working_directory_context(ctx);
+    let spec = crate::context_plan::ContextRecordSpec::new(
+        "session.workspace",
+        crate::context_plan::ContextRecordAuthority::Runtime,
+        crate::context_plan::ContextRecordRetention::Latest,
+        workspace.map_or_else(
+            crate::context_plan::ContextRecordBody::tombstone,
+            crate::context_plan::ContextRecordBody::text,
+        ),
+    );
+    let mut messages = messages.lock().unwrap();
+    let records = crate::context_plan::compile_context_records(&messages, [spec]);
+    messages.extend(
+        records
+            .into_iter()
+            .map(|record| crate::message::Message::context_record(turn_id.clone(), record)),
+    );
+}
+
 fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<&std::path::Path>) {
     let Some(system) = system.as_mut() else {
         return;
@@ -777,5 +811,46 @@ mod tests {
                 ..
             }) if key.ends_with(":7.iter[0].0") && message.contains("invalid request")
         ));
+    }
+
+    #[tokio::test]
+    async fn spawned_workspace_context_is_append_only_per_local_history() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let context = |path: &std::path::Path| {
+            ToolCtx::new()
+                .with_history_segment(crate::tool::HistorySegment::Spawned)
+                .with_session_messages_handle(std::sync::Arc::clone(&messages))
+                .with_workspace(crate::git_workspace::WorkspaceBinding {
+                    workspace_id: path.display().to_string(),
+                    path: path.to_path_buf(),
+                    repository_root: path.to_path_buf(),
+                    branch: None,
+                })
+        };
+        let turn_id = crate::event::TurnId::now();
+
+        sync_runtime_context_records(&context(first.path()), &turn_id).await;
+        sync_runtime_context_records(&context(first.path()), &turn_id).await;
+        sync_runtime_context_records(&context(second.path()), &turn_id).await;
+
+        let messages = messages.lock().unwrap();
+        let records: Vec<_> = messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                crate::message::MessagePart::ContextRecord(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].revision(), 1);
+        assert_eq!(records[1].revision(), 2);
+        assert!(
+            records[1]
+                .render_for_model()
+                .contains(&second.path().display().to_string())
+        );
     }
 }

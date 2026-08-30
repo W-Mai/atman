@@ -17,6 +17,7 @@ use atman_runtime::{Executor, Value, tools};
 struct RecordingProvider {
     calls: AtomicUsize,
     captured_messages: std::sync::Mutex<Vec<Vec<Message>>>,
+    captured_systems: std::sync::Mutex<Vec<Option<String>>>,
     script: Vec<Vec<MessagePart>>,
 }
 
@@ -25,12 +26,17 @@ impl RecordingProvider {
         Self {
             calls: AtomicUsize::new(0),
             captured_messages: std::sync::Mutex::new(Vec::new()),
+            captured_systems: std::sync::Mutex::new(Vec::new()),
             script,
         }
     }
 
     fn captured(&self) -> Vec<Vec<Message>> {
         self.captured_messages.lock().unwrap().clone()
+    }
+
+    fn captured_systems(&self) -> Vec<Option<String>> {
+        self.captured_systems.lock().unwrap().clone()
     }
 }
 
@@ -46,6 +52,10 @@ impl Provider for RecordingProvider {
                 .lock()
                 .unwrap()
                 .push(req.messages.clone());
+            self.captured_systems
+                .lock()
+                .unwrap()
+                .push(req.system.clone());
             let parts = self.script.get(idx).cloned().unwrap_or_else(|| {
                 vec![MessagePart::Text {
                     text: "[scripted: exhausted]".into(),
@@ -82,6 +92,10 @@ impl Provider for RecordingProvider {
             .lock()
             .unwrap()
             .push(req.messages.clone());
+        self.captured_systems
+            .lock()
+            .unwrap()
+            .push(req.system.clone());
         let turn_id = req
             .messages
             .first()
@@ -242,6 +256,11 @@ async fn context_session_feeds_session_history_into_llm_call() {
     );
 
     let second = &captured[1];
+    assert_eq!(
+        &second[..first.len()],
+        first,
+        "unchanged session records must preserve the complete prior request prefix"
+    );
     let has_assistant_with_tool_use = second.iter().any(|m| {
         m.role == MessageRole::Assistant
             && m.parts
@@ -497,6 +516,7 @@ async fn context_none_default_does_not_read_session_history() {
         turn_id.clone(),
         "pre-existing session msg",
     ));
+    session.set_goal(Some("current isolated-call goal".into()));
 
     let result = ex
         .run_in_turn(
@@ -518,15 +538,153 @@ async fn context_none_default_does_not_read_session_history() {
     let captured = provider.captured();
     assert_eq!(captured.len(), 1);
     let msgs = &captured[0];
-    assert_eq!(msgs.len(), 1, "context:none should send exactly 1 message");
-    assert_eq!(msgs[0].role, MessageRole::User);
+    let user_messages: Vec<_> = msgs
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .collect();
+    assert_eq!(user_messages.len(), 1);
     assert!(
-        msgs[0].text_concat().contains("just this prompt"),
+        user_messages[0].text_concat().contains("just this prompt"),
         "should only contain the prompt, got: {}",
-        msgs[0].text_concat()
+        user_messages[0].text_concat()
     );
     assert!(
-        !msgs[0].text_concat().contains("pre-existing session msg"),
+        msgs.iter()
+            .all(|message| !message.text_concat().contains("pre-existing session msg")),
         "session history must NOT leak into context:none calls"
     );
+    assert!(msgs.iter().any(|message| {
+        message.parts.iter().any(|part| {
+            matches!(part, MessagePart::ContextRecord(record) if record.key() == "session.goal")
+        })
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_state_changes_append_records_and_clear_with_a_tombstone() {
+    let _registry = common::ModelRegistryGuard::acquire(common::config([
+        common::model_for_provider("recording", "recording", 200_000, None),
+        common::model_for_provider("recording-full-window", "recording", 200_000, None),
+    ]))
+    .await;
+    let provider = Arc::new(RecordingProvider::new(vec![
+        vec![MessagePart::Text {
+            text: "first".into(),
+        }],
+        vec![MessagePart::Text {
+            text: "second".into(),
+        }],
+        vec![MessagePart::Text {
+            text: "third".into(),
+        }],
+    ]));
+    let temp = tempfile::tempdir().unwrap();
+    let session = Arc::new(Session::open(temp.path()).unwrap());
+    let ex = Executor::with_events(session.sink().clone());
+    ex.providers.register(provider.clone());
+    let file = parse_file(SINGLE_SESSION_CALL).unwrap();
+
+    session.set_goal(Some("ship the context migration".into()));
+    atman_runtime::memory::PlanStore::at(session.dir())
+        .upsert(atman_runtime::memory::plan::Plan::new(
+            "context-plan",
+            "Context migration",
+            vec!["Persist dynamic state".into()],
+        ))
+        .await
+        .unwrap();
+    ex.run_in_turn(
+        &file,
+        "one_shot",
+        vec![],
+        Some(TurnId::now()),
+        Some(session.clone()),
+    )
+    .await
+    .unwrap();
+    session.set_goal(None);
+    for _ in 0..2 {
+        ex.run_in_turn(
+            &file,
+            "one_shot",
+            vec![],
+            Some(TurnId::now()),
+            Some(session.clone()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let messages = session.messages();
+    let goal_records: Vec<_> = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::ContextRecord(record) if record.key() == "session.goal" => Some(record),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(goal_records.len(), 2);
+    assert_eq!(goal_records[0].revision(), 1);
+    assert_eq!(goal_records[1].revision(), 2);
+    assert!(goal_records[1].body().is_tombstone());
+
+    let captured = provider.captured();
+    let first_record_keys: std::collections::HashSet<_> = captured[0]
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::ContextRecord(record) => Some(record.key()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        first_record_keys,
+        std::collections::HashSet::from([
+            "session.goal",
+            "session.workspace",
+            "session.plan",
+            "session.models",
+        ])
+    );
+    assert!(
+        captured[0]
+            .iter()
+            .any(|message| message.text_concat().contains("ship the context migration"))
+    );
+    assert!(captured[1].iter().any(|message| {
+        message.parts.iter().any(|part| {
+            matches!(part, MessagePart::ContextRecord(record)
+                if record.key() == "session.goal" && record.body().is_tombstone())
+        })
+    }));
+    assert_eq!(
+        captured[1]
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter(|part| matches!(part, MessagePart::ContextRecord(record) if record.key() == "session.goal"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        captured[2]
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter(|part| matches!(part, MessagePart::ContextRecord(record) if record.key() == "session.goal"))
+            .count(),
+        2,
+        "unchanged cleared state must not append another record"
+    );
+    let systems = provider.captured_systems();
+    assert!(systems.iter().all(|system| {
+        system
+            .as_deref()
+            .is_some_and(|system| system.contains("Context records are append-only"))
+    }));
+    assert!(systems.iter().all(|system| {
+        !system
+            .as_deref()
+            .is_some_and(|system| system.contains("ship the context migration"))
+    }));
+    session.shutdown().await;
 }

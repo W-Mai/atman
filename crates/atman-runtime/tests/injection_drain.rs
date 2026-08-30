@@ -128,8 +128,18 @@ async fn pending_injection_appears_in_next_llm_request_messages() {
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     let msgs = &calls[0];
-    assert_eq!(msgs.len(), 2, "user prompt + injection nudge = 2 messages");
-    let nudge_text = msgs[1].text_concat();
+    assert_eq!(
+        msgs.iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        2,
+        "user prompt + injection nudge = 2 user messages"
+    );
+    let nudge_text = msgs
+        .iter()
+        .map(Message::text_concat)
+        .find(|text| text.contains("<user_nudge"))
+        .expect("injection message");
     assert!(nudge_text.contains("<user_nudge"), "got: {nudge_text}");
     assert!(
         nudge_text.contains("remember to check tests"),
@@ -169,7 +179,14 @@ async fn no_pending_injection_yields_bare_user_message() {
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].len(), 1, "no injection = only the user prompt");
+    assert_eq!(
+        calls[0]
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        1,
+        "no injection = only one user prompt"
+    );
 }
 
 #[tokio::test]
@@ -213,6 +230,20 @@ async fn injection_drained_once_not_reused_by_next_node() {
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].len(), 2, "first call got prompt + injection");
-    assert_eq!(calls[1].len(), 1, "second call got only the bare prompt");
+    assert_eq!(
+        calls[0]
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        2,
+        "first call got prompt + injection"
+    );
+    assert_eq!(
+        calls[1]
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        1,
+        "second call got only the bare prompt"
+    );
 }
