@@ -137,7 +137,13 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
             } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
                 Some((env.seq, message.clone()))
             }
-            crate::event::Event::SystemMsg { message, .. } => Some((env.seq, message.clone())),
+            crate::event::Event::SystemMsg {
+                message,
+                flow_run_id,
+                ..
+            } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
+                Some((env.seq, message.clone()))
+            }
             _ => None,
         })
         .collect())
@@ -812,7 +818,11 @@ pub(crate) fn apply_envelope_to_messages(
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             acc.push((env.seq, message.clone()));
         }
-        crate::event::Event::SystemMsg { message, .. } => {
+        crate::event::Event::SystemMsg {
+            message,
+            flow_run_id,
+            ..
+        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             acc.push((env.seq, message.clone()));
         }
         crate::event::Event::ContextCompact {

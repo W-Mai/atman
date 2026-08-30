@@ -495,10 +495,13 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         Event::TurnStart { turn_id, .. } | Event::TurnEnd { turn_id, .. } => {
             (Some(turn_id.0.to_string()), None)
         }
-        Event::UserMsg { turn_id, .. }
-        | Event::SystemMsg { turn_id, .. }
-        | Event::UserInject { turn_id, .. } => (Some(turn_id.0.to_string()), None),
-        Event::AssistantMsg {
+        Event::UserInject { turn_id, .. } => (Some(turn_id.0.to_string()), None),
+        Event::UserMsg {
+            turn_id,
+            flow_run_id,
+            ..
+        }
+        | Event::AssistantMsg {
             turn_id,
             flow_run_id,
             ..
@@ -509,6 +512,11 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             ..
         }
         | Event::ToolResultMetrics {
+            turn_id,
+            flow_run_id,
+            ..
+        }
+        | Event::SystemMsg {
             turn_id,
             flow_run_id,
             ..
@@ -636,6 +644,32 @@ mod tests {
                 spawned: false,
             },
         )
+    }
+
+    #[test]
+    fn every_owned_message_role_keeps_its_flow_anchor() {
+        let turn_id = crate::event::TurnId::now();
+        let flow_run_id = FlowRunId::now();
+        let user = crate::message::Message::user_text(turn_id.clone(), "delegated");
+        let system = crate::message::Message::system_text(turn_id.clone(), "handoff");
+
+        for event in [
+            Event::UserMsg {
+                turn_id: turn_id.clone(),
+                flow_run_id: Some(flow_run_id.clone()),
+                message: user,
+            },
+            Event::SystemMsg {
+                turn_id: turn_id.clone(),
+                flow_run_id: Some(flow_run_id.clone()),
+                message: system,
+            },
+        ] {
+            assert_eq!(
+                extract_anchors(&event),
+                (Some(turn_id.to_string()), Some(flow_run_id.to_string()))
+            );
+        }
     }
 
     #[test]

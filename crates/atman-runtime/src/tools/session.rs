@@ -98,7 +98,10 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
         MessageRole::User => ctx.message_flow_run_id().map(|run_id| run_id.0.to_string()),
         MessageRole::System => None,
     };
-    if let Some(tx) = &ctx.stream_tx {
+    if msg.origin != crate::message::MessageOrigin::Internal
+        && msg.role != MessageRole::System
+        && let Some(tx) = &ctx.stream_tx
+    {
         let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
             flow_run_id,
             message: msg.clone(),
@@ -177,6 +180,7 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
         },
         MessageRole::System => Event::SystemMsg {
             turn_id,
+            flow_run_id: ctx.message_flow_run_id(),
             message: msg.clone(),
         },
     };
@@ -342,5 +346,50 @@ mod tests {
                 .iter()
                 .any(|message| message.role == MessageRole::Tool)
         );
+    }
+
+    #[test]
+    fn internal_child_system_message_is_audited_without_becoming_a_live_transcript_frame() {
+        use crate::context_plan::{
+            ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+        };
+        use crate::event::{Event, FlowRunId, TurnId};
+
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let run_id = FlowRunId::now();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = ToolCtx::new()
+            .with_anchors(Some(TurnId::now()), Some(run_id.clone()), None)
+            .with_history_segment(crate::tool::HistorySegment::Spawned)
+            .with_events(session.sink().clone())
+            .with_session_messages_handle(messages)
+            .with_stream_tx(stream_tx);
+        let message = Message::context_record(
+            TurnId::now(),
+            ContextRecord::new(
+                "handoff.parent",
+                1,
+                ContextRecordAuthority::Runtime,
+                ContextRecordRetention::Latest,
+                ContextRecordBody::text("delegated"),
+            ),
+        );
+
+        append_message_to_context(&ctx, message).unwrap();
+
+        assert!(matches!(
+            stream_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(session.sink().snapshot().iter().any(|event| {
+            matches!(
+                event,
+                Event::SystemMsg {
+                    flow_run_id: Some(owner),
+                    ..
+                } if owner == &run_id
+            )
+        }));
     }
 }

@@ -183,6 +183,8 @@ pub enum Event {
     },
     SystemMsg {
         turn_id: TurnId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
     },
     UserInject {
@@ -763,6 +765,35 @@ mod tests {
                 context_call_identity: None,
                 context_cache: None,
                 assistant_tool_batch_width: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_system_message_without_flow_owner_still_deserializes() {
+        let turn_id = TurnId::now();
+        let message = crate::message::Message::context_record(
+            turn_id.clone(),
+            crate::context_plan::ContextRecord::new(
+                "session.goal",
+                1,
+                crate::context_plan::ContextRecordAuthority::User,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text("ship"),
+            ),
+        );
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "type": "system_msg",
+            "turn_id": turn_id,
+            "message": message,
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            event,
+            Event::SystemMsg {
+                flow_run_id: None,
                 ..
             }
         ));

@@ -479,7 +479,7 @@ fn extract_return_string_literal(flow: &FlowDecl) -> Option<String> {
     })
 }
 
-fn render_type(ty: &TypeExpr) -> String {
+pub(super) fn render_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name) => name.name.clone(),
         TypeExpr::List(inner) => format!("[{}]", render_type(inner)),

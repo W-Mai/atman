@@ -2104,6 +2104,7 @@ impl Session {
         let replacement_seq = self.sink.next_seq_peek();
         self.sink.emit(Event::SystemMsg {
             turn_id: turn_id.clone(),
+            flow_run_id: None,
             message: replacement_msg,
         });
         self.sink.emit(Event::ContextCompact {
@@ -2380,6 +2381,7 @@ impl AppendMessageCommand {
                 }
                 MessageRole::System => Event::SystemMsg {
                     turn_id: msg.turn_id.clone(),
+                    flow_run_id: self.flow_run_id.clone(),
                     message: msg.clone(),
                 },
             };

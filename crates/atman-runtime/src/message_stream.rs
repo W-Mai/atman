@@ -149,7 +149,15 @@ impl MessageStream {
                 {
                     acc.full_raw.push((ev.seq, message.clone()));
                 }
-                crate::event::Event::SystemMsg { message, .. } => {
+                crate::event::Event::SystemMsg {
+                    message,
+                    flow_run_id,
+                    ..
+                } if crate::projection::message_window::message_belongs_to_root(
+                    flow_run_id.as_ref(),
+                    &spawned_flow_ids,
+                ) =>
+                {
                     acc.full_raw.push((ev.seq, message.clone()));
                 }
                 _ => {}
@@ -220,6 +228,7 @@ mod tests {
             },
             "system_msg" => Event::SystemMsg {
                 turn_id: msg.turn_id.clone(),
+                flow_run_id: None,
                 message: msg.clone(),
             },
             _ => unreachable!(),
@@ -602,6 +611,7 @@ mod tests {
             12,
             Event::SystemMsg {
                 turn_id: TurnId::now(),
+                flow_run_id: None,
                 message: compact_summary("runtime summary"),
             },
         ));
@@ -699,7 +709,7 @@ mod tests {
                 7,
                 Event::AssistantMsg {
                     turn_id: TurnId::now(),
-                    flow_run_id: Some(spawned),
+                    flow_run_id: Some(spawned.clone()),
                     message: assistant("spawned one"),
                 },
             ),
@@ -729,5 +739,49 @@ mod tests {
         assert_eq!(third.len(), 3);
         assert_eq!(third[2].text_concat(), "durable root");
         assert_eq!(stream.window().len(), 3);
+
+        events.lock().unwrap().extend([
+            EventEnvelope::new(
+                10,
+                Event::SystemMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(root),
+                    message: Message::system_text(TurnId::now(), "root system"),
+                },
+            ),
+            EventEnvelope::new(
+                11,
+                Event::SystemMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(spawned),
+                    message: Message::system_text(TurnId::now(), "spawned system"),
+                },
+            ),
+            EventEnvelope::new(
+                12,
+                Event::SystemMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: None,
+                    message: Message::system_text(TurnId::now(), "durable system"),
+                },
+            ),
+        ]);
+        let fourth = stream.window();
+        assert_eq!(fourth.len(), 5);
+        assert!(
+            fourth
+                .iter()
+                .any(|message| message.text_concat() == "root system")
+        );
+        assert!(
+            fourth
+                .iter()
+                .all(|message| message.text_concat() != "spawned system")
+        );
+        assert!(
+            fourth
+                .iter()
+                .any(|message| message.text_concat() == "durable system")
+        );
     }
 }

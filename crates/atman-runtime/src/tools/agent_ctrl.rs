@@ -634,7 +634,7 @@ impl Tool for AgentSpawn {
                     "description": "Target flow parameters as key-value pairs. Use flow.search then flow.describe when the parameter contract is unknown. Example: arguments={\"goal\":\"read Cargo.toml\",\"role\":\"research\"}"
                 },
                 "async": {"type": "boolean", "default": true, "description": "If true (default), run in background and return a handle. If false, block until done."},
-                "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with a snapshot of the parent's messages."},
+                "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with the parent snapshot through its last complete tool transaction. Every child also receives an explicit handoff.parent context record."},
                 "workspace": {"type": "string", "enum": ["none", "auto", "retain"], "default": "none", "description": "Workspace policy for the child flow."}
             },
             "required": ["flow"]
@@ -906,6 +906,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let version = extract_flow_version(&args)?;
     let prepared = prepare_flow_agent(&flow, version.as_deref()).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
+    let inherit_context = should_inherit_context(&args);
     let run_id = FlowRunId::now();
     let policy = workspace_policy(&args)?;
     let session_id = workspace_session(ctx, policy)?;
@@ -939,9 +940,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     child_ctx.flow_identity = Some(child_identity);
     child_ctx.call_intent = None;
     let child_messages = Arc::new(Mutex::new(Vec::new()));
-    if should_inherit_context(&args)
-        && let Some(parent) = &ctx.session_messages_handle
-    {
+    if inherit_context && let Some(parent) = &ctx.session_messages_handle {
         *child_messages.lock().unwrap() = inherited_context_snapshot(parent);
     }
     run_prepared_flow_agent(
@@ -951,6 +950,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         run_id,
         child_messages,
         Arc::new(tokio::sync::Mutex::new(())),
+        inherit_context,
     )
     .await
 }
@@ -1073,6 +1073,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             child_run_id.clone(),
             Arc::clone(&entry_clone.messages),
             Arc::clone(&entry_clone.compact_lock),
+            inherit_context,
         )
         .await;
         let killed = entry_clone.cancel.is_cancelled();
@@ -1395,6 +1396,7 @@ async fn run_prepared_flow_agent(
     run_id: FlowRunId,
     child_messages: Arc<Mutex<Vec<Message>>>,
     child_compact_lock: Arc<tokio::sync::Mutex<()>>,
+    inherited_parent_context: bool,
 ) -> ToolResult {
     let Some(registry) = ctx.registry.as_ref() else {
         return Err(RuntimeError::ToolFailed(
@@ -1412,6 +1414,13 @@ async fn run_prepared_flow_agent(
     let mut child_ctx = sanitize_child_ctx(ctx);
     child_ctx.session_messages_handle = Some(child_messages);
     child_ctx.compact_lock_handle = Some(child_compact_lock);
+    seed_parent_handoff_context(
+        &child_ctx,
+        &flow,
+        &run_id,
+        initial_prompt.as_deref(),
+        inherited_parent_context,
+    )?;
     if let Some(prompt) = initial_prompt {
         seed_child_message_context(&child_ctx, prompt)?;
     }
@@ -1590,6 +1599,70 @@ fn seed_child_message_context(ctx: &ToolCtx, prompt: String) -> Result<(), Runti
     crate::tools::session::append_message_to_context(
         ctx,
         crate::message::Message::user_text(turn_id, prompt),
+    )
+}
+
+fn seed_parent_handoff_context(
+    ctx: &ToolCtx,
+    flow: &atman_dsl::ast::FlowDecl,
+    child_run_id: &FlowRunId,
+    invocation_prompt: Option<&str>,
+    inherited_parent_context: bool,
+) -> Result<(), RuntimeError> {
+    let parent_run_id = ctx
+        .flow_identity
+        .as_ref()
+        .and_then(|identity| identity.parent_run_id.as_ref())
+        .map(ToString::to_string);
+    let expected_result = flow
+        .ret
+        .as_ref()
+        .map(super::flow_list::render_type)
+        .unwrap_or_else(|| "unit".into());
+    let task_digest = invocation_prompt
+        .map(|prompt| format!("blake3:{}", blake3::hash(prompt.as_bytes()).to_hex()));
+    let handoff = serde_json::json!({
+        "parent_run_id": parent_run_id,
+        "child_run_id": child_run_id.to_string(),
+        "flow": flow.name.name,
+        "task_source": if invocation_prompt.is_some() { "following_user_message" } else { "flow_parameters" },
+        "task_digest": task_digest,
+        "parent_context": if inherited_parent_context {
+            "materialized_window_through_last_complete_tool_transaction"
+        } else {
+            "not_inherited"
+        },
+        "capability_boundary": "Only tools exposed by the current child model request are callable.",
+        "task_boundary": "Execute only this delegated flow invocation and return its declared result to the parent.",
+        "expected_result": expected_result,
+    });
+    let spec = crate::context_plan::ContextRecordSpec::new(
+        "handoff.parent",
+        crate::context_plan::ContextRecordAuthority::Runtime,
+        crate::context_plan::ContextRecordRetention::Latest,
+        crate::context_plan::ContextRecordBody::text(handoff.to_string()),
+    );
+    let turn_id = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
+    let record = {
+        let messages = ctx.session_messages_handle.as_ref().ok_or_else(|| {
+            RuntimeError::ToolFailed("flow.spawn: child message context is unavailable".into())
+        })?;
+        let messages = messages.lock().unwrap();
+        crate::context_plan::compile_context_records(&messages, [spec])
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "flow.spawn: child handoff record was not materialized".into(),
+                )
+            })?
+    };
+    crate::tools::session::append_message_to_context(
+        ctx,
+        crate::message::Message::context_record(turn_id, record),
     )
 }
 
@@ -1914,6 +1987,12 @@ mod tests {
                             .lock()
                             .unwrap()
                             .iter()
+                            .filter(|message| {
+                                !message
+                                    .parts
+                                    .iter()
+                                    .any(|part| matches!(part, MessagePart::ContextRecord(_)))
+                            })
                             .map(crate::message::Message::text_concat)
                             .collect::<Vec<_>>()
                             .join("|")
@@ -2234,18 +2313,27 @@ flow plain(user_prompt: string) -> string {
             status,
             FlowRunStatus::Ok { final_text, .. } if final_text == "async child prompt"
         ));
-        assert_eq!(
-            entry
-                .messages
-                .lock()
-                .unwrap()
-                .iter()
-                .map(crate::message::Message::text_concat)
-                .collect::<Vec<_>>(),
-            ["async child prompt"]
-        );
+        let entry_messages = entry.messages.lock().unwrap();
+        assert_eq!(entry_messages.len(), 2);
+        assert!(matches!(
+            entry_messages[0].parts.as_slice(),
+            [MessagePart::ContextRecord(record)] if record.key() == "handoff.parent"
+        ));
+        let MessagePart::ContextRecord(handoff) = &entry_messages[0].parts[0] else {
+            unreachable!("validated handoff record")
+        };
+        let rendered_handoff = handoff.render_for_model();
+        assert!(rendered_handoff.contains("following_user_message"));
+        assert!(rendered_handoff.contains("expected_result"));
+        assert!(!rendered_handoff.contains("async child prompt"));
+        assert_eq!(entry_messages[1].text_concat(), "async child prompt");
+        drop(entry_messages);
         assert_eq!(parent_messages.lock().unwrap().len(), 1);
         assert!(root_entry.messages.lock().unwrap().is_empty());
+        assert!(
+            event_session.messages_full().is_empty(),
+            "spawned handoff records must not project into root history"
+        );
         let invocation_events = event_session
             .sink()
             .snapshot()
@@ -2266,5 +2354,22 @@ flow plain(user_prompt: string) -> string {
                 .all(|(flow_run_id, _)| flow_run_id.is_some()),
             "child invocation events must not project into root history"
         );
+        let handoff_events = event_session
+            .sink()
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::event::Event::SystemMsg {
+                    flow_run_id,
+                    message,
+                    ..
+                } if message.parts.iter().any(
+                    |part| matches!(part, MessagePart::ContextRecord(record) if record.key() == "handoff.parent"),
+                ) => Some(flow_run_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(handoff_events.len(), 3);
+        assert!(handoff_events.iter().all(Option::is_some));
     }
 }
