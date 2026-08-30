@@ -92,6 +92,10 @@ Tool results use the same configured line, byte, and per-line budget in dispatch
 active budget into the Session at root-flow start, while spawned ToolCtx values inherit
 the same snapshot.
 
+Before provider projection, one canonical tool-pair normalizer moves every result next
+to its assistant call, emits parallel results in call order, fills interrupted calls,
+and removes only orphan result parts. Ordinary text in mixed messages remains visible.
+
 History recall is separate from automatic prompt assembly:
 
 - `memory.history.search` searches persisted session messages through FTS5.

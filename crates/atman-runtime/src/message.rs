@@ -317,6 +317,72 @@ pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
     messages.retain(|message| !message.parts.is_empty());
 }
 
+pub fn normalize_tool_pairs_for_model(messages: &[Message]) -> Vec<Message> {
+    #[derive(Clone)]
+    struct ToolResultRecord {
+        part: MessagePart,
+        turn_id: TurnId,
+        origin: MessageOrigin,
+    }
+
+    let mut results = std::collections::HashMap::new();
+    for message in messages {
+        for part in &message.parts {
+            if let MessagePart::ToolResult { tool_use_id, .. } = part {
+                results
+                    .entry(tool_use_id.clone())
+                    .or_insert_with(|| ToolResultRecord {
+                        part: part.clone(),
+                        turn_id: message.turn_id.clone(),
+                        origin: message.origin,
+                    });
+            }
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(messages.len() + 4);
+    for message in messages {
+        let tool_use_ids: Vec<String> = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut projected = message.clone();
+        projected
+            .parts
+            .retain(|part| !matches!(part, MessagePart::ToolResult { .. }));
+        if !projected.parts.is_empty() {
+            if projected.role == MessageRole::Tool {
+                projected.role = MessageRole::User;
+            }
+            normalized.push(projected);
+        }
+
+        for tool_use_id in tool_use_ids {
+            let result = results.get(&tool_use_id);
+            normalized.push(Message {
+                role: MessageRole::Tool,
+                parts: vec![result.map_or_else(
+                    || MessagePart::ToolResult {
+                        tool_use_id,
+                        content: "[tool execution interrupted — no result captured]".into(),
+                        is_error: true,
+                    },
+                    |result| result.part.clone(),
+                )],
+                turn_id: result
+                    .map(|result| result.turn_id.clone())
+                    .unwrap_or_else(|| message.turn_id.clone()),
+                origin: result.map_or(message.origin, |result| result.origin),
+            });
+        }
+    }
+    normalized
+}
+
 impl MessageRole {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -520,5 +586,130 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(part, MessagePart::ToolUse { intent: None, .. }));
+    }
+
+    #[test]
+    fn model_normalization_splits_parallel_results_in_call_order() {
+        let turn = TurnId::now();
+        let messages = vec![
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![
+                    MessagePart::ToolUse {
+                        id: "call-b".into(),
+                        name: "probe".into(),
+                        input: serde_json::json!({}),
+                        intent: None,
+                    },
+                    MessagePart::ToolUse {
+                        id: "call-a".into(),
+                        name: "probe".into(),
+                        input: serde_json::json!({}),
+                        intent: None,
+                    },
+                ],
+                turn_id: turn.clone(),
+                origin: MessageOrigin::User,
+            },
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![
+                    MessagePart::ToolResult {
+                        tool_use_id: "call-a".into(),
+                        content: "A".into(),
+                        is_error: false,
+                    },
+                    MessagePart::ToolResult {
+                        tool_use_id: "call-b".into(),
+                        content: "B".into(),
+                        is_error: false,
+                    },
+                ],
+                turn_id: turn,
+                origin: MessageOrigin::User,
+            },
+        ];
+
+        let normalized = normalize_tool_pairs_for_model(&messages);
+        let results: Vec<(&str, &str)> = normalized
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => Some((tool_use_id.as_str(), content.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, vec![("call-b", "B"), ("call-a", "A")]);
+        assert_eq!(normalize_tool_pairs_for_model(&normalized), normalized);
+    }
+
+    #[test]
+    fn model_normalization_preserves_mixed_content_and_drops_orphan_results() {
+        let turn = TurnId::now();
+        let messages = vec![
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![
+                    MessagePart::Text {
+                        text: "checking".into(),
+                    },
+                    MessagePart::ToolUse {
+                        id: "call-ok".into(),
+                        name: "probe".into(),
+                        input: serde_json::json!({}),
+                        intent: None,
+                    },
+                ],
+                turn_id: turn.clone(),
+                origin: MessageOrigin::User,
+            },
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![
+                    MessagePart::Text {
+                        text: "preserve me".into(),
+                    },
+                    MessagePart::ToolResult {
+                        tool_use_id: "call-ok".into(),
+                        content: "done".into(),
+                        is_error: false,
+                    },
+                    MessagePart::ToolResult {
+                        tool_use_id: "orphan".into(),
+                        content: "drop me".into(),
+                        is_error: false,
+                    },
+                ],
+                turn_id: turn,
+                origin: MessageOrigin::Watcher,
+            },
+            Message {
+                role: MessageRole::User,
+                parts: Vec::new(),
+                turn_id: TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        ];
+
+        let normalized = normalize_tool_pairs_for_model(&messages);
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0].text_concat(), "checking");
+        assert!(matches!(
+            &normalized[1].parts[..],
+            [MessagePart::ToolResult { tool_use_id, content, .. }]
+                if tool_use_id == "call-ok" && content == "done"
+        ));
+        assert_eq!(normalized[2].role, MessageRole::User);
+        assert_eq!(normalized[2].origin, MessageOrigin::Watcher);
+        assert_eq!(normalized[2].text_concat(), "preserve me");
+        assert!(!normalized.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(part, MessagePart::ToolResult { tool_use_id, .. } if tool_use_id == "orphan")
+            })
+        }));
     }
 }

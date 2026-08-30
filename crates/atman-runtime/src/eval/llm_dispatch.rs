@@ -7,8 +7,7 @@ use crate::value::Value;
 use super::ContextMode;
 use super::{
     StreamCallCtx, is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages,
-    render_injections, sanitize_tool_pairs, session_system_context,
-    tool_context_working_directory_system_prompt,
+    render_injections, session_system_context, tool_context_working_directory_system_prompt,
 };
 use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
 
@@ -278,7 +277,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let mut signature_retries: u32 = 0;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
-            let mut sanitized_messages = sanitize_tool_pairs(final_messages.clone());
+            let mut sanitized_messages =
+                crate::message::normalize_tool_pairs_for_model(&final_messages);
             for message in &mut sanitized_messages {
                 for part in &mut message.parts {
                     if let crate::message::MessagePart::Image { source } = part

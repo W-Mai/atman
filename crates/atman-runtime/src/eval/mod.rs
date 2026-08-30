@@ -2021,82 +2021,6 @@ pub struct TruncationStat {
     pub budget_tokens: u64,
 }
 
-pub(super) fn sanitize_tool_pairs(
-    messages: Vec<crate::message::Message>,
-) -> Vec<crate::message::Message> {
-    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
-    use std::collections::HashMap;
-    let mut result_by_id: HashMap<String, Message> = HashMap::new();
-    for m in &messages {
-        for p in &m.parts {
-            if let MessagePart::ToolResult { tool_use_id, .. } = p {
-                result_by_id
-                    .entry(tool_use_id.clone())
-                    .or_insert_with(|| Message {
-                        role: MessageRole::Tool,
-                        parts: vec![p.clone()],
-                        turn_id: m.turn_id.clone(),
-                        origin: MessageOrigin::User,
-                    });
-            }
-        }
-    }
-    let mut out: Vec<Message> = Vec::with_capacity(messages.len() + 4);
-    for m in &messages {
-        let uses: Vec<String> = m
-            .parts
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::ToolUse { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-            .collect();
-        let is_pure_result = m
-            .parts
-            .iter()
-            .all(|p| matches!(p, MessagePart::ToolResult { .. }));
-        if is_pure_result {
-            continue;
-        }
-        out.push(m.clone());
-        if !uses.is_empty() {
-            for u in &uses {
-                if let Some(rm) = result_by_id.get(u) {
-                    if let Some(MessagePart::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    }) = rm.parts.first()
-                    {
-                        out.push(Message {
-                            role: MessageRole::Tool,
-                            parts: vec![MessagePart::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                content: content.clone(),
-                                is_error: *is_error,
-                            }],
-                            turn_id: m.turn_id.clone(),
-                            origin: MessageOrigin::User,
-                        });
-                    }
-                } else {
-                    out.push(Message {
-                        role: MessageRole::Tool,
-                        parts: vec![MessagePart::ToolResult {
-                            tool_use_id: u.clone(),
-                            content: "[tool execution interrupted — no result captured]".into(),
-                            is_error: true,
-                        }],
-                        turn_id: m.turn_id.clone(),
-                        origin: MessageOrigin::User,
-                    });
-                }
-            }
-        }
-    }
-    out
-}
-
 pub fn truncate_prompt_to_budget(prompt: String, budget_tokens: u64) -> String {
     truncate_prompt_to_budget_tracked(prompt, budget_tokens).0
 }
@@ -3259,7 +3183,7 @@ mod sanitize_tests {
                 origin: MessageOrigin::User,
             },
         ];
-        let out = sanitize_tool_pairs(msgs);
+        let out = crate::message::normalize_tool_pairs_for_model(&msgs);
         let has_filler = out.iter().any(|m| {
             m.parts.iter().any(|p| {
                 matches!(p, MessagePart::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "call_orphan")
@@ -3297,7 +3221,7 @@ mod sanitize_tests {
                 origin: MessageOrigin::User,
             },
         ];
-        let out = sanitize_tool_pairs(msgs);
+        let out = crate::message::normalize_tool_pairs_for_model(&msgs);
         assert_eq!(
             out.len(),
             2,
