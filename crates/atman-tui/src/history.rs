@@ -4,9 +4,9 @@ use std::time::Instant;
 use atman_runtime::TranscriptEntry;
 use atman_runtime::message::{Message, MessagePart, MessageRole};
 use atman_runtime::stream::StreamFrame;
-use atman_runtime::workflow::WorkflowGraph;
+use atman_runtime::workflow::{WorkflowGraph, WorkflowPermissionIdentity, WorkflowPermissionState};
 
-use crate::app::{NoteLevel, OutputItem, frame_run_id};
+use crate::app::{NoteLevel, OutputItem};
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut tool_map: HashMap<String, String> = HashMap::new();
@@ -94,7 +94,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     // For a given flow_run_id, find the nearest spawned ancestor (the sub-agent
     // root). This groups all messages from a sub-agent's recursive subflows
     // (e.g. research_loop → research_loop) under one SubAgentActivity item.
-    let find_spawned_root = |rid: &str| -> Option<String> {
+    let resolve_spawned_root = |rid: &str| -> Option<String> {
         let mut current = Some(rid.to_string());
         while let Some(cur) = current {
             if spawned_roots.contains(&cur) {
@@ -104,11 +104,25 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
         }
         None
     };
+    let spawned_root_by_run: HashMap<String, String> = spawned_set
+        .iter()
+        .filter_map(|run_id| resolve_spawned_root(run_id).map(|root_id| (run_id.clone(), root_id)))
+        .collect();
+    let find_spawned_root = |rid: &str| spawned_root_by_run.get(rid).cloned();
 
     let mut out: Vec<OutputItem> = Vec::new();
     let mut current_workflow_idx: Option<usize> = None;
     let mut sub_agent_indices: HashMap<String, usize> = HashMap::new();
     let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
+    let mut sub_agent_entries: HashMap<String, Vec<&TranscriptEntry>> = HashMap::new();
+    let mut workflow_permission_batches: HashMap<
+        usize,
+        Vec<(
+            WorkflowPermissionIdentity,
+            atman_runtime::permission_audit::PermissionRequestAudit,
+            WorkflowPermissionState,
+        )>,
+    > = HashMap::new();
     let ensure_panel = |out: &mut Vec<OutputItem>, current: &mut Option<usize>| -> usize {
         if let Some(i) = *current
             && let Some(OutputItem::WorkflowPanel { ended_at: None, .. }) = out.get(i)
@@ -156,6 +170,36 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
         }
     };
     for entry in entries {
+        let entry_run_id = match entry {
+            TranscriptEntry::Message { flow_run_id, .. } => flow_run_id.clone(),
+            TranscriptEntry::FlowGraph { run_id, .. }
+            | TranscriptEntry::FlowStart { run_id, .. }
+            | TranscriptEntry::FlowNodeStart { run_id, .. }
+            | TranscriptEntry::FlowNodeEnd { run_id, .. }
+            | TranscriptEntry::ToolNode { run_id, .. }
+            | TranscriptEntry::FlowDone { run_id, .. } => Some(run_id.clone()),
+            TranscriptEntry::LlmCall { run_id, .. } => {
+                run_id.as_ref().map(|run_id| run_id.0.to_string())
+            }
+            TranscriptEntry::PermissionRequest { payload, .. } => {
+                Some(payload.requesting_run_id.0.to_string())
+            }
+            TranscriptEntry::PermissionGroup { payload, .. } => match &payload.owner {
+                atman_runtime::permission_audit::PermissionGroupAuditOwner::Flow { run_id } => {
+                    Some(run_id.0.to_string())
+                }
+                atman_runtime::permission_audit::PermissionGroupAuditOwner::User { .. }
+                | atman_runtime::permission_audit::PermissionGroupAuditOwner::System => None,
+            },
+            _ => None,
+        };
+        let spawned_root = entry_run_id.as_deref().and_then(&find_spawned_root);
+        if let Some(root_id) = spawned_root.as_ref() {
+            sub_agent_entries
+                .entry(root_id.clone())
+                .or_default()
+                .push(entry);
+        }
         match entry {
             TranscriptEntry::Message {
                 message: msg,
@@ -212,9 +256,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 {
                     apply_message_to_workflow(graph, msg, workflow_run_id);
                 }
-                if let Some(rid) = flow_run_id
-                    && let Some(root_id) = find_spawned_root(rid)
-                {
+                if let Some(root_id) = spawned_root {
                     if !sub_agent_indices.contains_key(&root_id) {
                         let (ok, cancelled) =
                             flow_dones.get(&root_id).cloned().unwrap_or((false, false));
@@ -485,9 +527,10 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     continue;
                 }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
-                if let Some(OutputItem::WorkflowPanel { graph, .. }) = out.get_mut(panel_idx) {
-                    graph.apply_permission_request_with_identity(identity.clone(), payload, *state);
-                }
+                workflow_permission_batches
+                    .entry(panel_idx)
+                    .or_default()
+                    .push((identity.clone(), payload.as_ref().clone(), *state));
             }
             TranscriptEntry::PermissionGroup { payload, resolved } => {
                 let Some(run_id) = (match &payload.owner {
@@ -528,6 +571,11 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             }
         }
     }
+    for (panel_idx, requests) in workflow_permission_batches {
+        if let Some(OutputItem::WorkflowPanel { graph, .. }) = out.get_mut(panel_idx) {
+            graph.apply_permission_requests(requests);
+        }
+    }
     // Fill in SubAgentActivity items with collected messages.
     for (root_id, msgs) in sub_agent_messages {
         if let Some(&idx) = sub_agent_indices.get(&root_id)
@@ -553,38 +601,24 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             }
             // Rebuild workflow_graph from transcript entries belonging to this
             // sub-agent (identified by transitive closure of spawned flows).
-            for entry in entries {
+            let mut permission_requests = Vec::new();
+            for entry in sub_agent_entries.remove(&root_id).unwrap_or_default() {
                 match entry {
                     TranscriptEntry::PermissionRequest {
                         identity,
                         payload,
                         state,
-                    } if find_spawned_root(&payload.requesting_run_id.0.to_string())
-                        == Some(root_id.clone()) =>
-                    {
-                        workflow_graph.apply_permission_request_with_identity(
+                    } => {
+                        permission_requests.push((
                             identity.clone(),
-                            payload,
+                            payload.as_ref().clone(),
                             *state,
-                        );
+                        ));
                         continue;
                     }
                     TranscriptEntry::PermissionGroup { payload, resolved } => {
-                        let owner_run_id = match &payload.owner {
-                            atman_runtime::permission_audit::PermissionGroupAuditOwner::Flow {
-                                run_id,
-                            } => run_id.0.to_string(),
-                            atman_runtime::permission_audit::PermissionGroupAuditOwner::User {
-                                ..
-                            }
-                            | atman_runtime::permission_audit::PermissionGroupAuditOwner::System => {
-                                continue;
-                            }
-                        };
-                        if find_spawned_root(&owner_run_id) == Some(root_id.clone()) {
-                            workflow_graph.apply_permission_group(payload, *resolved);
-                            continue;
-                        }
+                        workflow_graph.apply_permission_group(payload, *resolved);
+                        continue;
                     }
                     _ => {}
                 }
@@ -713,11 +747,10 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     }
                     _ => continue,
                 };
-                if let Some(rid) = frame_run_id(&frame)
-                    && find_spawned_root(rid) == Some(root_id.clone())
-                {
-                    workflow_graph.apply_stream_frame_at(&frame, ts);
-                }
+                workflow_graph.apply_stream_frame_at(&frame, ts);
+            }
+            if !permission_requests.is_empty() {
+                workflow_graph.apply_permission_requests(permission_requests);
             }
         }
     }
@@ -1037,7 +1070,41 @@ pub fn history_note(item_count: usize, message_count: usize) -> Option<OutputIte
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atman_runtime::event::{FlowNodeStatus, TurnId};
+    use atman_runtime::event::{FlowNodeStatus, FlowRunId, TurnId};
+
+    fn approved_permission(run_id: FlowRunId, tool_use_id: &str) -> TranscriptEntry {
+        let request_id = atman_runtime::permission::PermissionRequestId::now();
+        TranscriptEntry::PermissionRequest {
+            identity: WorkflowPermissionIdentity::Canonical {
+                request_id: request_id.clone(),
+            },
+            payload: Box::new(atman_runtime::permission_audit::PermissionRequestAudit {
+                request_id: Some(request_id),
+                revision: 1,
+                session_id: "session".into(),
+                requesting_run_id: run_id.clone(),
+                parent_run_id: None,
+                root_run_id: run_id,
+                tool_use_id: tool_use_id.into(),
+                tool: "fs.read".into(),
+                tier: atman_runtime::tool::Tier::Zero,
+                provenance: Default::default(),
+                target: atman_runtime::permission_audit::PermissionAuditTarget::User,
+                group_ids: Vec::new(),
+                policy: atman_runtime::permission_audit::PermissionPolicyReference {
+                    snapshot_id: "snapshot".into(),
+                    rule_id: "rule".into(),
+                },
+                escalation_path: Vec::new(),
+                decision_id: Some("decision".into()),
+                actor: None,
+                scope: None,
+                reason: None,
+                at: chrono::Utc::now(),
+            }),
+            state: WorkflowPermissionState::Approved,
+        }
+    }
 
     fn assistant(parts: Vec<MessagePart>) -> Message {
         Message {
@@ -1677,7 +1744,8 @@ mod tests {
         let root_run = "root-run-001".to_string();
         let loop_run = "loop-run-001".to_string();
         let sub_run = "sub-run-001".to_string();
-        let research_run = "research-run-001".to_string();
+        let research_flow_run_id = FlowRunId::now();
+        let research_run = research_flow_run_id.0.to_string();
 
         let entries = vec![
             // Root agent starts (spawned=false)
@@ -1737,6 +1805,15 @@ mod tests {
                 parent_node_id: None,
                 ts: None,
             },
+            TranscriptEntry::ToolNode {
+                run_id: research_run.clone(),
+                parent_node_id: "stmt_0".into(),
+                tool_use_id: "spawned-tool".into(),
+                tool_name: "fs.read".into(),
+                args_preview: "Cargo.toml".into(),
+                ts: None,
+            },
+            approved_permission(research_flow_run_id, "spawned-tool"),
             // Sub-agent assistant message (flow_run_id = research_run)
             TranscriptEntry::Message {
                 message: Message::assistant_text(TurnId::now(), "Here are the findings..."),
@@ -1798,17 +1875,24 @@ mod tests {
                 goal.clone(),
                 status.clone(),
                 workflow_graph.root.len(),
+                workflow_graph
+                    .find_node(&format!("tool:{research_run}:spawned-tool"))
+                    .and_then(|node| node.approval.clone()),
             )),
             _ => None,
         });
         assert!(sub_item.is_some(), "SubAgentActivity should be created");
-        let (msg_count, goal, status, graph_nodes) = sub_item.unwrap();
+        let (msg_count, goal, status, graph_nodes, approval) = sub_item.unwrap();
         assert_eq!(msg_count, 2, "should have 2 messages (user + assistant)");
         assert_eq!(goal, "read Cargo.toml", "goal from first user message");
         assert_eq!(status, "ok", "status from FlowDone");
         assert!(
             graph_nodes > 0,
             "workflow_graph should have nodes after rebuild, got {graph_nodes}"
+        );
+        assert_eq!(
+            approval,
+            Some(atman_runtime::workflow::ApprovalState::Approved)
         );
     }
 

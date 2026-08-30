@@ -495,7 +495,6 @@ impl WorkflowGraph {
             payload,
             state,
         );
-        self.refresh_permission_tool_approvals();
     }
 
     pub fn apply_permission_request_with_identity(
@@ -504,13 +503,23 @@ impl WorkflowGraph {
         payload: &PermissionRequestAudit,
         state: WorkflowPermissionState,
     ) {
-        self.permission_requests.insert(
-            identity,
-            WorkflowPermissionRequest {
-                payload: payload.clone(),
-                state,
-            },
-        );
+        self.apply_permission_requests([(identity, payload.clone(), state)]);
+    }
+
+    pub fn apply_permission_requests(
+        &mut self,
+        requests: impl IntoIterator<
+            Item = (
+                WorkflowPermissionIdentity,
+                PermissionRequestAudit,
+                WorkflowPermissionState,
+            ),
+        >,
+    ) {
+        for (identity, payload, state) in requests {
+            self.permission_requests
+                .insert(identity, WorkflowPermissionRequest { payload, state });
+        }
         self.refresh_permission_tool_approvals();
     }
 
@@ -544,30 +553,31 @@ impl WorkflowGraph {
                 })
                 .or_insert(request);
         }
-        for ((run_id, tool_use_id), request) in exact {
-            let id = tool_node_id(&run_id, &tool_use_id);
-            let Some(node) = find_node_mut(&mut self.root, &id) else {
-                continue;
-            };
-            node.approval = Some(match request.state {
-                WorkflowPermissionState::Pending => ApprovalState::Pending {
-                    level: format!("{:?}", request.payload.tier).to_lowercase(),
-                    preview: None,
-                },
-                WorkflowPermissionState::Approved | WorkflowPermissionState::Unrestricted => {
-                    ApprovalState::Approved
-                }
-                WorkflowPermissionState::Denied
-                | WorkflowPermissionState::Cancelled
-                | WorkflowPermissionState::Interrupted => ApprovalState::Denied {
-                    reason: request
-                        .payload
-                        .reason
-                        .clone()
-                        .unwrap_or_else(|| "permission denied".into()),
-                },
-            });
-        }
+        let approvals = exact
+            .into_iter()
+            .map(|((run_id, tool_use_id), request)| {
+                let approval = match request.state {
+                    WorkflowPermissionState::Pending => ApprovalState::Pending {
+                        level: format!("{:?}", request.payload.tier).to_lowercase(),
+                        preview: None,
+                    },
+                    WorkflowPermissionState::Approved | WorkflowPermissionState::Unrestricted => {
+                        ApprovalState::Approved
+                    }
+                    WorkflowPermissionState::Denied
+                    | WorkflowPermissionState::Cancelled
+                    | WorkflowPermissionState::Interrupted => ApprovalState::Denied {
+                        reason: request
+                            .payload
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "permission denied".into()),
+                    },
+                };
+                (tool_node_id(&run_id, &tool_use_id), approval)
+            })
+            .collect();
+        apply_permission_approvals(&mut self.root, &approvals);
     }
 
     pub fn apply_stream_frame(&mut self, frame: &crate::stream::StreamFrame) {
@@ -904,6 +914,18 @@ fn cascade_terminate(n: &mut WorkflowNode, status: NodeStatus, now: DateTime<Utc
     }
     for child in n.children.iter_mut() {
         cascade_terminate(child, status, now);
+    }
+}
+
+fn apply_permission_approvals(
+    nodes: &mut [WorkflowNode],
+    approvals: &BTreeMap<String, ApprovalState>,
+) {
+    for node in nodes {
+        if let Some(approval) = approvals.get(&node.id) {
+            node.approval = Some(approval.clone());
+        }
+        apply_permission_approvals(&mut node.children, approvals);
     }
 }
 
@@ -1382,6 +1404,68 @@ mod tests {
                 .approval,
             Some(ApprovalState::Pending { .. })
         ));
+    }
+
+    #[test]
+    fn batched_permission_projection_matches_incremental_updates() {
+        let run_id = FlowRunId::now();
+        let request_id = request_id();
+        let pending = permission_payload(
+            request_id.clone(),
+            run_id.clone(),
+            run_id.clone(),
+            "batched-tool",
+            Utc::now(),
+        );
+        let mut approved = pending.clone();
+        approved.at += chrono::Duration::seconds(1);
+        approved.reason = Some("approved".into());
+
+        let mut incremental = WorkflowGraph::new(TurnId::now());
+        add_tool(&mut incremental, &run_id, "batched-tool");
+        incremental.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical {
+                request_id: request_id.clone(),
+            },
+            &pending,
+            WorkflowPermissionState::Pending,
+        );
+        incremental.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical {
+                request_id: request_id.clone(),
+            },
+            &approved,
+            WorkflowPermissionState::Approved,
+        );
+
+        let mut batched = WorkflowGraph::new(TurnId::now());
+        add_tool(&mut batched, &run_id, "batched-tool");
+        batched.apply_permission_requests([
+            (
+                WorkflowPermissionIdentity::Canonical {
+                    request_id: request_id.clone(),
+                },
+                pending,
+                WorkflowPermissionState::Pending,
+            ),
+            (
+                WorkflowPermissionIdentity::Canonical { request_id },
+                approved,
+                WorkflowPermissionState::Approved,
+            ),
+        ]);
+
+        assert_eq!(batched.permission_requests, incremental.permission_requests);
+        assert_eq!(
+            batched
+                .find_node(&tool_node_id(&run_id.0.to_string(), "batched-tool"))
+                .unwrap()
+                .approval,
+            incremental
+                .find_node(&tool_node_id(&run_id.0.to_string(), "batched-tool"))
+                .unwrap()
+                .approval
+        );
     }
 
     #[test]
