@@ -19,6 +19,8 @@ The gate receives resource information from the tool's real argument schema. It 
 
 Shell command text is opaque to the permission gate. `bash.spawn` and `term.spawn` use their `cwd` argument as the structured filesystem scope for both approval and sandbox execution. A command that needs an external directory must set `cwd` to the narrowest required directory; an absolute path embedded only in `cmd` does not expand sandbox access.
 
+On macOS, the controlled process profile grants `/bin/ps` a command-specific sandbox exception because the system binary requires privileged process-inspection entitlements and cannot start inside a nested Seatbelt sandbox. The exception applies only to `/bin/ps`; the shell and every other child process remain sandboxed, and the enclosing `bash.spawn` or `term.spawn` invocation still passes through the normal permission gate.
+
 The main policy actions are:
 
 | Action | Result |

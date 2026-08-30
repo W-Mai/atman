@@ -448,6 +448,7 @@ pub const DEFAULT_PROFILE: &str = r#"(version 1)
 (deny default)
 (import "system.sb")
 (allow process*)
+(allow process-exec (literal "/bin/ps") (with no-sandbox))
 (allow signal (target same-sandbox))
 (allow file-read*
   (subpath "/System")
@@ -488,6 +489,7 @@ mod tests {
         assert!(profile.contains("/read"));
         assert!(profile.contains("/write"));
         assert!(profile.contains("/private/var/select"));
+        assert!(profile.contains("(allow process-exec (literal \"/bin/ps\") (with no-sandbox))"));
         assert!(profile.contains("(allow network*)"));
     }
 

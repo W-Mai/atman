@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Controlled process inspection** — macOS sandboxed shell and terminal calls can run the system `/bin/ps` binary through a command-specific exception without removing sandbox restrictions from the enclosing shell or other children.
 - **Controlled shell filesystem scope** — `bash.spawn` accepts an explicit working directory that is shared by permission provenance and the process sandbox, while macOS shell startup can read its system selector path.
 - **Reckless approval projection** — unrestricted tool calls resolve their transient permission records before rendering and no longer remain as stale user approvals.
 - **TUI exit lifecycle** — TUI shutdown releases the sole REPL input sender so double Ctrl+C exits an idle session without waiting on the input channel.
