@@ -202,6 +202,9 @@ impl Executor {
     ) -> Result<Value, RuntimeError> {
         let turn_id = invocation.turn_id.clone();
         let session = invocation.session.clone();
+        if let Some(session) = session.as_ref() {
+            session.set_tool_output_budget(self.tool_ctx.tool_output_budget);
+        }
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
         let flow_cancel = session
             .as_ref()
@@ -461,5 +464,30 @@ mod tests {
             )),
             Err(ProviderLifecycleAlreadyAttached)
         ));
+    }
+
+    #[tokio::test]
+    async fn root_invocation_projects_tool_output_budget_into_session() {
+        let budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 7,
+            max_bytes: 777,
+            max_line_bytes: 111,
+        };
+        let mut executor = Executor::new();
+        executor.tool_ctx.tool_output_budget = budget;
+        let session = std::sync::Arc::new(Session::open_ephemeral());
+        let file = atman_dsl::parse::parse_file(
+            r#"flow start() -> string {
+    return "ok"
+}"#,
+        )
+        .unwrap();
+
+        executor
+            .run_in_turn(&file, "start", Vec::new(), None, Some(session.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(session.tool_output_budget(), budget);
     }
 }

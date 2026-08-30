@@ -141,6 +141,7 @@ pub struct Session {
     pending_images: Mutex<Vec<crate::message::ImageSource>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     output_store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
+    tool_output_budget: Mutex<crate::tools::tool_output::ToolOutputBudget>,
     fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
     project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
@@ -814,6 +815,7 @@ impl Session {
             message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             output_store: output_store.clone(),
+            tool_output_budget: Mutex::new(Default::default()),
             turn: TurnState::new(),
             watch: WatchHub {
                 stream_tx,
@@ -981,6 +983,7 @@ impl Session {
             ),
             messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
             output_store: output_store.clone(),
+            tool_output_budget: Mutex::new(Default::default()),
             turn: TurnState::new(),
             watch: WatchHub {
                 stream_tx,
@@ -1041,6 +1044,7 @@ impl Session {
             message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             output_store: output_store.clone(),
+            tool_output_budget: Mutex::new(Default::default()),
             turn: TurnState::new(),
             watch: WatchHub {
                 stream_tx,
@@ -1142,6 +1146,14 @@ impl Session {
 
     pub fn output_store(&self) -> std::sync::Arc<crate::tools::tool_output::OutputStore> {
         self.output_store.clone()
+    }
+
+    pub fn set_tool_output_budget(&self, budget: crate::tools::tool_output::ToolOutputBudget) {
+        *self.tool_output_budget.lock().unwrap() = budget;
+    }
+
+    pub fn tool_output_budget(&self) -> crate::tools::tool_output::ToolOutputBudget {
+        *self.tool_output_budget.lock().unwrap()
     }
 
     pub fn mark_file_read(&self, path: &std::path::Path) {
@@ -2087,9 +2099,10 @@ pub struct AppendMessageCommand {
 impl AppendMessageCommand {
     pub fn execute(&self, session: &Session) -> u64 {
         let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
-        let msg = crate::tools::tool_output::maybe_truncate_tool_message(
+        let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
             &self.msg,
             Some(&session.output_store),
+            session.tool_output_budget(),
         );
         let is_internal = msg.origin == crate::message::MessageOrigin::Internal;
         let event =

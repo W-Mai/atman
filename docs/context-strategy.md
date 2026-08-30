@@ -87,6 +87,11 @@ cut backward when necessary to keep a retained ToolResult with its ToolUse, so o
 complete tool batch may temporarily make the segment slightly larger than the target.
 An active unpaired ToolUse at the tail is preserved until its result is appended.
 
+Tool results use the same configured line, byte, and per-line budget in dispatch,
+`session.push`, child segments, and direct Session appends. The Executor projects the
+active budget into the Session at root-flow start, while spawned ToolCtx values inherit
+the same snapshot.
+
 History recall is separate from automatic prompt assembly:
 
 - `memory.history.search` searches persisted session messages through FTS5.

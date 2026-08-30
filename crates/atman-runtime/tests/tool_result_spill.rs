@@ -82,6 +82,40 @@ async fn small_tool_result_not_truncated() {
 }
 
 #[tokio::test]
+async fn session_append_uses_the_configured_tool_output_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Session::open(tmp.path()).unwrap();
+    let budget = ToolOutputBudget {
+        max_lines: 4,
+        max_bytes: 64,
+        max_line_bytes: 64,
+    };
+    session.set_tool_output_budget(budget);
+    session.append_message(
+        Message {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: "tu_configured".into(),
+                content: "X".repeat(256),
+                is_error: false,
+            }],
+            turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
+        },
+        None,
+    );
+
+    let messages = session.messages();
+    let MessagePart::ToolResult { content, .. } = &messages[0].parts[0] else {
+        panic!()
+    };
+    let excerpt = content.split("\n\n[Output truncated:").next().unwrap();
+    assert_eq!(excerpt.len(), budget.max_bytes);
+    assert!(content.contains("output_id="));
+    session.shutdown().await;
+}
+
+#[tokio::test]
 async fn reopened_session_reads_full_output_by_byte_offset() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();
