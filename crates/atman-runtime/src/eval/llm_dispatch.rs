@@ -255,6 +255,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     sink.emit(crate::event::Event::LlmCall {
                         model: model.clone(),
                         provider: provider.name().to_string(),
+                        context_plan_id: None,
                         usage: crate::provider::TokenUsage::default(),
                         wallclock_ms: 0,
                         ttft_ms: None,
@@ -299,10 +300,12 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 reasoning: reasoning.clone(),
                 stall_timeout_secs,
             };
+            let context_plan = crate::context_plan::ModelContextPlan::new(req);
+            let context_plan_id = context_plan.id().clone();
             let start = std::time::Instant::now();
             let outcome = call_and_maybe_stream(
                 provider.as_ref(),
-                req,
+                context_plan.into_request(),
                 StreamCallCtx {
                     session: ctx.session_runtime.as_deref(),
                     stream_tx: stream_tx.clone(),
@@ -351,6 +354,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 sink.emit(crate::event::Event::LlmCall {
                     model: model.clone(),
                     provider: provider.name().to_string(),
+                    context_plan_id: Some(context_plan_id),
                     usage: usage.clone(),
                     wallclock_ms: elapsed_ms,
                     ttft_ms,

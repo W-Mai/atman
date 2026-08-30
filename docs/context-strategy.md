@@ -32,6 +32,11 @@ Explicit tool selectors retain their declared order, wildcard matches are sorted
 qualified name, and overlaps are removed. Tool schema object keys are recursively
 canonicalized, so registry insertion order does not change the provider prefix.
 
+Before dispatch, the runtime wraps the assembled request in a provider-neutral
+`ModelContextPlan`. Its `ContextPlanId` is recorded on the corresponding `llm_call`
+event and does not alter provider serialization. The identifier is the correlation
+key between the compiled plan and its resulting call event.
+
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if
 the call itself uses an isolated `prompt:` rather than session messages. The managed

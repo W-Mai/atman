@@ -268,6 +268,7 @@ mod tests {
             Event::LlmCall {
                 model: "m".into(),
                 provider: "p".into(),
+                context_plan_id: None,
                 usage: crate::provider::TokenUsage::default(),
                 wallclock_ms: 0,
                 ttft_ms: None,

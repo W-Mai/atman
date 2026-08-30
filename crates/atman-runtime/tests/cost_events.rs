@@ -35,12 +35,14 @@ async fn llm_call_event_records_wallclock_and_tokens() {
         Event::LlmCall {
             model,
             provider,
+            context_plan_id,
             usage,
             status,
             ..
         } => {
             assert_eq!(model, "mock-model");
             assert_eq!(provider, "mock");
+            assert!(context_plan_id.is_some());
             assert!(matches!(status, LlmCallStatus::Ok));
             assert!(usage.input > 0);
             assert!(usage.output > 0);

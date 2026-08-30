@@ -97,6 +97,7 @@ mod tests {
         Event::LlmCall {
             model: model.into(),
             provider: provider.into(),
+            context_plan_id: None,
             usage: TokenUsage {
                 input: in_tok,
                 output: out_tok,
@@ -115,6 +116,7 @@ mod tests {
         Event::LlmCall {
             model: model.into(),
             provider: "p".into(),
+            context_plan_id: None,
             usage: TokenUsage {
                 input: 5,
                 ..Default::default()

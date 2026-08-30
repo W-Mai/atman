@@ -109,6 +109,8 @@ pub enum Event {
     LlmCall {
         model: String,
         provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_plan_id: Option<crate::context_plan::ContextPlanId>,
         usage: crate::provider::TokenUsage,
         wallclock_ms: u64,
         ttft_ms: Option<u64>,
@@ -704,5 +706,19 @@ mod tests {
         let back: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.seq, 42);
         assert!(matches!(back.event, Event::UserMsg { .. }));
+    }
+
+    #[test]
+    fn legacy_llm_call_without_context_plan_id_still_deserializes() {
+        let json = r#"{"type":"llm_call","model":"m","provider":"p","usage":{"input":1,"cached_input":0,"output":0,"cache_write":0,"reasoning_tokens":0},"wallclock_ms":1,"ttft_ms":null,"tokens_per_second":null,"status":{"kind":"ok"},"run_id":null,"node_id":null}"#;
+        let event: Event = serde_json::from_str(json).unwrap();
+
+        assert!(matches!(
+            event,
+            Event::LlmCall {
+                context_plan_id: None,
+                ..
+            }
+        ));
     }
 }
