@@ -214,6 +214,53 @@ async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_flow_rejects_a_registered_tool_omitted_from_the_request() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "scripted",
+            "scripted-agent",
+            8_192,
+            None,
+        )]))
+        .await;
+    let provider = Arc::new(ScriptedAgentProvider::new(vec![
+        AgentTurn::ToolUse {
+            name: "fs.list".into(),
+            input: serde_json::json!({"path": "."}),
+        },
+        AgentTurn::FinalText("recovered after denied call".into()),
+    ]));
+    let sink = EventSink::new();
+    let ex = Executor::with_events(sink.clone());
+    tools::register_tier_zero(&ex.tools);
+    ex.providers.register(provider);
+
+    let result = ex
+        .run(
+            &parse_file(agent_source()).unwrap(),
+            "agent",
+            vec![("user_prompt".into(), Value::Str("inspect files".into()))],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Value::Str(text) if text == "recovered after denied call"));
+    let denied = sink.snapshot().into_iter().any(|event| match event {
+        Event::ToolResultMsg { message, .. } => message.parts.iter().any(|part| {
+            matches!(
+                part,
+                MessagePart::ToolResult { content, is_error: true, .. }
+                    if content.contains("was not exposed")
+            )
+        }),
+        _ => false,
+    });
+    assert!(
+        denied,
+        "unexposed registered tool should return a tool error"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_flow_hits_max_iterations_when_llm_keeps_calling_tools() {
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(

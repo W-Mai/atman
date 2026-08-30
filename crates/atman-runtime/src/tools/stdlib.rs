@@ -951,6 +951,24 @@ fn prepare_dispatch(
 
     let mut prepared = Vec::with_capacity(parsed.len());
     for (index, id, name, input, mut call_intent) in parsed {
+        if ctx
+            .model_tool_exposures
+            .as_ref()
+            .is_some_and(|exposures| !exposures.claim(ctx.flow_run_id.as_ref(), &id, &name))
+        {
+            emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
+            prepared.push(PreparedEntry::Failed {
+                index,
+                msg: build_error_result(
+                    ctx,
+                    &id,
+                    &format!(
+                        "dispatch_all: tool `{name}` was not exposed by the LLM request that produced call `{id}`"
+                    ),
+                ),
+            });
+            continue;
+        }
         let Some(tool) = registry.get(&name) else {
             emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
             prepared.push(PreparedEntry::Failed {
@@ -1505,6 +1523,71 @@ mod tests {
         fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
             Box::pin(async { Ok(Value::Unit) })
         }
+    }
+
+    struct UnexposedProbeTool;
+
+    impl Tool for UnexposedProbeTool {
+        fn name(&self) -> &str {
+            "hidden.probe"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { panic!("unexposed tool must not execute") })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_rejects_calls_outside_their_request_exposure() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(UnexposedProbeTool));
+        let mut ctx = authorized_ctx(std::sync::Arc::new(registry));
+        let response = crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![crate::message::MessagePart::ToolUse {
+                id: "hidden-call".into(),
+                name: "hidden.probe".into(),
+                input: serde_json::json!({}),
+                intent: None,
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        };
+        let exposures = crate::tool::ToolExposureRegistry::default();
+        exposures.register_response(ctx.flow_run_id.as_ref(), &response, ["allowed.probe"]);
+        ctx.model_tool_exposures = Some(exposures);
+        let uses = Value::List(vec![Value::Struct(vec![
+            ("id".into(), Value::Str("hidden-call".into())),
+            ("name".into(), Value::Str("hidden.probe".into())),
+            ("input".into(), Value::Struct(Vec::new())),
+        ])]);
+
+        let Value::List(results) = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("dispatch result list")
+        };
+        assert!(matches!(
+            &results[0],
+            Value::Message(crate::message::Message { parts, .. })
+                if matches!(
+                    &parts[..],
+                    [crate::message::MessagePart::ToolResult { content, is_error: true, .. }]
+                        if content.contains("was not exposed")
+                )
+        ));
     }
 
     #[tokio::test]

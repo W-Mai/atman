@@ -27,6 +27,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Request tool exposure** — model-generated tool calls are bound to the exact tool name exposed by their originating LLM request and can be dispatched only once within the producing flow.
 - **Tool-pair projection** — model requests normalize parallel tool results in call order, preserve non-tool content from mixed messages, and remove orphan results without duplicating valid parts.
 - **Tool-result budgets** — direct Session appends, runtime dispatch, `session.push`, and spawned flows use the same configured output budget and continuation store.
 - **Child context trimming** — ephemeral subflow message limits cut at complete tool-transaction boundaries and preserve active tool calls until their results arrive.

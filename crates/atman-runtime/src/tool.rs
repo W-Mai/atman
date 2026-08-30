@@ -139,6 +139,7 @@ pub struct ToolCtx {
     pub safety: Option<crate::safety::SafetyConfig>,
     pub current_model: Option<String>,
     pub call_intent: Option<crate::message::ToolCallIntent>,
+    pub(crate) model_tool_exposures: Option<ToolExposureRegistry>,
     pub(crate) invocation_env: crate::invocation_env::InvocationEnv,
     pub watch_rules: Option<crate::streaming::WatchRules>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
@@ -146,6 +147,80 @@ pub struct ToolCtx {
     pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
     pub agent_entry: Option<std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
     pub tool_output_budget: crate::tools::tool_output::ToolOutputBudget,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ToolExposureRegistry {
+    pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ToolExposureKey, usize>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ToolExposureKey {
+    flow_run_id: Option<crate::event::FlowRunId>,
+    tool_use_id: String,
+    tool_name: String,
+}
+
+impl ToolExposureRegistry {
+    pub(crate) fn register_response<I, S>(
+        &self,
+        flow_run_id: Option<&crate::event::FlowRunId>,
+        message: &crate::message::Message,
+        exposed_names: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let exposed_names: std::collections::HashSet<String> = exposed_names
+            .into_iter()
+            .map(|name| name.as_ref().to_string())
+            .collect();
+        let mut id_counts = std::collections::HashMap::new();
+        for part in &message.parts {
+            if let crate::message::MessagePart::ToolUse { id, .. } = part {
+                *id_counts.entry(id.as_str()).or_insert(0usize) += 1;
+            }
+        }
+
+        let mut pending = self.pending.lock().unwrap();
+        for part in &message.parts {
+            let crate::message::MessagePart::ToolUse { id, name, .. } = part else {
+                continue;
+            };
+            if id_counts.get(id.as_str()) != Some(&1) || !exposed_names.contains(name) {
+                continue;
+            }
+            *pending
+                .entry(ToolExposureKey {
+                    flow_run_id: flow_run_id.cloned(),
+                    tool_use_id: id.clone(),
+                    tool_name: name.clone(),
+                })
+                .or_insert(0) += 1;
+        }
+    }
+
+    pub(crate) fn claim(
+        &self,
+        flow_run_id: Option<&crate::event::FlowRunId>,
+        tool_use_id: &str,
+        tool_name: &str,
+    ) -> bool {
+        let key = ToolExposureKey {
+            flow_run_id: flow_run_id.cloned(),
+            tool_use_id: tool_use_id.to_string(),
+            tool_name: tool_name.to_string(),
+        };
+        let mut pending = self.pending.lock().unwrap();
+        let Some(count) = pending.get_mut(&key) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            pending.remove(&key);
+        }
+        true
+    }
 }
 
 impl ToolCtx {
@@ -738,6 +813,65 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_tool_exposure_is_scoped_exact_and_single_use() {
+        let exposures = ToolExposureRegistry::default();
+        let run = crate::event::FlowRunId::now();
+        let other_run = crate::event::FlowRunId::now();
+        let response = crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![crate::message::MessagePart::ToolUse {
+                id: "call-1".into(),
+                name: "allowed.probe".into(),
+                input: serde_json::json!({}),
+                intent: None,
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        };
+        exposures.register_response(Some(&run), &response, ["allowed.probe"]);
+
+        assert!(!exposures.claim(Some(&other_run), "call-1", "allowed.probe"));
+        assert!(!exposures.claim(Some(&run), "call-1", "changed.probe"));
+        assert!(exposures.claim(Some(&run), "call-1", "allowed.probe"));
+        assert!(!exposures.claim(Some(&run), "call-1", "allowed.probe"));
+    }
+
+    #[test]
+    fn model_tool_exposure_rejects_unexposed_and_duplicate_response_ids() {
+        let exposures = ToolExposureRegistry::default();
+        let run = crate::event::FlowRunId::now();
+        let response = crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![
+                crate::message::MessagePart::ToolUse {
+                    id: "duplicate".into(),
+                    name: "allowed.probe".into(),
+                    input: serde_json::json!({}),
+                    intent: None,
+                },
+                crate::message::MessagePart::ToolUse {
+                    id: "duplicate".into(),
+                    name: "allowed.probe".into(),
+                    input: serde_json::json!({}),
+                    intent: None,
+                },
+                crate::message::MessagePart::ToolUse {
+                    id: "hidden".into(),
+                    name: "hidden.probe".into(),
+                    input: serde_json::json!({}),
+                    intent: None,
+                },
+            ],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        };
+        exposures.register_response(Some(&run), &response, ["allowed.probe"]);
+
+        assert!(!exposures.claim(Some(&run), "duplicate", "allowed.probe"));
+        assert!(!exposures.claim(Some(&run), "hidden", "hidden.probe"));
+    }
 
     struct ReservedEnvTool;
 

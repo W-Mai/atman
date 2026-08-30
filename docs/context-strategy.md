@@ -96,6 +96,12 @@ Before provider projection, one canonical tool-pair normalizer moves every resul
 to its assistant call, emits parallel results in call order, fills interrupted calls,
 and removes only orphan result parts. Ordinary text in mixed messages remains visible.
 
+Each root invocation also owns a transient request-exposure registry. Successful LLM
+responses register only tool-use IDs and canonical names that appeared in that request's
+tool definitions. `dispatch_all` claims the matching flow-scoped entry before consulting
+the global registry; unexposed, renamed, duplicate-ID, cross-flow, and replayed calls are
+returned as tool errors without execution.
+
 History recall is separate from automatic prompt assembly:
 
 - `memory.history.search` searches persisted session messages through FTS5.

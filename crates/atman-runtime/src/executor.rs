@@ -306,6 +306,7 @@ impl Executor {
             .tool_ctx
             .clone()
             .with_invocation_env(invocation.env.clone());
+        tool_ctx.model_tool_exposures = Some(Default::default());
         tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
         tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
         tool_ctx.trust = Some(trust);
