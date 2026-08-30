@@ -1,5 +1,4 @@
 use crate::error::RuntimeError;
-use crate::storage;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -97,7 +96,7 @@ impl Tool for FlowCheck {
 }
 
 async fn read_flow_source(flow_ref: &str) -> Result<(std::path::PathBuf, String), RuntimeError> {
-    for path in flow_candidates(flow_ref) {
+    for path in super::flow_source::candidates(flow_ref) {
         match tokio::fs::read_to_string(&path).await {
             Ok(src) => return Ok((path, src)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -112,22 +111,4 @@ async fn read_flow_source(flow_ref: &str) -> Result<(std::path::PathBuf, String)
     Err(RuntimeError::ToolFailed(format!(
         "flow.check: flow `{flow_ref}` not found"
     )))
-}
-
-fn flow_candidates(flow_ref: &str) -> Vec<std::path::PathBuf> {
-    let path = std::path::PathBuf::from(flow_ref);
-    if path.is_absolute() {
-        return vec![path];
-    }
-    let file_name = if flow_ref.ends_with(".at") {
-        flow_ref.to_string()
-    } else {
-        format!("{flow_ref}.at")
-    };
-    let mut out = Vec::new();
-    if let Ok(config_dir) = storage::config_dir() {
-        out.push(config_dir.join("commands").join(&file_name));
-    }
-    out.push(std::path::PathBuf::from(file_name));
-    out
 }

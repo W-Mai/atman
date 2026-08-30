@@ -312,7 +312,7 @@ async fn managed_allocation_failures_do_not_register_flow_or_task() {
 }
 
 #[tokio::test]
-async fn prepare_failure_releases_allocated_workspace() {
+async fn flow_source_failure_happens_before_workspace_allocation() {
     let setup = Setup::new(true, true);
     let missing_flow = setup._repo.path().join("missing.at");
 
@@ -340,9 +340,7 @@ async fn prepare_failure_releases_allocated_workspace() {
         .unwrap()
         .list()
         .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].lifecycle_state(), WorkspaceState::Released);
-    assert!(!records[0].worktree_path.exists());
+    assert!(records.is_empty());
 }
 
 #[tokio::test]

@@ -132,7 +132,7 @@ fn bare_repository_requires_configured_external_root_and_stays_under_it() {
 }
 
 #[tokio::test]
-async fn automatic_ownership_ignores_user_supplied_owner_fields() {
+async fn automatic_ownership_rejects_user_supplied_owner_fields_before_allocation() {
     let repo = repo();
     let flow_path = repo.path().join("noop.at");
     std::fs::write(
@@ -165,7 +165,7 @@ async fn automatic_ownership_ignores_user_supplied_owner_fields() {
         .with_flow_workspace_service(Arc::new(service));
     ctx.flow_run_id = Some(root_run_id);
     ctx.flow_identity = Some(root_identity);
-    let value = AgentSpawn
+    let error = AgentSpawn
         .call(
             ToolArgs {
                 positional: Vec::new(),
@@ -183,19 +183,15 @@ async fn automatic_ownership_ignores_user_supplied_owner_fields() {
             &ctx,
         )
         .await
-        .unwrap();
-    assert!(matches!(value, Value::Str(ref value) if value == "ok"));
+        .unwrap_err();
+    assert!(error.to_string().contains("owner_flow"));
+    assert!(error.to_string().contains("owner_session"));
 
     let records = WorkspaceManager::at(repo.path(), None)
         .unwrap()
         .list()
         .unwrap();
-    assert_eq!(records.len(), 1);
-    let record = &records[0];
-    assert_eq!(record.owner_session.as_deref(), Some("trusted-session"));
-    let owner_flow = record.owner_flow.as_deref().unwrap();
-    assert_ne!(owner_flow, "spoof-flow");
-    uuid::Uuid::parse_str(owner_flow).unwrap();
+    assert!(records.is_empty());
 }
 
 #[tokio::test]

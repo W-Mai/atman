@@ -167,8 +167,6 @@ async fn agent_spawn_returns_final_assistant_text_when_no_tools_used() {
                 "flow".into(),
                 Value::Str(format!("{}@test_flow", flow_path)),
             ),
-            ("model".into(), Value::Str("mock".into())),
-            ("max_iterations".into(), Value::Int(3)),
         ],
     };
     let result = AgentSpawn.call(args, &ctx).await.unwrap();
@@ -210,7 +208,6 @@ async fn agent_spawn_reports_missing_provider_gracefully() {
                 "flow".into(),
                 Value::Str(format!("{}@test_flow", flow_path)),
             ),
-            ("model".into(), Value::Str("mock".into())),
         ],
     };
     let result = AgentSpawn.call(args, &ctx).await.unwrap();

@@ -614,7 +614,8 @@ impl Tool for AgentSpawn {
              - \"subagent.at\" — no @, takes first non-describe flow\n\
              - \"/abs/path/my.at@main\" — absolute path\n\n\
              Default flow is `subagent.at` (research/verify/implement/review roles). \
-             Required: `flow`. `async` is optional (default true). Other named args pass through to the flow. \
+             Required: `flow`. `version` rejects source changes after discovery. `async` is optional (default true). \
+             Other named args pass through to the flow. \
              A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
              Pass only parameters declared by flow.describe. Missing params use flow-defined defaults.",
@@ -626,6 +627,7 @@ impl Tool for AgentSpawn {
             "type": "object",
             "properties": {
                 "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
+                "version": {"type": "string", "description": "Optional source fingerprint returned by flow.search or flow.describe."},
                 "arguments": {
                     "type": "object",
                     "additionalProperties": true,
@@ -829,12 +831,21 @@ struct PreparedFlowAgent {
     flows: std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
 }
 
-async fn prepare_flow_agent(flow_ref: &str) -> Result<PreparedFlowAgent, RuntimeError> {
+async fn prepare_flow_agent(
+    flow_ref: &str,
+    expected_version: Option<&str>,
+) -> Result<PreparedFlowAgent, RuntimeError> {
     let (file_part, flow_name) = match flow_ref.split_once('@') {
         Some((file, name)) => (file, Some(name)),
         None => (flow_ref, None),
     };
     let (path, source) = read_flow_source(file_part).await?;
+    let actual_version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+    if expected_version.is_some_and(|version| version != actual_version) {
+        return Err(RuntimeError::ToolFailed(format!(
+            "flow.spawn: stale version for `{flow_ref}`; search again"
+        )));
+    }
     let file = atman_dsl::parse::parse_file(&source).map_err(|error| {
         RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {error}", path.display()))
     })?;
@@ -892,6 +903,9 @@ fn spawned_workspace_authority(
 
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
+    let version = extract_flow_version(&args)?;
+    let prepared = prepare_flow_agent(&flow, version.as_deref()).await?;
+    let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
     let run_id = FlowRunId::now();
     let policy = workspace_policy(&args)?;
     let session_id = workspace_session(ctx, policy)?;
@@ -901,7 +915,6 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         session_id,
         run_id.clone(),
     );
-    let prepared = prepare_flow_agent(&flow).await?;
     let child_identity = register_prepared_identity(
         &prepared,
         ctx,
@@ -933,7 +946,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     }
     run_prepared_flow_agent(
         prepared,
-        &args,
+        flow_args,
         &child_ctx,
         run_id,
         child_messages,
@@ -963,6 +976,9 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     })?;
 
     let flow_ref = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
+    let version = extract_flow_version(&args)?;
+    let prepared = prepare_flow_agent(&flow_ref, version.as_deref()).await?;
+    let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
     let child_run_id = FlowRunId::now();
@@ -974,7 +990,6 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         session_id.clone(),
         child_run_id.clone(),
     );
-    let prepared = prepare_flow_agent(&flow_ref).await?;
     let child_identity = register_prepared_identity(
         &prepared,
         ctx,
@@ -1053,7 +1068,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
         let result = run_prepared_flow_agent(
             prepared,
-            &args,
+            flow_args,
             &ctx_for_flow,
             child_run_id.clone(),
             Arc::clone(&entry_clone.messages),
@@ -1375,7 +1390,7 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
 
 async fn run_prepared_flow_agent(
     prepared: PreparedFlowAgent,
-    args: &ToolArgs,
+    flow_args: Vec<(String, Value)>,
     ctx: &ToolCtx,
     run_id: FlowRunId,
     child_messages: Arc<Mutex<Vec<Message>>>,
@@ -1392,7 +1407,6 @@ async fn run_prepared_flow_agent(
         ));
     };
     let PreparedFlowAgent { path, flow, flows } = prepared;
-    let flow_args = resolve_flow_arguments(&flow, args);
     let initial_prompt = invocation_user_message(&flow, &flow_args)?;
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
@@ -1430,22 +1444,36 @@ async fn run_prepared_flow_agent(
 fn resolve_flow_arguments(
     flow: &atman_dsl::ast::FlowDecl,
     args: &ToolArgs,
-) -> Vec<(String, Value)> {
+) -> Result<Vec<(String, Value)>, RuntimeError> {
     let mut flow_args = Vec::new();
+    let mut unknown = Vec::new();
     // Extract the structured flow parameters first.
-    if let Some(Value::Struct(fields)) = args.named("arguments") {
-        for (key, value) in fields {
-            if key == "flow" || key == "async" || key == "inherit_context" || key == "workspace" {
-                continue;
+    match args.named("arguments") {
+        Some(Value::Struct(fields)) => {
+            for (key, value) in fields {
+                if flow
+                    .params
+                    .iter()
+                    .any(|parameter| parameter.name.name == *key)
+                {
+                    flow_args.push((key.clone(), value.clone()));
+                } else {
+                    unknown.push(key.clone());
+                }
             }
-            if flow.params.iter().any(|p| p.name.name == *key) {
-                flow_args.push((key.clone(), value.clone()));
-            }
+        }
+        Some(Value::Unit) | None => {}
+        Some(other) => {
+            return Err(RuntimeError::ToolFailed(format!(
+                "flow.spawn: `arguments` must be a struct, got {}",
+                other.kind_name()
+            )));
         }
     }
     // Backward compat: top-level named args (pre-arguments schema).
     for (key, value) in &args.named {
         if key == "flow"
+            || key == "version"
             || key == "async"
             || key == "inherit_context"
             || key == "arguments"
@@ -1453,13 +1481,30 @@ fn resolve_flow_arguments(
         {
             continue;
         }
-        if flow.params.iter().any(|p| p.name.name == *key)
-            && !flow_args.iter().any(|(k, _)| k == key)
+        if !flow
+            .params
+            .iter()
+            .any(|parameter| parameter.name.name == *key)
         {
+            unknown.push(key.clone());
+        } else if flow_args.iter().any(|(name, _)| name == key) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "flow.spawn: argument `{key}` was provided twice"
+            )));
+        } else {
             flow_args.push((key.clone(), value.clone()));
         }
     }
-    flow_args
+    if !unknown.is_empty() {
+        unknown.sort();
+        unknown.dedup();
+        return Err(RuntimeError::ToolFailed(format!(
+            "flow.spawn: unknown argument(s) for `{}`: {}",
+            flow.name.name,
+            unknown.join(", ")
+        )));
+    }
+    Ok(flow_args)
 }
 
 fn should_inherit_context(args: &ToolArgs) -> bool {
@@ -1575,8 +1620,19 @@ fn extract_flow(args: &ToolArgs) -> Result<Option<String>, RuntimeError> {
     }
 }
 
+fn extract_flow_version(args: &ToolArgs) -> Result<Option<String>, RuntimeError> {
+    match args.named("version") {
+        Some(Value::Str(version)) if !version.trim().is_empty() => Ok(Some(version.clone())),
+        Some(Value::Unit) | None => Ok(None),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: "version string".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
 async fn read_flow_source(flow_ref: &str) -> Result<(PathBuf, String), RuntimeError> {
-    for path in flow_candidates(flow_ref) {
+    for path in super::flow_source::candidates(flow_ref) {
         match tokio::fs::read_to_string(&path).await {
             Ok(src) => return Ok((path, src)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1591,30 +1647,6 @@ async fn read_flow_source(flow_ref: &str) -> Result<(PathBuf, String), RuntimeEr
     Err(RuntimeError::ToolFailed(format!(
         "flow.spawn: flow `{flow_ref}` not found"
     )))
-}
-
-fn flow_candidates(flow_ref: &str) -> Vec<PathBuf> {
-    let path = PathBuf::from(flow_ref);
-    if path.is_absolute() {
-        return vec![path];
-    }
-    let file_name = if flow_ref.ends_with(".at") {
-        flow_ref.to_string()
-    } else {
-        format!("{flow_ref}.at")
-    };
-    let mut out = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        out.push(
-            PathBuf::from(home)
-                .join(".config")
-                .join("atman")
-                .join("commands")
-                .join(&file_name),
-        );
-    }
-    out.push(PathBuf::from(file_name));
-    out
 }
 
 fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
@@ -1689,7 +1721,8 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSpawn, FlowRegistry, FlowRunStatus, inherited_context_snapshot, terminal_then_emit,
+        AgentSpawn, FlowRegistry, FlowRunStatus, inherited_context_snapshot, prepare_flow_agent,
+        resolve_flow_arguments, terminal_then_emit,
     };
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use crate::permission::PermissionBroker;
@@ -1702,6 +1735,62 @@ mod tests {
     struct SandboxProbe;
 
     struct SessionTextProbe;
+
+    #[tokio::test]
+    async fn prepared_flow_rejects_a_stale_discovery_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.at");
+        let source = "flow child(goal: string) -> string { return goal }";
+        std::fs::write(&path, source).unwrap();
+        let flow_ref = format!("{}@child", path.display());
+        let version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+
+        prepare_flow_agent(&flow_ref, Some(&version)).await.unwrap();
+        let error = match prepare_flow_agent(&flow_ref, Some("blake3:stale")).await {
+            Ok(_) => panic!("stale version should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("stale version"));
+    }
+
+    #[test]
+    fn flow_arguments_reject_unknown_and_duplicate_fields() {
+        let file = atman_dsl::parse::parse_file(
+            "flow child(goal: string, retries: int = 1) -> string { return goal }",
+        )
+        .unwrap();
+        let flow = &file.flows[0];
+        let unknown = ToolArgs {
+            named: vec![(
+                "arguments".into(),
+                Value::Struct(vec![
+                    ("goal".into(), Value::Str("work".into())),
+                    ("typo".into(), Value::Bool(true)),
+                ]),
+            )],
+            ..Default::default()
+        };
+        let error = resolve_flow_arguments(flow, &unknown).unwrap_err();
+        assert!(error.to_string().contains("unknown argument(s)"));
+        assert!(error.to_string().contains("typo"));
+
+        let duplicate = ToolArgs {
+            named: vec![
+                (
+                    "arguments".into(),
+                    Value::Struct(vec![("goal".into(), Value::Str("nested".into()))]),
+                ),
+                ("goal".into(), Value::Str("top-level".into())),
+            ],
+            ..Default::default()
+        };
+        assert!(
+            resolve_flow_arguments(flow, &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("provided twice")
+        );
+    }
 
     #[test]
     fn flow_entry_keeps_execution_goal_separate_from_display_label() {
