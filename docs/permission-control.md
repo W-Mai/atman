@@ -17,6 +17,8 @@ Tool invocation
 
 The gate receives resource information from the tool's real argument schema. It does not guess that an arbitrary positional argument is a path. A resource can carry more than one risk—for example, a Git worktree operation can involve both a repository and a new worktree path.
 
+Shell command text is opaque to the permission gate. `bash.spawn` and `term.spawn` use their `cwd` argument as the structured filesystem scope for both approval and sandbox execution. A command that needs an external directory must set `cwd` to the narrowest required directory; an absolute path embedded only in `cmd` does not expand sandbox access.
+
 The main policy actions are:
 
 | Action | Result |

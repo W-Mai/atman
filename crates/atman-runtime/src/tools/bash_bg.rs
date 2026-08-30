@@ -991,6 +991,9 @@ block=true: waits for the command to finish, then returns stdout/stderr/exit_cod
 Use block_timeout_ms to set a max wait (default 30s). Use this for:\n\
 - short commands where you need the result immediately (ls, git status, echo)\n\
 - commands that finish quickly\n\n\
+Set cwd to the narrowest directory the command needs to access. In controlled\n\
+modes, cwd is the filesystem scope shown for approval and opened by the process\n\
+sandbox; paths embedded only in cmd do not expand sandbox access.\n\n\
 Do NOT use `sleep` in your command to wait — use block=true with block_timeout_ms\n\
 instead, or use the sleep tool to pause the workflow.",
         )
@@ -1001,6 +1004,7 @@ instead, or use the sleep tool to pause the workflow.",
             "type": "object",
             "properties": {
                 "cmd": {"type": "string", "description": "Shell command line."},
+                "cwd": {"type": "string", "description": "Working directory and sandbox filesystem scope. Set this to the narrowest directory needed for paths outside the current workspace."},
                 "block": {"type": "boolean", "default": false, "description": "If true, wait for process to exit before returning."},
                 "block_timeout_ms": {"type": "integer", "description": "Only with block=true. Max wait. 0 = no timeout. Default 30000."},
                 "timeout_ms": {"type": "integer", "description": "Process kill timeout in ms. Default 1800000 (30min). 0 = no timeout."},
@@ -1012,11 +1016,12 @@ instead, or use the sleep tool to pause the workflow.",
 
     fn invocation_provenance(
         &self,
-        _args: &ToolArgs,
+        args: &ToolArgs,
         ctx: &ToolCtx,
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        let explicit_cwd = extract_optional_string(args, "cwd").map(std::path::PathBuf::from);
         Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
-            .with_cwd(ctx, None)?
+            .with_cwd(ctx, explicit_cwd.as_deref())?
             .with_risk(crate::trust::RiskKind::ProcessSpawn))
     }
 
@@ -1043,7 +1048,8 @@ instead, or use the sleep tool to pause the workflow.",
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.spawn: registry not available".into())
             })?;
-            let cwd = ctx.resolve_cwd(None)?;
+            let explicit_cwd = extract_optional_string(&args, "cwd").map(std::path::PathBuf::from);
+            let cwd = ctx.resolve_cwd(explicit_cwd.as_deref())?;
             let execution_policy = ctx.execution_policy().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.spawn: missing execution policy snapshot".into())
             })?;
@@ -1338,6 +1344,13 @@ fn extract_optional_bool(args: &ToolArgs, name: &str) -> Option<bool> {
     }
 }
 
+fn extract_optional_string(args: &ToolArgs, name: &str) -> Option<String> {
+    match args.named(name)? {
+        Value::Str(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1420,6 +1433,7 @@ mod tests {
     struct RecordingBackgroundSandbox {
         strict: StrictLaunch,
         strict_calls: AtomicUsize,
+        cwd: Mutex<Option<std::path::PathBuf>>,
     }
 
     impl crate::sandbox::Sandbox for RecordingBackgroundSandbox {
@@ -1436,11 +1450,12 @@ mod tests {
             &self,
             _cmd: &[&str],
             _env: &[(String, String)],
-            _cwd: &std::path::Path,
+            cwd: &std::path::Path,
             authorization: &crate::permission::InvocationAuthorization,
         ) -> Result<Box<dyn crate::sandbox::BackgroundLauncher>, crate::sandbox::SandboxLaunchError>
         {
             self.strict_calls.fetch_add(1, Ordering::SeqCst);
+            *self.cwd.lock().unwrap() = Some(cwd.to_path_buf());
             match self.strict {
                 StrictLaunch::Success => Ok(Box::new(TestBackgroundLauncher)),
                 StrictLaunch::Denied => Err(crate::sandbox::SandboxLaunchError::Denied(Box::new(
@@ -1581,16 +1596,22 @@ mod tests {
     }
 
     #[test]
-    fn spawn_provenance_ignores_cmd_as_path() {
+    fn spawn_provenance_uses_explicit_cwd_not_cmd_as_path() {
         let dir = TempDir::new().unwrap();
         let ctx = ctx_with_registry(Arc::new(BgRegistry::new()), dir.path());
         let args = ToolArgs {
-            named: vec![("cmd".into(), Value::Str("/bin/echo hi".into()))],
+            named: vec![
+                ("cmd".into(), Value::Str("/bin/echo hi".into())),
+                ("cwd".into(), Value::Str(dir.path().display().to_string())),
+            ],
             ..ToolArgs::default()
         };
         let provenance = BashSpawn.invocation_provenance(&args, &ctx).unwrap();
         assert_eq!(provenance.path, None);
-        assert!(provenance.cwd.is_some());
+        assert_eq!(
+            provenance.cwd,
+            Some(crate::fs_access::canonicalize_stable(dir.path()))
+        );
         assert!(
             provenance
                 .risks
@@ -1980,10 +2001,11 @@ mod tests {
         let sandbox = Arc::new(RecordingBackgroundSandbox {
             strict: StrictLaunch::Success,
             strict_calls: AtomicUsize::new(0),
+            cwd: Mutex::new(None),
         });
         let args = ToolArgs {
             positional: vec![Value::Str("ignored".into())],
-            named: vec![],
+            named: vec![("cwd".into(), Value::Str(dir.path().display().to_string()))],
         };
         let ctx = brokered_spawn_ctx(registry.clone(), dir.path(), eager_sandbox_policy())
             .with_sandbox(sandbox.clone());
@@ -1992,6 +2014,10 @@ mod tests {
         BashSpawn.call(args, &ctx).await.unwrap();
 
         assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *sandbox.cwd.lock().unwrap(),
+            Some(crate::fs_access::canonicalize_stable(dir.path()))
+        );
         assert_eq!(background_entries(&registry, dir.path()), 1);
         registry.kill_all();
     }
@@ -2003,6 +2029,7 @@ mod tests {
         let sandbox = Arc::new(RecordingBackgroundSandbox {
             strict: StrictLaunch::Denied,
             strict_calls: AtomicUsize::new(0),
+            cwd: Mutex::new(None),
         });
         let args = ToolArgs {
             positional: vec![Value::Str("ignored".into())],
@@ -2026,6 +2053,7 @@ mod tests {
         let sandbox = Arc::new(RecordingBackgroundSandbox {
             strict: StrictLaunch::RuntimeError,
             strict_calls: AtomicUsize::new(0),
+            cwd: Mutex::new(None),
         });
         let args = ToolArgs {
             positional: vec![Value::Str("ignored".into())],
@@ -2049,6 +2077,7 @@ mod tests {
         let sandbox = Arc::new(RecordingBackgroundSandbox {
             strict: StrictLaunch::Denied,
             strict_calls: AtomicUsize::new(0),
+            cwd: Mutex::new(None),
         });
         let args = ToolArgs {
             positional: vec![Value::Str("ignored".into())],
@@ -2173,6 +2202,42 @@ mod tests {
             if !output.is_empty() {
                 let canonical_workspace = crate::fs_access::canonicalize_stable(workspace.path());
                 assert!(output.contains(&canonical_workspace.display().to_string()));
+                return;
+            }
+        }
+        panic!("pwd output did not arrive in time");
+    }
+
+    #[tokio::test]
+    async fn spawn_uses_explicit_cwd() {
+        let registry = Arc::new(BgRegistry::new());
+        let session_dir = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let ctx = ctx_with_registry(registry, session_dir.path());
+        let value = BashSpawn
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Str("pwd".into())],
+                    named: vec![("cwd".into(), Value::Str(cwd.path().display().to_string()))],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let log_path = value
+            .field("log_path")
+            .and_then(|value| match value {
+                Value::Str(path) => Some(path.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if !output.is_empty() {
+                let canonical_cwd = crate::fs_access::canonicalize_stable(cwd.path());
+                assert!(output.contains(&canonical_cwd.display().to_string()));
                 return;
             }
         }

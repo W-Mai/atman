@@ -457,6 +457,7 @@ pub const DEFAULT_PROFILE: &str = r#"(version 1)
   (subpath "/Library")
   (subpath "/private/etc")
   (subpath "/private/var/db")
+  (subpath "/private/var/select")
   (subpath "/dev")
   (subpath "/tmp")
   (subpath "/private/tmp")
@@ -486,6 +487,7 @@ mod tests {
         assert!(profile.contains("/cwd"));
         assert!(profile.contains("/read"));
         assert!(profile.contains("/write"));
+        assert!(profile.contains("/private/var/select"));
         assert!(profile.contains("(allow network*)"));
     }
 
