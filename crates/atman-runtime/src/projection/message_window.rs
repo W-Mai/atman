@@ -174,6 +174,17 @@ pub fn parse_context_compact_event(v: &serde_json::Value) -> Option<CompactRepla
     })
 }
 
+fn raw_event_belongs_to_root(
+    value: &serde_json::Value,
+    spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
+) -> bool {
+    value["flow_run_id"]
+        .as_str()
+        .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+        .map(crate::event::FlowRunId)
+        .is_none_or(|run_id| !spawned_flow_ids.contains(&run_id))
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactReplayEvent {
     range_start: usize,
@@ -368,6 +379,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 }
             }
             "context_compact" => {
+                if !raw_event_belongs_to_root(v, &spawned_flow_ids) {
+                    continue;
+                }
                 let Some(event) = parse_context_compact_event(v) else {
                     continue;
                 };
@@ -401,6 +415,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 }
             }
             "compaction_summary" => {
+                if !raw_event_belongs_to_root(v, &spawned_flow_ids) {
+                    continue;
+                }
                 out.push(TranscriptEntry::CompactionSummary {
                     range_start: v["range_start"].as_u64().unwrap_or(0) as usize,
                     range_end: v["range_end"].as_u64().unwrap_or(0) as usize,
@@ -826,6 +843,7 @@ pub(crate) fn apply_envelope_to_messages(
             acc.push((env.seq, message.clone()));
         }
         crate::event::Event::ContextCompact {
+            flow_run_id,
             compacted_range_start,
             compacted_range_end,
             replacement_msg_seq,
@@ -833,7 +851,7 @@ pub(crate) fn apply_envelope_to_messages(
             after_tokens,
             before_tokens,
             ..
-        } => {
+        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             let range_start = *compacted_range_start as usize;
             let range_end = *compacted_range_end as usize;
             if range_start > range_end || range_end >= acc.len() {
@@ -872,7 +890,11 @@ pub(crate) fn apply_envelope_to_messages(
                 acc.insert(insertion_idx, replacement);
             }
         }
-        crate::event::Event::Checkpoint { messages, .. } => {
+        crate::event::Event::Checkpoint {
+            flow_run_id,
+            messages,
+            ..
+        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             acc.clear();
             acc.extend(
                 messages
@@ -978,6 +1000,87 @@ mod tests {
             ),
         ];
         assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
+    }
+
+    #[test]
+    fn transcript_replay_ignores_spawned_compaction_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let child = FlowRunId::now();
+        let events = [
+            EventEnvelope::new(
+                1,
+                Event::UserMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: None,
+                    message: message(MessageRole::User, "root user"),
+                },
+            ),
+            EventEnvelope::new(2, flow_start(child.clone(), None, true)),
+            EventEnvelope::new(
+                3,
+                Event::SystemMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(child.clone()),
+                    message: Message::system_compact_summary(
+                        TurnId::now(),
+                        "child summary",
+                        0,
+                        0,
+                        1,
+                    ),
+                },
+            ),
+            EventEnvelope::new(
+                4,
+                Event::ContextCompact {
+                    session_id: "session".into(),
+                    flow_run_id: Some(child.clone()),
+                    before_tokens: 100,
+                    after_tokens: 10,
+                    compacted_range_start: 0,
+                    compacted_range_end: 0,
+                    summary_text: Some("child summary".into()),
+                    replacement_msg_seq: Some(3),
+                },
+            ),
+            EventEnvelope::new(
+                5,
+                Event::CompactionSummary {
+                    session_id: "session".into(),
+                    flow_run_id: Some(child),
+                    range_start: 0,
+                    range_end: 0,
+                    compacted_count: 1,
+                    before_tokens: 100,
+                    after_tokens: 10,
+                    summary: "child summary".into(),
+                },
+            ),
+        ];
+        let jsonl = events
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        std::fs::write(&path, jsonl).unwrap();
+
+        let entries = super::replay_transcript_from(&path).unwrap();
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            super::TranscriptEntry::Message { message, flow_run_id: None }
+                if message.text_concat() == "root user"
+        )));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            super::TranscriptEntry::FlowStart { spawned: true, .. }
+        )));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry, super::TranscriptEntry::CompactionSummary { .. }))
+        );
     }
 
     #[test]

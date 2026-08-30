@@ -11,6 +11,7 @@ All notable changes to atman are documented in this file.
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
 - **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, usage source, call purpose, root/child identity, provider-projected cache-prefix observation, and assistant tool-batch width for the plan compiled for the dispatch attempt. `Event::ToolResultMetrics` records raw and model-visible result sizes.
 - **Context record message parts** — `MessagePart` includes a structured `ContextRecord` variant with authority, retention, revision, and content digest metadata.
+- **Scoped compaction events** — `Event::CompactionSummary`, `Event::ContextCompact`, and `Event::Checkpoint` include an optional child flow owner.
 - **MCP tool snapshots** — `McpClient::tools` is replaced by `McpClient::tool_snapshot()`, which returns a canonical, fingerprinted snapshot suitable for atomic publication.
 - **Provider lifecycle result surfaces** — `AuthLogin`, `AuthLogout`, `RefreshProviderModels`, `AddConfigProvider`, and `UpdateConfigProvider` are replaced by `TuiControl::MutateProvider`, `ProviderMutation::UpsertConfig`, `TuiCommand::ProviderMutationResult`, and `TuiCommand::ProviderCatalogRefreshResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. `TuiControl::TestProvider` carries a complete `ProviderEntry` instead of separate type, credential, and endpoint fields. `BootstrapOutcome` exposes `provider_catalog_refresh_plan` and is non-exhaustive. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
 
@@ -37,6 +38,8 @@ All notable changes to atman are documented in this file.
 - **Workspace lifecycle visibility** — flow status, task snapshots, and session events expose optional workspace identity, path, state, and cleanup diagnostics for spawned children.
 
 ### 🐛 Fixes
+
+- **Scoped compaction events** — child flow compaction summaries, range replacements, and checkpoints retain their flow owner and cannot rewrite the root model window or transcript projection.
 
 - **Scoped context usage** — provider/model/purpose/root-or-child buckets retain their latest plan usage independently, so child and helper calls cannot replace the root session's active-window reading.
 - **Context usage fallback** — provider token counts remain authoritative when present; missing input and output usage is estimated from the complete compiled request without adding cached input twice.

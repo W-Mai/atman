@@ -599,10 +599,13 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             turn_id.as_ref().map(|t| t.0.to_string()),
             flow_run_id.as_ref().map(|r| r.0.to_string()),
         ),
-        Event::CompactionSummary { .. }
-        | Event::LlmCall { .. }
-        | Event::ContextCompact { .. }
-        | Event::Checkpoint { .. }
+        Event::CompactionSummary { flow_run_id, .. }
+        | Event::ContextCompact { flow_run_id, .. }
+        | Event::Checkpoint { flow_run_id, .. } => (
+            None,
+            flow_run_id.as_ref().map(|run_id| run_id.0.to_string()),
+        ),
+        Event::LlmCall { .. }
         | Event::PendingPrompt { .. }
         | Event::PromptResolved { .. }
         | Event::TerminalFinalState { .. }
@@ -668,6 +671,44 @@ mod tests {
             assert_eq!(
                 extract_anchors(&event),
                 (Some(turn_id.to_string()), Some(flow_run_id.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn every_owned_compaction_event_keeps_its_flow_anchor() {
+        let flow_run_id = FlowRunId::now();
+        for event in [
+            Event::CompactionSummary {
+                session_id: "session".into(),
+                flow_run_id: Some(flow_run_id.clone()),
+                range_start: 0,
+                range_end: 1,
+                compacted_count: 2,
+                before_tokens: 100,
+                after_tokens: 10,
+                summary: "summary".into(),
+            },
+            Event::ContextCompact {
+                session_id: "session".into(),
+                flow_run_id: Some(flow_run_id.clone()),
+                before_tokens: 100,
+                after_tokens: 10,
+                compacted_range_start: 0,
+                compacted_range_end: 1,
+                summary_text: Some("summary".into()),
+                replacement_msg_seq: None,
+            },
+            Event::Checkpoint {
+                session_id: "session".into(),
+                flow_run_id: Some(flow_run_id.clone()),
+                messages: Vec::new(),
+                window_tokens: 10,
+            },
+        ] {
+            assert_eq!(
+                extract_anchors(&event),
+                (None, Some(flow_run_id.to_string()))
             );
         }
     }

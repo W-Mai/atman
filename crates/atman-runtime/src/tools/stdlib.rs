@@ -271,6 +271,7 @@ impl Tool for ReplaceMessagesRange {
                         .as_ref()
                         .map(|t| t.0.to_string())
                         .unwrap_or_default(),
+                    flow_run_id: ctx.message_flow_run_id(),
                     before_tokens,
                     after_tokens,
                     compacted_range_start: seq_span.0,

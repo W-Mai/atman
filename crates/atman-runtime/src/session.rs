@@ -1955,6 +1955,7 @@ impl Session {
         self.sink.mark_compacted();
         self.sink.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             before_tokens,
             after_tokens,
             compacted_range_start: 0,
@@ -1964,6 +1965,7 @@ impl Session {
         });
         self.sink.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             range_start: 0,
             range_end: 0,
             compacted_count: rewritten_count,
@@ -1991,6 +1993,7 @@ impl Session {
         }
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             messages: replacement,
             window_tokens: after_tokens,
         });
@@ -2022,6 +2025,7 @@ impl Session {
         self.sink.mark_compacted();
         self.sink.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             before_tokens,
             after_tokens,
             compacted_range_start: range.start as u64,
@@ -2031,6 +2035,7 @@ impl Session {
         });
         self.sink.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             range_start: range.start as u64,
             range_end: range.end.saturating_sub(1) as u64,
             compacted_count: range.end - range.start,
@@ -2058,6 +2063,7 @@ impl Session {
         }
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             messages: replacement,
             window_tokens: after_tokens,
         });
@@ -2109,6 +2115,7 @@ impl Session {
         });
         self.sink.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             before_tokens,
             after_tokens,
             compacted_range_start: range.start as u64,
@@ -2118,6 +2125,7 @@ impl Session {
         });
         self.sink.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             range_start: range.start as u64,
             range_end: range.end.saturating_sub(1) as u64,
             compacted_count: range.end - range.start,
@@ -2152,6 +2160,7 @@ impl Session {
         self.refresh_window_snapshot();
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
+            flow_run_id: None,
             messages: checkpoint_messages.to_vec(),
             window_tokens,
         });

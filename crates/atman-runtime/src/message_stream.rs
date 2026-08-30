@@ -245,6 +245,7 @@ mod tests {
     ) -> Event {
         Event::ContextCompact {
             session_id: "test".into(),
+            flow_run_id: None,
             before_tokens,
             after_tokens,
             compacted_range_start: range_start,
@@ -490,6 +491,7 @@ mod tests {
             make_msg_event("user_msg", &old, 1),
             Event::Checkpoint {
                 session_id: "test".into(),
+                flow_run_id: None,
                 messages: vec![summary.clone(), retained.clone()],
                 window_tokens: 10,
             },
@@ -619,6 +621,7 @@ mod tests {
             13,
             Event::ContextCompact {
                 session_id: "test".into(),
+                flow_run_id: None,
                 before_tokens: 1000,
                 after_tokens: 100,
                 compacted_range_start: 1,
@@ -659,6 +662,54 @@ mod tests {
             "full must contain pre-compact 'old assistant', got: {:?}",
             texts
         );
+    }
+
+    #[test]
+    fn spawned_compaction_and_checkpoint_do_not_mutate_root_window() {
+        let child_run_id = crate::event::FlowRunId::now();
+        let events = event_envelopes(vec![
+            make_msg_event("user_msg", &user("root user"), 1),
+            make_msg_event("assistant_msg", &assistant("root assistant"), 2),
+            Event::FlowStart {
+                run_id: child_run_id.clone(),
+                flow_name: "child".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: true,
+            },
+            Event::SystemMsg {
+                turn_id: TurnId::now(),
+                flow_run_id: Some(child_run_id.clone()),
+                message: compact_summary("child summary"),
+            },
+            Event::ContextCompact {
+                session_id: "test".into(),
+                flow_run_id: Some(child_run_id.clone()),
+                before_tokens: 100,
+                after_tokens: 10,
+                compacted_range_start: 0,
+                compacted_range_end: 1,
+                summary_text: Some("child summary".into()),
+                replacement_msg_seq: Some(4),
+            },
+            Event::Checkpoint {
+                session_id: "test".into(),
+                flow_run_id: Some(child_run_id),
+                messages: vec![compact_summary("child checkpoint")],
+                window_tokens: 10,
+            },
+        ]);
+        let stream = MessageStream::new(events);
+
+        assert_eq!(
+            stream
+                .window()
+                .iter()
+                .map(Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["root user", "root assistant"]
+        );
+        assert_eq!(stream.full_messages().len(), 2);
     }
 
     #[test]

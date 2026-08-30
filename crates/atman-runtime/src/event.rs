@@ -174,6 +174,8 @@ pub enum Event {
     },
     CompactionSummary {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
         range_start: u64,
         range_end: u64,
         compacted_count: usize,
@@ -201,6 +203,8 @@ pub enum Event {
     },
     ContextCompact {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
         before_tokens: u64,
         after_tokens: u64,
         compacted_range_start: u64,
@@ -212,6 +216,8 @@ pub enum Event {
     },
     Checkpoint {
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
         messages: Vec<crate::message::Message>,
         window_tokens: u64,
     },
@@ -703,6 +709,7 @@ mod tests {
     fn compaction_summary_serializes_all_fields() {
         let ev = Event::CompactionSummary {
             session_id: "sess".into(),
+            flow_run_id: None,
             range_start: 2,
             range_end: 8,
             compacted_count: 7,
@@ -725,6 +732,7 @@ mod tests {
     fn seq_and_set_seq_cover_compaction_summary() {
         let _ev = Event::CompactionSummary {
             session_id: "sess".into(),
+            flow_run_id: None,
             range_start: 0,
             range_end: 1,
             compacted_count: 2,
@@ -797,5 +805,43 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn legacy_compaction_events_without_flow_owner_still_deserialize() {
+        for value in [
+            serde_json::json!({
+                "type": "compaction_summary",
+                "session_id": "session",
+                "range_start": 0,
+                "range_end": 1,
+                "compacted_count": 2,
+                "before_tokens": 100,
+                "after_tokens": 10,
+                "summary": "summary",
+            }),
+            serde_json::json!({
+                "type": "context_compact",
+                "session_id": "session",
+                "before_tokens": 100,
+                "after_tokens": 10,
+                "compacted_range_start": 0,
+                "compacted_range_end": 1,
+            }),
+            serde_json::json!({
+                "type": "checkpoint",
+                "session_id": "session",
+                "messages": [],
+                "window_tokens": 10,
+            }),
+        ] {
+            let event: Event = serde_json::from_value(value).unwrap();
+            assert!(match event {
+                Event::CompactionSummary { flow_run_id, .. }
+                | Event::ContextCompact { flow_run_id, .. }
+                | Event::Checkpoint { flow_run_id, .. } => flow_run_id.is_none(),
+                _ => false,
+            });
+        }
     }
 }
