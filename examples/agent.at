@@ -1,8 +1,8 @@
 flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
+        invocation { user_message: user_prompt }
     }
-    _prompt_lands_via_begin_turn = user_prompt
     return subflow(agent_loop, 0)
 }
 

@@ -12,6 +12,9 @@ pub enum ValidationError {
     #[error("undefined tool `{0}`")]
     UndefinedTool(String),
 
+    #[error("invocation user_message must reference a declared string parameter")]
+    InvalidInvocationUserMessage,
+
     #[error(
         "watch on `{target}` uses event `{event}`, but bind is a {target_kind} node — expected one of {expected}"
     )]
@@ -25,6 +28,7 @@ pub enum ValidationError {
 
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
+    validate_invocation_contract(flow, &mut errors);
     let mut scope: HashSet<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
     for name in BUILTIN_VARS {
         scope.insert(name.to_string());
@@ -35,6 +39,48 @@ pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<Validat
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn validate_invocation_contract(flow: &FlowDecl, errors: &mut Vec<ValidationError>) {
+    let Some((_, value)) = flow.contract.as_ref().and_then(|contract| {
+        contract
+            .blocks
+            .iter()
+            .find(|block| block.name.name == "invocation")
+            .and_then(|block| {
+                block
+                    .kwargs
+                    .iter()
+                    .find(|(name, _)| name.name == "user_message")
+            })
+    }) else {
+        return;
+    };
+    let atman_dsl::ast::Expr::Ident(parameter_name) = value else {
+        errors.push(ValidationError::InvalidInvocationUserMessage);
+        return;
+    };
+    let Some(parameter) = flow
+        .params
+        .iter()
+        .find(|parameter| parameter.name.name == parameter_name.name)
+    else {
+        errors.push(ValidationError::InvalidInvocationUserMessage);
+        return;
+    };
+    let is_string = matches!(
+        &parameter.ty,
+        atman_dsl::ast::TypeExpr::Named(name) if name.name == "string"
+    );
+    let has_supported_default = parameter.default.as_ref().is_none_or(|default| {
+        matches!(
+            default,
+            atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(_))
+        )
+    });
+    if !is_string || !has_supported_default {
+        errors.push(ValidationError::InvalidInvocationUserMessage);
     }
 }
 
@@ -296,6 +342,32 @@ mod tests {
 "#;
         let file = parse_file(src).unwrap();
         validate(&file.flows[0], &registry_with_fs()).expect("valid flow");
+    }
+
+    #[test]
+    fn invocation_user_message_requires_a_declared_string_parameter() {
+        for source in [
+            r#"flow t(count: int) -> int {
+    contract { invocation { user_message: count } }
+    return count
+}"#,
+            r#"flow t(prompt: string) -> string {
+    contract { invocation { user_message: "prompt" } }
+    return prompt
+}"#,
+            r#"flow t(prefix: string, prompt: string = prefix) -> string {
+    contract { invocation { user_message: prompt } }
+    return prompt
+}"#,
+        ] {
+            let file = parse_file(source).unwrap();
+            let errors = validate(&file.flows[0], &registry_with_fs()).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidInvocationUserMessage))
+            );
+        }
     }
 
     #[test]

@@ -120,7 +120,6 @@ impl Provider for RecordingProvider {
 
 const AGENT_CONTEXT_SESSION: &str = r#"
 flow agent(user_prompt: string) -> string {
-    _prompt_lands_via_begin_turn = user_prompt
     return subflow(agent_loop, 0)
 }
 
@@ -222,6 +221,14 @@ async fn context_session_feeds_session_history_into_llm_call() {
     assert_eq!(captured.len(), 2, "two LLM calls expected");
 
     let first = &captured[0];
+    assert_eq!(
+        first
+            .iter()
+            .filter(|m| { m.role == MessageRole::User && m.text_concat() == "what's in the file?" })
+            .count(),
+        1,
+        "root agent prompt must remain single-copy"
+    );
     assert!(
         first.iter().any(|m| {
             m.role == MessageRole::User && m.text_concat().contains("what's in the file?")

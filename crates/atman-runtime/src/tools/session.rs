@@ -60,7 +60,7 @@ impl Tool for SessionPush {
                     });
                 }
             };
-            let Some(handle) = &ctx.session_messages_handle else {
+            let Some(_handle) = &ctx.session_messages_handle else {
                 return Err(RuntimeError::ToolFailed(
                     "session.push: no session messages handle available".into(),
                 ));
@@ -75,30 +75,41 @@ impl Tool for SessionPush {
                     ctx.output_store.as_deref(),
                     ctx.tool_output_budget,
                 );
-                emit_message_event(ctx, &msg);
-                let flow_run_id = match msg.role {
-                    MessageRole::Assistant | MessageRole::Tool => {
-                        ctx.flow_run_id.as_ref().map(|r| r.0.to_string())
-                    }
-                    MessageRole::User | MessageRole::System => None,
-                };
-                if let Some(tx) = &ctx.stream_tx {
-                    let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
-                        flow_run_id,
-                        message: msg.clone(),
-                    });
-                }
-                handle.lock().unwrap().push(msg.clone());
-                // Cap ephemeral sub-agent segments; root persists via event sink.
-                if ctx.session_runtime.is_none() && handle.lock().unwrap().len() > 100 {
-                    let mut h = handle.lock().unwrap();
-                    let start = h.len() - 100;
-                    h.drain(..start);
-                }
+                append_message_to_context(ctx, msg)?;
             }
             Ok(Value::Unit)
         })
     }
+}
+
+pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(), RuntimeError> {
+    let Some(handle) = &ctx.session_messages_handle else {
+        return Err(RuntimeError::ToolFailed(
+            "session message context is unavailable".into(),
+        ));
+    };
+    emit_message_event(ctx, &msg);
+    let flow_run_id = match msg.role {
+        MessageRole::Assistant | MessageRole::Tool => {
+            ctx.flow_run_id.as_ref().map(|run_id| run_id.0.to_string())
+        }
+        MessageRole::User => ctx.message_flow_run_id().map(|run_id| run_id.0.to_string()),
+        MessageRole::System => None,
+    };
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
+            flow_run_id,
+            message: msg.clone(),
+        });
+    }
+    let mut messages = handle.lock().unwrap();
+    messages.push(msg);
+    // Cap ephemeral sub-agent segments; root persists via event sink.
+    if ctx.session_runtime.is_none() && messages.len() > 100 {
+        let start = messages.len() - 100;
+        messages.drain(..start);
+    }
+    Ok(())
 }
 
 fn emit_message_event(ctx: &ToolCtx, msg: &Message) {

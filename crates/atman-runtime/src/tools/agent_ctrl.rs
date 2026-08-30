@@ -593,6 +593,7 @@ impl Tool for AgentSpawn {
              - \"/abs/path/my.at@main\" — absolute path\n\n\
              Default flow is `subagent.at` (research/verify/implement/review roles). \
              Required: `flow`. `async` is optional (default true). Other named args pass through to the flow. \
+             A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
              Best practice: call flow.list to see available flows and params, then pass \
              matching named args. Missing params use flow-defined defaults.",
@@ -902,30 +903,34 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     };
     child_ctx.flow_run_id = Some(run_id.clone());
     child_ctx.flow_identity = Some(child_identity);
-    run_prepared_flow_agent(prepared, &args, &child_ctx, run_id).await
+    let child_messages = Arc::new(Mutex::new(Vec::new()));
+    if should_inherit_context(&args)
+        && let Some(parent) = &ctx.session_messages_handle
+    {
+        *child_messages.lock().unwrap() = parent.lock().unwrap().clone();
+    }
+    run_prepared_flow_agent(
+        prepared,
+        &args,
+        &child_ctx,
+        run_id,
+        child_messages,
+        Arc::new(tokio::sync::Mutex::new(())),
+    )
+    .await
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
-    // Extract flow params from the `arguments` object (generic, no hardcoded param names).
-    let arg_fields: Vec<(String, Value)> = match args.named("arguments") {
-        Some(Value::Struct(fields)) => fields.clone(),
-        _ => Vec::new(),
-    };
     // Use the first string-typed argument as a display label for the FlowEntry.
-    let display_label = arg_fields
-        .iter()
-        .find_map(|(_, v)| {
-            if let Value::Str(s) = v {
-                Some(s.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-    let inherit_context = args
-        .named("inherit_context")
-        .map(|v| matches!(v, Value::Bool(true)))
-        .unwrap_or(false);
+    let display_label = match args.named("arguments") {
+        Some(Value::Struct(fields)) => fields.iter().find_map(|(_, value)| match value {
+            Value::Str(value) => Some(value.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+    .unwrap_or_default();
+    let inherit_context = should_inherit_context(&args);
     let flow_registry = ctx.flow_registry.clone().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
     })?;
@@ -1017,8 +1022,15 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             ctx_for_flow = ctx_for_flow.with_workspace(binding);
         }
 
-        let result =
-            run_prepared_flow_agent(prepared, &args, &ctx_for_flow, child_run_id.clone()).await;
+        let result = run_prepared_flow_agent(
+            prepared,
+            &args,
+            &ctx_for_flow,
+            child_run_id.clone(),
+            Arc::clone(&entry_clone.messages),
+            Arc::clone(&entry_clone.compact_lock),
+        )
+        .await;
         let killed = entry_clone.cancel.is_cancelled();
         let status = match &result {
             _ if killed => FlowRunStatus::Killed {
@@ -1337,6 +1349,8 @@ async fn run_prepared_flow_agent(
     args: &ToolArgs,
     ctx: &ToolCtx,
     run_id: FlowRunId,
+    child_messages: Arc<Mutex<Vec<Message>>>,
+    child_compact_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> ToolResult {
     let Some(registry) = ctx.registry.as_ref() else {
         return Err(RuntimeError::ToolFailed(
@@ -1349,9 +1363,47 @@ async fn run_prepared_flow_agent(
         ));
     };
     let PreparedFlowAgent { path, flow, flows } = prepared;
-    // Extract flow params from the `arguments` object — generic, matches by
-    // param name, no hardcoded param names.
-    let mut flow_args: Vec<(String, Value)> = Vec::new();
+    let flow_args = resolve_flow_arguments(&flow, args);
+    let initial_prompt = invocation_user_message(&flow, &flow_args)?;
+    emit_flow_agent_start(ctx, &run_id, &flow.name.name);
+    let mut child_ctx = sanitize_child_ctx(ctx);
+    child_ctx.session_messages_handle = Some(child_messages);
+    child_ctx.compact_lock_handle = Some(child_compact_lock);
+    if let Some(prompt) = initial_prompt {
+        seed_child_message_context(&child_ctx, prompt)?;
+    }
+    let out = crate::exec::exec_flow_with_siblings(
+        &flow,
+        flow_args,
+        registry.as_ref(),
+        &child_ctx,
+        providers.as_ref(),
+        &flows,
+        child_ctx.events.as_ref(),
+        child_ctx.turn_id.clone(),
+        Some(run_id.clone()),
+        None,
+        child_ctx.cancel.clone(),
+        None,
+        path.parent().map(|p| p.to_path_buf()),
+    )
+    .await;
+    let status = match &out {
+        Ok(_) => FlowStatus::Ok,
+        Err(e) => FlowStatus::Errored {
+            message: e.to_string(),
+        },
+    };
+    mark_terminal_and_emit_child_flow_end(ctx, &run_id, &status);
+    out
+}
+
+fn resolve_flow_arguments(
+    flow: &atman_dsl::ast::FlowDecl,
+    args: &ToolArgs,
+) -> Vec<(String, Value)> {
+    let mut flow_args = Vec::new();
+    // Extract the structured flow parameters first.
     if let Some(Value::Struct(fields)) = args.named("arguments") {
         for (key, value) in fields {
             if key == "flow" || key == "async" || key == "inherit_context" || key == "workspace" {
@@ -1378,56 +1430,87 @@ async fn run_prepared_flow_agent(
             flow_args.push((key.clone(), value.clone()));
         }
     }
-    emit_flow_agent_start(ctx, &run_id, &flow.name.name);
-    let mut child_ctx = sanitize_child_ctx(ctx);
-    // One message segment per FlowRun: async shares entry.messages, sync gets
-    // a fresh ephemeral handle.
-    let inherit = args
-        .named("inherit_context")
-        .map(|v| matches!(v, Value::Bool(true)))
-        .unwrap_or(false);
-    child_ctx.session_messages_handle = match &ctx.agent_entry {
-        Some(entry) => Some(std::sync::Arc::clone(&entry.messages)),
-        None => {
-            let handle: std::sync::Arc<std::sync::Mutex<Vec<_>>> =
-                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            if inherit {
-                if let Some(parent) = &ctx.session_messages_handle {
-                    *handle.lock().unwrap() = parent.lock().unwrap().clone();
-                }
-            }
-            Some(handle)
-        }
+    flow_args
+}
+
+fn should_inherit_context(args: &ToolArgs) -> bool {
+    matches!(args.named("inherit_context"), Some(Value::Bool(true)))
+}
+
+fn invocation_user_message(
+    flow: &atman_dsl::ast::FlowDecl,
+    flow_args: &[(String, Value)],
+) -> Result<Option<String>, RuntimeError> {
+    let Some((_, parameter_value)) = flow.contract.as_ref().and_then(|contract| {
+        contract
+            .blocks
+            .iter()
+            .find(|block| block.name.name == "invocation")
+            .and_then(|block| {
+                block
+                    .kwargs
+                    .iter()
+                    .find(|(name, _)| name.name == "user_message")
+            })
+    }) else {
+        return Ok(None);
     };
-    // Sync path has no entry; fresh compact_lock avoids deadlocking on the
-    // parent's lock.
-    if ctx.agent_entry.is_none() {
-        child_ctx.compact_lock_handle = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
+    let atman_dsl::ast::Expr::Ident(parameter_name) = parameter_value else {
+        return Err(RuntimeError::ToolFailed(
+            "flow.spawn: invocation user_message must reference a string flow parameter".into(),
+        ));
+    };
+    let parameter_name = parameter_name.name.as_str();
+    let Some(parameter) = flow
+        .params
+        .iter()
+        .find(|parameter| parameter.name.name == parameter_name)
+    else {
+        return Err(RuntimeError::ToolFailed(format!(
+            "flow.spawn: invocation user_message references unknown parameter `{parameter_name}`"
+        )));
+    };
+    if !matches!(
+        &parameter.ty,
+        atman_dsl::ast::TypeExpr::Named(name) if name.name == "string"
+    ) {
+        return Err(RuntimeError::ToolFailed(format!(
+            "flow.spawn: invocation user_message parameter `{parameter_name}` must be a string"
+        )));
     }
-    let out = crate::exec::exec_flow_with_siblings(
-        &flow,
-        flow_args,
-        registry.as_ref(),
-        &child_ctx,
-        providers.as_ref(),
-        &flows,
-        child_ctx.events.as_ref(),
-        child_ctx.turn_id.clone(),
-        Some(run_id.clone()),
-        None,
-        child_ctx.cancel.clone(),
-        None,
-        path.parent().map(|p| p.to_path_buf()),
-    )
-    .await;
-    let status = match &out {
-        Ok(_) => FlowStatus::Ok,
-        Err(e) => FlowStatus::Errored {
-            message: e.to_string(),
+    match flow_args
+        .iter()
+        .find(|(name, _)| name == parameter_name)
+        .map(|(_, value)| value)
+    {
+        Some(Value::Str(value)) => Ok(Some(value.clone())),
+        Some(value) => Err(RuntimeError::TypeMismatch {
+            expected: "string invocation user_message".into(),
+            actual: value.kind_name().into(),
+        }),
+        None => match parameter.default.as_ref() {
+            Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(value))) => {
+                Ok(Some(value.clone()))
+            }
+            Some(_) => Err(RuntimeError::ToolFailed(format!(
+                "flow.spawn: invocation user_message parameter `{parameter_name}` requires a literal string default"
+            ))),
+            None => Err(RuntimeError::ToolFailed(format!(
+                "flow.spawn: invocation user_message parameter `{parameter_name}` was not provided"
+            ))),
         },
-    };
-    mark_terminal_and_emit_child_flow_end(ctx, &run_id, &status);
-    out
+    }
+}
+
+fn seed_child_message_context(ctx: &ToolCtx, prompt: String) -> Result<(), RuntimeError> {
+    let turn_id = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
+    crate::tools::session::append_message_to_context(
+        ctx,
+        crate::message::Message::user_text(turn_id, prompt),
+    )
 }
 
 fn mark_terminal_and_emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
@@ -1580,6 +1663,8 @@ mod tests {
 
     struct SandboxProbe;
 
+    struct SessionTextProbe;
+
     impl Tool for SandboxProbe {
         fn name(&self) -> &str {
             "sandbox.probe"
@@ -1595,6 +1680,39 @@ mod tests {
             ctx: &'a ToolCtx,
         ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
             Box::pin(async move { Ok(Value::Bool(ctx.sandbox.is_some())) })
+        }
+    }
+
+    impl Tool for SessionTextProbe {
+        fn name(&self) -> &str {
+            "session.text"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: ToolArgs,
+            ctx: &'a ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async move {
+                let text = ctx
+                    .session_messages_handle
+                    .as_ref()
+                    .map(|handle| {
+                        handle
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(crate::message::Message::text_concat)
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .unwrap_or_default();
+                Ok(Value::Str(text))
+            })
         }
     }
 
@@ -1747,5 +1865,198 @@ mod tests {
             .unwrap();
 
         assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn flow_spawn_owns_one_isolated_invocation_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.at");
+        std::fs::write(
+            &path,
+            r#"flow child(user_prompt: string) -> string {
+    contract { invocation { user_message: user_prompt } }
+    return session.text()
+}
+
+flow plain(user_prompt: string) -> string {
+    return session.text()
+}"#,
+        )
+        .unwrap();
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SessionTextProbe));
+        let flows = Arc::new(FlowRegistry::new());
+        let broker = PermissionBroker::shared(Arc::clone(&flows));
+        let event_session = Arc::new(crate::session::Session::open_ephemeral());
+        let root_run_id = crate::event::FlowRunId::now();
+        let trust = crate::trust::TrustConfig::default();
+        let root_identity = flows
+            .register_root(
+                "test-session".into(),
+                root_run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&trust, false, None),
+            )
+            .unwrap();
+        let root_entry = flows.create_entry(
+            "root".into(),
+            "parent prompt".into(),
+            String::new(),
+            root_run_id.clone(),
+        );
+        let parent_messages = Arc::new(std::sync::Mutex::new(vec![
+            crate::message::Message::user_text(crate::event::TurnId::now(), "parent prompt"),
+        ]));
+        let mut ctx = ToolCtx::new()
+            .with_registry(tools)
+            .with_providers(Arc::new(ProviderRegistry::new()))
+            .with_flow_registry(Arc::clone(&flows))
+            .with_permission_broker(broker)
+            .with_events(event_session.sink().clone())
+            .with_session_id("test-session")
+            .with_trust(trust)
+            .with_agent_entry(Arc::clone(&root_entry))
+            .with_session_messages_handle(Arc::clone(&parent_messages));
+        ctx.flow_run_id = Some(root_run_id);
+        ctx.flow_identity = Some(root_identity);
+
+        let result = AgentSpawn
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        (
+                            "flow".into(),
+                            Value::Str(format!("{}@child", path.display())),
+                        ),
+                        ("async".into(), Value::Bool(false)),
+                        (
+                            "arguments".into(),
+                            Value::Struct(vec![(
+                                "user_prompt".into(),
+                                Value::Str("child prompt".into()),
+                            )]),
+                        ),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, Value::Str(text) if text == "child prompt"));
+        assert_eq!(parent_messages.lock().unwrap().len(), 1);
+        assert!(
+            root_entry.messages.lock().unwrap().is_empty(),
+            "sync child must not reuse the parent FlowEntry message segment"
+        );
+
+        let plain_result = AgentSpawn
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        (
+                            "flow".into(),
+                            Value::Str(format!("{}@plain", path.display())),
+                        ),
+                        ("async".into(), Value::Bool(false)),
+                        (
+                            "arguments".into(),
+                            Value::Struct(vec![(
+                                "user_prompt".into(),
+                                Value::Str("not implicit".into()),
+                            )]),
+                        ),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(plain_result, Value::Str(text) if text.is_empty()));
+
+        let async_result = AgentSpawn
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        (
+                            "flow".into(),
+                            Value::Str(format!("{}@child", path.display())),
+                        ),
+                        ("async".into(), Value::Bool(true)),
+                        (
+                            "arguments".into(),
+                            Value::Struct(vec![(
+                                "user_prompt".into(),
+                                Value::Str("async child prompt".into()),
+                            )]),
+                        ),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = async_result else {
+            panic!("expected async spawn handle");
+        };
+        let handle = fields
+            .into_iter()
+            .find_map(|(name, value)| match (name.as_str(), value) {
+                ("handle", Value::Str(handle)) => Some(handle),
+                _ => None,
+            })
+            .expect("async spawn handle");
+        let entry = flows.lookup(&handle).unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status = entry.status.lock().unwrap().clone();
+                if !status.is_running() {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            status,
+            FlowRunStatus::Ok { final_text, .. } if final_text == "async child prompt"
+        ));
+        assert_eq!(
+            entry
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .map(crate::message::Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["async child prompt"]
+        );
+        assert_eq!(parent_messages.lock().unwrap().len(), 1);
+        assert!(root_entry.messages.lock().unwrap().is_empty());
+        let invocation_events = event_session
+            .sink()
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::event::Event::UserMsg {
+                    flow_run_id,
+                    message,
+                    ..
+                } => Some((flow_run_id, message.text_concat())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(invocation_events.len(), 2);
+        assert!(
+            invocation_events
+                .iter()
+                .all(|(flow_run_id, _)| flow_run_id.is_some()),
+            "child invocation events must not project into root history"
+        );
     }
 }

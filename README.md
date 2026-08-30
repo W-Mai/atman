@@ -109,8 +109,10 @@ A `.at` file declares types, providers, tools, routes, lifecycle hooks, and flow
 
 ```atman
 flow run_agent(user_prompt: string) -> string {
-    contract { capabilities { shell: true } }
-    session.push(message.user(user_prompt))
+    contract {
+        capabilities { shell: true }
+        invocation { user_message: user_prompt }
+    }
     loop {
         reply = llm.call(model: "smart", context: "session", tools: ["fs.read", "bash.spawn"])
         tool_uses = extract_tool_uses(reply)
@@ -122,6 +124,8 @@ flow run_agent(user_prompt: string) -> string {
     return text_concat(reply)
 }
 ```
+
+`invocation.user_message` maps a string parameter to the initial user message of an isolated `flow.spawn` context. CLI and daemon root turns record their input before flow execution, so the declaration does not append a second root message.
 
 Run the managed flow through the default route after `atman init`, or run the example explicitly:
 

@@ -199,6 +199,7 @@ Recent turns (JSON): "#;
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
+        invocation { user_message: user_prompt }
     }
     rules_index = rule.fetch()
     confessions = memory.fetch_confessions()
@@ -302,6 +303,7 @@ pub const SUBAGENT_AT: &str = r#"flow describe() -> string {
 flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 200) -> string {
     contract {
         capabilities { shell: true }
+        invocation { user_message: goal }
     }
     when role == "research" {
         return subflow(research_loop, goal, model, max_iter)
@@ -319,7 +321,9 @@ flow subagent(goal: string, role: string = "research", model: string = "smart", 
 }
 
 flow research_loop(goal: string, model: string, max_iter: int) -> string {
-    session.push(message.user(goal))
+    contract {
+        invocation { user_message: goal }
+    }
     i = 0
     loop {
         i = i + 1
@@ -372,7 +376,9 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
 }
 
 flow verify_loop(goal: string, model: string, max_iter: int) -> string {
-    session.push(message.user(goal))
+    contract {
+        invocation { user_message: goal }
+    }
     i = 0
     loop {
         i = i + 1
@@ -427,7 +433,9 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
 }
 
 flow implement_loop(goal: string, model: string, max_iter: int) -> string {
-    session.push(message.user(goal))
+    contract {
+        invocation { user_message: goal }
+    }
     i = 0
     loop {
         i = i + 1
@@ -482,7 +490,9 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
 }
 
 flow review_loop(goal: string, model: string, max_iter: int) -> string {
-    session.push(message.user(goal))
+    contract {
+        invocation { user_message: goal }
+    }
     i = 0
     loop {
         i = i + 1

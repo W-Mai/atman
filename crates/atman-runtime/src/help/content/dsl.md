@@ -228,11 +228,15 @@ shell tools through a subflow, declare the capability on the parent.
 This pattern makes rule selection visible, runs independent research workers in
 parallel, starts a long test in the background, and keeps the main LLM in control:
 
+`invocation.user_message` seeds an isolated `flow.spawn` context from the named string parameter. Root turns are already recorded by the invoking client.
+
 ```atman
 flow orchestrate(user_prompt: string) -> string {
-    contract { capabilities { shell: true } }
+    contract {
+        capabilities { shell: true }
+        invocation { user_message: user_prompt }
+    }
 
-    session.push(message.user(user_prompt))
     rules = rule.fetch()
     confessions = memory.fetch_confessions()
     selection = llm.extract(
