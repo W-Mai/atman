@@ -35,7 +35,11 @@ canonicalized, so registry insertion order does not change the provider prefix.
 Before dispatch, the runtime wraps the assembled request in a provider-neutral
 `ModelContextPlan`. Its `ContextPlanId` is recorded on the corresponding `llm_call`
 event and does not alter provider serialization. The identifier is the correlation
-key between the compiled plan and its resulting call event.
+key between the compiled plan and its resulting call event. The event also separates
+estimated stable-instruction, tool-definition, message, and context-record tokens.
+Provider usage remains authoritative when present; missing input or output counts use
+the complete plan estimate and the event identifies provider, estimated, or mixed
+usage.
 
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if

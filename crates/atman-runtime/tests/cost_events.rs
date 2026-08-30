@@ -36,6 +36,8 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             model,
             provider,
             context_plan_id,
+            context_tokens,
+            usage_source,
             usage,
             status,
             ..
@@ -43,6 +45,9 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             assert_eq!(model, "mock-model");
             assert_eq!(provider, "mock");
             assert!(context_plan_id.is_some());
+            let tokens = context_tokens.as_ref().expect("context token lanes");
+            assert!(tokens.messages > 0);
+            assert!(usage_source.is_some());
             assert!(matches!(status, LlmCallStatus::Ok));
             assert!(usage.input > 0);
             assert!(usage.output > 0);

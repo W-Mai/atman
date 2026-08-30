@@ -98,6 +98,8 @@ mod tests {
             model: model.into(),
             provider: provider.into(),
             context_plan_id: None,
+            context_tokens: None,
+            usage_source: None,
             usage: TokenUsage {
                 input: in_tok,
                 output: out_tok,
@@ -117,6 +119,8 @@ mod tests {
             model: model.into(),
             provider: "p".into(),
             context_plan_id: None,
+            context_tokens: None,
+            usage_source: None,
             usage: TokenUsage {
                 input: 5,
                 ..Default::default()

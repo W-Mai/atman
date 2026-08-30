@@ -100,7 +100,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         }
     }
     let compaction_budget = crate::compaction::CompactionBudgetContext {
-        fixed_input_tokens: Some(fixed_wire_prefix_tokens(&system, &tool_specs)),
+        fixed_input_tokens: Some(crate::context_plan::estimate_fixed_input_tokens(
+            &system,
+            &tool_specs,
+        )),
     };
     if !matches!(context_mode, ContextMode::None)
         && !has_messages_override
@@ -256,6 +259,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         model: model.clone(),
                         provider: provider.name().to_string(),
                         context_plan_id: None,
+                        context_tokens: None,
+                        usage_source: None,
                         usage: crate::provider::TokenUsage::default(),
                         wallclock_ms: 0,
                         ttft_ms: None,
@@ -302,6 +307,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             };
             let context_plan = crate::context_plan::ModelContextPlan::new(req);
             let context_plan_id = context_plan.id().clone();
+            let context_tokens = context_plan.token_lanes().clone();
+            let estimated_input = context_plan.estimated_input_tokens();
             let start = std::time::Instant::now();
             let outcome = call_and_maybe_stream(
                 provider.as_ref(),
@@ -318,25 +325,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             )
             .await;
             let elapsed_ms = start.elapsed().as_millis() as u64;
-            let usage = match &outcome {
-                Ok(am) => crate::provider::TokenUsage {
-                    input: am
-                        .token_usage
-                        .input
-                        .max(crate::provider::estimate_tokens(&prompt)),
-                    cached_input: am.token_usage.cached_input,
-                    output: am
-                        .token_usage
-                        .output
-                        .max(crate::provider::estimate_tokens(&am.text_concat())),
-                    cache_write: am.token_usage.cache_write,
-                    reasoning_tokens: am.token_usage.reasoning_tokens,
-                },
-                Err(_) => crate::provider::TokenUsage {
-                    input: crate::provider::estimate_tokens(&prompt),
-                    ..Default::default()
-                },
-            };
+            let provider_usage = outcome
+                .as_ref()
+                .map(|am| am.token_usage.clone())
+                .unwrap_or_default();
+            let estimated_output = outcome
+                .as_ref()
+                .map(|am| crate::provider::estimate_tokens(&am.text_concat()))
+                .unwrap_or(0);
+            let (usage, usage_source) = crate::context_plan::reconcile_token_usage(
+                &provider_usage,
+                estimated_input,
+                estimated_output,
+            );
             let status = match &outcome {
                 Ok(_) => crate::event::LlmCallStatus::Ok,
                 Err(e) => crate::event::LlmCallStatus::Errored {
@@ -355,6 +356,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     model: model.clone(),
                     provider: provider.name().to_string(),
                     context_plan_id: Some(context_plan_id),
+                    context_tokens: Some(context_tokens),
+                    usage_source: Some(usage_source),
                     usage: usage.clone(),
                     wallclock_ms: elapsed_ms,
                     ttft_ms,
@@ -649,17 +652,6 @@ fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message
     ));
 }
 
-fn fixed_wire_prefix_tokens(system: &Option<String>, tools: &[crate::tool::ToolSpec]) -> u64 {
-    let system_tokens = system
-        .as_deref()
-        .map(crate::provider::estimate_tokens)
-        .unwrap_or(0);
-    let tool_tokens = serde_json::to_string(tools)
-        .map(|json| crate::provider::estimate_tokens(&json))
-        .unwrap_or(0);
-    system_tokens.saturating_add(tool_tokens)
-}
-
 fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
     ctx.session_runtime
         .as_ref()
@@ -696,7 +688,10 @@ mod tests {
 
         let expected = crate::provider::estimate_tokens(system.as_deref().unwrap())
             + crate::provider::estimate_tokens(&serde_json::to_string(&tools).unwrap());
-        assert_eq!(fixed_wire_prefix_tokens(&system, &tools), expected);
+        assert_eq!(
+            crate::context_plan::estimate_fixed_input_tokens(&system, &tools),
+            expected
+        );
     }
 
     #[test]

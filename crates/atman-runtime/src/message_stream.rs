@@ -269,6 +269,8 @@ mod tests {
                 model: "m".into(),
                 provider: "p".into(),
                 context_plan_id: None,
+                context_tokens: None,
+                usage_source: None,
                 usage: crate::provider::TokenUsage::default(),
                 wallclock_ms: 0,
                 ttft_ms: None,

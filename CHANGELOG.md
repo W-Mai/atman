@@ -9,7 +9,7 @@ All notable changes to atman are documented in this file.
 ### ⚠️ Breaking Changes
 
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
-- **LLM context plan identity** — `Event::LlmCall` includes an optional `context_plan_id` that identifies the provider-neutral plan compiled for the dispatch attempt.
+- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, and usage source for the provider-neutral plan compiled for the dispatch attempt.
 - **Provider lifecycle result surfaces** — `AuthLogin`, `AuthLogout`, `RefreshProviderModels`, `AddConfigProvider`, and `UpdateConfigProvider` are replaced by `TuiControl::MutateProvider`, `ProviderMutation::UpsertConfig`, `TuiCommand::ProviderMutationResult`, and `TuiCommand::ProviderCatalogRefreshResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. `TuiControl::TestProvider` carries a complete `ProviderEntry` instead of separate type, credential, and endpoint fields. `BootstrapOutcome` exposes `provider_catalog_refresh_plan` and is non-exhaustive. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
 
 ### ✨ Features
@@ -28,6 +28,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Context usage fallback** — provider token counts remain authoritative when present; missing input and output usage is estimated from the complete compiled request without adding cached input twice.
 - **Request tool exposure** — model-generated tool calls are bound to the exact tool name exposed by their originating LLM request and can be dispatched only once within the producing flow.
 - **Tool-pair projection** — model requests normalize parallel tool results in call order, preserve non-tool content from mixed messages, and remove orphan results without duplicating valid parts.
 - **Tool-result budgets** — direct Session appends, runtime dispatch, `session.push`, and spawned flows use the same configured output budget and continuation store.
