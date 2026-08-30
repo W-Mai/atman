@@ -4,6 +4,7 @@ pub mod auth_store;
 pub mod compaction;
 pub mod config_hub;
 pub mod config_migration;
+pub mod config_provider;
 pub mod cost;
 pub mod env;
 pub mod error;

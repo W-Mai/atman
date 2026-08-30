@@ -728,49 +728,60 @@ mod tests {
         assert!(weak_provider.upgrade().is_none());
     }
 
-    #[tokio::test]
-    async fn bootstrap_workspace_service_uses_daemon_generation() {
-        let repository = repo();
-        let state = DaemonState::new_with_generation(
-            repository.path().join("data"),
-            "daemon-generation".into(),
-        );
-        let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
-            events: atman_runtime::event::EventSink::new(),
-            mock: true,
-            config_dir: None,
-            project_root: repository.path().to_path_buf(),
-            home_dir: None,
-            workspace_generation: state.daemon_generation().to_owned(),
-        })
-        .await
-        .unwrap();
-
-        let service = outcome
-            .executor
-            .tool_ctx
-            .flow_workspace_service
-            .as_ref()
-            .unwrap();
-        let binding = service
-            .allocate(
-                atman_runtime::git_workspace::WorkspacePolicy::Auto,
-                "session",
-                "flow",
-                None,
-            )
+    #[test]
+    fn bootstrap_workspace_service_uses_daemon_generation() {
+        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap()
-            .unwrap();
-        let manager =
-            atman_runtime::git_workspace::WorkspaceManager::at(repository.path(), None).unwrap();
-        let record = manager.get(&binding.workspace_id).unwrap();
-        assert_eq!(
-            record
-                .lease
-                .as_ref()
-                .map(|lease| lease.daemon_generation.as_str()),
-            Some("daemon-generation")
-        );
+            .block_on(async {
+                let repository = repo();
+                let state = DaemonState::new_with_generation(
+                    repository.path().join("data"),
+                    "daemon-generation".into(),
+                );
+                let outcome =
+                    crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
+                        events: atman_runtime::event::EventSink::new(),
+                        mock: true,
+                        config_dir: None,
+                        project_root: repository.path().to_path_buf(),
+                        home_dir: None,
+                        workspace_generation: state.daemon_generation().to_owned(),
+                    })
+                    .await
+                    .unwrap();
+
+                let service = outcome
+                    .executor
+                    .tool_ctx
+                    .flow_workspace_service
+                    .as_ref()
+                    .unwrap();
+                let binding = service
+                    .allocate(
+                        atman_runtime::git_workspace::WorkspacePolicy::Auto,
+                        "session",
+                        "flow",
+                        None,
+                    )
+                    .unwrap()
+                    .unwrap();
+                let manager =
+                    atman_runtime::git_workspace::WorkspaceManager::at(repository.path(), None)
+                        .unwrap();
+                let record = manager.get(&binding.workspace_id).unwrap();
+                assert_eq!(
+                    record
+                        .lease
+                        .as_ref()
+                        .map(|lease| lease.daemon_generation.as_str()),
+                    Some("daemon-generation")
+                );
+            });
     }
 
     #[test]

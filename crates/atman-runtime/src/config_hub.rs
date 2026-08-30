@@ -110,6 +110,13 @@ pub struct ProviderConfigUpdate<'a> {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderConfigWriteMode {
+    Upsert,
+    Create,
+    Update,
+}
+
 pub struct AuthTokenUpdate {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -1341,40 +1348,112 @@ impl ConfigHub {
     }
 
     pub fn upsert_provider(&self, update: ProviderConfigUpdate<'_>) -> Result<(), ConfigError> {
-        self.update_config_toml(|doc| {
-            if doc.get("providers").is_none() {
-                doc.insert("providers", toml_edit::Item::Table(toml_edit::Table::new()));
-            }
-            let providers = doc
-                .get_mut("providers")
-                .and_then(toml_edit::Item::as_table_mut)
-                .ok_or_else(|| ConfigError::Invalid("providers is not a table".into()))?;
-            let reasoning_format = update
-                .reasoning_format
-                .map(|value| value.to_string())
-                .or_else(|| {
-                    providers
+        crate::provider_lifecycle::upsert_config_provider_for_hub(self, update)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_provider(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+    ) -> Result<crate::model_registry::ProviderEntry, ConfigError> {
+        self.write_provider_config(update, ProviderConfigWriteMode::Create)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn update_provider(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+    ) -> Result<crate::model_registry::ProviderEntry, ConfigError> {
+        self.write_provider_config(update, ProviderConfigWriteMode::Update)
+    }
+
+    #[cfg(test)]
+    fn write_provider_config(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+        mode: ProviderConfigWriteMode,
+    ) -> Result<crate::model_registry::ProviderEntry, ConfigError> {
+        self.write_provider_config_and_then(update, mode, |_| ())
+            .map(|(entry, ())| entry)
+    }
+
+    pub(crate) fn write_provider_config_and_then<T>(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+        mode: ProviderConfigWriteMode,
+        after_commit: impl FnOnce(&crate::model_registry::ProviderEntry) -> T,
+    ) -> Result<(crate::model_registry::ProviderEntry, T), ConfigError> {
+        self.update_config_toml_and_then(
+            |doc| {
+                if doc.get("providers").is_none() {
+                    doc.insert("providers", toml_edit::Item::Table(toml_edit::Table::new()));
+                }
+                let providers = doc
+                    .get_mut("providers")
+                    .and_then(toml_edit::Item::as_table_mut)
+                    .ok_or_else(|| ConfigError::Invalid("providers is not a table".into()))?;
+                let exists = providers.contains_key(update.name);
+                match (mode, exists) {
+                    (ProviderConfigWriteMode::Create, true) => {
+                        return Err(ConfigError::NameConflict {
+                            name: update.name.to_string(),
+                            domain: "providers",
+                        });
+                    }
+                    (ProviderConfigWriteMode::Update, false) => {
+                        return Err(ConfigError::Invalid(format!(
+                            "config provider `{}` does not exist",
+                            update.name
+                        )));
+                    }
+                    _ => {}
+                }
+                let reasoning_format = match update.reasoning_format {
+                    Some(value) => Some(value),
+                    None => providers
                         .get(update.name)
                         .and_then(toml_edit::Item::as_table)
                         .and_then(|entry| entry.get("reasoning_format"))
                         .and_then(toml_edit::Item::as_str)
-                        .map(str::to_string)
-                });
-            let mut entry = toml_edit::Table::new();
-            entry.insert("kind", toml_edit::value(update.kind));
-            insert_nonempty(&mut entry, "api_key", update.api_key);
-            insert_nonempty(&mut entry, "api_key_env", update.api_key_env);
-            insert_nonempty(&mut entry, "base_url", update.base_url);
-            if let Some(value) = update.max_tokens {
-                entry.insert("max_tokens", toml_edit::value(i64::from(value)));
-            }
-            if let Some(value) = reasoning_format {
-                entry.insert("reasoning_format", toml_edit::value(value));
-            }
-            entry.insert("enabled", toml_edit::value(update.enabled));
-            providers.insert(update.name, toml_edit::Item::Table(entry));
-            Ok(())
-        })
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(ConfigError::Invalid)?,
+                };
+                let mut entry = toml_edit::Table::new();
+                entry.insert("kind", toml_edit::value(update.kind));
+                insert_nonempty(&mut entry, "api_key", update.api_key);
+                insert_nonempty(&mut entry, "api_key_env", update.api_key_env);
+                insert_nonempty(&mut entry, "base_url", update.base_url);
+                if let Some(value) = update.max_tokens {
+                    entry.insert("max_tokens", toml_edit::value(i64::from(value)));
+                }
+                if let Some(value) = reasoning_format {
+                    entry.insert("reasoning_format", toml_edit::value(value.to_string()));
+                }
+                entry.insert("enabled", toml_edit::value(update.enabled));
+                providers.insert(update.name, toml_edit::Item::Table(entry));
+                Ok(crate::model_registry::ProviderEntry {
+                    name: update.name.to_string(),
+                    kind: update.kind.to_string(),
+                    api_key: update
+                        .api_key
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    api_key_env: update
+                        .api_key_env
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    base_url: update
+                        .base_url
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    max_tokens: update.max_tokens,
+                    reasoning_format,
+                    enabled: Some(update.enabled),
+                })
+            },
+            after_commit,
+        )
     }
 
     pub fn add_alias(&self, alias: &str, model: &str) -> Result<(), ConfigError> {
@@ -1437,9 +1516,21 @@ impl ConfigHub {
     }
 
     pub fn reload(&self) -> Result<(), ConfigError> {
+        crate::provider_lifecycle::reload_config_providers_for_hub(self)
+    }
+
+    pub(crate) fn reload_and_then<T>(
+        &self,
+        apply: impl FnOnce(crate::model_registry::ProviderConfig) -> T,
+    ) -> Result<T, ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let _file_lock = self.lock_config_file()?;
         let text = self.read_config_toml()?;
-        crate::model_registry::reload_from_text(&text)
-            .map_err(|error| ConfigError::Invalid(error.to_string()))
+        let prepared = crate::model_registry::prepare_config_text(&text)
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+        let snapshot = prepared.snapshot();
+        crate::model_registry::commit_prepared_config(prepared);
+        Ok(apply(snapshot))
     }
 
     pub fn model_config(
@@ -1544,10 +1635,19 @@ impl ConfigHub {
         lock_file(&self.config_dir.join(".config.toml.lock"))
     }
 
-    fn update_config_toml(
+    fn update_config_toml<T>(
         &self,
-        mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), ConfigError>,
-    ) -> Result<(), ConfigError> {
+        mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        self.update_config_toml_and_then(mutate, |_| ())
+            .map(|(result, ())| result)
+    }
+
+    fn update_config_toml_and_then<T, U>(
+        &self,
+        mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T, ConfigError>,
+        after_commit: impl FnOnce(&T) -> U,
+    ) -> Result<(T, U), ConfigError> {
         let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
         let _file_lock = self.lock_config_file()?;
         let text = self.read_config_toml()?;
@@ -1556,13 +1656,14 @@ impl ConfigHub {
         } else {
             text.parse()?
         };
-        mutate(&mut doc)?;
+        let result = mutate(&mut doc)?;
         let new_text = doc.to_string();
         let prepared = crate::model_registry::prepare_config_text(&new_text)
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         self.write_config_toml(&new_text)?;
         crate::model_registry::commit_prepared_config(prepared);
-        Ok(())
+        let after_commit = after_commit(&result);
+        Ok((result, after_commit))
     }
 
     fn write_config_toml(&self, text: &str) -> Result<(), ConfigError> {
@@ -1877,6 +1978,14 @@ fn table_contains(
 mod tests {
     use super::*;
 
+    struct ProviderRegistryReset;
+
+    impl Drop for ProviderRegistryReset {
+        fn drop(&mut self) {
+            crate::model_registry::set_provider_config(Default::default());
+        }
+    }
+
     fn temp_hub() -> (tempfile::TempDir, ConfigHub) {
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
@@ -1918,6 +2027,171 @@ mod tests {
         let config = std::fs::read_to_string(hub.config_toml_path()).unwrap();
         assert!(config.contains("reasoning_format = \"reasoning-effort\""));
         assert!(config.contains("enabled = false"));
+    }
+
+    #[test]
+    fn provider_create_returns_the_committed_snapshot() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ProviderRegistryReset;
+        let (_dir, hub) = temp_hub();
+
+        let snapshot = hub
+            .create_provider(ProviderConfigUpdate {
+                name: "gateway",
+                kind: "openai-compat",
+                api_key: Some("inline-key"),
+                api_key_env: Some("GATEWAY_KEY"),
+                base_url: Some("https://gateway.example/v1"),
+                max_tokens: Some(16_384),
+                reasoning_format: Some(crate::providers::openai::OpenAiReasoningFormat::Official),
+                enabled: false,
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.name, "gateway");
+        assert_eq!(snapshot.kind, "openai-compat");
+        assert_eq!(snapshot.api_key.as_deref(), Some("inline-key"));
+        assert_eq!(snapshot.api_key_env.as_deref(), Some("GATEWAY_KEY"));
+        assert_eq!(
+            snapshot.base_url.as_deref(),
+            Some("https://gateway.example/v1")
+        );
+        assert_eq!(snapshot.max_tokens, Some(16_384));
+        assert_eq!(
+            snapshot.reasoning_format,
+            Some(crate::providers::openai::OpenAiReasoningFormat::Official)
+        );
+        assert_eq!(snapshot.enabled, Some(false));
+
+        let committed = hub.model_config().unwrap().unwrap().providers["gateway"].clone();
+        assert_eq!(committed.name, snapshot.name);
+        assert_eq!(committed.kind, snapshot.kind);
+        assert_eq!(committed.api_key, snapshot.api_key);
+        assert_eq!(committed.api_key_env, snapshot.api_key_env);
+        assert_eq!(committed.base_url, snapshot.base_url);
+        assert_eq!(committed.max_tokens, snapshot.max_tokens);
+        assert_eq!(committed.reasoning_format, snapshot.reasoning_format);
+        assert_eq!(committed.enabled, snapshot.enabled);
+    }
+
+    #[test]
+    fn provider_create_conflict_does_not_overwrite_the_existing_entry() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ProviderRegistryReset;
+        let (_dir, hub) = temp_hub();
+        let initial = ProviderConfigUpdate {
+            name: "gateway",
+            kind: "openai-compat",
+            api_key: Some("first-key"),
+            api_key_env: None,
+            base_url: Some("https://first.example/v1"),
+            max_tokens: Some(8_192),
+            reasoning_format: None,
+            enabled: true,
+        };
+        hub.create_provider(initial).unwrap();
+        let before = hub.read_config_toml().unwrap();
+
+        let error = hub
+            .create_provider(ProviderConfigUpdate {
+                kind: "anthropic",
+                api_key: Some("second-key"),
+                base_url: Some("https://second.example/v1"),
+                ..initial
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::NameConflict {
+                ref name,
+                domain: "providers"
+            } if name == "gateway"
+        ));
+        assert_eq!(hub.read_config_toml().unwrap(), before);
+        let committed = &hub.model_config().unwrap().unwrap().providers["gateway"];
+        assert_eq!(committed.kind, "openai-compat");
+        assert_eq!(committed.api_key.as_deref(), Some("first-key"));
+        assert_eq!(
+            committed.base_url.as_deref(),
+            Some("https://first.example/v1")
+        );
+    }
+
+    #[test]
+    fn provider_update_missing_does_not_create_an_entry() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ProviderRegistryReset;
+        let (_dir, hub) = temp_hub();
+        let before = hub.read_config_toml().unwrap();
+
+        let error = hub
+            .update_provider(ProviderConfigUpdate {
+                name: "missing",
+                kind: "openai-compat",
+                api_key: None,
+                api_key_env: None,
+                base_url: Some("https://gateway.example/v1"),
+                max_tokens: None,
+                reasoning_format: None,
+                enabled: true,
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("does not exist"));
+        assert_eq!(hub.read_config_toml().unwrap(), before);
+        assert!(hub.model_config().unwrap().is_none());
+    }
+
+    #[test]
+    fn reload_reads_and_commits_under_the_config_write_lock() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ProviderRegistryReset;
+        let (_dir, hub) = temp_hub();
+        std::fs::write(
+            hub.config_toml_path(),
+            "[providers.gateway]\nkind = \"openai-compat\"\napi_key = \"old-key\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let config_guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let reload_hub = hub.clone();
+        let reload = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx.send(reload_hub.reload()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        std::fs::write(
+            hub.config_toml_path(),
+            "[providers.gateway]\nkind = \"openai-compat\"\napi_key = \"new-key\"\nenabled = false\n",
+        )
+        .unwrap();
+        drop(config_guard);
+
+        finished_rx.recv().unwrap().unwrap();
+        reload.join().unwrap();
+        let projected = crate::model_registry::all_provider_entries()
+            .into_iter()
+            .find(|(name, _)| name == "gateway")
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(projected.api_key.as_deref(), Some("new-key"));
+        assert_eq!(projected.enabled, Some(false));
     }
 
     #[test]

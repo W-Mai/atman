@@ -2030,215 +2030,6 @@ async fn cmd_repl_once(
                             async move { execute_provider_mutation(&lifecycle, action).await },
                         );
                     }
-                    atman_tui::TuiControl::AddConfigProvider {
-                        name,
-                        provider_type,
-                        api_key,
-                        api_key_env,
-                        base_url,
-                        max_tokens,
-                        reasoning_format,
-                        enabled,
-                    } => {
-                        let reasoning_format = reasoning_format.parse().ok();
-                        let update =
-                            atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
-                                hub.upsert_provider(
-                                    atman_runtime::config_hub::ProviderConfigUpdate {
-                                        name: &name,
-                                        kind: &provider_type,
-                                        api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
-                                        api_key_env: (!api_key_env.is_empty())
-                                            .then_some(api_key_env.as_str()),
-                                        base_url: (!base_url.is_empty())
-                                            .then_some(base_url.as_str()),
-                                        max_tokens,
-                                        reasoning_format,
-                                        enabled,
-                                    },
-                                )
-                            });
-                        if update.is_ok() {
-                            if !base_url.is_empty() {
-                                atman_runtime::model_registry::register_preset_models_for(
-                                    &name, &base_url,
-                                );
-                            }
-                            let provider_key = format!("config:{name}");
-                            let resolved_key = if !api_key.is_empty() {
-                                api_key.clone()
-                            } else if !api_key_env.is_empty() {
-                                std::env::var(&api_key_env).unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            let resolved_url = if !base_url.is_empty() {
-                                base_url.clone()
-                            } else {
-                                match provider_type.as_str() {
-                                    "openai" | "openai-compat" => {
-                                        std::env::var("OPENAI_BASE_URL").unwrap_or_default()
-                                    }
-                                    "anthropic" => {
-                                        std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default()
-                                    }
-                                    _ => String::new(),
-                                }
-                            };
-                            match provider_type.as_str() {
-                                "anthropic" => {
-                                    let mut p =
-                                        atman_runtime::providers::anthropic::AnthropicProvider::new(
-                                            &provider_key,
-                                            &resolved_key,
-                                        );
-                                    if !resolved_url.is_empty() {
-                                        p = p.with_base_url(&resolved_url);
-                                    }
-                                    if let Some(mt) = max_tokens {
-                                        p = p.with_max_tokens(mt);
-                                    }
-                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
-                                }
-                                "openai" | "openai-compat" => {
-                                    let mut p =
-                                        atman_runtime::providers::openai::OpenAiProvider::new(
-                                            &provider_key,
-                                            &resolved_key,
-                                        );
-                                    p = p.with_reasoning_format(reasoning_format.unwrap_or_else(
-                                        || {
-                                            configured_openai_reasoning_format(
-                                                &name,
-                                                &provider_type,
-                                            )
-                                        },
-                                    ));
-                                    if !resolved_url.is_empty() {
-                                        p = p.with_base_url(&resolved_url);
-                                    }
-                                    if let Some(mt) = max_tokens {
-                                        p = p.with_max_tokens(mt);
-                                    }
-                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
-                                }
-                                _ => {}
-                            }
-                            let _ = cmd_tx_for_models.send(
-                                atman_tui::TuiCommand::ProviderCatalogChanged {
-                                    added_provider: Some(name.clone()),
-                                },
-                            );
-                            atman_runtime::notify!(success, "Provider \"{name}\" added");
-                        } else if let Err(error) = update {
-                            atman_runtime::notify!(
-                                error,
-                                "Provider \"{name}\" add failed: {error}"
-                            );
-                        }
-                    }
-                    atman_tui::TuiControl::UpdateConfigProvider {
-                        name,
-                        provider_type,
-                        api_key,
-                        api_key_env,
-                        base_url,
-                        max_tokens,
-                        reasoning_format,
-                        enabled,
-                    } => {
-                        let reasoning_format = reasoning_format.parse().ok();
-                        let update =
-                            atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
-                                hub.upsert_provider(
-                                    atman_runtime::config_hub::ProviderConfigUpdate {
-                                        name: &name,
-                                        kind: &provider_type,
-                                        api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
-                                        api_key_env: (!api_key_env.is_empty())
-                                            .then_some(api_key_env.as_str()),
-                                        base_url: (!base_url.is_empty())
-                                            .then_some(base_url.as_str()),
-                                        max_tokens,
-                                        reasoning_format,
-                                        enabled,
-                                    },
-                                )
-                            });
-                        if update.is_ok() {
-                            let provider_key = format!("config:{name}");
-                            let resolved_key = if !api_key.is_empty() {
-                                api_key.clone()
-                            } else if !api_key_env.is_empty() {
-                                std::env::var(&api_key_env).unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            let resolved_url = if !base_url.is_empty() {
-                                base_url.clone()
-                            } else {
-                                match provider_type.as_str() {
-                                    "openai" | "openai-compat" => {
-                                        std::env::var("OPENAI_BASE_URL").unwrap_or_default()
-                                    }
-                                    "anthropic" => {
-                                        std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default()
-                                    }
-                                    _ => String::new(),
-                                }
-                            };
-                            match provider_type.as_str() {
-                                "anthropic" => {
-                                    let mut p =
-                                        atman_runtime::providers::anthropic::AnthropicProvider::new(
-                                            &provider_key,
-                                            &resolved_key,
-                                        );
-                                    if !resolved_url.is_empty() {
-                                        p = p.with_base_url(&resolved_url);
-                                    }
-                                    if let Some(mt) = max_tokens {
-                                        p = p.with_max_tokens(mt);
-                                    }
-                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
-                                }
-                                "openai" | "openai-compat" => {
-                                    let mut p =
-                                        atman_runtime::providers::openai::OpenAiProvider::new(
-                                            &provider_key,
-                                            &resolved_key,
-                                        );
-                                    p = p.with_reasoning_format(reasoning_format.unwrap_or_else(
-                                        || {
-                                            configured_openai_reasoning_format(
-                                                &name,
-                                                &provider_type,
-                                            )
-                                        },
-                                    ));
-                                    if !resolved_url.is_empty() {
-                                        p = p.with_base_url(&resolved_url);
-                                    }
-                                    if let Some(mt) = max_tokens {
-                                        p = p.with_max_tokens(mt);
-                                    }
-                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
-                                }
-                                _ => {}
-                            }
-                            let _ = cmd_tx_for_models.send(
-                                atman_tui::TuiCommand::ProviderCatalogChanged {
-                                    added_provider: None,
-                                },
-                            );
-                            atman_runtime::notify!(success, "Provider \"{name}\" updated");
-                        } else if let Err(error) = update {
-                            atman_runtime::notify!(
-                                error,
-                                "Provider \"{name}\" update failed: {error}"
-                            );
-                        }
-                    }
                     atman_tui::TuiControl::UpsertConfigModel {
                         old_name,
                         name,
@@ -3052,6 +2843,49 @@ async fn execute_provider_mutation(
         atman_tui::ProviderMutation::Refresh { provider_id } => {
             let delta = lifecycle.refresh_models(&provider_id).await?;
             Ok(atman_tui::ProviderMutationSuccess::Refreshed { provider_id, delta })
+        }
+        atman_tui::ProviderMutation::UpsertConfig {
+            name,
+            kind,
+            api_key,
+            api_key_env,
+            base_url,
+            max_tokens,
+            reasoning_format,
+            enabled,
+            create,
+        } => {
+            if !atman_runtime::model_registry::config_provider_types().contains(&kind.as_str()) {
+                bail!("config provider kind `{kind}` is not supported");
+            }
+            let reasoning_format = if reasoning_format.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    reasoning_format
+                        .parse()
+                        .map_err(|error: String| anyhow::anyhow!(error))?,
+                )
+            };
+            let update = atman_runtime::config_hub::ProviderConfigUpdate {
+                name: &name,
+                kind: &kind,
+                api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
+                api_key_env: (!api_key_env.is_empty()).then_some(api_key_env.as_str()),
+                base_url: (!base_url.is_empty()).then_some(base_url.as_str()),
+                max_tokens,
+                reasoning_format,
+                enabled,
+            };
+            if create {
+                lifecycle.create_config_provider(update)?
+            } else {
+                lifecycle.update_config_provider(update)?
+            }
+            Ok(atman_tui::ProviderMutationSuccess::ConfigSaved {
+                name,
+                created: create,
+            })
         }
         _ => bail!("provider mutation is not supported by this host"),
     }
@@ -7290,24 +7124,6 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configured_openai_reasoning_format(
-    provider_name: &str,
-    provider_type: &str,
-) -> atman_runtime::providers::openai::OpenAiReasoningFormat {
-    atman_runtime::model_registry::all_provider_entries()
-        .into_iter()
-        .find_map(|(name, entry)| {
-            (name == provider_name)
-                .then_some(entry.reasoning_format)
-                .flatten()
-        })
-        .unwrap_or_else(|| {
-            atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
-                provider_type,
-            )
-        })
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn test_provider_endpoint(
     name: &str,
@@ -7539,6 +7355,90 @@ mod tests {
             ))
             .unwrap_err();
         assert!(refresh_error.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn config_provider_mutation_commits_through_selected_hub_and_reconciles_live_state() {
+        struct ConfigReset;
+
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                atman_runtime::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ConfigReset;
+        let config = tempfile::tempdir().unwrap();
+        let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config.path());
+        let lifecycle = atman_runtime::provider_lifecycle::ProviderLifecycle::new(
+            hub.clone(),
+            atman_runtime::provider::ProviderRegistry::new(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let create = atman_tui::ProviderMutation::UpsertConfig {
+            name: "gateway".into(),
+            kind: "openai-compat".into(),
+            api_key: "test-key".into(),
+            api_key_env: String::new(),
+            base_url: "http://localhost/v1".into(),
+            max_tokens: Some(16_384),
+            reasoning_format: "reasoning-effort".into(),
+            enabled: true,
+            create: true,
+        };
+        assert_eq!(
+            runtime
+                .block_on(execute_provider_mutation(&lifecycle, create.clone()))
+                .unwrap(),
+            atman_tui::ProviderMutationSuccess::ConfigSaved {
+                name: "gateway".into(),
+                created: true,
+            }
+        );
+        assert!(lifecycle.provider_registry().contains("config:gateway"));
+        let entry = hub.model_config().unwrap().unwrap().providers["gateway"].clone();
+        assert_eq!(entry.max_tokens, Some(16_384));
+        assert_eq!(
+            entry.reasoning_format,
+            Some(atman_runtime::providers::openai::OpenAiReasoningFormat::Official)
+        );
+
+        let before_duplicate = hub.read_config_toml().unwrap();
+        assert!(
+            runtime
+                .block_on(execute_provider_mutation(&lifecycle, create))
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+        assert_eq!(hub.read_config_toml().unwrap(), before_duplicate);
+
+        let disable = atman_tui::ProviderMutation::UpsertConfig {
+            name: "gateway".into(),
+            kind: "openai-compat".into(),
+            api_key: "test-key".into(),
+            api_key_env: String::new(),
+            base_url: "http://localhost/v1".into(),
+            max_tokens: Some(16_384),
+            reasoning_format: "reasoning-effort".into(),
+            enabled: false,
+            create: false,
+        };
+        runtime
+            .block_on(execute_provider_mutation(&lifecycle, disable))
+            .unwrap();
+        assert!(!lifecycle.provider_registry().contains("config:gateway"));
+        assert_eq!(
+            hub.model_config().unwrap().unwrap().providers["gateway"].max_tokens,
+            Some(16_384)
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::auth_store::{ProviderKind, StoredProvider};
 use crate::config_hub::{
     AuthModelCacheCommit, AuthModelCacheUpdate, AuthProviderInsertCommit,
     AuthProviderRuntimeCommit, AuthProviderRuntimeState, ConfigError, ConfigHub,
+    ProviderConfigUpdate, ProviderConfigWriteMode,
 };
 use crate::model_registry::{
     CatalogDelta, CatalogError, PreparedProviderCatalog, ProviderDescriptor,
@@ -72,12 +73,14 @@ pub struct ProviderLifecycle {
     hub: ConfigHub,
     providers: ProviderRegistry,
     state: Arc<Mutex<LifecycleState>>,
+    config_state: Arc<Mutex<ConfigProviderLifecycleState>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct ProviderLifecycleOwner {
     hub: ConfigHub,
     state: Arc<Mutex<LifecycleState>>,
+    config_state: Arc<Mutex<ConfigProviderLifecycleState>>,
 }
 
 #[derive(Default)]
@@ -86,6 +89,12 @@ struct LifecycleState {
     operation_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     refresh_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     live_providers: HashMap<String, LiveProviderEntry>,
+    registries: Vec<WeakProviderRegistry>,
+}
+
+#[derive(Default)]
+struct ConfigProviderLifecycleState {
+    config_providers: HashMap<String, crate::model_registry::ProviderEntry>,
     registries: Vec<WeakProviderRegistry>,
 }
 
@@ -162,6 +171,9 @@ impl Drop for ProviderOperationFence {
 
 static LIFECYCLE_COORDINATORS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<LifecycleState>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static CONFIG_PROVIDER_COORDINATORS: LazyLock<
+    Mutex<HashMap<PathBuf, Weak<Mutex<ConfigProviderLifecycleState>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl ProviderLifecycle {
     pub fn new(hub: ConfigHub, providers: ProviderRegistry) -> Self {
@@ -175,12 +187,13 @@ impl ProviderLifecycle {
         providers: ProviderRegistry,
     ) -> (Self, Vec<Arc<dyn Provider>>) {
         let state = shared_lifecycle_state(&hub);
-        let replaced = {
+        let config_state = shared_config_provider_state(&hub);
+        let mut replaced = Vec::new();
+        {
             let mut shared = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut registered = false;
-            let mut replaced = Vec::new();
             shared.registries.retain(|registry| {
                 let Some(registry) = registry.upgrade() else {
                     return false;
@@ -196,13 +209,41 @@ impl ProviderLifecycle {
                 }
                 shared.registries.push(providers.downgrade());
             }
-            replaced
-        };
+        }
+        {
+            let mut shared = config_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut registered = false;
+            shared.registries.retain(|registry| {
+                let Some(registry) = registry.upgrade() else {
+                    return false;
+                };
+                registered |= registry.shares_storage_with(&providers);
+                true
+            });
+            if !registered {
+                let mut config_providers = shared
+                    .config_providers
+                    .iter()
+                    .map(|(name, entry)| (name.clone(), entry.clone()))
+                    .collect::<Vec<_>>();
+                config_providers.sort_by(|left, right| left.0.cmp(&right.0));
+                for (name, entry) in config_providers {
+                    let (_, previous) = crate::config_provider::reconcile_config_provider_deferred(
+                        &providers, &name, &entry,
+                    );
+                    replaced.extend(previous);
+                }
+                shared.registries.push(providers.downgrade());
+            }
+        }
         (
             Self {
                 hub,
                 providers,
                 state,
+                config_state,
             },
             replaced,
         )
@@ -220,6 +261,7 @@ impl ProviderLifecycle {
         ProviderLifecycleOwner {
             hub: self.hub.clone(),
             state: self.state.clone(),
+            config_state: self.config_state.clone(),
         }
     }
 
@@ -228,7 +270,39 @@ impl ProviderLifecycle {
             hub: owner.hub,
             providers,
             state: owner.state,
+            config_state: owner.config_state,
         }
+    }
+
+    /// Reload config-backed providers and reconcile every attached live registry.
+    pub fn reload_config_providers(&self) -> Result<(), ProviderLifecycleError> {
+        reload_config_providers_for_hub(&self.hub)?;
+        Ok(())
+    }
+
+    /// Create one config-backed provider and reconcile every attached live registry.
+    pub fn create_config_provider(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+    ) -> Result<(), ProviderLifecycleError> {
+        self.commit_config_provider(update, ProviderConfigWriteMode::Create)
+    }
+
+    /// Update one config-backed provider and reconcile every attached live registry.
+    pub fn update_config_provider(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+    ) -> Result<(), ProviderLifecycleError> {
+        self.commit_config_provider(update, ProviderConfigWriteMode::Update)
+    }
+
+    fn commit_config_provider(
+        &self,
+        update: ProviderConfigUpdate<'_>,
+        mode: ProviderConfigWriteMode,
+    ) -> Result<(), ProviderLifecycleError> {
+        mutate_config_provider_for_hub(&self.hub, update, mode)?;
+        Ok(())
     }
 
     pub async fn install_provider(
@@ -1526,6 +1600,86 @@ impl ProviderLifecycle {
     }
 }
 
+pub(crate) fn reload_config_providers_for_hub(hub: &ConfigHub) -> Result<(), ConfigError> {
+    let state = shared_config_provider_state(hub);
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut replaced = Vec::new();
+    hub.reload_and_then(|snapshot| {
+        let mut providers = snapshot.providers.into_iter().collect::<Vec<_>>();
+        providers.sort_by(|left, right| left.0.cmp(&right.0));
+        let current_names = providers
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>();
+        let stale_names = state
+            .config_providers
+            .keys()
+            .filter(|name| !current_names.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        state.registries.retain(|registry| {
+            let Some(registry) = registry.upgrade() else {
+                return false;
+            };
+            for name in &stale_names {
+                replaced.extend(registry.take_named(&format!("config:{name}")));
+            }
+            for (name, entry) in &providers {
+                let (_, previous) = crate::config_provider::reconcile_config_provider_deferred(
+                    &registry, name, entry,
+                );
+                replaced.extend(previous);
+            }
+            true
+        });
+        state.config_providers = providers.into_iter().collect();
+    })?;
+    drop(state);
+    drop(replaced);
+    Ok(())
+}
+
+pub(crate) fn upsert_config_provider_for_hub(
+    hub: &ConfigHub,
+    update: ProviderConfigUpdate<'_>,
+) -> Result<(), ConfigError> {
+    mutate_config_provider_for_hub(hub, update, ProviderConfigWriteMode::Upsert)
+}
+
+fn mutate_config_provider_for_hub(
+    hub: &ConfigHub,
+    update: ProviderConfigUpdate<'_>,
+    mode: ProviderConfigWriteMode,
+) -> Result<(), ConfigError> {
+    let state = shared_config_provider_state(hub);
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut replaced = Vec::new();
+    hub.write_provider_config_and_then(update, mode, |entry| {
+        state.registries.retain(|registry| {
+            let Some(registry) = registry.upgrade() else {
+                return false;
+            };
+            let (_, previous) = crate::config_provider::reconcile_config_provider_deferred(
+                &registry,
+                &entry.name,
+                entry,
+            );
+            replaced.extend(previous);
+            true
+        });
+        state
+            .config_providers
+            .insert(entry.name.clone(), entry.clone());
+    })?;
+    drop(state);
+    drop(replaced);
+    Ok(())
+}
+
 fn wire_profile_for_kind(kind: &ProviderKind) -> ReasoningWireProfile {
     match kind {
         ProviderKind::Codex => ReasoningWireProfile::CodexResponses,
@@ -1535,7 +1689,7 @@ fn wire_profile_for_kind(kind: &ProviderKind) -> ReasoningWireProfile {
 }
 
 fn shared_lifecycle_state(hub: &ConfigHub) -> Arc<Mutex<LifecycleState>> {
-    let key = lifecycle_coordinator_key(hub);
+    let key = coordinator_key(hub.auth_path());
     let mut coordinators = LIFECYCLE_COORDINATORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1548,8 +1702,21 @@ fn shared_lifecycle_state(hub: &ConfigHub) -> Arc<Mutex<LifecycleState>> {
     state
 }
 
-fn lifecycle_coordinator_key(hub: &ConfigHub) -> PathBuf {
-    let path = hub.auth_path();
+fn shared_config_provider_state(hub: &ConfigHub) -> Arc<Mutex<ConfigProviderLifecycleState>> {
+    let key = coordinator_key(&hub.config_toml_path());
+    let mut coordinators = CONFIG_PROVIDER_COORDINATORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
+    if let Some(state) = coordinators.get(&key).and_then(Weak::upgrade) {
+        return state;
+    }
+    let state = Arc::new(Mutex::new(ConfigProviderLifecycleState::default()));
+    coordinators.insert(key, Arc::downgrade(&state));
+    state
+}
+
+fn coordinator_key(path: &Path) -> PathBuf {
     if let Some(parent) = path.parent()
         && let Ok(parent) = std::fs::canonicalize(parent)
         && let Some(file_name) = path.file_name()
@@ -1767,6 +1934,253 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn concurrent_config_provider_updates_leave_config_and_live_registries_in_sync() {
+        struct ConfigReset;
+
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                crate::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ConfigReset;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(dir.path());
+        let registry = ProviderRegistry::new();
+        let lifecycle = ProviderLifecycle::new(hub.clone(), registry.clone());
+        lifecycle
+            .create_config_provider(ProviderConfigUpdate {
+                name: "gateway",
+                kind: "openai-compat",
+                api_key: Some("initial-key"),
+                api_key_env: None,
+                base_url: Some("https://gateway.example/v1"),
+                max_tokens: Some(8_192),
+                reasoning_format: None,
+                enabled: true,
+            })
+            .unwrap();
+
+        let peer_registry = ProviderRegistry::new();
+        let _peer = ProviderLifecycle::new(hub.clone(), peer_registry.clone());
+        let writers = 16;
+        let barrier = Arc::new(std::sync::Barrier::new(writers));
+        let handles = (0..writers)
+            .map(|index| {
+                let lifecycle = lifecycle.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let api_key = format!("key-{index}");
+                    barrier.wait();
+                    lifecycle
+                        .update_config_provider(ProviderConfigUpdate {
+                            name: "gateway",
+                            kind: "openai-compat",
+                            api_key: Some(&api_key),
+                            api_key_env: None,
+                            base_url: Some("https://gateway.example/v1"),
+                            max_tokens: Some(8_192 + index as u32),
+                            reasoning_format: None,
+                            enabled: index % 2 == 0,
+                        })
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let committed = hub.model_config().unwrap().unwrap().providers["gateway"].clone();
+        let global = crate::model_registry::all_provider_entries()
+            .into_iter()
+            .find(|(name, _)| name == "gateway")
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(global.api_key, committed.api_key);
+        assert_eq!(global.max_tokens, committed.max_tokens);
+        assert_eq!(global.enabled, committed.enabled);
+        let available = crate::config_provider::config_provider_availability(&committed)
+            == crate::config_provider::ConfigProviderAvailability::Available;
+        assert_eq!(registry.contains("config:gateway"), available);
+        assert_eq!(peer_registry.contains("config:gateway"), available);
+    }
+
+    #[test]
+    fn public_config_mutations_sync_existing_and_new_registries() {
+        struct ConfigReset;
+
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                crate::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ConfigReset;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_config_dir(dir.path());
+        let active = ProviderConfigUpdate {
+            name: "gateway",
+            kind: "openai-compat",
+            api_key: Some("test-key"),
+            api_key_env: None,
+            base_url: Some("https://gateway.example/v1"),
+            max_tokens: None,
+            reasoning_format: None,
+            enabled: true,
+        };
+        hub.upsert_provider(active).unwrap();
+        let registry = ProviderRegistry::new();
+        let lifecycle = ProviderLifecycle::new(hub.clone(), registry.clone());
+        lifecycle.reload_config_providers().unwrap();
+        assert!(registry.contains("config:gateway"));
+
+        hub.upsert_provider(ProviderConfigUpdate {
+            enabled: false,
+            ..active
+        })
+        .unwrap();
+        assert!(!registry.contains("config:gateway"));
+        let before_attach_registry = ProviderRegistry::new();
+        let _before_attach = ProviderLifecycle::new(hub.clone(), before_attach_registry.clone());
+        assert!(!before_attach_registry.contains("config:gateway"));
+
+        hub.upsert_provider(active).unwrap();
+        assert!(registry.contains("config:gateway"));
+        assert!(before_attach_registry.contains("config:gateway"));
+        let after_attach_registry = ProviderRegistry::new();
+        let _after_attach = ProviderLifecycle::new(hub.clone(), after_attach_registry.clone());
+        assert!(after_attach_registry.contains("config:gateway"));
+
+        std::fs::write(
+            hub.config_toml_path(),
+            "[providers.gateway]\nkind = \"openai-compat\"\napi_key = \"reloaded-key\"\nenabled = false\n",
+        )
+        .unwrap();
+        hub.reload().unwrap();
+        assert!(!registry.contains("config:gateway"));
+        assert!(!before_attach_registry.contains("config:gateway"));
+        assert!(!after_attach_registry.contains("config:gateway"));
+        let reloaded_registry = ProviderRegistry::new();
+        let _reloaded = ProviderLifecycle::new(hub.clone(), reloaded_registry.clone());
+        assert!(!reloaded_registry.contains("config:gateway"));
+    }
+
+    #[test]
+    fn public_config_mutations_fan_out_across_distinct_auth_stores() {
+        struct ConfigReset;
+
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                crate::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ConfigReset;
+        let dir = tempfile::tempdir().unwrap();
+        let hub_a = ConfigHub::from_auth_path(dir.path().join("auth-a.json"));
+        let hub_b = ConfigHub::from_auth_path(dir.path().join("auth-b.json"));
+        let registry_a = ProviderRegistry::new();
+        let registry_b = ProviderRegistry::new();
+        let lifecycle_a = ProviderLifecycle::new(hub_a.clone(), registry_a.clone());
+        let lifecycle_b = ProviderLifecycle::new(hub_b.clone(), registry_b.clone());
+
+        assert!(!Arc::ptr_eq(&lifecycle_a.state, &lifecycle_b.state));
+        assert!(Arc::ptr_eq(
+            &lifecycle_a.config_state,
+            &lifecycle_b.config_state
+        ));
+
+        let active = ProviderConfigUpdate {
+            name: "gateway",
+            kind: "openai-compat",
+            api_key: Some("test-key"),
+            api_key_env: None,
+            base_url: Some("https://gateway.example/v1"),
+            max_tokens: None,
+            reasoning_format: None,
+            enabled: true,
+        };
+        hub_a.upsert_provider(active).unwrap();
+        assert!(registry_a.contains("config:gateway"));
+        assert!(registry_b.contains("config:gateway"));
+
+        hub_b
+            .upsert_provider(ProviderConfigUpdate {
+                enabled: false,
+                ..active
+            })
+            .unwrap();
+        assert!(!registry_a.contains("config:gateway"));
+        assert!(!registry_b.contains("config:gateway"));
+
+        let registry_c = ProviderRegistry::new();
+        let lifecycle_c = ProviderLifecycle::new(hub_a.clone(), registry_c.clone());
+        assert!(Arc::ptr_eq(
+            &lifecycle_a.config_state,
+            &lifecycle_c.config_state
+        ));
+        assert!(!registry_c.contains("config:gateway"));
+    }
+
+    #[test]
+    fn public_config_reload_fans_out_across_distinct_auth_stores() {
+        struct ConfigReset;
+
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                crate::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ConfigReset;
+        let dir = tempfile::tempdir().unwrap();
+        let hub_a = ConfigHub::from_auth_path(dir.path().join("auth-a.json"));
+        let hub_b = ConfigHub::from_auth_path(dir.path().join("auth-b.json"));
+        let registry_a = ProviderRegistry::new();
+        let registry_b = ProviderRegistry::new();
+        let _lifecycle_a = ProviderLifecycle::new(hub_a.clone(), registry_a.clone());
+        let _lifecycle_b = ProviderLifecycle::new(hub_b.clone(), registry_b.clone());
+
+        std::fs::write(
+            hub_a.config_toml_path(),
+            "[providers.gateway]\nkind = \"openai-compat\"\napi_key = \"first-key\"\nenabled = true\n",
+        )
+        .unwrap();
+        hub_a.reload().unwrap();
+        assert!(registry_a.contains("config:gateway"));
+        assert!(registry_b.contains("config:gateway"));
+
+        std::fs::write(
+            hub_b.config_toml_path(),
+            "[providers.gateway]\nkind = \"openai-compat\"\napi_key = \"second-key\"\nenabled = false\n",
+        )
+        .unwrap();
+        hub_b.reload().unwrap();
+        assert!(!registry_a.contains("config:gateway"));
+        assert!(!registry_b.contains("config:gateway"));
+
+        let projected = crate::model_registry::all_provider_entries()
+            .into_iter()
+            .find(|(name, _)| name == "gateway")
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(projected.api_key.as_deref(), Some("second-key"));
+        assert_eq!(projected.enabled, Some(false));
     }
 
     #[test]

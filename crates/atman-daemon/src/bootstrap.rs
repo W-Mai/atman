@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_runtime::event::EventSink;
-use atman_runtime::providers::anthropic::AnthropicProvider;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::providers::openai::OpenAiProvider;
 use atman_runtime::sandbox::Sandbox;
 use atman_runtime::{Executor, Value, tools};
 
@@ -471,9 +469,10 @@ async fn register_providers(
     executor: &mut Executor,
     auth_hub: &atman_runtime::config_hub::ConfigHub,
 ) -> Result<Vec<String>> {
-    register_providers_from_config(executor);
-    atman_runtime::model_registry::register_all_preset_models();
     let lifecycle = executor.attach_provider_lifecycle(auth_hub.clone())?;
+    lifecycle
+        .reload_config_providers()
+        .context("load model and provider configuration")?;
     prepare_auth_provider_runtime(&lifecycle).await
 }
 
@@ -574,78 +573,6 @@ fn reload_cached_codex_provider_after_conflict(
     }
 }
 
-fn register_providers_from_config(executor: &mut Executor) {
-    for (name, entry) in atman_runtime::model_registry::all_provider_entries() {
-        if entry.enabled == Some(false) {
-            continue;
-        }
-        // Resolve API key: api_key_env -> api_key -> kind-based env fallback
-        let key = entry
-            .api_key_env
-            .as_deref()
-            .and_then(|env| std::env::var(env).ok().filter(|v| !v.trim().is_empty()))
-            .or_else(|| entry.api_key.clone().filter(|k| !k.is_empty()))
-            .or_else(|| match entry.kind.as_str() {
-                "openai" | "openai-compat" => std::env::var("OPENAI_API_KEY")
-                    .ok()
-                    .filter(|v| !v.is_empty()),
-                "anthropic" => std::env::var("ANTHROPIC_API_KEY")
-                    .ok()
-                    .filter(|v| !v.is_empty()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let needs_key = matches!(
-            entry.kind.as_str(),
-            "openai" | "openai-compat" | "anthropic"
-        );
-        if needs_key && key.is_empty() {
-            continue;
-        }
-
-        // Resolve base_url: config -> kind-based env override
-        let base_url = entry
-            .base_url
-            .clone()
-            .or_else(|| match entry.kind.as_str() {
-                "openai" | "openai-compat" => std::env::var("OPENAI_BASE_URL").ok(),
-                "anthropic" => std::env::var("ANTHROPIC_BASE_URL").ok(),
-                _ => None,
-            });
-
-        let provider_name = format!("config:{name}");
-        match entry.kind.as_str() {
-            "anthropic" => {
-                let mut p = AnthropicProvider::new(&provider_name, &key);
-                if let Some(url) = &base_url {
-                    p = p.with_base_url(url);
-                }
-                if let Some(mt) = entry.max_tokens {
-                    p = p.with_max_tokens(mt);
-                }
-                executor.providers.register(Arc::new(p));
-            }
-            "openai" | "openai-compat" => {
-                let mut p = OpenAiProvider::new(&provider_name, &key);
-                p = p.with_reasoning_format(entry.reasoning_format.unwrap_or_else(|| {
-                    atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
-                        &entry.kind,
-                    )
-                }));
-                if let Some(url) = &base_url {
-                    p = p.with_base_url(url);
-                }
-                if let Some(mt) = entry.max_tokens {
-                    p = p.with_max_tokens(mt);
-                }
-                executor.providers.register(Arc::new(p));
-            }
-            _ => {}
-        }
-    }
-}
-
 pub fn load_preview_config(
     config_dir: Option<&Path>,
 ) -> atman_runtime::tools::preview::PreviewConfig {
@@ -695,36 +622,111 @@ pub fn default_data_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn build_executor_injects_tool_output_budget() {
-        let config = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            config.path().join("config.toml"),
-            "[trust]\nmode = \"eager\"\n[tool_output]\nmax_lines = 7\nmax_bytes = 777\nmax_line_bytes = 111\n",
-        )
-        .unwrap();
+    #[test]
+    fn build_executor_injects_tool_output_budget() {
+        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let config = tempfile::tempdir().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                let home = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    config.path().join("config.toml"),
+                    "[trust]\nmode = \"eager\"\n[tool_output]\nmax_lines = 7\nmax_bytes = 777\nmax_line_bytes = 111\n",
+                )
+                .unwrap();
 
-        let outcome = build_executor(BootstrapOptions {
-            events: EventSink::new(),
-            mock: true,
-            config_dir: Some(config.path().to_path_buf()),
-            project_root: project.path().to_path_buf(),
-            home_dir: Some(home.path().to_path_buf()),
-            workspace_generation: "bootstrap-test-generation".into(),
-        })
-        .await
-        .unwrap();
+                let outcome = build_executor(BootstrapOptions {
+                    events: EventSink::new(),
+                    mock: true,
+                    config_dir: Some(config.path().to_path_buf()),
+                    project_root: project.path().to_path_buf(),
+                    home_dir: Some(home.path().to_path_buf()),
+                    workspace_generation: "bootstrap-test-generation".into(),
+                })
+                .await
+                .unwrap();
 
-        assert_eq!(
-            outcome.executor.tool_ctx.tool_output_budget,
-            atman_runtime::tools::tool_output::ToolOutputBudget {
-                max_lines: 7,
-                max_bytes: 777,
-                max_line_bytes: 111,
+                assert_eq!(
+                    outcome.executor.tool_ctx.tool_output_budget,
+                    atman_runtime::tools::tool_output::ToolOutputBudget {
+                        max_lines: 7,
+                        max_bytes: 777,
+                        max_line_bytes: 111,
+                    }
+                );
+            });
+    }
+
+    #[test]
+    fn build_executor_loads_config_providers_from_the_selected_config_dir() {
+        struct ConfigReset;
+
+        impl Drop for ConfigReset {
+            fn drop(&mut self) {
+                atman_runtime::model_registry::set_provider_config(Default::default());
             }
+        }
+
+        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = ConfigReset;
+        let mut stale = atman_runtime::model_registry::ProviderConfig::default();
+        stale.providers.insert(
+            "stale".into(),
+            atman_runtime::model_registry::ProviderEntry {
+                kind: "openai-compat".into(),
+                api_key: Some("stale-key".into()),
+                enabled: Some(true),
+                ..Default::default()
+            },
         );
+        atman_runtime::model_registry::set_provider_config(stale);
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let config = tempfile::tempdir().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                let home = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    config.path().join("config.toml"),
+                    r#"[providers.selected]
+kind = "openai-compat"
+api_key = "test-key"
+base_url = "https://gateway.example/v1"
+enabled = true
+"#,
+                )
+                .unwrap();
+
+                let outcome = build_executor(BootstrapOptions {
+                    events: EventSink::new(),
+                    mock: false,
+                    config_dir: Some(config.path().to_path_buf()),
+                    project_root: project.path().to_path_buf(),
+                    home_dir: Some(home.path().to_path_buf()),
+                    workspace_generation: "selected-config-provider-test".into(),
+                })
+                .await
+                .unwrap();
+
+                assert!(outcome.executor.providers.contains("config:selected"));
+                assert!(!outcome.executor.providers.contains("config:stale"));
+                let provider_names = atman_runtime::model_registry::all_provider_entries()
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>();
+                assert_eq!(provider_names, vec!["selected"]);
+            });
     }
 
     #[test]

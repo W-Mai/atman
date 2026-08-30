@@ -1528,9 +1528,14 @@ fn apply_provider_mutation_result(
     ) {
         return;
     }
-    app.wm.modals.model_manager.refresh();
-    if !app.wm.modals.model_picker.is_pending() && app.app.reconcile_input_reasoning() {
-        app.app.save_ui_state();
+    if let crate::provider_manager::ProviderMutationResolution::ConfigSaved {
+        name,
+        created: true,
+    } = &resolution
+    {
+        apply_provider_catalog_changed(app, Some(name.clone()));
+    } else {
+        apply_provider_catalog_changed(app, None);
     }
     if let crate::provider_manager::ProviderMutationResolution::Installed { name } = &resolution
         && app.wm.modals.onboarding_open
@@ -1565,6 +1570,14 @@ fn apply_provider_mutation_result(
                     "models refreshed · +{} ~{} -{} · {} total",
                     delta.added, delta.updated, delta.removed, delta.total
                 ),
+                app::NoteLevel::Success,
+            ),
+            Ok(crate::ProviderMutationSuccess::ConfigSaved { name, created }) => (
+                if created {
+                    format!("{name} added")
+                } else {
+                    format!("{name} updated")
+                },
                 app::NoteLevel::Success,
             ),
             Err(error) => (
@@ -1775,6 +1788,20 @@ mod tests {
         }
     }
 
+    fn config_upsert(name: &str, create: bool) -> crate::ProviderMutation {
+        crate::ProviderMutation::UpsertConfig {
+            name: name.into(),
+            kind: "openai-compat".into(),
+            api_key: "test-key".into(),
+            api_key_env: String::new(),
+            base_url: "https://gateway.example/v1".into(),
+            max_tokens: None,
+            reasoning_format: "thinking-toggle".into(),
+            enabled: true,
+            create,
+        }
+    }
+
     #[test]
     fn provider_login_advances_onboarding_only_after_success() {
         let mut app = UiState::new(AppState::new("session".into(), None));
@@ -1811,6 +1838,62 @@ mod tests {
             app.app.toasts.last().unwrap().level,
             app::NoteLevel::Success
         );
+    }
+
+    #[test]
+    fn config_create_advances_onboarding_and_opens_model_manager_after_success() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        app.wm.modals.onboarding_open = true;
+        let provider = "config-ack-empty";
+        let failed_request = pending_provider_request(&mut app, config_upsert(provider, true));
+
+        apply_provider_mutation_result(&mut app, failed_request, Err("save failed".into()));
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ProviderSelect
+        );
+        assert!(!app.wm.modals.model_manager.open);
+        assert_eq!(app.app.toasts.last().unwrap().level, app::NoteLevel::Error);
+
+        let successful_request = pending_provider_request(&mut app, config_upsert(provider, true));
+        apply_provider_mutation_result(
+            &mut app,
+            successful_request,
+            Ok(crate::ProviderMutationSuccess::ConfigSaved {
+                name: provider.into(),
+                created: true,
+            }),
+        );
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ModelSelect
+        );
+        assert!(app.wm.modals.model_manager.open);
+        assert!(app.app.toasts.last().unwrap().message.contains("added"));
+    }
+
+    #[test]
+    fn config_update_refreshes_without_reopening_onboarding() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        app.wm.modals.onboarding_open = true;
+        let provider = "config-ack-update";
+        let request = pending_provider_request(&mut app, config_upsert(provider, false));
+
+        apply_provider_mutation_result(
+            &mut app,
+            request,
+            Ok(crate::ProviderMutationSuccess::ConfigSaved {
+                name: provider.into(),
+                created: false,
+            }),
+        );
+
+        assert_eq!(
+            app.wm.modals.onboarding.step,
+            crate::onboarding::OnboardingStep::ProviderSelect
+        );
+        assert!(!app.wm.modals.model_manager.open);
+        assert!(app.app.toasts.last().unwrap().message.contains("updated"));
     }
 
     #[test]

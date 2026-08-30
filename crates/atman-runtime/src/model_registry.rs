@@ -533,6 +533,12 @@ pub(crate) struct PreparedConfigLayer {
     presets: BTreeMap<ModelIdentity, PresetModelEntry>,
 }
 
+impl PreparedConfigLayer {
+    pub(crate) fn snapshot(&self) -> ProviderConfig {
+        self.config.values.clone()
+    }
+}
+
 fn prepare_config_layer(config: ConfigLayer) -> Result<PreparedConfigLayer, CatalogError> {
     let presets = build_preset_models(&config);
     let transaction = REGISTRY_TRANSACTION_LOCK.lock().unwrap();
@@ -2011,6 +2017,7 @@ pub fn read_config_toml_pub() -> Option<String> {
         .ok()
 }
 
+#[cfg(test)]
 pub(crate) fn reload_from_text(text: &str) -> anyhow::Result<()> {
     let prepared = prepare_config_text(text)?;
     commit_prepared_config(prepared);

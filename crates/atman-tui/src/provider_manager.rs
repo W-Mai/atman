@@ -41,6 +41,24 @@ pub enum ProviderStatus {
     Error,
 }
 
+fn config_provider_status(
+    availability: atman_runtime::config_provider::ConfigProviderAvailability,
+) -> ProviderStatus {
+    match availability {
+        atman_runtime::config_provider::ConfigProviderAvailability::Available => {
+            ProviderStatus::Active
+        }
+        atman_runtime::config_provider::ConfigProviderAvailability::Disabled => {
+            ProviderStatus::Disabled
+        }
+        atman_runtime::config_provider::ConfigProviderAvailability::MissingCredential
+        | atman_runtime::config_provider::ConfigProviderAvailability::UnsupportedKind => {
+            ProviderStatus::Inactive
+        }
+        _ => ProviderStatus::Inactive,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfirmKind {
     Delete,
@@ -92,6 +110,7 @@ pub struct ProviderManager {
     pub in_form: bool,
     form_field: usize,
     editing_provider: Option<String>,
+    form_max_tokens: Option<u32>,
     show_confirm: bool,
     confirm_kind: Option<ConfirmKind>,
     confirm_provider_id: Option<String>,
@@ -107,6 +126,7 @@ pub(crate) enum ProviderMutationResolution {
     ProtocolError,
     Succeeded,
     Installed { name: String },
+    ConfigSaved { name: String, created: bool },
 }
 
 impl ProviderManager {
@@ -168,6 +188,9 @@ impl ProviderManager {
             crate::ProviderMutation::SetEnabled { .. } => "updating provider state…  Esc:hide",
             crate::ProviderMutation::Remove { .. } => "removing provider…  Esc:hide",
             crate::ProviderMutation::Refresh { .. } => "refreshing models…  Esc:hide",
+            crate::ProviderMutation::UpsertConfig { .. } => {
+                "saving provider configuration…  Esc:hide"
+            }
         })
     }
 
@@ -217,11 +240,9 @@ impl ProviderManager {
                 .unwrap_or("")
                 .replace("https://", "")
                 .replace("http://", "");
-            let status = if entry.enabled == Some(false) {
-                ProviderStatus::Disabled
-            } else {
-                ProviderStatus::Active
-            };
+            let status = config_provider_status(
+                atman_runtime::config_provider::config_provider_availability(&entry),
+            );
             self.providers.push(ProviderEntry {
                 source: ProviderSource::Config,
                 name,
@@ -239,6 +260,7 @@ impl ProviderManager {
         self.editing_provider = None;
         self.in_form = false;
         self.name_focused = false;
+        self.form_max_tokens = None;
         self.add_options = atman_runtime::model_registry::PROVIDER_PRESETS
             .iter()
             .enumerate()
@@ -281,7 +303,8 @@ impl ProviderManager {
         self.show_add = true;
         self.editing_provider = Some(name.to_string());
         self.in_form = true;
-        self.form_field = 0;
+        self.form_field = 1;
+        self.form_max_tokens = entry.max_tokens;
         let mut name_ed = InputEditor::default();
         name_ed.insert_str(name);
         self.name_editor = name_ed;
@@ -439,10 +462,10 @@ impl ProviderManager {
                         .map(|(_, e)| e.clone())
                     {
                         let current_enabled = entry.enabled.unwrap_or(true);
-                        if let Some(tx) = control_tx {
-                            let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
+                        self.begin_mutation(
+                            crate::ProviderMutation::UpsertConfig {
                                 name: p.name.clone(),
-                                provider_type: entry.kind.clone(),
+                                kind: entry.kind.clone(),
                                 api_key: entry.api_key.unwrap_or_default(),
                                 api_key_env: entry.api_key_env.unwrap_or_default(),
                                 base_url: entry.base_url.unwrap_or_default(),
@@ -456,8 +479,10 @@ impl ProviderManager {
                                     })
                                     .to_string(),
                                 enabled: !current_enabled,
-                            });
-                        }
+                                create: false,
+                            },
+                            control_tx,
+                        );
                     }
                 }
                 ProviderSource::Env => {}
@@ -573,6 +598,18 @@ impl ProviderManager {
                 self.name_focused = false;
                 ProviderMutationResolution::Installed { name }
             }
+            crate::ProviderMutation::UpsertConfig { name, create, .. } => {
+                if self.in_form {
+                    self.show_add = false;
+                    self.in_form = false;
+                    self.editing_provider = None;
+                    self.form_max_tokens = None;
+                }
+                ProviderMutationResolution::ConfigSaved {
+                    name,
+                    created: create,
+                }
+            }
             _ => ProviderMutationResolution::Succeeded,
         }
     }
@@ -606,6 +643,7 @@ impl ProviderManager {
     fn open_custom_form(&mut self) {
         self.in_form = true;
         self.form_field = 0;
+        self.form_max_tokens = None;
         self.name_editor = InputEditor::default();
         self.api_key_editor = InputEditor::default();
         self.base_url_editor = InputEditor::default();
@@ -680,6 +718,7 @@ impl ProviderManager {
                             self.show_add = false;
                             self.in_form = false;
                             self.editing_provider = None;
+                            self.form_max_tokens = None;
                         } else {
                             self.in_form = false;
                         }
@@ -688,7 +727,11 @@ impl ProviderManager {
                         self.test_form(control_tx);
                     }
                     KeyAction::Tab => {
-                        self.form_field = 0;
+                        self.form_field = if self.editing_provider.is_some() {
+                            1
+                        } else {
+                            0
+                        };
                     }
                     KeyAction::BackTab => {
                         self.form_field = 6;
@@ -697,6 +740,7 @@ impl ProviderManager {
                 }
                 return None;
             }
+            let name_locked = self.editing_provider.is_some();
             let editor = match self.form_field {
                 0 => &mut self.name_editor,
                 1 => &mut self.provider_type_editor,
@@ -712,6 +756,7 @@ impl ProviderManager {
                         self.show_add = false;
                         self.in_form = false;
                         self.editing_provider = None;
+                        self.form_max_tokens = None;
                     } else {
                         self.in_form = false;
                     }
@@ -721,6 +766,9 @@ impl ProviderManager {
                 }
                 KeyAction::Tab => {
                     self.form_field = (self.form_field + 1) % 8;
+                    if name_locked && self.form_field == 0 {
+                        self.form_field = 1;
+                    }
                 }
                 KeyAction::BackTab => {
                     self.form_field = if self.form_field == 0 {
@@ -728,6 +776,9 @@ impl ProviderManager {
                     } else {
                         self.form_field - 1
                     };
+                    if name_locked && self.form_field == 0 {
+                        self.form_field = 7;
+                    }
                 }
                 KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 1 => {
                     let direction =
@@ -787,7 +838,9 @@ impl ProviderManager {
                 | KeyAction::CursorEnd
                 | KeyAction::Char(_)
                 | KeyAction::Newline => {
-                    editor.handle_key(action);
+                    if !name_locked || self.form_field != 0 {
+                        editor.handle_key(action);
+                    }
                 }
                 _ => {}
             }
@@ -861,11 +914,15 @@ impl ProviderManager {
         &mut self,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
-        let name = self.name_editor.buf().trim().to_string();
+        let create = self.editing_provider.is_none();
+        let name = self
+            .editing_provider
+            .clone()
+            .unwrap_or_else(|| self.name_editor.buf().trim().to_string());
         let api_key = self.api_key_editor.buf().trim().to_string();
         let api_key_env = self.api_key_env_editor.buf().trim().to_string();
         let base_url = self.base_url_editor.buf().trim().to_string();
-        let provider_type = self.provider_type_editor.buf().trim().to_string();
+        let kind = self.provider_type_editor.buf().trim().to_string();
         let reasoning_format = self.reasoning_format_editor.buf().trim().to_string();
         let enabled = matches!(
             self.enabled_editor.buf().trim().to_lowercase().as_str(),
@@ -874,44 +931,25 @@ impl ProviderManager {
         if name.is_empty() || base_url.is_empty() {
             return None;
         }
-        let provider_type = if provider_type.is_empty() {
+        let kind = if kind.is_empty() {
             atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
         } else {
-            provider_type
+            kind
         };
-        let sent = control_tx.is_some_and(|tx| {
-            if self.editing_provider.is_some() {
-                tx.send(crate::TuiControl::UpdateConfigProvider {
-                    name: name.clone(),
-                    provider_type: provider_type.clone(),
-                    api_key: api_key.clone(),
-                    api_key_env: api_key_env.clone(),
-                    base_url: base_url.clone(),
-                    max_tokens: None,
-                    reasoning_format: reasoning_format.clone(),
-                    enabled,
-                })
-                .is_ok()
-            } else {
-                tx.send(crate::TuiControl::AddConfigProvider {
-                    name: name.clone(),
-                    provider_type: provider_type.clone(),
-                    api_key: api_key.clone(),
-                    api_key_env: api_key_env.clone(),
-                    base_url: base_url.clone(),
-                    max_tokens: None,
-                    reasoning_format: reasoning_format.clone(),
-                    enabled,
-                })
-                .is_ok()
-            }
-        });
-        if !sent {
-            return None;
-        }
-        self.show_add = false;
-        self.in_form = false;
-        self.editing_provider = None;
+        self.begin_mutation(
+            crate::ProviderMutation::UpsertConfig {
+                name,
+                kind,
+                api_key,
+                api_key_env,
+                base_url,
+                max_tokens: self.form_max_tokens,
+                reasoning_format,
+                enabled,
+                create,
+            },
+            control_tx,
+        );
         None
     }
 
@@ -985,6 +1023,13 @@ fn mutation_success_matches(
                 ..
             },
         ) => provider_id == refreshed_id,
+        (
+            crate::ProviderMutation::UpsertConfig { name, create, .. },
+            crate::ProviderMutationSuccess::ConfigSaved {
+                name: saved_name,
+                created,
+            },
+        ) => name == saved_name && create == created,
         _ => false,
     }
 }
@@ -1556,6 +1601,9 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         if !self.in_form {
             return;
         }
+        if self.form_field == 0 && self.editing_provider.is_some() {
+            return;
+        }
         if self.form_field == 1 {
             let value = text.trim();
             if let Some(index) = provider_types().iter().position(|kind| *kind == value) {
@@ -1620,6 +1668,49 @@ fn render_pending_help(
 mod tests {
     use super::*;
 
+    fn populate_config_form(manager: &mut ProviderManager, editing: Option<&str>) {
+        manager.open = true;
+        manager.show_add = true;
+        manager.in_form = true;
+        manager.editing_provider = editing.map(str::to_string);
+        manager.form_field = if editing.is_some() { 1 } else { 0 };
+        manager
+            .name_editor
+            .replace_with(editing.unwrap_or("gateway"));
+        manager.provider_type_editor.replace_with("openai-compat");
+        manager.api_key_editor.replace_with("test-key");
+        manager.api_key_env_editor.replace_with("GATEWAY_API_KEY");
+        manager
+            .base_url_editor
+            .replace_with("https://gateway.example/v1");
+        manager
+            .reasoning_format_editor
+            .replace_with("thinking-toggle");
+        manager.enabled_editor.replace_with("true");
+    }
+
+    #[test]
+    fn unavailable_config_providers_are_not_presented_as_active() {
+        use atman_runtime::config_provider::ConfigProviderAvailability;
+
+        assert_eq!(
+            config_provider_status(ConfigProviderAvailability::Available),
+            ProviderStatus::Active
+        );
+        assert_eq!(
+            config_provider_status(ConfigProviderAvailability::Disabled),
+            ProviderStatus::Disabled
+        );
+        assert_eq!(
+            config_provider_status(ConfigProviderAvailability::MissingCredential),
+            ProviderStatus::Inactive
+        );
+        assert_eq!(
+            config_provider_status(ConfigProviderAvailability::UnsupportedKind),
+            ProviderStatus::Inactive
+        );
+    }
+
     #[test]
     fn paste_accepts_only_known_provider_type() {
         let mut manager = ProviderManager::default();
@@ -1679,6 +1770,86 @@ mod tests {
             "thinking-toggle",
         );
         assert_eq!(manager.reasoning_format_editor.buf(), "thinking-toggle");
+    }
+
+    #[test]
+    fn config_form_waits_for_matching_ack_and_preserves_failed_input() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+
+        manager.commit_form(Some(&tx));
+        let failed_request = receive_mutation(&mut rx);
+        assert!(matches!(
+            &failed_request.action,
+            crate::ProviderMutation::UpsertConfig {
+                name,
+                create: true,
+                ..
+            } if name == "gateway"
+        ));
+        assert!(manager.in_form);
+        assert!(manager.show_add);
+        assert_eq!(manager.pending_mutation.as_ref(), Some(&failed_request));
+
+        assert_eq!(
+            manager.resolve_mutation(&failed_request, &Err("save failed".into())),
+            ProviderMutationResolution::Failed
+        );
+        assert!(manager.in_form);
+        assert!(manager.show_add);
+        assert_eq!(manager.api_key_editor.buf(), "test-key");
+        assert!(manager.pending_mutation.is_none());
+
+        manager.commit_form(Some(&tx));
+        let successful_request = receive_mutation(&mut rx);
+        assert_eq!(
+            manager.resolve_mutation(
+                &successful_request,
+                &Ok(crate::ProviderMutationSuccess::ConfigSaved {
+                    name: "gateway".into(),
+                    created: true,
+                }),
+            ),
+            ProviderMutationResolution::ConfigSaved {
+                name: "gateway".into(),
+                created: true,
+            }
+        );
+        assert!(!manager.in_form);
+        assert!(!manager.show_add);
+        assert!(manager.pending_mutation.is_none());
+    }
+
+    #[test]
+    fn config_edit_keeps_name_and_hidden_max_tokens() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, Some("gateway"));
+        manager.form_max_tokens = Some(16_384);
+
+        manager.handle_add_key(&KeyAction::BackTab, Some(&tx));
+        assert_eq!(manager.form_field, 7);
+        manager.handle_add_key(&KeyAction::Tab, Some(&tx));
+        assert_eq!(manager.form_field, 1);
+
+        manager.form_field = 0;
+        manager.handle_add_key(&KeyAction::Char('x'), Some(&tx));
+        <ProviderManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "renamed");
+        assert_eq!(manager.name_editor.buf(), "gateway");
+        manager.name_editor.replace_with("corrupted");
+
+        manager.commit_form(Some(&tx));
+        let request = receive_mutation(&mut rx);
+        assert!(matches!(
+            request.action,
+            crate::ProviderMutation::UpsertConfig {
+                ref name,
+                max_tokens: Some(16_384),
+                create: false,
+                ..
+            } if name == "gateway"
+        ));
     }
 
     fn receive_mutation(
@@ -1893,6 +2064,61 @@ mod tests {
     }
 
     #[test]
+    fn config_toggle_uses_the_acknowledged_mutation_path() {
+        struct RegistryReset;
+        impl Drop for RegistryReset {
+            fn drop(&mut self) {
+                atman_runtime::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = RegistryReset;
+        let mut config = atman_runtime::model_registry::ProviderConfig::default();
+        config.providers.insert(
+            "gateway".into(),
+            atman_runtime::model_registry::ProviderEntry {
+                kind: "openai-compat".into(),
+                api_key_env: Some("GATEWAY_API_KEY".into()),
+                base_url: Some("https://gateway.example/v1".into()),
+                max_tokens: Some(8_192),
+                enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        atman_runtime::model_registry::set_provider_config(config);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager {
+            providers: vec![ProviderEntry {
+                source: ProviderSource::Config,
+                name: "gateway".into(),
+                kind: "openai-compat".into(),
+                status: ProviderStatus::Active,
+                detail: String::new(),
+            }],
+            ..Default::default()
+        };
+
+        manager.toggle_enabled(Some(&tx));
+        let request = receive_mutation(&mut rx);
+        assert!(matches!(
+            &request.action,
+            crate::ProviderMutation::UpsertConfig {
+                name,
+                max_tokens: Some(8_192),
+                enabled: false,
+                create: false,
+                ..
+            } if name == "gateway"
+        ));
+        assert_eq!(manager.providers[0].status, ProviderStatus::Active);
+        assert_eq!(manager.pending_mutation.as_ref(), Some(&request));
+    }
+
+    #[test]
     fn failed_dispatch_and_pending_request_reject_additional_mutations() {
         let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
         drop(closed_rx);
@@ -2010,6 +2236,40 @@ mod tests {
                 crate::ProviderMutationSuccess::Refreshed {
                     provider_id: "provider-b".into(),
                     delta: Default::default(),
+                },
+            ),
+            (
+                crate::ProviderMutation::UpsertConfig {
+                    name: "provider-a".into(),
+                    kind: "openai-compat".into(),
+                    api_key: String::new(),
+                    api_key_env: String::new(),
+                    base_url: "https://gateway.example/v1".into(),
+                    max_tokens: None,
+                    reasoning_format: "thinking-toggle".into(),
+                    enabled: true,
+                    create: true,
+                },
+                crate::ProviderMutationSuccess::ConfigSaved {
+                    name: "provider-b".into(),
+                    created: true,
+                },
+            ),
+            (
+                crate::ProviderMutation::UpsertConfig {
+                    name: "provider-a".into(),
+                    kind: "openai-compat".into(),
+                    api_key: String::new(),
+                    api_key_env: String::new(),
+                    base_url: "https://gateway.example/v1".into(),
+                    max_tokens: None,
+                    reasoning_format: "thinking-toggle".into(),
+                    enabled: true,
+                    create: false,
+                },
+                crate::ProviderMutationSuccess::ConfigSaved {
+                    name: "provider-a".into(),
+                    created: true,
                 },
             ),
         ];

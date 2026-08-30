@@ -133,26 +133,6 @@ pub enum TuiControl {
     },
     /// Execute a provider mutation; completed operations return one matching result.
     MutateProvider(ProviderMutationRequest),
-    AddConfigProvider {
-        name: String,
-        provider_type: String,
-        api_key: String,
-        api_key_env: String,
-        base_url: String,
-        max_tokens: Option<u32>,
-        reasoning_format: String,
-        enabled: bool,
-    },
-    UpdateConfigProvider {
-        name: String,
-        provider_type: String,
-        api_key: String,
-        api_key_env: String,
-        base_url: String,
-        max_tokens: Option<u32>,
-        reasoning_format: String,
-        enabled: bool,
-    },
     UpsertConfigModel {
         old_name: Option<String>,
         name: String,
@@ -286,13 +266,20 @@ pub enum ProviderMutation {
     Refresh {
         provider_id: String,
     },
+    UpsertConfig {
+        name: String,
+        kind: String,
+        api_key: String,
+        api_key_env: String,
+        base_url: String,
+        max_tokens: Option<u32>,
+        reasoning_format: String,
+        enabled: bool,
+        create: bool,
+    },
 }
 
-/// A committed provider mutation.
-///
-/// Login results must preserve the requested kind and name. Other results
-/// must preserve the requested provider ID and, for state changes, the
-/// requested enabled value.
+/// Result of a committed provider mutation with request identity preserved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProviderMutationSuccess {
@@ -311,6 +298,10 @@ pub enum ProviderMutationSuccess {
     Refreshed {
         provider_id: String,
         delta: atman_runtime::model_registry::CatalogDelta,
+    },
+    ConfigSaved {
+        name: String,
+        created: bool,
     },
 }
 
