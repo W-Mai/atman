@@ -215,19 +215,26 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             confession_triggers: [string] -- "relevant confession trigger keywords",
         },
     )
-    rule_context = list.reduce(
-        list.map(hints.rule_names, |n| rule.fetch(name: n)),
-        |acc, c| acc + "\n\n---\n\n" + c,
-        "",
+    recorded_rules = list.map(
+        hints.rule_names,
+        |name| context.record(
+            key: "agent.rule." + name,
+            content: rule.fetch(name: name),
+        ),
     )
-    confession_context = list.reduce(
+    matched_confessions = list.reduce(
         list.map(hints.confession_triggers, |t| memory.fetch_confessions(trigger: t)),
-        |acc, c| acc + "\n\n" + to_json_string(c),
-        "",
+        |acc, items| concat(acc, items),
+        [],
+    )
+    recorded_confessions = list.map(
+        matched_confessions,
+        |item| context.record(
+            key: "agent.mistake." + item.id,
+            content: to_json_string(item),
+        ),
     )
     system_prompt = @"../prompts/system.md"
-        + "\n\n## Relevant Rules\n" + rule_context
-        + "\n\n## Relevant Past Mistakes\n" + confession_context
     loop {
         reply = llm.call(
             model: "smart",
@@ -592,6 +599,16 @@ mod tests {
             file.flows.iter().any(|f| f.name.name == "agent"),
             "agent flow must exist"
         );
+    }
+
+    #[test]
+    fn agent_context_selection_appends_records_without_rewriting_system() {
+        assert!(AGENT_AT.contains("context.record("));
+        assert!(AGENT_AT.contains("agent.rule."));
+        assert!(AGENT_AT.contains("agent.mistake."));
+        assert!(!AGENT_AT.contains("## Relevant Rules"));
+        assert!(!AGENT_AT.contains("## Relevant Past Mistakes"));
+        assert!(AGENT_AT.contains("system_prompt = @\"../prompts/system.md\"\n    loop"));
     }
 
     #[test]

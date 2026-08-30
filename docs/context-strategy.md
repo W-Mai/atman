@@ -210,9 +210,9 @@ Different stores solve different retention problems:
 | Rules | Managed agent selects and loads relevant rules before its main loop | Task-specific operating constraints |
 | Specs | Available through memory tools | Feature progress and deviations |
 
-Goal and plan survive message compaction because they are stored outside the message
-window and reassembled into the system prompt. Clearing either store removes that
-anchor from later calls.
+Goal and plan stores remain the source of truth. Before a model call, their current
+values synchronize into versioned context records. Compaction retains the latest
+record per live key, and clearing either store appends a tombstone.
 
 ## Managed agent composition
 
@@ -221,8 +221,9 @@ The default agent currently follows this sequence:
 1. Push the user request into session history.
 2. Load the rule index, confession index, and five recent messages.
 3. Ask a cheap extraction call which rules and confession triggers are relevant.
-4. Load the selected full rule text and matching confession records.
-5. Build the managed system prompt from `prompts/system.md` plus selected context.
+4. Append each selected full rule and matching confession as an independently keyed
+   retrieved context record; unchanged items are not appended again.
+5. Load the stable managed system prompt from `prompts/system.md`.
 6. Enter a `loop` whose main call uses `context: "session"` and the managed system prompt.
 7. Dispatch tool calls and push their results into session history.
 8. When no tools are requested, classify whether the agent is done, blocked, lazy, or forgot tools; continue or break accordingly.

@@ -250,15 +250,24 @@ flow orchestrate(user_prompt: string) -> string {
         },
     )
     { rule_names, confession_triggers } = selection
-    rule_text = list.reduce(
-        list.map(rule_names, |name| rule.fetch(name: name)),
-        |acc, item| acc + "\n\n---\n\n" + item,
-        "",
+    recorded_rules = list.map(
+        rule_names,
+        |name| context.record(
+            key: "agent.rule." + name,
+            content: rule.fetch(name: name),
+        ),
     )
-    confession_text = list.reduce(
+    matched_confessions = list.reduce(
         list.map(confession_triggers, |hint| memory.fetch_confessions(trigger: hint)),
-        |acc, item| acc + "\n" + to_json_string(item),
-        "",
+        |acc, items| concat(acc, items),
+        [],
+    )
+    recorded_confessions = list.map(
+        matched_confessions,
+        |item| context.record(
+            key: "agent.mistake." + item.id,
+            content: to_json_string(item),
+        ),
     )
 
     research = fanout [
@@ -275,8 +284,6 @@ flow orchestrate(user_prompt: string) -> string {
         model: "smart",
         context: "session",
         system: @"prompts/system.md"
-            + "\n\n## Relevant Rules\n" + rule_text
-            + "\n\n## Relevant Confessions\n" + confession_text
             + "\n\n## Parallel Research\n" + to_json_string(research)
             + "\n\n## Test Output\n" + test_result.output,
         tools: ["fs.read", "fs.grep"],
