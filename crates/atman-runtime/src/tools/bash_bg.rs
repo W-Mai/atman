@@ -1050,26 +1050,21 @@ instead, or use the sleep tool to pause the workflow.",
             })?;
             let explicit_cwd = extract_optional_string(&args, "cwd").map(std::path::PathBuf::from);
             let cwd = ctx.resolve_cwd(explicit_cwd.as_deref())?;
-            let execution_policy = ctx.execution_policy().ok_or_else(|| {
-                RuntimeError::ToolFailed("bash.spawn: missing execution policy snapshot".into())
-            })?;
-            let launcher: Box<dyn crate::sandbox::BackgroundLauncher> = match execution_policy {
-                crate::trust::ExecutionPolicy::Controlled => {
+            let authorization = ctx.invocation_authorization_for("bash.spawn")?;
+            let launcher: Box<dyn crate::sandbox::BackgroundLauncher> = match authorization
+                .execution_boundary()
+            {
+                crate::permission::ExecutionBoundary::Sandboxed => {
                     let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
                         RuntimeError::ToolFailed(
                             "bash.spawn: sandbox unavailable for controlled execution".into(),
-                        )
-                    })?;
-                    let authorization = ctx.invocation_authorization().ok_or_else(|| {
-                        RuntimeError::ToolFailed(
-                            "bash.spawn: missing invocation authorization".into(),
                         )
                     })?;
                     sandbox
                         .prepare_background(&["sh", "-c", cmd.as_str()], &[], &cwd, authorization)
                         .map_err(|error| error.into_runtime("bash.spawn"))?
                 }
-                crate::trust::ExecutionPolicy::Unrestricted => {
+                crate::permission::ExecutionBoundary::Direct => {
                     let mut command = tokio::process::Command::new("sh");
                     command
                         .arg("-c")
@@ -1442,6 +1437,7 @@ mod tests {
             _cmd: &'a [&'a str],
             _env: &'a [(String, String)],
             _cwd: &'a std::path::Path,
+            _authorization: &'a crate::permission::InvocationAuthorization,
         ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
             Box::pin(async { Err(RuntimeError::ToolFailed("unsupported".into())) })
         }
@@ -1507,6 +1503,13 @@ mod tests {
         ctx.session_dir = Some(dir.to_path_buf());
         ctx.session_id = Some("test-session".to_string());
         ctx.for_tool_invocation(crate::tool::Tier::Four)
+            .authorized_for(crate::permission::InvocationAuthorization::new(
+                crate::permission::PermissionRequestId::now(),
+                "test-call",
+                "bash.spawn",
+                crate::permission::ResourceProvenance::none(),
+                crate::permission::ExecutionBoundary::Direct,
+            ))
     }
 
     fn brokered_spawn_ctx(
@@ -2019,6 +2022,29 @@ mod tests {
             Some(crate::fs_access::canonicalize_stable(dir.path()))
         );
         assert_eq!(background_entries(&registry, dir.path()), 1);
+        registry.kill_all();
+    }
+
+    #[tokio::test]
+    async fn direct_authorization_skips_available_sandbox() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let sandbox = Arc::new(RecordingBackgroundSandbox {
+            strict: StrictLaunch::Denied,
+            strict_calls: AtomicUsize::new(0),
+            cwd: Mutex::new(None),
+        });
+        let args = ToolArgs {
+            positional: vec![Value::Str("exit 0".into())],
+            named: vec![("block".into(), Value::Bool(true))],
+        };
+        let ctx =
+            ctx_with_registry(Arc::clone(&registry), dir.path()).with_sandbox(sandbox.clone());
+
+        let result = BashSpawn.call(args, &ctx).await.unwrap();
+
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(result.field("exit_code"), Some(Value::Int(0))));
         registry.kill_all();
     }
 

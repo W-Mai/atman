@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::FlowRunId;
 use crate::permission::{
-    ApprovalTarget, DecisionActor, EscalationHop, GrantScope, GroupOwner, PermissionDecision,
-    PermissionGrant, PermissionGroup, PermissionGroupId, PermissionRequest, PermissionRequestId,
-    PermissionRequestState,
+    ApprovalTarget, DecisionActor, EscalationHop, ExecutionBoundary, GrantScope, GroupOwner,
+    PermissionDecision, PermissionGrant, PermissionGroup, PermissionGroupId, PermissionRequest,
+    PermissionRequestId, PermissionRequestState,
 };
 use crate::tool::Tier;
-use crate::trust::{RiskKind, TrustConfig};
+use crate::trust::{ExecutionPolicy, PolicyResolution, RiskKind, TrustConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -88,21 +88,30 @@ pub struct PermissionPolicyReference {
 }
 
 impl PermissionPolicyReference {
-    pub fn capture(policy: &TrustConfig, tier: Tier, risks: &BTreeSet<RiskKind>) -> Self {
+    pub fn capture(
+        policy: &TrustConfig,
+        tier: Tier,
+        risks: &BTreeSet<RiskKind>,
+        execution_policy: ExecutionPolicy,
+        effective: PolicyResolution,
+    ) -> Self {
         let bytes = serde_json::to_vec(policy).expect("TrustConfig is serializable");
         let digest = blake3::hash(&bytes).to_hex().to_string();
         let risk_names = risks
             .iter()
             .map(|risk| format!("{risk:?}"))
             .collect::<Vec<_>>();
+        let policy_resolution = policy.resolve_policy_resolution(tier, risks.iter().copied());
         Self {
             snapshot_id: format!("blake3:{digest}"),
             rule_id: format!(
-                "mode={:?};tier={tier:?};risks={};escalation={:?};result={:?}",
+                "mode={:?};tier={tier:?};risks={};escalation={:?};escalation_step={:?};policy_result={:?};effective_result={:?};execution={execution_policy:?}",
                 policy.mode,
                 risk_names.join(","),
                 policy.escalation,
-                policy.resolve_policy(tier, risks.iter().copied())
+                policy_resolution.escalation,
+                policy_resolution.action,
+                effective.action,
             ),
         }
     }
@@ -192,6 +201,11 @@ pub struct PermissionRequestAudit {
     pub tool_use_id: String,
     pub tool: String,
     pub tier: Tier,
+    /// Process boundary selected for this approval. Pending user approvals
+    /// report the boundary that an approval will grant; denied and non-process
+    /// requests have no execution boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_boundary: Option<ExecutionBoundary>,
     #[serde(default)]
     pub provenance: PermissionProvenanceSummary,
     pub target: PermissionAuditTarget,
@@ -231,6 +245,27 @@ impl PermissionRequestAudit {
             tool_use_id: request.intent.tool_use_id.clone(),
             tool: request.intent.tool_name.clone(),
             tier: request.intent.tier,
+            execution_boundary: request
+                .intent
+                .risks
+                .contains(&RiskKind::ProcessSpawn)
+                .then(|| match decision {
+                    Some(decision)
+                        if decision.action == crate::permission::PermissionAction::Approve =>
+                    {
+                        Some(decision.execution_boundary)
+                    }
+                    Some(_) => None,
+                    None if matches!(request.state, PermissionRequestState::Pending { .. }) => {
+                        Some(if matches!(target, ApprovalTarget::User) {
+                            ExecutionBoundary::Direct
+                        } else {
+                            ExecutionBoundary::Sandboxed
+                        })
+                    }
+                    None => None,
+                })
+                .flatten(),
             provenance: PermissionProvenanceSummary {
                 cwd: provenance
                     .cwd
@@ -340,6 +375,8 @@ pub struct PermissionGrantAudit {
     pub request_id: PermissionRequestId,
     pub requesting_run_id: FlowRunId,
     pub actor: PermissionProjectionActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_boundary: Option<ExecutionBoundary>,
     pub scope: PermissionAuditScope,
     pub reason: Option<String>,
     pub at: DateTime<Utc>,
@@ -361,6 +398,11 @@ impl PermissionGrantAudit {
             request_id: grant.request_id.clone(),
             requesting_run_id: grant.requesting_run_id.clone(),
             actor,
+            execution_boundary: grant
+                .requirement
+                .risks
+                .contains(&RiskKind::ProcessSpawn)
+                .then_some(grant.execution_boundary),
             scope: (&grant.scope).into(),
             reason,
             at,
@@ -519,6 +561,7 @@ mod tests {
             tool_use_id: "tool-use".into(),
             tool: "fs.read".into(),
             tier: Tier::Two,
+            execution_boundary: None,
             provenance: PermissionProvenanceSummary::default(),
             target: PermissionAuditTarget::User,
             group_ids: Vec::new(),
@@ -533,6 +576,16 @@ mod tests {
             reason: None,
             at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn legacy_request_audit_has_unknown_execution_boundary() {
+        let mut value = serde_json::to_value(request(&FlowRunId::now())).unwrap();
+        value.as_object_mut().unwrap().remove("execution_boundary");
+
+        let decoded: PermissionRequestAudit = serde_json::from_value(value).unwrap();
+
+        assert_eq!(decoded.execution_boundary, None);
     }
 
     #[test]
@@ -617,6 +670,7 @@ mod tests {
             actor: PermissionProjectionActor::System {
                 component: "test".into(),
             },
+            execution_boundary: None,
             scope: PermissionAuditScope::CurrentCall,
             reason: None,
             at: Utc::now(),

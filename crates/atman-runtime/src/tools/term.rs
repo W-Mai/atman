@@ -771,25 +771,20 @@ async fn spawn_impl(
     };
     let env_refs: Vec<(String, String)> = env.clone();
 
-    let execution_policy = ctx.execution_policy().ok_or_else(|| {
-        RuntimeError::ToolFailed("term.spawn: missing execution policy snapshot".into())
-    })?;
-    let pty_result = match execution_policy {
-        crate::trust::ExecutionPolicy::Controlled => {
+    let authorization = ctx.invocation_authorization_for("term.spawn")?;
+    let pty_result = match authorization.execution_boundary() {
+        crate::permission::ExecutionBoundary::Sandboxed => {
             let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed(
                     "term.spawn: sandbox unavailable for controlled execution".into(),
                 )
-            })?;
-            let authorization = ctx.invocation_authorization().ok_or_else(|| {
-                RuntimeError::ToolFailed("term.spawn: missing invocation authorization".into())
             })?;
             sandbox
                 .spawn_pty(&cmd_args, &env_refs, &cwd, pty_size, authorization)
                 .await
                 .map_err(|error| error.into_runtime("term.spawn"))?
         }
-        crate::trust::ExecutionPolicy::Unrestricted => {
+        crate::permission::ExecutionBoundary::Direct => {
             spawn_pty_direct(&cmd_args, &env_refs, &cwd, pty_size)?
         }
     };
@@ -2259,6 +2254,7 @@ mod tests {
             _cmd: &'a [&'a str],
             _env: &'a [(String, String)],
             _cwd: &'a Path,
+            _authorization: &'a crate::permission::InvocationAuthorization,
         ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
             Box::pin(async { Err(RuntimeError::ToolFailed("Operation not permitted".into())) })
         }
@@ -2312,6 +2308,7 @@ mod tests {
             _cmd: &'a [&'a str],
             _env: &'a [(String, String)],
             _cwd: &'a Path,
+            _authorization: &'a crate::permission::InvocationAuthorization,
         ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
             Box::pin(async { Err(RuntimeError::ToolFailed("strict sentinel".into())) })
         }
@@ -2377,6 +2374,13 @@ mod tests {
             });
         ctx.session_id = Some("r4".into());
         ctx.for_tool_invocation(crate::tool::Tier::Four)
+            .authorized_for(crate::permission::InvocationAuthorization::new(
+                crate::permission::PermissionRequestId::now(),
+                "test-call",
+                "term.spawn",
+                crate::permission::ResourceProvenance::none(),
+                crate::permission::ExecutionBoundary::Direct,
+            ))
     }
 
     fn term_args(cwd: &Path) -> ToolArgs {
@@ -2434,6 +2438,23 @@ mod tests {
         let error = spawn_impl(args, &ctx).await.unwrap_err();
         assert!(error.to_string().contains("strict sentinel"));
         assert_eq!(sandbox.pty_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_authorization_skips_available_sandbox() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let sandbox = Arc::new(StrictRecordingSandbox {
+            pty_calls: AtomicUsize::new(0),
+        });
+        let ctx = managed_term_ctx(workspace.path(), Arc::clone(&registry), session_dir.path())
+            .with_sandbox(sandbox.clone());
+
+        spawn_impl(term_args(workspace.path()), &ctx).await.unwrap();
+
+        assert_eq!(sandbox.pty_calls.load(Ordering::SeqCst), 0);
+        registry.kill_all();
     }
 
     async fn authorize_term_spawn(ctx: ToolCtx, args: &ToolArgs) -> ToolCtx {

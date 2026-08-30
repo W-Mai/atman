@@ -60,22 +60,38 @@ impl Tool for TestRun {
                 None => detect_framework(&cwd)?,
             };
             let cmd = build_command(&framework, scope.as_deref())?;
+            let authorization = ctx.invocation_authorization_for("test.run")?;
+            let cmd_refs = cmd.iter().map(String::as_str).collect::<Vec<_>>();
 
             let start = Instant::now();
-            let mut child = tokio::process::Command::new(&cmd[0]);
-            child.args(&cmd[1..]).current_dir(&cwd);
             let spawn_start = Instant::now();
-            let output_fut = child.output();
+            let output_fut = async {
+                match authorization.execution_boundary() {
+                    crate::permission::ExecutionBoundary::Sandboxed => {
+                        let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
+                            RuntimeError::ToolFailed(
+                                "test.run: sandbox unavailable for controlled execution".into(),
+                            )
+                        })?;
+                        sandbox.spawn(&cmd_refs, &[], &cwd, authorization).await
+                    }
+                    crate::permission::ExecutionBoundary::Direct => {
+                        let mut child = tokio::process::Command::new(&cmd[0]);
+                        child.args(&cmd[1..]).current_dir(&cwd).kill_on_drop(true);
+                        child.output().await.map_err(|error| {
+                            RuntimeError::ToolFailed(format!(
+                                "test.run spawn `{}`: {error}",
+                                cmd.join(" ")
+                            ))
+                        })
+                    }
+                }
+            };
             let output = match tokio::time::timeout(Duration::from_millis(timeout_ms), output_fut)
                 .await
             {
                 Ok(Ok(out)) => out,
-                Ok(Err(e)) => {
-                    return Err(RuntimeError::ToolFailed(format!(
-                        "test.run spawn `{}`: {e}",
-                        cmd.join(" ")
-                    )));
-                }
+                Ok(Err(error)) => return Err(error),
                 Err(_) => {
                     return Ok(Value::Struct(vec![
                         ("exit".into(), Value::Int(-1)),
@@ -194,6 +210,79 @@ fn extract_optional_path(args: &ToolArgs, name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    struct RecordingTestSandbox {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::sandbox::Sandbox for RecordingTestSandbox {
+        fn spawn<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a Path,
+            _authorization: &'a crate::permission::InvocationAuthorization,
+        ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                std::process::Command::new("true")
+                    .output()
+                    .map_err(|error| RuntimeError::ToolFailed(error.to_string()))
+            })
+        }
+
+        fn prepare_background(
+            &self,
+            _cmd: &[&str],
+            _env: &[(String, String)],
+            _cwd: &Path,
+            _authorization: &crate::permission::InvocationAuthorization,
+        ) -> Result<Box<dyn crate::sandbox::BackgroundLauncher>, crate::sandbox::SandboxLaunchError>
+        {
+            Err(crate::sandbox::SandboxLaunchError::Runtime(
+                RuntimeError::ToolFailed("unsupported".into()),
+            ))
+        }
+
+        fn spawn_pty<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a Path,
+            _pty_size: portable_pty::PtySize,
+            _authorization: &'a crate::permission::InvocationAuthorization,
+        ) -> crate::tool::BoxFut<
+            'a,
+            Result<crate::sandbox::PtySpawnResult, crate::sandbox::SandboxLaunchError>,
+        > {
+            Box::pin(async {
+                Err(crate::sandbox::SandboxLaunchError::Runtime(
+                    RuntimeError::ToolFailed("unsupported".into()),
+                ))
+            })
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    fn authorize(
+        ctx: ToolCtx,
+        execution_boundary: crate::permission::ExecutionBoundary,
+    ) -> ToolCtx {
+        ctx.authorized_for(crate::permission::InvocationAuthorization::new(
+            crate::permission::PermissionRequestId::now(),
+            "test-call",
+            "test.run",
+            crate::permission::ResourceProvenance::none(),
+            execution_boundary,
+        ))
+    }
+
     #[test]
     fn provenance_uses_cwd_and_reports_process_spawn() {
         let dir = tempfile::tempdir().unwrap();
@@ -292,7 +381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
         let tool = TestRun;
-        let ctx = ToolCtx::new();
+        let ctx = authorize(ToolCtx::new(), crate::permission::ExecutionBoundary::Direct);
         let args = ToolArgs {
             positional: vec![],
             named: vec![
@@ -314,16 +403,19 @@ mod tests {
     }
 
     fn managed_ctx(workspace: &Path) -> ToolCtx {
-        ToolCtx::new()
-            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
-                workspace.to_path_buf(),
-            ))
-            .with_workspace(crate::git_workspace::WorkspaceBinding {
-                workspace_id: "test".into(),
-                repository_root: workspace.to_path_buf(),
-                path: workspace.to_path_buf(),
-                branch: None,
-            })
+        authorize(
+            ToolCtx::new()
+                .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                    workspace.to_path_buf(),
+                ))
+                .with_workspace(crate::git_workspace::WorkspaceBinding {
+                    workspace_id: "test".into(),
+                    repository_root: workspace.to_path_buf(),
+                    path: workspace.to_path_buf(),
+                    branch: None,
+                }),
+            crate::permission::ExecutionBoundary::Direct,
+        )
     }
 
     fn run_args(cwd: &Path, framework: &str) -> ToolArgs {
@@ -372,6 +464,26 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(result.field("exit"), Some(Value::Int(0))));
+    }
+
+    #[tokio::test]
+    async fn enforced_authorization_uses_sandbox_runner() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sandbox = std::sync::Arc::new(RecordingTestSandbox {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let ctx = authorize(
+            managed_ctx(workspace.path()).with_sandbox(sandbox.clone()),
+            crate::permission::ExecutionBoundary::Sandboxed,
+        );
+
+        let result = TestRun
+            .call(run_args(workspace.path(), "cargo"), &ctx)
+            .await
+            .unwrap();
+
+        assert!(matches!(result.field("exit"), Some(Value::Int(0))));
+        assert_eq!(sandbox.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

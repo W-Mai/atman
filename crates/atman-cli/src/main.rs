@@ -5181,6 +5181,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
                 tool_use_id,
                 tool: (*tool).into(),
                 tier: Tier::Four,
+                execution_boundary: Default::default(),
                 provenance: PermissionProvenanceSummary {
                     targets: vec![(*args).into()],
                     ..PermissionProvenanceSummary::default()

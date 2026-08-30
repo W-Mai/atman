@@ -103,7 +103,6 @@ pub struct ToolCtx {
     pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
     pub registry: Option<std::sync::Arc<ToolRegistry>>,
     pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
-    execution_policy: Option<crate::trust::ExecutionPolicy>,
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
@@ -311,6 +310,24 @@ impl ToolCtx {
         self.invocation_authorization.as_ref()
     }
 
+    pub(crate) fn invocation_authorization_for(
+        &self,
+        tool_name: &str,
+    ) -> Result<&crate::permission::InvocationAuthorization, crate::error::RuntimeError> {
+        let authorization = self.invocation_authorization.as_ref().ok_or_else(|| {
+            crate::error::RuntimeError::ToolFailed(format!(
+                "{tool_name}: missing invocation authorization"
+            ))
+        })?;
+        if authorization.tool_name() != tool_name {
+            return Err(crate::error::RuntimeError::ToolFailed(format!(
+                "{tool_name}: invocation authorization belongs to {}",
+                authorization.tool_name()
+            )));
+        }
+        Ok(authorization)
+    }
+
     pub fn with_fs_access(mut self, policy: crate::fs_access::FsAccessPolicy) -> Self {
         self.fs_access = policy;
         self
@@ -436,30 +453,14 @@ impl ToolCtx {
         self
     }
 
-    /// Freezes the active trust policy for one tool invocation. Session-backed
-    /// calls read the latest snapshot; the resulting context is then shared by
-    /// approval, sandbox selection, and execution for that invocation.
-    pub fn for_tool_invocation(mut self, tier: Tier) -> Self {
+    /// Freezes the active trust policy for one tool invocation. The broker uses
+    /// this snapshot to mint an invocation authorization carrying the selected
+    /// execution boundary.
+    pub fn for_tool_invocation(mut self, _tier: Tier) -> Self {
         if let Some(session) = self.session_runtime.as_ref() {
             self.trust = Some(session.trust_config());
         }
-        let trust = self.trust.as_ref().cloned().unwrap_or_default();
-        let execution_policy = self
-            .flow_identity
-            .as_ref()
-            .map(|identity| {
-                identity
-                    .effective_authority
-                    .constrain_policy(&trust, tier, [])
-                    .0
-            })
-            .unwrap_or_else(|| trust.execution_policy());
-        self.execution_policy = Some(execution_policy);
         self
-    }
-
-    pub(crate) fn execution_policy(&self) -> Option<crate::trust::ExecutionPolicy> {
-        self.execution_policy
     }
 
     pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {
@@ -700,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn invocation_snapshot_tracks_session_trust_and_selects_tier4_sandbox() {
+    fn invocation_snapshot_tracks_session_trust() {
         let dir = tempfile::tempdir().unwrap();
         let initial = crate::trust::TrustConfig::default();
         let session = std::sync::Arc::new(
@@ -727,10 +728,6 @@ mod tests {
 
         let controlled = base.clone().for_tool_invocation(Tier::Four);
         assert_eq!(controlled.trust, Some(initial));
-        assert_eq!(
-            controlled.execution_policy(),
-            Some(crate::trust::ExecutionPolicy::Controlled)
-        );
         assert!(controlled.sandbox.is_some());
 
         let reckless = crate::trust::TrustConfig {
@@ -741,10 +738,6 @@ mod tests {
         let unrestricted = base.for_tool_invocation(Tier::Four);
 
         assert_eq!(unrestricted.trust, Some(reckless));
-        assert_eq!(
-            unrestricted.execution_policy(),
-            Some(crate::trust::ExecutionPolicy::Unrestricted)
-        );
         assert!(unrestricted.sandbox.is_some());
         assert!(controlled.sandbox.is_some());
     }

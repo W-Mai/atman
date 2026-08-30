@@ -200,7 +200,7 @@ mod tests {
             crate::permission::ResourceProvenance::none()
                 .with_path(&crate::tool::ToolCtx::default(), target)
                 .unwrap(),
-            true,
+            crate::permission::ExecutionBoundary::Sandboxed,
         );
         crate::tool::ToolCtx::default()
             .with_fs_access(FsAccessPolicy {

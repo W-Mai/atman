@@ -3785,6 +3785,16 @@ fn permission_detail_sections(
     if let Some(scope) = &payload.scope {
         sections.push(("scope", format!("{scope:?}")));
     }
+    if payload.provenance.risks.contains("ProcessSpawn") {
+        sections.push((
+            "execution",
+            match payload.execution_boundary {
+                Some(atman_runtime::permission::ExecutionBoundary::Sandboxed) => "sandboxed".into(),
+                Some(atman_runtime::permission::ExecutionBoundary::Direct) => "direct".into(),
+                None => "not executed".into(),
+            },
+        ));
+    }
     sections.push((
         "policy",
         format!(

@@ -257,13 +257,13 @@ pub async fn request_approval_with_additional_risks(
         }
     };
     let permit_provenance = provenance.clone();
-    let permit = |request_id, manual: bool| {
+    let permit = |request_id, execution_boundary| {
         crate::permission::InvocationAuthorization::new(
             request_id,
             id,
             name,
             permit_provenance.clone(),
-            manual,
+            execution_boundary,
         )
     };
     let Some(run_id) = ctx.flow_run_id.clone() else {
@@ -317,10 +317,13 @@ pub async fn request_approval_with_additional_risks(
                         "unrestricted",
                     );
                     return ApprovalOutcome::Approve {
-                        authorization: Box::new(permit(request_id.clone(), false)),
+                        authorization: Box::new(permit(
+                            request_id.clone(),
+                            crate::permission::ExecutionBoundary::Direct,
+                        )),
                     };
                 }
-                ImmediateAuthorization::Auto => {
+                ImmediateAuthorization::Auto { execution_boundary } => {
                     emit_approval_result(
                         ctx,
                         &run_id,
@@ -329,10 +332,10 @@ pub async fn request_approval_with_additional_risks(
                         "policy",
                     );
                     return ApprovalOutcome::Approve {
-                        authorization: Box::new(permit(request_id.clone(), false)),
+                        authorization: Box::new(permit(request_id.clone(), execution_boundary)),
                     };
                 }
-                ImmediateAuthorization::Granted { .. } => {
+                ImmediateAuthorization::Granted { grant } => {
                     emit_approval_result(
                         ctx,
                         &run_id,
@@ -341,7 +344,10 @@ pub async fn request_approval_with_additional_risks(
                         "grant",
                     );
                     return ApprovalOutcome::Approve {
-                        authorization: Box::new(permit(request_id.clone(), false)),
+                        authorization: Box::new(permit(
+                            request_id.clone(),
+                            grant.execution_boundary,
+                        )),
                     };
                 }
                 ImmediateAuthorization::Denied { reason } => {
@@ -396,25 +402,33 @@ pub async fn request_approval_with_additional_risks(
         }
     }
     if let Some(result) = broker_resolution {
-        let decision = match result {
+        let (decision, execution_boundary) = match result {
             Ok(crate::permission::PermissionResolution::Decision(decision))
                 if decision.action == crate::permission::PermissionAction::Approve =>
             {
-                crate::session::ApprovalDecision::Approve
+                (
+                    crate::session::ApprovalDecision::Approve,
+                    decision.execution_boundary,
+                )
             }
-            Ok(crate::permission::PermissionResolution::Decision(decision)) => {
+            Ok(crate::permission::PermissionResolution::Decision(decision)) => (
                 crate::session::ApprovalDecision::Deny {
                     reason: decision
                         .reason
                         .unwrap_or_else(|| "denied by permission broker".into()),
-                }
-            }
-            Ok(crate::permission::PermissionResolution::Cancelled { reason }) => {
-                crate::session::ApprovalDecision::Deny { reason }
-            }
-            Err(_) => crate::session::ApprovalDecision::Deny {
-                reason: "permission request dropped".into(),
-            },
+                },
+                crate::permission::ExecutionBoundary::Sandboxed,
+            ),
+            Ok(crate::permission::PermissionResolution::Cancelled { reason }) => (
+                crate::session::ApprovalDecision::Deny { reason },
+                crate::permission::ExecutionBoundary::Sandboxed,
+            ),
+            Err(_) => (
+                crate::session::ApprovalDecision::Deny {
+                    reason: "permission request dropped".into(),
+                },
+                crate::permission::ExecutionBoundary::Sandboxed,
+            ),
         };
         emit_approval_result(ctx, &run_id, id, &decision, "broker");
         return match decision {
@@ -426,7 +440,7 @@ pub async fn request_approval_with_additional_risks(
                         .request
                         .request_id
                         .clone(),
-                    true,
+                    execution_boundary,
                 )),
             },
             crate::session::ApprovalDecision::Deny { reason } => ApprovalOutcome::Deny { reason },
@@ -455,30 +469,38 @@ pub async fn request_approval_with_additional_risks(
         return ApprovalOutcome::Deny { reason };
     }
     let request_id = pending.request.request_id.clone();
-    let decision = match pending.resolution.await {
+    let (decision, execution_boundary) = match pending.resolution.await {
         Ok(crate::permission::PermissionResolution::Decision(decision))
             if decision.action == crate::permission::PermissionAction::Approve =>
         {
-            crate::session::ApprovalDecision::Approve
+            (
+                crate::session::ApprovalDecision::Approve,
+                decision.execution_boundary,
+            )
         }
-        Ok(crate::permission::PermissionResolution::Decision(decision)) => {
+        Ok(crate::permission::PermissionResolution::Decision(decision)) => (
             crate::session::ApprovalDecision::Deny {
                 reason: decision
                     .reason
                     .unwrap_or_else(|| "denied by permission broker".into()),
-            }
-        }
-        Ok(crate::permission::PermissionResolution::Cancelled { reason }) => {
-            crate::session::ApprovalDecision::Deny { reason }
-        }
-        Err(_) => crate::session::ApprovalDecision::Deny {
-            reason: "permission request dropped".into(),
-        },
+            },
+            crate::permission::ExecutionBoundary::Sandboxed,
+        ),
+        Ok(crate::permission::PermissionResolution::Cancelled { reason }) => (
+            crate::session::ApprovalDecision::Deny { reason },
+            crate::permission::ExecutionBoundary::Sandboxed,
+        ),
+        Err(_) => (
+            crate::session::ApprovalDecision::Deny {
+                reason: "permission request dropped".into(),
+            },
+            crate::permission::ExecutionBoundary::Sandboxed,
+        ),
     };
     emit_approval_result(ctx, &run_id, id, &decision, "user");
     match decision {
         crate::session::ApprovalDecision::Approve => ApprovalOutcome::Approve {
-            authorization: Box::new(permit(request_id, true)),
+            authorization: Box::new(permit(request_id, execution_boundary)),
         },
         crate::session::ApprovalDecision::Deny { reason } => ApprovalOutcome::Deny { reason },
     }
@@ -500,6 +522,8 @@ mod tests {
 
     struct Tier2Tool;
 
+    struct ProcessTool;
+
     impl crate::tool::Tool for Tier2Tool {
         fn name(&self) -> &str {
             "probe.tool"
@@ -507,6 +531,33 @@ mod tests {
 
         fn tier(&self) -> Tier {
             Tier::Two
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: ToolArgs,
+            _ctx: &'a ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async move { Ok(crate::value::Value::Unit) })
+        }
+    }
+
+    impl crate::tool::Tool for ProcessTool {
+        fn name(&self) -> &str {
+            "process.tool"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Two
+        }
+
+        fn invocation_provenance(
+            &self,
+            _args: &ToolArgs,
+            _ctx: &ToolCtx,
+        ) -> Result<crate::permission::ResourceProvenance, crate::error::RuntimeError> {
+            Ok(crate::permission::ResourceProvenance::none()
+                .with_risk(crate::trust::RiskKind::ProcessSpawn))
         }
 
         fn call<'a>(
@@ -1128,6 +1179,70 @@ mod tests {
             broker.get(&request_id).map(|r| r.state),
             Some(crate::permission::PermissionRequestState::Approved { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn process_authorization_carries_selected_execution_boundary() {
+        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig {
+            mode: TrustMode::Steady,
+            ..TrustConfig::default()
+        });
+        let broker = ctx.permission_broker.clone().unwrap();
+        let gate = tokio::spawn({
+            let ctx = ctx.clone();
+            async move {
+                request_approval(
+                    &ctx,
+                    "process-user",
+                    "process.tool",
+                    &ToolArgs::default(),
+                    ApprovalLevel::Approve,
+                    Some(&ProcessTool),
+                )
+                .await
+            }
+        });
+        let request_id = loop {
+            if let Some(request) = broker.list().first() {
+                break request.request_id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        resolve_as_user(
+            &broker,
+            request_id,
+            crate::permission::PermissionAction::Approve,
+            None,
+        );
+        let ApprovalOutcome::Approve { authorization } = gate.await.unwrap() else {
+            panic!("expected user approval");
+        };
+        assert_eq!(
+            authorization.execution_boundary(),
+            crate::permission::ExecutionBoundary::Direct
+        );
+
+        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: crate::trust::EscalationPolicy::Allow,
+            ..TrustConfig::default()
+        });
+        let ApprovalOutcome::Approve { authorization } = request_approval(
+            &ctx,
+            "process-eager-allow",
+            "process.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&ProcessTool),
+        )
+        .await
+        else {
+            panic!("expected eager allow authorization");
+        };
+        assert_eq!(
+            authorization.execution_boundary(),
+            crate::permission::ExecutionBoundary::Direct
+        );
     }
 
     #[tokio::test]

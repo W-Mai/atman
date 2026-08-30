@@ -4,7 +4,9 @@ use std::sync::Mutex;
 
 use crate::event::FlowRunId;
 use crate::tool::Tier;
-use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind, TrustConfig};
+use crate::trust::{
+    ExecutionPolicy, PolicyAction, PolicyEscalation, PolicyResolution, RiskKind, TrustConfig,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvocationKind {
@@ -106,6 +108,16 @@ impl EffectiveAuthority {
         tier: Tier,
         risks: impl IntoIterator<Item = RiskKind>,
     ) -> (ExecutionPolicy, PolicyAction) {
+        let (execution, resolution) = self.constrain_policy_resolution(trust, tier, risks);
+        (execution, resolution.action)
+    }
+
+    pub fn constrain_policy_resolution(
+        &self,
+        trust: &TrustConfig,
+        tier: Tier,
+        risks: impl IntoIterator<Item = RiskKind>,
+    ) -> (ExecutionPolicy, PolicyResolution) {
         let current_execution = match (self.execution_policy, trust.execution_policy()) {
             (ExecutionPolicy::Unrestricted, ExecutionPolicy::Unrestricted) => {
                 ExecutionPolicy::Unrestricted
@@ -113,7 +125,13 @@ impl EffectiveAuthority {
             _ => ExecutionPolicy::Controlled,
         };
         if current_execution == ExecutionPolicy::Unrestricted {
-            return (current_execution, PolicyAction::Auto);
+            return (
+                current_execution,
+                PolicyResolution {
+                    action: PolicyAction::Auto,
+                    escalation: PolicyEscalation::None,
+                },
+            );
         }
         let tier_index = match tier {
             Tier::Zero => 0,
@@ -128,10 +146,9 @@ impl EffectiveAuthority {
             .fold(self.tier_ceiling[tier_index], |action, risk| {
                 action.most_restrictive(self.risk_ceiling[risk_index(*risk)])
             });
-        (
-            current_execution,
-            trust.resolve_policy(tier, risks).most_restrictive(ceiling),
-        )
+        let mut resolution = trust.resolve_policy_resolution(tier, risks);
+        resolution.action = resolution.action.most_restrictive(ceiling);
+        (current_execution, resolution)
     }
 
     pub fn inherited_child(
@@ -299,6 +316,27 @@ mod tests {
         );
         assert_eq!(child.shell, root.shell);
         assert_eq!(child.workspace_root, root.workspace_root);
+    }
+
+    #[test]
+    fn authority_ceiling_prevents_eager_allow_from_becoming_automatic() {
+        let trust = TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            escalation: crate::trust::EscalationPolicy::Allow,
+            ..TrustConfig::default()
+        };
+        let authority = EffectiveAuthority {
+            execution_policy: ExecutionPolicy::Controlled,
+            tier_ceiling: [PolicyAction::Ask; 5],
+            ..EffectiveAuthority::root(&trust, true, None)
+        };
+
+        let (execution, resolution) =
+            authority.constrain_policy_resolution(&trust, Tier::Two, [RiskKind::ProcessSpawn]);
+
+        assert_eq!(execution, ExecutionPolicy::Controlled);
+        assert_eq!(resolution.action, PolicyAction::Ask);
+        assert_eq!(resolution.escalation, PolicyEscalation::Allowed);
     }
 
     #[test]

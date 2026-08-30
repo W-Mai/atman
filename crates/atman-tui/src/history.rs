@@ -1088,6 +1088,7 @@ mod tests {
                 tool_use_id: tool_use_id.into(),
                 tool: "fs.read".into(),
                 tier: atman_runtime::tool::Tier::Zero,
+                execution_boundary: Default::default(),
                 provenance: Default::default(),
                 target: atman_runtime::permission_audit::PermissionAuditTarget::User,
                 group_ids: Vec::new(),

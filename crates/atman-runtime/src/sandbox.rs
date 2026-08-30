@@ -134,6 +134,7 @@ pub trait Sandbox: Send + Sync {
         cmd: &'a [&'a str],
         env: &'a [(String, String)],
         cwd: &'a Path,
+        authorization: &'a InvocationAuthorization,
     ) -> BoxFut<'a, Result<std::process::Output, RuntimeError>>;
 
     fn prepare_background(
@@ -311,8 +312,14 @@ impl Sandbox for SandboxExec {
         cmd: &'a [&'a str],
         env: &'a [(String, String)],
         cwd: &'a Path,
+        authorization: &'a InvocationAuthorization,
     ) -> BoxFut<'a, Result<std::process::Output, RuntimeError>> {
         Box::pin(async move {
+            if !authorization.is_for_call(authorization.tool_use_id(), "test.run") {
+                return Err(RuntimeError::ToolFailed(
+                    "sandbox execution requires test.run authorization".into(),
+                ));
+            }
             if !self.is_available() {
                 return Err(RuntimeError::ToolFailed(
                     "sandbox-exec not available on this host".into(),
@@ -324,7 +331,8 @@ impl Sandbox for SandboxExec {
                 .arg("-f")
                 .arg(&profile.path)
                 .args(cmd)
-                .current_dir(cwd);
+                .current_dir(cwd)
+                .kill_on_drop(true);
             for (key, value) in env {
                 command.env(key, value);
             }
@@ -448,7 +456,6 @@ pub const DEFAULT_PROFILE: &str = r#"(version 1)
 (deny default)
 (import "system.sb")
 (allow process*)
-(allow process-exec (literal "/bin/ps") (with no-sandbox))
 (allow signal (target same-sandbox))
 (allow file-read*
   (subpath "/System")
@@ -489,7 +496,7 @@ mod tests {
         assert!(profile.contains("/read"));
         assert!(profile.contains("/write"));
         assert!(profile.contains("/private/var/select"));
-        assert!(profile.contains("(allow process-exec (literal \"/bin/ps\") (with no-sandbox))"));
+        assert!(!profile.contains("/bin/ps"));
         assert!(profile.contains("(allow network*)"));
     }
 

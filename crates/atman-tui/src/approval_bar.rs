@@ -53,10 +53,20 @@ pub fn render(
                 })
         })
         .map(|p| {
+            let execution = match (
+                p.payload.provenance.risks.contains("ProcessSpawn"),
+                p.payload.execution_boundary,
+            ) {
+                (true, Some(atman_runtime::permission::ExecutionBoundary::Sandboxed)) => {
+                    " · sandboxed"
+                }
+                (true, Some(atman_runtime::permission::ExecutionBoundary::Direct)) => " · direct",
+                _ => "",
+            };
             (
                 p.payload.tool.clone(),
                 format!(
-                    "{} · {}",
+                    "{}{execution} · {}",
                     p.request_id,
                     p.payload.provenance.targets.join(", ")
                 ),

@@ -19,7 +19,7 @@ The gate receives resource information from the tool's real argument schema. It 
 
 Shell command text is opaque to the permission gate. `bash.spawn` and `term.spawn` use their `cwd` argument as the structured filesystem scope for both approval and sandbox execution. A command that needs an external directory must set `cwd` to the narrowest required directory; an absolute path embedded only in `cmd` does not expand sandbox access.
 
-On macOS, the controlled process profile grants `/bin/ps` a command-specific sandbox exception because the system binary requires privileged process-inspection entitlements and cannot start inside a nested Seatbelt sandbox. The exception applies only to `/bin/ps`; the shell and every other child process remain sandboxed, and the enclosing `bash.spawn` or `term.spawn` invocation still passes through the normal permission gate.
+Process execution has a per-invocation boundary. Baseline automatic policy decisions and parent Flow approvals remain sandboxed. An authenticated user approval bypasses the Atman process sandbox for that approved call only; Eager `escalation = "allow"` and Reckless mode also run the approved process directly. Explicit denials and structural authority limits still apply.
 
 The main policy actions are:
 
@@ -42,6 +42,8 @@ The permission decision is made once for each invocation. A cloned, invocation-s
 | `eager` | Routine work is automatic; higher-risk policy decisions use `escalation`. | Enabled. |
 | `reckless` | Tools are unrestricted after identity and authority checks. | Disabled. |
 
+For process-spawning tools, "Enabled" is the automatic baseline rather than an immutable boundary. A real user approval selects direct execution for that invocation. Parent Flow approvals and baseline `auto` decisions select sandboxed execution. The selected boundary is retained by a scoped grant and shown in permission audit records.
+
 The TUI may display a themed name and description for these modes. The persisted configuration uses the stable enum values above, not the themed labels.
 
 `calm` and `steady` keep their fixed safety floor. Setting `escalation = "allow"` does not turn those modes into unrestricted execution.
@@ -60,7 +62,7 @@ escalation = "allow"
 |---|---|
 | `deny` | Convert an escalation to `deny`. |
 | `ask` | Keep the escalation as `ask`. This is the default. |
-| `allow` | Convert an escalation to `auto`. |
+| `allow` | Convert an escalation to `auto`; process-spawning calls run directly. |
 
 For example, `flow.spawn` is a Tier 2 tool. With `mode = "eager"` and `escalation = "allow"`, a normal Tier 2 spawn can pass the central gate without creating a pending approval. A risk override or the Flow's authority ceiling can still make the effective decision more restrictive.
 
@@ -173,13 +175,13 @@ This prevents a running Flow from creating a broad authority and then widening i
 
 Controlled execution requires a complete trusted invocation context. Missing broker, Flow identity, registry binding, trust snapshot, or run identity causes denial. The runtime does not fall back to an older automatic-approval path.
 
-A strict sandbox denial is final for that invocation. The runtime never converts it into an unrestricted retry.
+A sandbox denial is final for that invocation. The runtime never converts it into an unrestricted retry. Direct execution is selected by the broker before the first launch only when the invocation carries user, Eager Allow, or Reckless authority.
 
 ## Audit events
 
 Permission lifecycle changes are projected to both the persisted event log and the live stream. The public event families cover request creation, targeting, deferral, approval, denial, and cancellation; group creation, update, and resolution; grant creation and expiry; and unrestricted execution.
 
-Each record includes its stable request or grant identity, Flow ancestry, policy reference, authority actor, scope, reason, and a bounded provenance summary. The summary includes resolved resource targets needed for audit without copying tool arguments or arbitrary payloads.
+Each record includes its stable request or grant identity, Flow ancestry, policy reference, authority actor, process boundary, scope, reason, and a bounded provenance summary. The summary includes resolved resource targets needed for audit without copying tool arguments or arbitrary payloads.
 
 Records produced by one broker operation are emitted only after the operation commits. Failed atomic batches emit no partial records, and a successful approval is emitted immediately before its corresponding persistent grant. Lifecycle cleanup records identify a system component rather than inheriting the original decision actor.
 

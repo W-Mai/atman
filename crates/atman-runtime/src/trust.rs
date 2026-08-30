@@ -108,6 +108,22 @@ pub enum EscalationPolicy {
     Allow,
 }
 
+/// How Eager transformed an otherwise-Ask policy result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyEscalation {
+    None,
+    Denied,
+    Pending,
+    Allowed,
+}
+
+/// Policy result retaining whether an automatic decision came from Eager Allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyResolution {
+    pub action: PolicyAction,
+    pub escalation: PolicyEscalation,
+}
+
 impl EscalationPolicy {
     pub fn next(self) -> Self {
         match self {
@@ -596,8 +612,19 @@ impl TrustConfig {
         tier: crate::tool::Tier,
         risks: impl IntoIterator<Item = RiskKind>,
     ) -> PolicyAction {
+        self.resolve_policy_resolution(tier, risks).action
+    }
+
+    pub fn resolve_policy_resolution(
+        &self,
+        tier: crate::tool::Tier,
+        risks: impl IntoIterator<Item = RiskKind>,
+    ) -> PolicyResolution {
         if self.execution_policy() == ExecutionPolicy::Unrestricted {
-            return PolicyAction::Auto;
+            return PolicyResolution {
+                action: PolicyAction::Auto,
+                escalation: PolicyEscalation::None,
+            };
         }
 
         let action = risks
@@ -607,12 +634,24 @@ impl TrustConfig {
             });
 
         if self.mode != TrustMode::Eager || action != PolicyAction::Ask {
-            return action;
+            return PolicyResolution {
+                action,
+                escalation: PolicyEscalation::None,
+            };
         }
         match self.escalation {
-            EscalationPolicy::Deny => PolicyAction::Deny,
-            EscalationPolicy::Ask => PolicyAction::Ask,
-            EscalationPolicy::Allow => PolicyAction::Auto,
+            EscalationPolicy::Deny => PolicyResolution {
+                action: PolicyAction::Deny,
+                escalation: PolicyEscalation::Denied,
+            },
+            EscalationPolicy::Ask => PolicyResolution {
+                action: PolicyAction::Ask,
+                escalation: PolicyEscalation::Pending,
+            },
+            EscalationPolicy::Allow => PolicyResolution {
+                action: PolicyAction::Auto,
+                escalation: PolicyEscalation::Allowed,
+            },
         }
     }
 }
@@ -935,6 +974,40 @@ mod tests {
             config.resolve_policy(Tier::Four, [RiskKind::Network]),
             PolicyAction::Auto
         );
+    }
+
+    #[test]
+    fn eager_resolution_preserves_how_ask_was_resolved() {
+        use crate::tool::Tier;
+
+        let allowed = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Allow,
+            ..TrustConfig::default()
+        }
+        .resolve_policy_resolution(Tier::Two, [RiskKind::ProcessSpawn]);
+        assert_eq!(allowed.action, PolicyAction::Auto);
+        assert_eq!(allowed.escalation, PolicyEscalation::Allowed);
+
+        let automatic = TrustConfig {
+            mode: TrustMode::Eager,
+            tiers: TierPolicyConfig {
+                eager: TierPolicyOverrides {
+                    tier2: Some(PolicyAction::Auto),
+                    ..TierPolicyOverrides::default()
+                },
+            },
+            risks: RiskPolicyConfig {
+                eager: RiskPolicyOverrides {
+                    process_spawn: Some(PolicyAction::Auto),
+                    ..RiskPolicyOverrides::default()
+                },
+            },
+            ..TrustConfig::default()
+        }
+        .resolve_policy_resolution(Tier::Two, [RiskKind::ProcessSpawn]);
+        assert_eq!(automatic.action, PolicyAction::Auto);
+        assert_eq!(automatic.escalation, PolicyEscalation::None);
     }
 
     #[test]

@@ -313,6 +313,7 @@ pub struct PermissionDecision {
     pub request_id: PermissionRequestId,
     pub actor: DecisionActor,
     pub action: PermissionAction,
+    pub execution_boundary: ExecutionBoundary,
     pub grant_scope: Option<GrantScope>,
     pub reason: Option<String>,
     pub decided_at: DateTime<Utc>,
@@ -325,17 +326,43 @@ pub struct PermissionGrant {
     pub session_id: String,
     pub requesting_run_id: FlowRunId,
     pub requirement: AuthorityRequirement,
+    pub execution_boundary: ExecutionBoundary,
     pub scope: GrantScope,
     pub actor: DecisionActor,
     pub granted_at: DateTime<Utc>,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionBoundary {
+    #[default]
+    Sandboxed,
+    Direct,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImmediateAuthorization {
     Unrestricted,
-    Auto,
-    Denied { reason: String },
-    Granted { grant: Box<PermissionGrant> },
+    Auto {
+        execution_boundary: ExecutionBoundary,
+    },
+    Denied {
+        reason: String,
+    },
+    Granted {
+        grant: Box<PermissionGrant>,
+    },
 }
 
 #[derive(Debug)]
@@ -357,9 +384,7 @@ pub struct InvocationAuthorization {
     tool_use_id: String,
     tool_name: String,
     provenance: ResourceProvenance,
-    /// True when a human or an ancestor answered, false when policy or an
-    /// existing grant authorized it without asking.
-    manual: bool,
+    execution_boundary: ExecutionBoundary,
 }
 
 impl InvocationAuthorization {
@@ -368,14 +393,14 @@ impl InvocationAuthorization {
         tool_use_id: impl Into<String>,
         tool_name: impl Into<String>,
         provenance: ResourceProvenance,
-        manual: bool,
+        execution_boundary: ExecutionBoundary,
     ) -> Self {
         Self {
             request_id,
             tool_use_id: tool_use_id.into(),
             tool_name: tool_name.into(),
             provenance,
-            manual,
+            execution_boundary,
         }
     }
 
@@ -391,8 +416,8 @@ impl InvocationAuthorization {
         &self.tool_use_id
     }
 
-    pub fn was_manual(&self) -> bool {
-        self.manual
+    pub fn execution_boundary(&self) -> ExecutionBoundary {
+        self.execution_boundary
     }
 
     pub(crate) fn provenance(&self) -> &ResourceProvenance {
@@ -901,19 +926,25 @@ impl PermissionBroker {
                 self.authenticate_target(&identity, &requirement, &intent.provenance, target)
             })
             .transpose()?;
-        let (execution_policy, action) = identity.effective_authority.constrain_policy(
-            policy,
-            intent.tier,
-            intent.risks.iter().copied(),
-        );
+        let (execution_policy, resolution) = identity
+            .effective_authority
+            .constrain_policy_resolution(policy, intent.tier, intent.risks.iter().copied());
         let mut state = self.state.lock().unwrap();
         let request_id = PermissionRequestId::now();
         let now = Utc::now();
         let immediate = if execution_policy == ExecutionPolicy::Unrestricted {
             Some(ImmediateAuthorization::Unrestricted)
         } else {
-            match action {
-                PolicyAction::Auto => Some(ImmediateAuthorization::Auto),
+            match resolution.action {
+                PolicyAction::Auto => Some(ImmediateAuthorization::Auto {
+                    execution_boundary: if intent.risks.contains(&RiskKind::ProcessSpawn)
+                        && resolution.escalation == crate::trust::PolicyEscalation::Allowed
+                    {
+                        ExecutionBoundary::Direct
+                    } else {
+                        ExecutionBoundary::Sandboxed
+                    },
+                }),
                 PolicyAction::Deny => Some(ImmediateAuthorization::Denied {
                     reason: "permission policy denied the invocation".into(),
                 }),
@@ -954,6 +985,8 @@ impl PermissionBroker {
                 policy,
                 intent.tier,
                 &intent.risks,
+                execution_policy,
+                resolution,
             ),
             intent,
             requirement,
@@ -1132,6 +1165,11 @@ impl PermissionBroker {
             request_id: request_id.clone(),
             actor: prepared.actor.clone(),
             action,
+            execution_boundary: decision_execution_boundary(
+                &prepared.request,
+                &prepared.actor,
+                action,
+            ),
             grant_scope: grant_scope.clone(),
             reason: reason.clone(),
             decided_at: Utc::now(),
@@ -1186,6 +1224,7 @@ impl PermissionBroker {
                     session_id: prepared.request.session_id,
                     requesting_run_id: prepared.request.requesting_run_id,
                     requirement: prepared.request.requirement,
+                    execution_boundary: decision.execution_boundary,
                     scope,
                     actor: prepared.actor,
                     granted_at: decision.decided_at,
@@ -1273,6 +1312,7 @@ impl PermissionBroker {
             request_id: request_id.clone(),
             actor: actor.clone(),
             action,
+            execution_boundary: decision_execution_boundary(&request, &actor, action),
             grant_scope: grant_scope.clone(),
             reason: reason.clone(),
             decided_at: Utc::now(),
@@ -1336,6 +1376,7 @@ impl PermissionBroker {
                     session_id: request.session_id.clone(),
                     requesting_run_id: request.requesting_run_id.clone(),
                     requirement: request.requirement.clone(),
+                    execution_boundary: decision.execution_boundary,
                     scope,
                     actor,
                     granted_at: decision.decided_at,
@@ -2528,6 +2569,12 @@ fn submission_audits(
         } else {
             PermissionAction::Approve
         },
+        execution_boundary: match authorization {
+            ImmediateAuthorization::Unrestricted => ExecutionBoundary::Direct,
+            ImmediateAuthorization::Auto { execution_boundary } => *execution_boundary,
+            ImmediateAuthorization::Granted { grant } => grant.execution_boundary,
+            ImmediateAuthorization::Denied { .. } => ExecutionBoundary::Sandboxed,
+        },
         grant_scope: match authorization {
             ImmediateAuthorization::Granted { grant } => Some(grant.scope.clone()),
             _ => None,
@@ -2692,7 +2739,7 @@ fn matching_grant(
 ) -> Option<PermissionGrant> {
     grants
         .iter()
-        .find(|grant| {
+        .filter(|grant| {
             grant.session_id == identity.session_id
                 && grant.requesting_run_id == identity.run_id
                 && requirement_contains(&grant.requirement, requirement)
@@ -2726,7 +2773,23 @@ fn matching_grant(
                     GrantScope::CurrentCall => false,
                 }
         })
+        .max_by_key(|grant| grant.execution_boundary)
         .cloned()
+}
+
+fn decision_execution_boundary(
+    request: &PermissionRequest,
+    actor: &DecisionActor,
+    action: PermissionAction,
+) -> ExecutionBoundary {
+    if action == PermissionAction::Approve
+        && request.intent.risks.contains(&RiskKind::ProcessSpawn)
+        && matches!(actor, DecisionActor::User { .. })
+    {
+        ExecutionBoundary::Direct
+    } else {
+        ExecutionBoundary::Sandboxed
+    }
 }
 
 fn validate_same_path_scope(
@@ -2778,6 +2841,7 @@ fn equivalent_grant(left: &PermissionGrant, right: &PermissionGrant) -> bool {
     left.session_id == right.session_id
         && left.requesting_run_id == right.requesting_run_id
         && left.requirement == right.requirement
+        && left.execution_boundary == right.execution_boundary
         && left.scope == right.scope
 }
 
@@ -2893,6 +2957,13 @@ mod tests {
         }
     }
 
+    fn process_intent() -> PermissionIntent {
+        let mut intent = intent();
+        intent.risks.insert(RiskKind::ProcessSpawn);
+        intent.provenance = intent.provenance.with_risk(RiskKind::ProcessSpawn);
+        intent
+    }
+
     fn submit_to_flow(
         broker: &PermissionBroker,
         requester: &FlowIdentity,
@@ -2945,12 +3016,20 @@ mod tests {
     }
 
     fn submit_to_user(broker: &PermissionBroker, requester: &FlowIdentity) -> PendingPermission {
+        submit_to_user_with_intent(broker, requester, intent())
+    }
+
+    fn submit_to_user_with_intent(
+        broker: &PermissionBroker,
+        requester: &FlowIdentity,
+        intent: PermissionIntent,
+    ) -> PendingPermission {
         let target = ApprovalAuthority::User(broker.user_authority(&requester.session_id, None));
         let SubmissionOutcome::Pending(pending) = broker
             .submit_to(
                 Some(&requester.session_id),
                 Some(&requester.run_id),
-                intent(),
+                intent,
                 false,
                 target,
                 &ask_policy(),
@@ -3188,7 +3267,7 @@ mod tests {
         };
         assert!(matches!(
             auto_submission.authorization,
-            ImmediateAuthorization::Auto
+            ImmediateAuthorization::Auto { .. }
         ));
         assert_immediate_is_auditable(&broker, &auto_submission);
 
@@ -3258,6 +3337,161 @@ mod tests {
             PermissionRequestState::Cancelled { .. }
         ));
         assert_eq!(broker.list().len(), 4);
+    }
+
+    #[test]
+    fn process_boundary_distinguishes_policy_flow_and_user_authority() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+
+        let automatic = TrustConfig {
+            mode: TrustMode::Eager,
+            tiers: crate::trust::TierPolicyConfig {
+                eager: crate::trust::TierPolicyOverrides {
+                    tier2: Some(PolicyAction::Auto),
+                    ..Default::default()
+                },
+            },
+            risks: crate::trust::RiskPolicyConfig {
+                eager: crate::trust::RiskPolicyOverrides {
+                    process_spawn: Some(PolicyAction::Auto),
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        };
+        let SubmissionOutcome::Immediate(automatic) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                process_intent(),
+                false,
+                &automatic,
+            )
+            .unwrap()
+        else {
+            panic!("expected automatic authorization");
+        };
+        assert!(matches!(
+            automatic.authorization,
+            ImmediateAuthorization::Auto {
+                execution_boundary: ExecutionBoundary::Sandboxed
+            }
+        ));
+
+        let eager_allow = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Allow,
+            ..Default::default()
+        };
+        let SubmissionOutcome::Immediate(allowed) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                process_intent(),
+                false,
+                &eager_allow,
+            )
+            .unwrap()
+        else {
+            panic!("expected eager allow authorization");
+        };
+        assert!(matches!(
+            allowed.authorization,
+            ImmediateAuthorization::Auto {
+                execution_boundary: ExecutionBoundary::Direct
+            }
+        ));
+
+        let user_pending = submit_to_user_with_intent(&broker, &requester, process_intent());
+        assert_eq!(
+            crate::permission_audit::PermissionRequestAudit::from_request(
+                &user_pending.request,
+                Vec::new(),
+                None,
+                Utc::now(),
+            )
+            .execution_boundary,
+            Some(ExecutionBoundary::Direct)
+        );
+        let ResolveOutcome::Resolved(user_decision) = broker
+            .resolve(
+                &user_pending.request.request_id,
+                &user_decision(&broker, "session"),
+                PermissionAction::Approve,
+                None,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("user approval must resolve");
+        };
+        assert_eq!(user_decision.execution_boundary, ExecutionBoundary::Direct);
+
+        let SubmissionOutcome::Pending(flow_pending) =
+            submit_to_flow_with_intent(&broker, &requester, Arc::clone(&root), process_intent())
+                .unwrap()
+        else {
+            panic!("expected flow approval");
+        };
+        let ResolveOutcome::Resolved(flow_decision) = broker
+            .resolve(
+                &flow_pending.request.request_id,
+                &DecisionAuthority::Flow(broker.flow_authority(root).unwrap()),
+                PermissionAction::Approve,
+                None,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("flow approval must resolve");
+        };
+        assert_eq!(
+            flow_decision.execution_boundary,
+            ExecutionBoundary::Sandboxed
+        );
+    }
+
+    #[test]
+    fn user_process_grant_reuses_direct_boundary() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_to_user_with_intent(&broker, &requester, process_intent());
+        let scope = GrantScope::ChildRunSameTool {
+            run_id: requester.run_id.clone(),
+            tool_name: "bash.spawn".into(),
+        };
+
+        broker
+            .resolve(
+                &pending.request.request_id,
+                &user_decision(&broker, "session"),
+                PermissionAction::Approve,
+                Some(scope),
+                None,
+            )
+            .unwrap();
+
+        let SubmissionOutcome::Immediate(granted) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                process_intent(),
+                false,
+                &ask_policy(),
+            )
+            .unwrap()
+        else {
+            panic!("expected reusable grant");
+        };
+        assert!(matches!(
+            granted.authorization,
+            ImmediateAuthorization::Granted { grant }
+                if grant.execution_boundary == ExecutionBoundary::Direct
+        ));
     }
 
     #[test]
@@ -3849,7 +4083,7 @@ mod tests {
                 true,
                 &policy,
             ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(value.authorization, ImmediateAuthorization::Auto)
+            Ok(SubmissionOutcome::Immediate(value)) if matches!(value.authorization, ImmediateAuthorization::Auto { .. })
         ));
         assert!(submit_to_flow(&broker, &requester, Arc::clone(&requester)).is_err());
         assert_eq!(broker.list().len(), 1);
@@ -6011,7 +6245,7 @@ mod tests {
                 workspace_root: Some(crate::fs_access::canonicalize_stable(root.path())),
                 ..ResourceProvenance::default()
             },
-            true,
+            ExecutionBoundary::Sandboxed,
         );
         assert!(authorization.covers("fs.write", &file));
         assert!(!authorization.covers("fs.write", &sibling));

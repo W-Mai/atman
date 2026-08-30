@@ -1137,6 +1137,7 @@ mod tests {
             tool_use_id: tool_use_id.into(),
             tool: "fs.read".into(),
             tier: crate::tool::Tier::Two,
+            execution_boundary: Default::default(),
             provenance: crate::permission_audit::PermissionProvenanceSummary {
                 cwd: None,
                 path: None,

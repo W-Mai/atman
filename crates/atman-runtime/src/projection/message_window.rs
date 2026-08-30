@@ -236,6 +236,7 @@ fn legacy_permission_payload(
             .unwrap_or("unknown legacy tool")
             .into(),
         tier: crate::tool::Tier::Zero,
+        execution_boundary: Default::default(),
         provenance: PermissionProvenanceSummary {
             cwd: None,
             path: None,
@@ -926,6 +927,7 @@ mod tests {
             tool_use_id: tool_use_id.into(),
             tool: "fs.read".into(),
             tier: crate::tool::Tier::Two,
+            execution_boundary: Default::default(),
             provenance: Default::default(),
             target: crate::permission_audit::PermissionAuditTarget::User,
             group_ids: Vec::new(),
