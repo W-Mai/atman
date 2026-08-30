@@ -110,8 +110,9 @@ selection preserves a recent tail using all of these lower bounds:
 - a recent token tail of roughly 5% of the history budget.
 
 The summary replaces the selected range only when the replacement is smaller. Tool
-use/result pairs are sanitized, the replacement is checkpointed, and the live
-session window is updated. Depending on `[compaction].review`, manual or all
+use/result parts are sanitized without dropping valid text or valid pairs from a
+mixed message, the replacement is checkpointed, and the live session window is
+updated. Depending on `[compaction].review`, manual or all
 compactions may be reviewed before commit. If the provider reports an actual context
 overflow, the runtime can compact and rebuild the request once before normal retry
 handling continues.

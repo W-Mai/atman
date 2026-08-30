@@ -194,21 +194,20 @@ pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
             })
         })
         .collect();
+    let mut seen_uses: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut seen_results: std::collections::HashSet<String> = std::collections::HashSet::new();
-    messages.retain(|m| {
-        for p in &m.parts {
-            match p {
-                MessagePart::ToolUse { id, .. } if !result_ids.contains(id) => return false,
-                MessagePart::ToolResult { tool_use_id, .. } => {
-                    if !use_ids.contains(tool_use_id) || !seen_results.insert(tool_use_id.clone()) {
-                        return false;
-                    }
-                }
-                _ => {}
+    for message in messages.iter_mut() {
+        message.parts.retain(|part| match part {
+            MessagePart::ToolUse { id, .. } => {
+                result_ids.contains(id) && seen_uses.insert(id.clone())
             }
-        }
-        true
-    });
+            MessagePart::ToolResult { tool_use_id, .. } => {
+                use_ids.contains(tool_use_id) && seen_results.insert(tool_use_id.clone())
+            }
+            _ => true,
+        });
+    }
+    messages.retain(|message| !message.parts.is_empty());
 }
 
 pub fn find_compact_summaries(messages: &[Message]) -> Vec<CompactSummary> {
@@ -1637,5 +1636,65 @@ mod tests {
         let mut filtered = msgs;
         filter_orphan_tool_messages(&mut filtered);
         assert_eq!(filtered.len(), 2, "orphan result should be removed");
+    }
+
+    #[test]
+    fn filter_orphan_tool_parts_preserves_valid_mixed_message_content() {
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
+        let turn = TurnId::now();
+        let mut messages = vec![
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![
+                    MessagePart::Text {
+                        text: "keep assistant text".into(),
+                    },
+                    MessagePart::ToolUse {
+                        id: "valid".into(),
+                        name: "fs.read".into(),
+                        input: serde_json::json!({}),
+                        intent: None,
+                    },
+                    MessagePart::ToolUse {
+                        id: "orphan-use".into(),
+                        name: "fs.read".into(),
+                        input: serde_json::json!({}),
+                        intent: None,
+                    },
+                ],
+                turn_id: turn.clone(),
+                origin: MessageOrigin::User,
+            },
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![
+                    MessagePart::Text {
+                        text: "keep tool text".into(),
+                    },
+                    MessagePart::ToolResult {
+                        tool_use_id: "valid".into(),
+                        content: "ok".into(),
+                        is_error: false,
+                    },
+                    MessagePart::ToolResult {
+                        tool_use_id: "orphan-result".into(),
+                        content: "drop".into(),
+                        is_error: false,
+                    },
+                ],
+                turn_id: turn,
+                origin: MessageOrigin::User,
+            },
+        ];
+
+        filter_orphan_tool_messages(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert!(
+            matches!(&messages[0].parts[..], [MessagePart::Text { .. }, MessagePart::ToolUse { id, .. }] if id == "valid")
+        );
+        assert!(
+            matches!(&messages[1].parts[..], [MessagePart::Text { .. }, MessagePart::ToolResult { tool_use_id, .. }] if tool_use_id == "valid")
+        );
     }
 }

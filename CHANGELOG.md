@@ -26,6 +26,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction tool-pair sanitation** — orphaned or duplicate tool parts are removed individually, preserving valid text and valid tool pairs that share the same message.
 - **Stable tool exposure** — wildcard tool selectors expand in qualified-name order, overlapping selectors emit one definition, and nested schema object keys use canonical order so equivalent registries produce identical provider prefixes.
 - **Compaction input accounting** — history budgets count the system prompt and tool definitions once, without reserving space for unsent structured input or double-counting an appended prompt already present in messages.
 - **Workflow tool border alignment** — approval badges preserve the declared card width so the top and bottom borders end in the same column.
