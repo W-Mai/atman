@@ -63,6 +63,28 @@ pub(crate) fn resolve_config_hub(
     }
 }
 
+fn connected_mcp_status(
+    name: String,
+    transport: atman_runtime::mcp::TransportKind,
+    snapshot: &atman_runtime::mcp::McpToolSnapshot,
+) -> atman_runtime::mcp::McpServerStatus {
+    atman_runtime::mcp::McpServerStatus {
+        name,
+        transport,
+        state: atman_runtime::mcp::McpServerState::Connected {
+            tool_count: snapshot.tools.len(),
+            tools: snapshot
+                .tools
+                .iter()
+                .map(|tool| atman_runtime::mcp::McpToolInfo {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                })
+                .collect(),
+        },
+    }
+}
+
 /// Spawn background MCP connections on a single thread using cooperative
 /// concurrency (tokio::task::spawn_local).  Each enabled server connects
 /// independently — fast servers don't wait for slow ones.  Tools are
@@ -224,27 +246,64 @@ pub fn spawn_mcp_boot(
                                 },
                             ));
                             let arc_client = std::sync::Arc::new(client);
+                            let mut notifications = arc_client.subscribe_notifications();
                             let snapshot = arc_client.tool_snapshot();
                             atman_runtime::mcp::publish_tool_snapshot(
                                 &executor.tools,
-                                arc_client,
+                                arc_client.clone(),
                                 tier,
                                 &snapshot,
                             );
-                            session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
-                                name,
+                            session.update_mcp_server(connected_mcp_status(
+                                name.clone(),
                                 transport,
-                                state: atman_runtime::mcp::McpServerState::Connected {
-                                    tool_count: snapshot.tools.len(),
-                                    tools: snapshot
-                                        .tools
-                                        .iter()
-                                        .map(|t| atman_runtime::mcp::McpToolInfo {
-                                            name: t.name.clone(),
-                                            description: t.description.clone(),
-                                        })
-                                        .collect(),
-                                },
+                                &snapshot,
+                            ));
+                            let refresh_tools = executor.tools.clone();
+                            let refresh_session = session.clone();
+                            tokio::task::spawn_local(async move {
+                                loop {
+                                    let should_refresh = match notifications.recv().await {
+                                        Ok(atman_runtime::mcp::McpNotification::ToolsListChanged) => {
+                                            true
+                                        }
+                                        Ok(_) => false,
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                            true
+                                        }
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            break;
+                                        }
+                                    };
+                                    if !should_refresh {
+                                        continue;
+                                    }
+                                    match arc_client.refresh_tool_snapshot().await {
+                                        Ok(Some(snapshot)) => {
+                                            atman_runtime::mcp::publish_tool_snapshot(
+                                                &refresh_tools,
+                                                arc_client.clone(),
+                                                tier,
+                                                &snapshot,
+                                            );
+                                            refresh_session.update_mcp_server(
+                                                connected_mcp_status(
+                                                    name.clone(),
+                                                    transport,
+                                                    &snapshot,
+                                                ),
+                                            );
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            atman_runtime::notify!(
+                                                warn,
+                                                "MCP `{}` tool refresh failed; keeping the previous snapshot: {error}",
+                                                name
+                                            );
+                                        }
+                                    }
+                                }
                             });
                         }
                         Err(e) => {

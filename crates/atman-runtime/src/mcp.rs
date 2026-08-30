@@ -762,8 +762,11 @@ pub struct McpClient {
     pub name: String,
     transport: std::sync::Mutex<Arc<dyn McpTransport>>,
     tool_snapshot: std::sync::RwLock<Arc<McpToolSnapshot>>,
+    tool_refresh: tokio::sync::Mutex<()>,
     reconnect: Option<ReconnectConfig>,
     notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+    retained_notification_rx:
+        std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<McpNotification>>>,
     sampling_handler: SharedSamplingHandler,
 }
 
@@ -815,7 +818,7 @@ impl McpClient {
         env: &[(String, String)],
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
-        let (notification_tx, _) = tokio::sync::broadcast::channel(256);
+        let (notification_tx, notification_rx) = tokio::sync::broadcast::channel(256);
         let sampling_handler: SharedSamplingHandler = Arc::new(std::sync::Mutex::new(None));
         let transport: Arc<dyn McpTransport> = Arc::new(
             McpStdioTransport::spawn(
@@ -829,9 +832,14 @@ impl McpClient {
             .await?,
         );
         let name = name.into();
-        let mut client = Self::finish_connect(name.clone(), transport).await?;
-        client.notification_tx = notification_tx;
-        client.sampling_handler = sampling_handler;
+        let mut client = Self::finish_connect(
+            name.clone(),
+            transport,
+            notification_tx,
+            notification_rx,
+            sampling_handler,
+        )
+        .await?;
         client.reconnect = Some(ReconnectConfig::Stdio {
             cmd: cmd.to_string(),
             args: args.to_vec(),
@@ -847,8 +855,9 @@ impl McpClient {
         auth_token: Option<String>,
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
-        let (notification_tx, _) = tokio::sync::broadcast::channel(256);
+        let (notification_tx, notification_rx) = tokio::sync::broadcast::channel(256);
         let url_str: String = url.into();
+        let sampling_handler: SharedSamplingHandler = Arc::new(std::sync::Mutex::new(None));
         let transport: Arc<dyn McpTransport> = Arc::new(McpHttpTransport::new(
             url_str.clone(),
             auth_token.clone(),
@@ -856,8 +865,14 @@ impl McpClient {
             notification_tx.clone(),
         ));
         let name = name.into();
-        let mut client = Self::finish_connect(name.clone(), transport).await?;
-        client.notification_tx = notification_tx;
+        let mut client = Self::finish_connect(
+            name.clone(),
+            transport,
+            notification_tx,
+            notification_rx,
+            sampling_handler,
+        )
+        .await?;
         client.reconnect = Some(ReconnectConfig::Http {
             url: url_str,
             auth_token,
@@ -870,12 +885,23 @@ impl McpClient {
         name: impl Into<String>,
         transport: Arc<dyn McpTransport>,
     ) -> Result<Self, McpError> {
-        Self::finish_connect(name.into(), transport).await
+        let (notification_tx, notification_rx) = tokio::sync::broadcast::channel(256);
+        Self::finish_connect(
+            name.into(),
+            transport,
+            notification_tx,
+            notification_rx,
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+        .await
     }
 
     async fn finish_connect(
         name: String,
         transport: Arc<dyn McpTransport>,
+        notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+        notification_rx: tokio::sync::broadcast::Receiver<McpNotification>,
+        sampling_handler: SharedSamplingHandler,
     ) -> Result<Self, McpError> {
         let init_params = serde_json::json!({
             "protocolVersion": "2024-11-05",
@@ -887,14 +913,15 @@ impl McpClient {
             .notify("notifications/initialized", serde_json::Value::Null)
             .await?;
         let tool_snapshot = fetch_tool_snapshot(transport.as_ref()).await?;
-        let (notification_tx, _) = tokio::sync::broadcast::channel(256);
         Ok(Self {
             name,
             transport: std::sync::Mutex::new(transport),
             tool_snapshot: std::sync::RwLock::new(Arc::new(tool_snapshot)),
+            tool_refresh: tokio::sync::Mutex::new(()),
             reconnect: None,
             notification_tx,
-            sampling_handler: Arc::new(std::sync::Mutex::new(None)),
+            retained_notification_rx: std::sync::Mutex::new(Some(notification_rx)),
+            sampling_handler,
         })
     }
 
@@ -908,7 +935,11 @@ impl McpClient {
     }
 
     pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<McpNotification> {
-        self.notification_tx.subscribe()
+        self.retained_notification_rx
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| self.notification_tx.subscribe())
     }
 
     pub fn tool_snapshot(&self) -> Arc<McpToolSnapshot> {
@@ -916,6 +947,7 @@ impl McpClient {
     }
 
     pub async fn refresh_tool_snapshot(&self) -> Result<Option<Arc<McpToolSnapshot>>, McpError> {
+        let _refresh = self.tool_refresh.lock().await;
         let transport = { self.transport.lock().unwrap().clone() };
         let candidate = Arc::new(fetch_tool_snapshot(transport.as_ref()).await?);
         let mut current = self.tool_snapshot.write().unwrap();
@@ -1618,6 +1650,64 @@ mod tests {
         }
     }
 
+    struct MutableToolTransport {
+        response: std::sync::Mutex<Result<serde_json::Value, String>>,
+    }
+
+    impl MutableToolTransport {
+        fn new(tool_name: &str) -> Self {
+            Self {
+                response: std::sync::Mutex::new(Ok(Self::tool_page(tool_name))),
+            }
+        }
+
+        fn set_tool(&self, tool_name: &str) {
+            *self.response.lock().unwrap() = Ok(Self::tool_page(tool_name));
+        }
+
+        fn fail(&self, message: &str) {
+            *self.response.lock().unwrap() = Err(message.to_string());
+        }
+
+        fn tool_page(tool_name: &str) -> serde_json::Value {
+            serde_json::json!({
+                "tools": [{"name": tool_name, "inputSchema": {"type": "object"}}]
+            })
+        }
+    }
+
+    impl McpTransport for MutableToolTransport {
+        fn call<'a>(
+            &'a self,
+            method: &'a str,
+            _params: serde_json::Value,
+        ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
+            let result = match method {
+                "initialize" => Ok(serde_json::json!({})),
+                "tools/list" => self
+                    .response
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map_err(McpError::Protocol),
+                other => Err(McpError::Protocol(format!("unexpected call `{other}`"))),
+            };
+            Box::pin(async move { result })
+        }
+
+        fn notify<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: serde_json::Value,
+        ) -> BoxFut<'a, Result<(), McpError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+    }
+
     #[tokio::test]
     async fn connect_reads_every_tools_page_into_one_canonical_snapshot() {
         let transport = Arc::new(PagedToolTransport::new(false));
@@ -1660,6 +1750,55 @@ mod tests {
         };
 
         assert!(error.to_string().contains("repeated cursor `page-2`"));
+    }
+
+    #[tokio::test]
+    async fn notification_receiver_retains_events_until_runtime_subscribes() {
+        let transport = Arc::new(MutableToolTransport::new("alpha"));
+        let client = McpClient::connect_with_transport("dynamic", transport)
+            .await
+            .unwrap();
+
+        client
+            .notification_tx
+            .send(McpNotification::ToolsListChanged)
+            .unwrap();
+        let mut notifications = client.subscribe_notifications();
+
+        assert!(matches!(
+            notifications.try_recv(),
+            Ok(McpNotification::ToolsListChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_replaces_changed_namespace_and_preserves_last_good_on_failure() {
+        let transport = Arc::new(MutableToolTransport::new("alpha"));
+        let client = Arc::new(
+            McpClient::connect_with_transport("dynamic", transport.clone())
+                .await
+                .unwrap(),
+        );
+        let registry = crate::tool::ToolRegistry::new();
+        let initial = client.tool_snapshot();
+        publish_tool_snapshot(&registry, client.clone(), crate::tool::Tier::Zero, &initial);
+
+        assert!(client.refresh_tool_snapshot().await.unwrap().is_none());
+        transport.set_tool("beta");
+        let changed = client
+            .refresh_tool_snapshot()
+            .await
+            .unwrap()
+            .expect("changed snapshot");
+        publish_tool_snapshot(&registry, client.clone(), crate::tool::Tier::Zero, &changed);
+        assert!(!registry.has("mcp.dynamic.alpha"));
+        assert!(registry.has("mcp.dynamic.beta"));
+
+        let last_good = client.tool_snapshot().fingerprint.clone();
+        transport.fail("refresh unavailable");
+        assert!(client.refresh_tool_snapshot().await.is_err());
+        assert_eq!(client.tool_snapshot().fingerprint, last_good);
+        assert!(registry.has("mcp.dynamic.beta"));
     }
 
     #[tokio::test]
