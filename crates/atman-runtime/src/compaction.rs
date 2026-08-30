@@ -180,38 +180,7 @@ pub fn estimate_compacted_message_tokens(
 }
 
 pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
-    let use_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|m| {
-            m.parts.iter().filter_map(|p| match p {
-                MessagePart::ToolUse { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-        })
-        .collect();
-    let result_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|m| {
-            m.parts.iter().filter_map(|p| match p {
-                MessagePart::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
-                _ => None,
-            })
-        })
-        .collect();
-    let mut seen_uses: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_results: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for message in messages.iter_mut() {
-        message.parts.retain(|part| match part {
-            MessagePart::ToolUse { id, .. } => {
-                result_ids.contains(id) && seen_uses.insert(id.clone())
-            }
-            MessagePart::ToolResult { tool_use_id, .. } => {
-                use_ids.contains(tool_use_id) && seen_results.insert(tool_use_id.clone())
-            }
-            _ => true,
-        });
-    }
-    messages.retain(|message| !message.parts.is_empty());
+    crate::message::retain_complete_tool_pairs(messages);
 }
 
 pub fn find_compact_summaries(messages: &[Message]) -> Vec<CompactSummary> {

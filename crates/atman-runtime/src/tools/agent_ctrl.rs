@@ -930,7 +930,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     if should_inherit_context(&args)
         && let Some(parent) = &ctx.session_messages_handle
     {
-        *child_messages.lock().unwrap() = parent.lock().unwrap().clone();
+        *child_messages.lock().unwrap() = inherited_context_snapshot(parent);
     }
     run_prepared_flow_agent(
         prepared,
@@ -999,7 +999,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     );
     if inherit_context {
         if let Some(parent) = &ctx.session_messages_handle {
-            let snapshot = parent.lock().unwrap().clone();
+            let snapshot = inherited_context_snapshot(parent);
             *entry.messages.lock().unwrap() = snapshot;
         }
     }
@@ -1467,6 +1467,12 @@ fn should_inherit_context(args: &ToolArgs) -> bool {
     matches!(args.named("inherit_context"), Some(Value::Bool(true)))
 }
 
+fn inherited_context_snapshot(parent: &Arc<Mutex<Vec<Message>>>) -> Vec<Message> {
+    let mut snapshot = parent.lock().unwrap().clone();
+    crate::message::retain_complete_tool_pairs(&mut snapshot);
+    snapshot
+}
+
 fn invocation_user_message(
     flow: &atman_dsl::ast::FlowDecl,
     flow_args: &[(String, Value)],
@@ -1683,7 +1689,10 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentSpawn, FlowRegistry, FlowRunStatus, terminal_then_emit};
+    use super::{
+        AgentSpawn, FlowRegistry, FlowRunStatus, inherited_context_snapshot, terminal_then_emit,
+    };
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use crate::permission::PermissionBroker;
     use crate::provider::ProviderRegistry;
     use crate::tool::{Tier, Tool, ToolArgs, ToolCtx, ToolRegistry};
@@ -1708,6 +1717,72 @@ mod tests {
         );
         assert_eq!(entry.goal, "Audit the full provider chain");
         assert_eq!(entry.display_label, "Review provider routing");
+    }
+
+    #[test]
+    fn inherited_context_excludes_incomplete_parent_tool_transactions() {
+        let turn_id = crate::event::TurnId::now();
+        let parent = Arc::new(std::sync::Mutex::new(vec![
+            Message::user_text(turn_id.clone(), "delegate work"),
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![
+                    MessagePart::Text {
+                        text: "starting tools".into(),
+                    },
+                    MessagePart::ToolUse {
+                        id: "active-spawn".into(),
+                        name: "flow.spawn".into(),
+                        input: serde_json::json!({}),
+                        intent: None,
+                    },
+                    MessagePart::ToolUse {
+                        id: "complete-read".into(),
+                        name: "fs.read".into(),
+                        input: serde_json::json!({"path": "README.md"}),
+                        intent: None,
+                    },
+                ],
+                turn_id: turn_id.clone(),
+                origin: MessageOrigin::User,
+            },
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "complete-read".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                }],
+                turn_id,
+                origin: MessageOrigin::User,
+            },
+        ]));
+
+        let snapshot = inherited_context_snapshot(&parent);
+
+        assert!(snapshot.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Text { text } if text == "starting tools"))
+        }));
+        assert!(snapshot.iter().any(|message| {
+            message.parts.iter().any(
+                |part| matches!(part, MessagePart::ToolUse { id, .. } if id == "complete-read"),
+            )
+        }));
+        assert!(!snapshot.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolUse { id, .. } if id == "active-spawn"))
+        }));
+        assert!(parent.lock().unwrap().iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolUse { id, .. } if id == "active-spawn"))
+        }));
     }
 
     impl Tool for SandboxProbe {

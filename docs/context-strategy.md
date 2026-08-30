@@ -76,6 +76,12 @@ compaction, the active window contains a structured compact summary followed by
 recent messages. A checkpoint persists that replacement and synchronizes the live
 message handle, so subsequent `context: "session"` calls use the compacted window.
 
+Spawned flows keep a separate message segment. With `inherit_context: true`, the
+child starts from a copy of the parent's active window and then appends its invocation
+message. That copy contains only complete tool-use/result pairs, so the active parent
+`flow.spawn` transaction and other concurrently executing tools do not become orphaned
+requests in the child context.
+
 History recall is separate from automatic prompt assembly:
 
 - `memory.history.search` searches persisted session messages through FTS5.

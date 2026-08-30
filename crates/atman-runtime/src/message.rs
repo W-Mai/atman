@@ -282,6 +282,41 @@ impl Message {
     }
 }
 
+pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
+    let use_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .flat_map(|message| {
+            message.parts.iter().filter_map(|part| match part {
+                MessagePart::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    let result_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .flat_map(|message| {
+            message.parts.iter().filter_map(|part| match part {
+                MessagePart::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    let mut seen_uses = std::collections::HashSet::new();
+    let mut seen_results = std::collections::HashSet::new();
+    for message in messages.iter_mut() {
+        message.parts.retain(|part| match part {
+            MessagePart::ToolUse { id, .. } => {
+                result_ids.contains(id) && seen_uses.insert(id.clone())
+            }
+            MessagePart::ToolResult { tool_use_id, .. } => {
+                use_ids.contains(tool_use_id) && seen_results.insert(tool_use_id.clone())
+            }
+            _ => true,
+        });
+    }
+    messages.retain(|message| !message.parts.is_empty());
+}
+
 impl MessageRole {
     pub fn as_str(&self) -> &'static str {
         match self {
