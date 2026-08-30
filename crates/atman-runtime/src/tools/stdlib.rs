@@ -1333,24 +1333,61 @@ fn missing_required_fields(schema: &serde_json::Value, named: &[(String, Value)]
 }
 
 fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) -> crate::message::Message {
-    let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
+    let excerpt = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
         msg,
         ctx.output_store.as_deref(),
         ctx.tool_output_budget,
     );
+    emit_tool_result_metrics(ctx, msg, &excerpt);
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
             flow_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
-            message: msg.clone(),
+            message: excerpt.clone(),
         });
     } else if let Some(sink) = &ctx.events {
         sink.emit(crate::event::Event::ToolResultMsg {
-            turn_id: msg.turn_id.clone(),
+            turn_id: excerpt.turn_id.clone(),
             flow_run_id: ctx.flow_run_id.clone(),
-            message: msg.clone(),
+            message: excerpt.clone(),
         });
     }
-    msg
+    excerpt
+}
+
+fn emit_tool_result_metrics(
+    ctx: &ToolCtx,
+    raw: &crate::message::Message,
+    excerpt: &crate::message::Message,
+) {
+    let Some(sink) = &ctx.events else {
+        return;
+    };
+    for part in &raw.parts {
+        let crate::message::MessagePart::ToolResult {
+            tool_use_id,
+            content: raw_content,
+            ..
+        } = part
+        else {
+            continue;
+        };
+        let excerpt_content = excerpt.parts.iter().find_map(|part| match part {
+            crate::message::MessagePart::ToolResult {
+                tool_use_id: excerpt_id,
+                content,
+                ..
+            } if excerpt_id == tool_use_id => Some(content.as_str()),
+            _ => None,
+        });
+        sink.emit(crate::event::Event::ToolResultMetrics {
+            turn_id: raw.turn_id.clone(),
+            flow_run_id: ctx.flow_run_id.clone(),
+            tool_use_id: tool_use_id.clone(),
+            raw_bytes: raw_content.len() as u64,
+            excerpt_bytes: excerpt_content.map_or(0, |content| content.len() as u64),
+            truncated: excerpt_content != Some(raw_content.as_str()),
+        });
+    }
 }
 
 fn render_tool_result_text(v: &Value) -> String {
@@ -1911,9 +1948,11 @@ mod tests {
             output: "0123456789".repeat(20),
         }));
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let events = crate::event::EventSink::new();
         let mut ctx = ToolCtx::new()
             .with_registry(std::sync::Arc::new(registry))
-            .with_stream_tx(stream_tx);
+            .with_stream_tx(stream_tx)
+            .with_events(events.clone());
         ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
             max_lines: 32,
             max_bytes: 24,
@@ -1952,12 +1991,35 @@ mod tests {
             crate::message::MessagePart::ToolResult { content, .. }
                 if content.contains("Output truncated")
         ));
+        let returned_bytes = match &returned.parts[0] {
+            crate::message::MessagePart::ToolResult { content, .. } => content.len() as u64,
+            _ => unreachable!(),
+        };
+        let metrics = events
+            .snapshot()
+            .into_iter()
+            .find_map(|event| match event {
+                crate::event::Event::ToolResultMetrics {
+                    tool_use_id,
+                    raw_bytes,
+                    excerpt_bytes,
+                    truncated,
+                    ..
+                } if tool_use_id == "text_id" => Some((raw_bytes, excerpt_bytes, truncated)),
+                _ => None,
+            })
+            .expect("tool result metrics");
+        assert!(metrics.0 > 0);
+        assert_eq!((metrics.1, metrics.2), (returned_bytes, true));
     }
 
     #[test]
     fn finish_dispatch_returns_the_budgeted_message_it_emits() {
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
-        let mut ctx = ToolCtx::new().with_stream_tx(stream_tx);
+        let events = crate::event::EventSink::new();
+        let mut ctx = ToolCtx::new()
+            .with_stream_tx(stream_tx)
+            .with_events(events.clone());
         ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
             max_lines: 32,
             max_bytes: 24,
@@ -1984,6 +2046,20 @@ mod tests {
             crate::message::MessagePart::ToolResult { content, .. }
                 if content.contains("Output truncated")
         ));
+        let excerpt_bytes = match &returned.parts[0] {
+            crate::message::MessagePart::ToolResult { content, .. } => content.len() as u64,
+            _ => unreachable!(),
+        };
+        assert!(events.snapshot().into_iter().any(|event| matches!(
+            event,
+            crate::event::Event::ToolResultMetrics {
+                tool_use_id,
+                raw_bytes: 200,
+                excerpt_bytes: observed,
+                truncated: true,
+                ..
+            } if tool_use_id == "text_id" && observed == excerpt_bytes
+        )));
     }
 
     #[test]

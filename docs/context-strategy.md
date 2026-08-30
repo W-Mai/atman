@@ -53,6 +53,9 @@ cold starts, cache enablement or disablement, provider/model/projection changes,
 stable-instruction changes, tool changes, compaction, and other message-prefix
 rewrites separately. Transport JSON punctuation and output-only request fields are
 excluded because they do not represent the provider's semantic prompt prefix.
+Successful calls record the number of tool uses returned in the assistant message.
+Each dispatched tool result records raw bytes, model-visible excerpt bytes, and
+whether output budgeting changed the content before it enters message history.
 
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if

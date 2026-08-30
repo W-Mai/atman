@@ -266,6 +266,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
                         ),
                         context_cache: None,
+                        assistant_tool_batch_width: None,
                         usage: crate::provider::TokenUsage::default(),
                         wallclock_ms: 0,
                         ttft_ms: None,
@@ -363,6 +364,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .as_ref()
                 .map(|am| crate::provider::estimate_tokens(&am.text_concat()))
                 .unwrap_or(0);
+            let assistant_tool_batch_width = outcome.as_ref().ok().map(|message| {
+                message
+                    .message
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part, crate::message::MessagePart::ToolUse { .. }))
+                    .count() as u64
+            });
             let (usage, usage_source) = crate::context_plan::reconcile_token_usage(
                 &provider_usage,
                 estimated_input,
@@ -391,6 +400,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     context_call_purpose: Some(context_call_purpose),
                     context_call_identity: Some(context_call_identity.clone()),
                     context_cache: Some(context_cache),
+                    assistant_tool_batch_width,
                     usage: usage.clone(),
                     wallclock_ms: elapsed_ms,
                     ttft_ms,

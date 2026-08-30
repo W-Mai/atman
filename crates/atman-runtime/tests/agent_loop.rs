@@ -211,6 +211,36 @@ async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
         content.contains("world of atman"),
         "tool_result content should carry the file body, got: {content}"
     );
+
+    let batch_widths: Vec<u64> = sink
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::LlmCall {
+                assistant_tool_batch_width,
+                ..
+            } => assistant_tool_batch_width,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(batch_widths, vec![1, 0]);
+
+    let result_metrics = sink
+        .snapshot()
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ToolResultMetrics {
+                tool_use_id,
+                raw_bytes,
+                excerpt_bytes,
+                truncated,
+                ..
+            } if tool_use_id == "call_0" => Some((raw_bytes, excerpt_bytes, truncated)),
+            _ => None,
+        })
+        .expect("tool result metrics");
+    assert_eq!(result_metrics.0, result_metrics.1);
+    assert!(!result_metrics.2);
 }
 
 #[tokio::test(flavor = "current_thread")]

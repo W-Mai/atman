@@ -449,6 +449,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::UserMsg { .. } => "user_msg",
         Event::AssistantMsg { .. } => "assistant_msg",
         Event::ToolResultMsg { .. } => "tool_result_msg",
+        Event::ToolResultMetrics { .. } => "tool_result_metrics",
         Event::DiffPreview { .. } => "diff_preview",
         Event::CompactionSummary { .. } => "compaction_summary",
         Event::SystemMsg { .. } => "system_msg",
@@ -503,6 +504,11 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             ..
         }
         | Event::ToolResultMsg {
+            turn_id,
+            flow_run_id,
+            ..
+        }
+        | Event::ToolResultMetrics {
             turn_id,
             flow_run_id,
             ..

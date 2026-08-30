@@ -121,6 +121,8 @@ pub enum Event {
         context_call_identity: Option<crate::context_plan::ContextCallIdentity>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_cache: Option<crate::context_plan::ContextCacheObservation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_tool_batch_width: Option<u64>,
         usage: crate::provider::TokenUsage,
         wallclock_ms: u64,
         ttft_ms: Option<u64>,
@@ -152,6 +154,15 @@ pub enum Event {
         turn_id: TurnId,
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
+    },
+    ToolResultMetrics {
+        turn_id: TurnId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
+        tool_use_id: String,
+        raw_bytes: u64,
+        excerpt_bytes: u64,
+        truncated: bool,
     },
     DiffPreview {
         turn_id: Option<TurnId>,
@@ -581,6 +592,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_metrics_serialize_raw_and_excerpt_sizes() {
+        let ev = Event::ToolResultMetrics {
+            turn_id: TurnId::now(),
+            flow_run_id: Some(FlowRunId::now()),
+            tool_use_id: "call-1".into(),
+            raw_bytes: 10_000,
+            excerpt_bytes: 1_000,
+            truncated: true,
+        };
+        let value = serde_json::to_value(ev).unwrap();
+
+        assert_eq!(value["type"], "tool_result_metrics");
+        assert_eq!(value["tool_use_id"], "call-1");
+        assert_eq!(value["raw_bytes"], 10_000);
+        assert_eq!(value["excerpt_bytes"], 1_000);
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
     fn seq_and_set_seq_cover_tool_node() {
         let _ev = Event::ToolNode {
             run_id: FlowRunId::now(),
@@ -732,6 +762,7 @@ mod tests {
                 context_call_purpose: None,
                 context_call_identity: None,
                 context_cache: None,
+                assistant_tool_batch_width: None,
                 ..
             }
         ));

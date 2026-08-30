@@ -42,6 +42,7 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             context_call_purpose,
             context_call_identity,
             context_cache,
+            assistant_tool_batch_width,
             usage,
             status,
             ..
@@ -69,6 +70,7 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             );
             assert!(cache.wire_prefix_bytes > 0);
             assert_eq!(cache.common_prefix_bytes, 0);
+            assert_eq!(*assistant_tool_batch_width, Some(0));
             assert!(matches!(status, LlmCallStatus::Ok));
             assert!(usage.input > 0);
             assert!(usage.output > 0);

@@ -274,6 +274,7 @@ mod tests {
                 context_call_purpose: None,
                 context_call_identity: None,
                 context_cache: None,
+                assistant_tool_batch_width: None,
                 usage: crate::provider::TokenUsage::default(),
                 wallclock_ms: 0,
                 ttft_ms: None,
