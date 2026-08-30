@@ -41,6 +41,9 @@ Provider usage remains authoritative when present; missing input or output count
 the complete plan estimate and the event identifies provider, estimated, or mixed
 usage. The same event classifies general, extraction, classification, and branch
 generation calls and identifies detached, root-session, and spawned-child contexts.
+The Session retains the latest usage in bounded provider/model/purpose/identity buckets.
+Only a general root-session call updates the active model-window reading; helper and
+child calls remain visible in their own buckets without replacing it.
 
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if

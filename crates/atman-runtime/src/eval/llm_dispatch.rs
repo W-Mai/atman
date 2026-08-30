@@ -9,7 +9,7 @@ use super::{
     StreamCallCtx, is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages,
     render_injections, session_system_context, tool_context_working_directory_system_prompt,
 };
-use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
+use super::{append_system_context, call_and_maybe_stream};
 
 /// Core LLM dispatch with all side effects.
 /// Used as the single implementation behind `llm.call` and higher-level LLM tools.
@@ -365,11 +365,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 sink.emit(crate::event::Event::LlmCall {
                     model: model.clone(),
                     provider: provider.name().to_string(),
-                    context_plan_id: Some(context_plan_id),
+                    context_plan_id: Some(context_plan_id.clone()),
                     context_tokens: Some(context_tokens),
                     usage_source: Some(usage_source),
                     context_call_purpose: Some(context_call_purpose),
-                    context_call_identity: Some(context_call_identity),
+                    context_call_identity: Some(context_call_identity.clone()),
                     usage: usage.clone(),
                     wallclock_ms: elapsed_ms,
                     ttft_ms,
@@ -379,7 +379,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     node_id: ctx.current_node_id.clone(),
                 });
             }
-            let input_with_cache = input_with_cache_for_window(&usage);
             if let Some(tx) = stream_tx.as_ref() {
                 let _ = tx.send(crate::stream::StreamFrame::LlmCallStats {
                     model: model.clone(),
@@ -397,12 +396,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             if let Some(session) = ctx.session_runtime.as_ref()
                 && !matches!(context_mode, ContextMode::None)
             {
-                session.record_llm_call(
+                session.record_context_plan_call(
+                    provider.name(),
                     &model,
-                    input_with_cache,
-                    usage.output,
-                    usage.cached_input,
-                    usage.cache_write,
+                    context_plan_id,
+                    context_call_purpose,
+                    context_call_identity,
+                    &usage,
                     ttft_ms,
                     tps,
                 );

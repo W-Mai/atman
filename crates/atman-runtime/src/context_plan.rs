@@ -131,11 +131,35 @@ impl ContextCallIdentity {
             crate::tool::HistorySegment::Root if session_id.is_some() => ContextCallScope::Root,
             crate::tool::HistorySegment::Root => ContextCallScope::Detached,
         };
+        let flow_run_id = match scope {
+            ContextCallScope::Root => None,
+            ContextCallScope::Child | ContextCallScope::Detached => ctx.flow_run_id.clone(),
+        };
         Self {
             scope,
             session_id,
-            flow_run_id: ctx.flow_run_id.clone(),
+            flow_run_id,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ContextUsageKey {
+    pub provider: String,
+    pub model: String,
+    pub call_purpose: ContextCallPurpose,
+    pub call_identity: ContextCallIdentity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsageRecord {
+    pub plan_id: ContextPlanId,
+    pub usage: crate::provider::TokenUsage,
+}
+
+impl ContextUsageRecord {
+    pub fn window_input_tokens(&self) -> u64 {
+        self.usage.input.saturating_add(self.usage.cached_input)
     }
 }
 
@@ -320,6 +344,7 @@ mod tests {
         });
         assert_eq!(root.scope, ContextCallScope::Root);
         assert_eq!(root.session_id.as_deref(), Some("session-1"));
+        assert!(root.flow_run_id.is_none());
 
         let child = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx {
             session_id: Some("session-1".into()),
@@ -328,5 +353,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(child.scope, ContextCallScope::Child);
+        assert!(child.flow_run_id.is_some());
     }
 }

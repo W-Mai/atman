@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -82,19 +83,53 @@ pub struct WatchHub {
 
 pub struct CompactionState {
     pub manual_pending: std::sync::atomic::AtomicBool,
-    pub last_input_tokens: std::sync::atomic::AtomicU64,
+    pub model_window_tokens: std::sync::atomic::AtomicU64,
     pub review_mode: Mutex<CompactReviewMode>,
     pub lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    last_context_usage: Mutex<LastContextUsageStore>,
 }
 
 impl CompactionState {
     fn new() -> Self {
         Self {
             manual_pending: std::sync::atomic::AtomicBool::new(false),
-            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
+            model_window_tokens: std::sync::atomic::AtomicU64::new(0),
             review_mode: Mutex::new(CompactReviewMode::default()),
             lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            last_context_usage: Mutex::new(LastContextUsageStore::default()),
         }
+    }
+}
+
+const MAX_LAST_CONTEXT_USAGES: usize = 256;
+
+#[derive(Default)]
+struct LastContextUsageStore {
+    entries: HashMap<crate::context_plan::ContextUsageKey, crate::context_plan::ContextUsageRecord>,
+    order: VecDeque<crate::context_plan::ContextUsageKey>,
+}
+
+impl LastContextUsageStore {
+    fn insert(
+        &mut self,
+        key: crate::context_plan::ContextUsageKey,
+        record: crate::context_plan::ContextUsageRecord,
+    ) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(key, record);
+        while self.entries.len() > MAX_LAST_CONTEXT_USAGES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(
+        &self,
+        key: &crate::context_plan::ContextUsageKey,
+    ) -> Option<crate::context_plan::ContextUsageRecord> {
+        self.entries.get(key).cloned()
     }
 }
 
@@ -1004,7 +1039,7 @@ impl Session {
             compaction: {
                 let c = CompactionState::new();
                 if persisted.window_tokens > 0 {
-                    c.last_input_tokens.store(
+                    c.model_window_tokens.store(
                         persisted.window_tokens,
                         std::sync::atomic::Ordering::Relaxed,
                     );
@@ -1289,26 +1324,112 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        if tokens_in > 0 {
+        self.record_llm_usage(
+            model,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            ttft_ms,
+            tokens_per_sec,
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_context_plan_call(
+        &self,
+        provider: &str,
+        model: &str,
+        plan_id: crate::context_plan::ContextPlanId,
+        call_purpose: crate::context_plan::ContextCallPurpose,
+        call_identity: crate::context_plan::ContextCallIdentity,
+        usage: &crate::provider::TokenUsage,
+        ttft_ms: Option<u64>,
+        tokens_per_sec: Option<f64>,
+    ) {
+        let key = crate::context_plan::ContextUsageKey {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            call_purpose,
+            call_identity: call_identity.clone(),
+        };
+        let record = crate::context_plan::ContextUsageRecord {
+            plan_id,
+            usage: usage.clone(),
+        };
+        self.compaction
+            .last_context_usage
+            .lock()
+            .expect("context usage lock poisoned")
+            .insert(key, record);
+
+        let updates_model_window = matches!(
+            (call_identity.scope, call_purpose),
+            (
+                crate::context_plan::ContextCallScope::Root,
+                crate::context_plan::ContextCallPurpose::General
+            )
+        );
+        self.record_llm_usage(
+            model,
+            usage.input.saturating_add(usage.cached_input),
+            usage.output,
+            usage.cached_input,
+            usage.cache_write,
+            ttft_ms,
+            tokens_per_sec,
+            updates_model_window,
+        );
+    }
+
+    pub fn last_context_usage(
+        &self,
+        key: &crate::context_plan::ContextUsageKey,
+    ) -> Option<crate::context_plan::ContextUsageRecord> {
+        self.compaction
+            .last_context_usage
+            .lock()
+            .expect("context usage lock poisoned")
+            .get(key)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_llm_usage(
+        &self,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        cache_read: u64,
+        cache_write: u64,
+        ttft_ms: Option<u64>,
+        tokens_per_sec: Option<f64>,
+        updates_model_window: bool,
+    ) {
+        if updates_model_window && tokens_in > 0 {
             self.compaction
-                .last_input_tokens
+                .model_window_tokens
                 .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
         }
         self.watch.context.send_modify(|snap| {
-            snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
             snap.cache_read = snap.cache_read.saturating_add(cache_read);
             snap.cache_write = snap.cache_write.saturating_add(cache_write);
-            snap.last_ttft_ms = ttft_ms.unwrap_or(0);
-            snap.last_tokens_per_sec = tokens_per_sec.unwrap_or(0.0);
+            if updates_model_window {
+                snap.model = model.to_string();
+                snap.last_ttft_ms = ttft_ms.unwrap_or(0);
+                snap.last_tokens_per_sec = tokens_per_sec.unwrap_or(0.0);
+            }
         });
-        self.refresh_window_snapshot();
+        if updates_model_window {
+            self.refresh_window_snapshot();
+        }
     }
 
     pub fn last_input_tokens(&self) -> u64 {
         self.compaction
-            .last_input_tokens
+            .model_window_tokens
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -1763,7 +1884,7 @@ impl Session {
                 compacted_count: rewritten_count,
             });
         self.compaction
-            .last_input_tokens
+            .model_window_tokens
             .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut messages) = self.messages.lock() {
             *messages = replacement.clone();
@@ -1830,7 +1951,7 @@ impl Session {
                 compacted_count: range.end - range.start,
             });
         self.compaction
-            .last_input_tokens
+            .model_window_tokens
             .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut messages) = self.messages.lock() {
             *messages = replacement.clone();
@@ -1918,7 +2039,7 @@ impl Session {
         let checkpoint_messages = self.messages();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
         self.compaction
-            .last_input_tokens
+            .model_window_tokens
             .store(window_tokens, std::sync::atomic::Ordering::Relaxed);
         // Sync the messages Vec (root's messages_handle) with the compacted
         // windowed view so root's llm context via messages_handle respects
@@ -2254,6 +2375,34 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use tempfile::TempDir;
+
+    #[test]
+    fn last_context_usage_store_evicts_the_oldest_identity() {
+        let mut store = LastContextUsageStore::default();
+        for index in 0..=MAX_LAST_CONTEXT_USAGES {
+            store.insert(
+                crate::context_plan::ContextUsageKey {
+                    provider: "provider".into(),
+                    model: format!("model-{index}"),
+                    call_purpose: crate::context_plan::ContextCallPurpose::General,
+                    call_identity: crate::context_plan::ContextCallIdentity::detached(),
+                },
+                crate::context_plan::ContextUsageRecord {
+                    plan_id: crate::context_plan::ContextPlanId::now(),
+                    usage: crate::provider::TokenUsage::default(),
+                },
+            );
+        }
+
+        assert_eq!(store.entries.len(), MAX_LAST_CONTEXT_USAGES);
+        assert!(!store.entries.keys().any(|key| key.model == "model-0"));
+        assert!(
+            store
+                .entries
+                .keys()
+                .any(|key| key.model == format!("model-{MAX_LAST_CONTEXT_USAGES}"))
+        );
+    }
 
     fn permission_authority() -> crate::flow_authority::EffectiveAuthority {
         use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind};

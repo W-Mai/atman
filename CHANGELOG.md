@@ -28,6 +28,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Scoped context usage** — provider/model/purpose/root-or-child buckets retain their latest plan usage independently, so child and helper calls cannot replace the root session's active-window reading.
 - **Context usage fallback** — provider token counts remain authoritative when present; missing input and output usage is estimated from the complete compiled request without adding cached input twice.
 - **Request tool exposure** — model-generated tool calls are bound to the exact tool name exposed by their originating LLM request and can be dispatched only once within the producing flow.
 - **Tool-pair projection** — model requests normalize parallel tool results in call order, preserve non-tool content from mixed messages, and remove orphan results without duplicating valid parts.
