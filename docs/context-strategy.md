@@ -82,6 +82,11 @@ message. That copy contains only complete tool-use/result pairs, so the active p
 `flow.spawn` transaction and other concurrently executing tools do not become orphaned
 requests in the child context.
 
+Ephemeral child segments retain the existing 100-message target. Trimming moves the
+cut backward when necessary to keep a retained ToolResult with its ToolUse, so one
+complete tool batch may temporarily make the segment slightly larger than the target.
+An active unpaired ToolUse at the tail is preserved until its result is appended.
+
 History recall is separate from automatic prompt assembly:
 
 - `memory.history.search` searches persisted session messages through FTS5.

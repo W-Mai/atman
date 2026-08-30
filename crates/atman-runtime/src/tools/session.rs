@@ -3,6 +3,8 @@ use crate::message::{Message, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
+const EPHEMERAL_CONTEXT_MESSAGE_LIMIT: usize = 100;
+
 pub struct SessionPush;
 
 impl Tool for SessionPush {
@@ -105,11 +107,49 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
     let mut messages = handle.lock().unwrap();
     messages.push(msg);
     // Cap ephemeral sub-agent segments; root persists via event sink.
-    if ctx.session_runtime.is_none() && messages.len() > 100 {
-        let start = messages.len() - 100;
-        messages.drain(..start);
+    if ctx.session_runtime.is_none() {
+        trim_ephemeral_context(&mut messages, EPHEMERAL_CONTEXT_MESSAGE_LIMIT);
     }
     Ok(())
+}
+
+fn trim_ephemeral_context(messages: &mut Vec<Message>, limit: usize) {
+    if messages.len() <= limit {
+        return;
+    }
+    let mut start = messages.len() - limit;
+    loop {
+        let retained_result_ids: std::collections::HashSet<&str> = messages[start..]
+            .iter()
+            .flat_map(|message| {
+                message.parts.iter().filter_map(|part| match part {
+                    crate::message::MessagePart::ToolResult { tool_use_id, .. } => {
+                        Some(tool_use_id.as_str())
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        let Some(transaction_start) = messages[..start]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                message
+                    .parts
+                    .iter()
+                    .any(|part| {
+                        matches!(part, crate::message::MessagePart::ToolUse { id, .. }
+                            if retained_result_ids.contains(id.as_str()))
+                    })
+                    .then_some(index)
+            })
+            .min()
+        else {
+            break;
+        };
+        start = transaction_start;
+    }
+    messages.drain(..start);
 }
 
 fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
@@ -146,6 +186,96 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message_with_parts(parts: Vec<crate::message::MessagePart>) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            parts,
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        }
+    }
+
+    #[test]
+    fn ephemeral_context_trims_at_complete_tool_transaction_boundary() {
+        use crate::message::MessagePart;
+
+        let mut messages = vec![Message::user_text(
+            crate::event::TurnId::now(),
+            "drop this old message",
+        )];
+        messages.push(message_with_parts(vec![
+            MessagePart::ToolUse {
+                id: "call-a".into(),
+                name: "fs.read".into(),
+                input: serde_json::json!({}),
+                intent: None,
+            },
+            MessagePart::ToolUse {
+                id: "call-b".into(),
+                name: "fs.read".into(),
+                input: serde_json::json!({}),
+                intent: None,
+            },
+        ]));
+        for id in ["call-a", "call-b"] {
+            messages.push(Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: id.into(),
+                    content: "done".into(),
+                    is_error: false,
+                }],
+                turn_id: crate::event::TurnId::now(),
+                origin: crate::message::MessageOrigin::User,
+            });
+        }
+        messages.extend((0..98).map(|index| {
+            Message::assistant_text(crate::event::TurnId::now(), format!("tail-{index}"))
+        }));
+
+        trim_ephemeral_context(&mut messages, EPHEMERAL_CONTEXT_MESSAGE_LIMIT);
+
+        assert_eq!(messages.len(), 101);
+        assert!(messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolUse { id, .. } if id == "call-a"))
+        }));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.text_concat() == "drop this old message")
+        );
+    }
+
+    #[test]
+    fn ephemeral_context_keeps_active_unpaired_tool_use() {
+        use crate::message::MessagePart;
+
+        let mut messages = (0..100)
+            .map(|index| {
+                Message::assistant_text(crate::event::TurnId::now(), format!("old-{index}"))
+            })
+            .collect::<Vec<_>>();
+        messages.push(message_with_parts(vec![MessagePart::ToolUse {
+            id: "active".into(),
+            name: "flow.spawn".into(),
+            input: serde_json::json!({}),
+            intent: None,
+        }]));
+
+        trim_ephemeral_context(&mut messages, EPHEMERAL_CONTEXT_MESSAGE_LIMIT);
+
+        assert_eq!(messages.len(), EPHEMERAL_CONTEXT_MESSAGE_LIMIT);
+        assert!(messages.iter().any(|message| {
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::ToolUse { id, .. } if id == "active"))
+        }));
+    }
 
     #[test]
     fn session_push_name_and_tier() {

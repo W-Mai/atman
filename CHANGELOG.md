@@ -27,6 +27,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Child context trimming** — ephemeral subflow message limits cut at complete tool-transaction boundaries and preserve active tool calls until their results arrive.
 - **Spawned context transactions** — inherited child context excludes parent tool calls that are still executing while preserving complete tool pairs and surrounding assistant text.
 - **Working-directory context** — root and spawned LLM calls receive one resolved working-directory block without duplicating dynamic context or leaking a `{pwd}` placeholder.
 - **Compaction preflight freshness** — automatic compaction evaluates the current message window and fixed provider prefix instead of reusing the previous request's input-token count.
