@@ -54,9 +54,11 @@ The flow chooses one message source:
 The managed `commands/agent.at` uses `context: "session"`. It does **not** feed
 `memory.recent_turns` to the main model as a fixed sliding window.
 
-At the start of the managed flow, `memory.recent_turns(n: 5)` is used only as input
-to the cheap rule/confession selector. The same tool is used later by the stall
-classifier. Those helper calls do not define the main model's session context.
+At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_chars: 12000)`
+provides a bounded excerpt to the cheap rule/confession selector. The same bounded
+view is used later by the stall classifier. Its lossless `items` remain available to
+explicit callers, and these helper calls do not define the main model's session
+context.
 
 ## Session history and active window
 
@@ -74,7 +76,8 @@ History recall is separate from automatic prompt assembly:
 - `memory.history.search` searches persisted session messages through FTS5.
 - `memory.history.read` reads a selected range.
 - `memory.history.count` reports the available history size.
-- `memory.recent_turns` returns a small recent slice for workflow logic.
+- `memory.recent_turns` returns lossless recent turns and can produce a separately
+  bounded excerpt for workflow logic.
 
 Search results are not inserted into the next prompt automatically. The flow or agent
 must inspect them and deliberately carry the relevant facts forward, for example in a

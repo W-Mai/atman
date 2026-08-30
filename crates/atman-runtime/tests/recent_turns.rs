@@ -124,3 +124,48 @@ async fn recent_turns_caps_output_at_n() {
         other => panic!("want int, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn recent_turns_excerpt_is_bounded_without_replacing_lossless_items() {
+    let ex = Executor::new();
+    ex.tools
+        .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
+    let messages = Arc::new(vec![
+        Message::user_text(atman_runtime::event::TurnId::now(), "x".repeat(10_000)),
+        Message::assistant_text(atman_runtime::event::TurnId::now(), "latest-marker"),
+    ]);
+    let ctx = atman_runtime::ToolCtx::new().with_session_messages(messages);
+    let args = atman_runtime::ToolArgs {
+        positional: Vec::new(),
+        named: vec![
+            ("n".into(), Value::Int(5)),
+            ("excerpt_chars".into(), Value::Int(128)),
+        ],
+    };
+
+    let result = ex
+        .tools
+        .get("memory.recent_turns")
+        .unwrap()
+        .call(args, &ctx)
+        .await
+        .unwrap();
+    let Value::Struct(fields) = result else {
+        panic!("expected structured recent-turn result");
+    };
+    let excerpt = fields
+        .iter()
+        .find_map(|(name, value)| (name == "excerpt").then_some(value))
+        .and_then(|value| match value {
+            Value::Str(text) => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    let items = fields
+        .iter()
+        .find_map(|(name, value)| (name == "items").then_some(value))
+        .unwrap();
+    assert!(excerpt.chars().count() <= 128);
+    assert!(excerpt.contains("latest-marker"));
+    assert!(matches!(items, Value::List(items) if items.len() == 2));
+}

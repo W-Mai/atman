@@ -90,6 +90,129 @@ impl Tool for MemoryGoalSet {
 
 pub struct MemoryRecentTurns;
 
+const RECENT_EXCERPT_MESSAGE_CHARS: usize = 2_000;
+
+fn recent_turns_value(
+    message_count: u64,
+    turn_count: u64,
+    messages: Vec<crate::message::Message>,
+    excerpt_chars: Option<usize>,
+) -> Value {
+    let excerpt = excerpt_chars.map(|limit| bounded_recent_excerpt(&messages, limit));
+    let items = messages.into_iter().map(Value::Message).collect();
+    let mut fields = vec![
+        (
+            "total_message_count".into(),
+            Value::Int(message_count as i64),
+        ),
+        ("total_turn_count".into(), Value::Int(turn_count as i64)),
+        ("items".into(), Value::List(items)),
+    ];
+    if let Some((text, truncated)) = excerpt {
+        fields.push(("excerpt".into(), Value::Str(text)));
+        fields.push(("excerpt_truncated".into(), Value::Bool(truncated)));
+    }
+    Value::Struct(fields)
+}
+
+fn bounded_recent_excerpt(
+    messages: &[crate::message::Message],
+    max_chars: usize,
+) -> (String, bool) {
+    let mut remaining = max_chars;
+    let mut chunks = Vec::new();
+    let mut truncated = false;
+    for message in messages.iter().rev() {
+        let separator_chars = usize::from(!chunks.is_empty()) * 2;
+        if remaining <= separator_chars {
+            truncated = true;
+            break;
+        }
+        let message_limit = remaining
+            .saturating_sub(separator_chars)
+            .min(RECENT_EXCERPT_MESSAGE_CHARS);
+        let (chunk, message_truncated) = bounded_message_excerpt(message, message_limit);
+        remaining = remaining.saturating_sub(separator_chars + chunk.chars().count());
+        chunks.push(chunk);
+        truncated |= message_truncated;
+    }
+    if chunks.len() < messages.len() {
+        truncated = true;
+    }
+    chunks.reverse();
+    (chunks.join("\n\n"), truncated)
+}
+
+fn bounded_message_excerpt(message: &crate::message::Message, max_chars: usize) -> (String, bool) {
+    use crate::message::MessagePart;
+
+    fn push_bounded(out: &mut String, used: &mut usize, max: usize, text: &str) -> bool {
+        for ch in text.chars() {
+            if *used == max {
+                return true;
+            }
+            out.push(ch);
+            *used += 1;
+        }
+        false
+    }
+
+    let mut out = String::new();
+    let mut used = 0;
+    let mut truncated = push_bounded(
+        &mut out,
+        &mut used,
+        max_chars,
+        &format!("[{}]", message.role.as_str()),
+    );
+    for part in &message.parts {
+        if used == max_chars {
+            truncated = true;
+            break;
+        }
+        truncated |= match part {
+            MessagePart::CompactSummary { summary, .. } => {
+                push_bounded(&mut out, &mut used, max_chars, "\nsummary: ")
+                    | push_bounded(&mut out, &mut used, max_chars, summary)
+            }
+            MessagePart::Text { text } => {
+                push_bounded(&mut out, &mut used, max_chars, "\ntext: ")
+                    | push_bounded(&mut out, &mut used, max_chars, text)
+            }
+            MessagePart::Thinking { .. } => {
+                push_bounded(&mut out, &mut used, max_chars, "\n[thinking omitted]")
+            }
+            MessagePart::Image { .. } => push_bounded(&mut out, &mut used, max_chars, "\n[image]"),
+            MessagePart::ToolUse { name, intent, .. } => {
+                let purpose = intent
+                    .as_ref()
+                    .map(|intent| format!(" — {}", intent.as_str()))
+                    .unwrap_or_default();
+                push_bounded(
+                    &mut out,
+                    &mut used,
+                    max_chars,
+                    &format!("\ntool_call: {name}{purpose}"),
+                )
+            }
+            MessagePart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let status = if *is_error { "error" } else { "ok" };
+                push_bounded(
+                    &mut out,
+                    &mut used,
+                    max_chars,
+                    &format!("\ntool_result {tool_use_id} ({status}): "),
+                ) | push_bounded(&mut out, &mut used, max_chars, content)
+            }
+        };
+    }
+    (out, truncated)
+}
+
 impl Tool for MemoryRecentTurns {
     fn name(&self) -> &str {
         "memory.recent_turns"
@@ -103,7 +226,8 @@ impl Tool for MemoryRecentTurns {
         Some(
             "Return the last N Message values (user + assistant + tool_result) from the \
              current session's event log so a flow can hand the code agent a sliding \
-             history window. Reads from disk; cost O(events file size).",
+             history window. `items` remain lossless; `excerpt_chars` additionally returns \
+             a bounded recent-first text excerpt. Reads from disk; cost O(events file size).",
         )
     }
 
@@ -111,7 +235,8 @@ impl Tool for MemoryRecentTurns {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "n": {"type": "integer", "description": "Max complete turns to return (default 10)"}
+                "n": {"type": "integer", "description": "Max complete turns to return (default 10)"},
+                "excerpt_chars": {"type": "integer", "minimum": 0, "description": "Also return an `excerpt` capped at this many characters without changing lossless `items`"}
             }
         })
     }
@@ -128,28 +253,34 @@ impl Tool for MemoryRecentTurns {
                 }
                 None => 10,
             };
+            let excerpt_chars = match args.named("excerpt_chars") {
+                Some(Value::Int(k)) if *k >= 0 => Some(*k as usize),
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "non-negative int".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+                None => None,
+            };
             if n == 0 {
                 if let Some(cb) = &ctx.on_memory_recent {
                     cb(0);
                 }
-                return Ok(Value::Struct(vec![
-                    ("total_message_count".into(), Value::Int(0)),
-                    ("total_turn_count".into(), Value::Int(0)),
-                    ("items".into(), Value::List(Vec::new())),
-                ]));
+                return Ok(recent_turns_value(0, 0, Vec::new(), excerpt_chars));
             }
             // Sub-agent path: session_messages has the child's local message list.
             if let Some(msgs) = ctx.session_messages.as_ref() {
                 let (total, recent) = crate::history_store::recent_turn_messages(msgs, n);
-                let out: Vec<Value> = recent.into_iter().map(Value::Message).collect();
                 if let Some(cb) = &ctx.on_memory_recent {
-                    cb(out.len() as u16);
+                    cb(recent.len() as u16);
                 }
-                return Ok(Value::Struct(vec![
-                    ("total_message_count".into(), Value::Int(msgs.len() as i64)),
-                    ("total_turn_count".into(), Value::Int(total as i64)),
-                    ("items".into(), Value::List(out)),
-                ]));
+                return Ok(recent_turns_value(
+                    msgs.len() as u64,
+                    total,
+                    recent,
+                    excerpt_chars,
+                ));
             }
             // Main-agent path: delegate to HistoryStore.
             let Some(store) = ctx.history_store.clone() else {
@@ -164,15 +295,12 @@ impl Tool for MemoryRecentTurns {
             if let Some(cb) = &ctx.on_memory_recent {
                 cb(msgs.len() as u16);
             }
-            let items: Vec<Value> = msgs.into_iter().map(Value::Message).collect();
-            Ok(Value::Struct(vec![
-                (
-                    "total_message_count".into(),
-                    Value::Int(message_count as i64),
-                ),
-                ("total_turn_count".into(), Value::Int(turn_count as i64)),
-                ("items".into(), Value::List(items)),
-            ]))
+            Ok(recent_turns_value(
+                message_count,
+                turn_count,
+                msgs,
+                excerpt_chars,
+            ))
         })
     }
 }

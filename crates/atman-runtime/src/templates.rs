@@ -58,7 +58,7 @@ Relevant past confessions may already be injected by the parent workflow. When `
 When `memory.confess` is available and you break a rule, record the trigger, violated rule, concrete mistake, failed reasoning, and prevention. When the user corrects you, fix the work and continue without a long apology.
 
 ## Recall
-memory.recent_turns — this session's last N messages, fast and cheap.
+memory.recent_turns — lossless raw recent turns; set excerpt_chars and use `.excerpt` before feeding results to a model.
 memory.history.count — lightweight total message count (no content).
 memory.history.search — full-text across sessions.
 memory.history.read — paginate by turn.
@@ -205,11 +205,11 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     }
     rules_index = rule.fetch()
     confessions = memory.fetch_confessions()
-    recent = memory.recent_turns(n: 5)
+    recent = memory.recent_turns(n: 5, excerpt_chars: 12000)
     hints = llm.extract(
         model: "cheap",
         prompt: "User request: " + user_prompt
-            + "\n\nRecent context:\n" + to_json_string(recent)
+            + "\n\nRecent context:\n" + recent.excerpt
             + "\n\nAvailable rules index (name + description):\n" + to_json_string(rules_index)
             + "\n\nPast confessions (trigger + mitigation):\n" + to_json_string(confessions)
             + "\n\nWhich rules are relevant to this task? Which past confessions apply? Return rule names and confession trigger keywords.",
@@ -270,14 +270,14 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         )
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
-            recent = memory.recent_turns(n: 5)
+            recent = memory.recent_turns(n: 5, excerpt_chars: 12000)
             intent = llm.classify(
                 model: "cheap",
                 prompt: @"../prompts/judge-stall.md"
                     + "\n\nCurrent user prompt:\n"
                     + user_prompt
                     + "\n\nRecent turns:\n"
-                    + to_json_string(recent),
+                    + recent.excerpt,
                 categories: ["waiting_for_user", "lazy", "forgot_tools", "done"],
                 retry: 2,
             )
@@ -351,13 +351,14 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            recent = memory.recent_turns(n: 5, excerpt_chars: 12000)
             intent = llm.classify(
                 model: "cheap",
                 prompt: @"../prompts/judge-stall.md"
                     + "\n\nCurrent task:\n"
                     + goal
                     + "\n\nRecent turns:\n"
-                    + to_json_string(memory.recent_turns(n: 5)),
+                    + recent.excerpt,
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
@@ -408,13 +409,14 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            recent = memory.recent_turns(n: 5, excerpt_chars: 12000)
             intent = llm.classify(
                 model: "cheap",
                 prompt: @"../prompts/judge-stall.md"
                     + "\n\nCurrent task:\n"
                     + goal
                     + "\n\nRecent turns:\n"
-                    + to_json_string(memory.recent_turns(n: 5)),
+                    + recent.excerpt,
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
@@ -465,13 +467,14 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            recent = memory.recent_turns(n: 5, excerpt_chars: 12000)
             intent = llm.classify(
                 model: "cheap",
                 prompt: @"../prompts/judge-stall.md"
                     + "\n\nCurrent task:\n"
                     + goal
                     + "\n\nRecent turns:\n"
-                    + to_json_string(memory.recent_turns(n: 5)),
+                    + recent.excerpt,
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
@@ -517,13 +520,14 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
+            recent = memory.recent_turns(n: 5, excerpt_chars: 12000)
             intent = llm.classify(
                 model: "cheap",
                 prompt: @"../prompts/judge-stall.md"
                     + "\n\nCurrent task:\n"
                     + goal
                     + "\n\nRecent turns:\n"
-                    + to_json_string(memory.recent_turns(n: 5)),
+                    + recent.excerpt,
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )

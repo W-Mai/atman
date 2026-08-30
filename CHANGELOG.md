@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Bounded recent-history excerpts** — `memory.recent_turns` can return a character-limited recent-first excerpt while retaining its lossless `items` result.
 - **Tool call purpose metadata** — LLM-generated built-in, MCP, and spawned-flow calls retain a concise purpose across provider history, workflow replay, approvals, and TUI rendering without changing executable arguments.
 - **Provider-aware reasoning controls** — model settings, DSL calls, TUI submissions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
 - **Multimodal image input** — OpenAI Chat Completions, Codex Responses, and Anthropic Messages accept persistent image attachments from TUI clipboard paste, CLI paths, daemon requests, and DSL messages.
@@ -26,6 +27,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Managed-agent history consumption** — rule selection and stall checks consume a 12,000-character recent-history excerpt instead of serializing unbounded raw turns into auxiliary prompts.
 - **Compaction tool-pair sanitation** — orphaned or duplicate tool parts are removed individually, preserving valid text and valid tool pairs that share the same message.
 - **Stable tool exposure** — wildcard tool selectors expand in qualified-name order, overlapping selectors emit one definition, and nested schema object keys use canonical order so equivalent registries produce identical provider prefixes.
 - **Compaction input accounting** — history budgets count the system prompt and tool definitions once, without reserving space for unsent structured input or double-counting an appended prompt already present in messages.
