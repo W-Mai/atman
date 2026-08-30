@@ -277,6 +277,9 @@ fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError
     let mut out = Vec::with_capacity(parts.len());
     for p in parts {
         match p {
+            MessagePart::ContextRecord(record) => out.push(ChatPart::Text {
+                text: record.render_for_model(),
+            }),
             MessagePart::CompactSummary { summary, .. } => out.push(ChatPart::Text {
                 text: summary.clone(),
             }),
@@ -320,6 +323,7 @@ fn split_assistant_parts(
     let mut tools = Vec::new();
     for p in parts {
         match p {
+            MessagePart::ContextRecord(record) => text.push(record.render_for_model()),
             MessagePart::Text { text: t } => text.push(t.clone()),
             MessagePart::ToolUse {
                 id,
@@ -366,6 +370,12 @@ impl Provider for OpenAiProvider {
         for (index, message) in body.messages.iter().enumerate() {
             let lane = if index == 0 && req.system.is_some() {
                 crate::context_plan::ContextPrefixLane::Stable
+            } else if req
+                .messages
+                .get(index.saturating_sub(usize::from(req.system.is_some())))
+                .is_some_and(Message::contains_context_record)
+            {
+                crate::context_plan::ContextPrefixLane::Records
             } else {
                 crate::context_plan::ContextPrefixLane::Messages
             };
@@ -1096,5 +1106,46 @@ mod tests {
         );
         assert_eq!(observation.reset_reason, None);
         assert_eq!(observation.common_prefix_bytes, first_bytes);
+    }
+
+    #[test]
+    fn internal_context_record_projects_as_mid_conversation_system_message() {
+        let provider = OpenAiProvider::new("openai", "test-key");
+        let mut request = LlmRequest {
+            model: "gpt-test".into(),
+            messages: vec![Message::user_text(crate::event::TurnId::now(), "before")],
+            system: Some("stable".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let before = provider.context_prefix(&request).unwrap();
+        let before_bytes = before.initial_observation().wire_prefix_bytes;
+        request.messages.push(Message::context_record(
+            crate::event::TurnId::now(),
+            crate::context_plan::ContextRecord::new(
+                "session.goal",
+                1,
+                crate::context_plan::ContextRecordAuthority::User,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text("finish the task"),
+            ),
+        ));
+
+        let body = serde_json::to_value(provider.build_body(&request, true).unwrap()).unwrap();
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][2]["role"], "system");
+        assert!(
+            body["messages"][2]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("finish the task"))
+        );
+        let after = provider.context_prefix(&request).unwrap();
+        let observation = after.compare("openai", "openai", "model", "model", &before);
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, before_bytes);
     }
 }

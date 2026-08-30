@@ -171,6 +171,17 @@ fn bounded_message_excerpt(message: &crate::message::Message, max_chars: usize) 
             break;
         }
         truncated |= match part {
+            MessagePart::ContextRecord(record) => push_bounded(
+                &mut out,
+                &mut used,
+                max_chars,
+                &format!(
+                    "\n[context {}@{}]\n{}",
+                    record.key(),
+                    record.revision(),
+                    record.render_for_model()
+                ),
+            ),
             MessagePart::CompactSummary { summary, .. } => {
                 push_bounded(&mut out, &mut used, max_chars, "\nsummary: ")
                     | push_bounded(&mut out, &mut used, max_chars, summary)

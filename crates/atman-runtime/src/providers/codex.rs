@@ -254,7 +254,18 @@ fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
             MessageRole::System => {
                 let content = build_user_content(&m.parts)?;
                 items.push(InputItem {
-                    role: Some("user".into()),
+                    role: Some(
+                        if m.origin == MessageOrigin::Internal
+                            && m.parts
+                                .iter()
+                                .any(|part| matches!(part, MessagePart::ContextRecord(_)))
+                        {
+                            "developer"
+                        } else {
+                            "user"
+                        }
+                        .into(),
+                    ),
                     content: Some(content),
                     item_type: Some("message".into()),
                     call_id: None,
@@ -273,6 +284,11 @@ fn build_user_content(parts: &[MessagePart]) -> Result<InputContent, RuntimeErro
     let mut parts_out: Vec<ResponseInputContent> = Vec::new();
     for p in parts {
         match p {
+            MessagePart::ContextRecord(record) => {
+                parts_out.push(ResponseInputContent::InputText {
+                    text: record.render_for_model(),
+                });
+            }
             MessagePart::Text { text } => {
                 parts_out.push(ResponseInputContent::InputText { text: text.clone() });
             }
@@ -313,6 +329,7 @@ fn split_assistant_parts(
     let mut tools: Vec<AssistantSplit> = Vec::new();
     for p in parts {
         match p {
+            MessagePart::ContextRecord(record) => text.push_str(&record.render_for_model()),
             MessagePart::Text { text: t } => text.push_str(t),
             MessagePart::ToolUse {
                 id,
@@ -471,7 +488,14 @@ impl Provider for CodexProvider {
             builder.push(crate::context_plan::ContextPrefixLane::Tools, tool)?;
         }
         for item in &body.input {
-            builder.push(crate::context_plan::ContextPrefixLane::Messages, item)?;
+            builder.push(
+                if item.role.as_deref() == Some("developer") {
+                    crate::context_plan::ContextPrefixLane::Records
+                } else {
+                    crate::context_plan::ContextPrefixLane::Messages
+                },
+                item,
+            )?;
         }
         Ok(builder.finish())
     }
@@ -1463,6 +1487,51 @@ mod tests {
         assert_eq!(body["instructions"], "stable instructions");
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"], "retained summary");
+    }
+
+    #[test]
+    fn internal_context_record_projects_as_developer_input() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let mut request = crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: vec![crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "before",
+            )],
+            system: Some("stable instructions".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let before = provider.context_prefix(&request).unwrap();
+        let before_bytes = before.initial_observation().wire_prefix_bytes;
+        request
+            .messages
+            .push(crate::message::Message::context_record(
+                crate::event::TurnId::now(),
+                crate::context_plan::ContextRecord::new(
+                    "session.goal",
+                    1,
+                    crate::context_plan::ContextRecordAuthority::User,
+                    crate::context_plan::ContextRecordRetention::Latest,
+                    crate::context_plan::ContextRecordBody::text("finish the task"),
+                ),
+            ));
+
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
+        assert_eq!(body["input"][1]["role"], "developer");
+        assert!(
+            body["input"][1]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("finish the task"))
+        );
+        let after = provider.context_prefix(&request).unwrap();
+        let observation = after.compare("codex", "codex", "model", "model", &before);
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, before_bytes);
     }
 
     #[test]

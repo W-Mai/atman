@@ -57,6 +57,14 @@ Successful calls record the number of tool uses returned in the assistant messag
 Each dispatched tool result records raw bytes, model-visible excerpt bytes, and
 whether output budgeting changed the content before it enters message history.
 
+Dynamic model context can be represented as an internal `ContextRecord` message
+part. Records carry a stable key, monotonic revision, semantic content digest,
+authority, and retention policy. OpenAI chat projects them as mid-conversation
+system messages, Codex Responses uses developer input items, and Anthropic uses
+explicitly framed user context. Latest-value records survive compaction and remain
+hidden from the normal TUI transcript while staying present in event and checkpoint
+data.
+
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if
 the call itself uses an isolated `prompt:` rather than session messages. The managed

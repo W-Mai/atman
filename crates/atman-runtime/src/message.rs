@@ -140,6 +140,7 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePart {
+    ContextRecord(crate::context_plan::ContextRecord),
     CompactSummary {
         summary: String,
         seq_start: u64,
@@ -202,6 +203,15 @@ pub enum ImageData {
 }
 
 impl Message {
+    pub fn context_record(turn_id: TurnId, record: crate::context_plan::ContextRecord) -> Self {
+        Self {
+            role: MessageRole::System,
+            parts: vec![MessagePart::ContextRecord(record)],
+            turn_id,
+            origin: MessageOrigin::Internal,
+        }
+    }
+
     pub fn user_text(turn_id: TurnId, text: impl Into<String>) -> Self {
         Self {
             role: MessageRole::User,
@@ -253,6 +263,7 @@ impl Message {
         let mut out = String::new();
         for p in &self.parts {
             match p {
+                MessagePart::ContextRecord(record) => out.push_str(&record.render_for_model()),
                 MessagePart::Text { text } => out.push_str(text),
                 MessagePart::CompactSummary { summary, .. } => out.push_str(summary),
                 _ => {}
@@ -279,6 +290,12 @@ impl Message {
                 None
             }
         })
+    }
+
+    pub fn contains_context_record(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::ContextRecord(_)))
     }
 }
 
@@ -565,6 +582,27 @@ mod tests {
         let msg: Message = serde_json::from_str(json).unwrap();
         assert_eq!(msg.origin, MessageOrigin::User);
         assert_eq!(msg.text_concat(), "legacy");
+    }
+
+    #[test]
+    fn context_record_message_round_trips_as_internal_system_context() {
+        let message = Message::context_record(
+            TurnId::now(),
+            crate::context_plan::ContextRecord::new(
+                "session.workspace",
+                1,
+                crate::context_plan::ContextRecordAuthority::Runtime,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text("/workspace"),
+            ),
+        );
+        let encoded = serde_json::to_string(&message).unwrap();
+        let decoded: Message = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+        assert_eq!(decoded.role, MessageRole::System);
+        assert_eq!(decoded.origin, MessageOrigin::Internal);
+        assert!(decoded.text_concat().contains("/workspace"));
     }
 
     #[test]

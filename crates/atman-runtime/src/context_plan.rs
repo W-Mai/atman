@@ -5,6 +5,182 @@ use crate::provider::LlmRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
+pub struct ContentDigest(String);
+
+impl ContentDigest {
+    fn for_record(
+        authority: ContextRecordAuthority,
+        retention: ContextRecordRetention,
+        body: &ContextRecordBody,
+    ) -> Self {
+        let bytes = serde_json::to_vec(&(authority, retention, body))
+            .expect("context record fields must serialize");
+        Self(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRecordAuthority {
+    Runtime,
+    User,
+    Retrieved,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRecordRetention {
+    Latest,
+    Timeline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextRecordBody {
+    Text { text: String },
+    CapabilityDelta { delta: serde_json::Value },
+}
+
+impl ContextRecordBody {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Text { text } => text.clone(),
+            Self::CapabilityDelta { delta } => delta.to_string(),
+        }
+    }
+
+    fn canonicalized(mut self) -> Self {
+        if let Self::CapabilityDelta { delta } = &mut self {
+            canonicalize_json(delta);
+        }
+        self
+    }
+}
+
+fn canonicalize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, mut value) in entries {
+                canonicalize_json(&mut value);
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonicalize_json(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextRecordWire {
+    key: String,
+    revision: u64,
+    #[serde(default, rename = "digest")]
+    _digest: Option<ContentDigest>,
+    authority: ContextRecordAuthority,
+    retention: ContextRecordRetention,
+    body: ContextRecordBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "ContextRecordWire")]
+pub struct ContextRecord {
+    key: String,
+    revision: u64,
+    digest: ContentDigest,
+    authority: ContextRecordAuthority,
+    retention: ContextRecordRetention,
+    body: ContextRecordBody,
+}
+
+impl From<ContextRecordWire> for ContextRecord {
+    fn from(wire: ContextRecordWire) -> Self {
+        let ContextRecordWire {
+            key,
+            revision,
+            _digest: _,
+            authority,
+            retention,
+            body,
+        } = wire;
+        Self::new(key, revision, authority, retention, body)
+    }
+}
+
+impl ContextRecord {
+    pub fn new(
+        key: impl Into<String>,
+        revision: u64,
+        authority: ContextRecordAuthority,
+        retention: ContextRecordRetention,
+        body: ContextRecordBody,
+    ) -> Self {
+        let body = body.canonicalized();
+        let digest = ContentDigest::for_record(authority, retention, &body);
+        Self {
+            key: key.into(),
+            revision,
+            digest,
+            authority,
+            retention,
+            body,
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+
+    pub fn authority(&self) -> ContextRecordAuthority {
+        self.authority
+    }
+
+    pub fn retention(&self) -> ContextRecordRetention {
+        self.retention
+    }
+
+    pub fn body(&self) -> &ContextRecordBody {
+        &self.body
+    }
+
+    pub fn render_for_model(&self) -> String {
+        let metadata = serde_json::json!({
+            "key": self.key,
+            "revision": self.revision,
+            "digest": self.digest.as_str(),
+            "authority": self.authority,
+            "retention": self.retention,
+        });
+        format!(
+            "[atman context record]\n{metadata}\n{}\n[/atman context record]",
+            self.body.render()
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
 pub struct ContextPlanId(pub Uuid);
 
 impl ContextPlanId {
@@ -114,7 +290,14 @@ impl ContextPrefixSnapshot {
             builder.push(ContextPrefixLane::Stable, schema)?;
         }
         for message in &request.messages {
-            builder.push(ContextPrefixLane::Messages, message)?;
+            builder.push(
+                if message.contains_context_record() {
+                    ContextPrefixLane::Records
+                } else {
+                    ContextPrefixLane::Messages
+                },
+                message,
+            )?;
         }
         Ok(builder.finish())
     }
@@ -454,11 +637,14 @@ pub struct ContextTokenLanes {
 
 impl ContextTokenLanes {
     pub fn for_request(request: &LlmRequest) -> Self {
+        let total_message_tokens =
+            crate::compaction::estimate_tokens_for_messages(&request.messages);
+        let records = estimate_record_tokens(&request.messages);
         Self {
             stable: estimate_stable_tokens(&request.system),
             tools: estimate_tool_tokens(&request.tools),
-            messages: crate::compaction::estimate_tokens_for_messages(&request.messages),
-            records: 0,
+            messages: total_message_tokens.saturating_sub(records),
+            records,
         }
     }
 
@@ -471,6 +657,32 @@ impl ContextTokenLanes {
             .saturating_add(self.messages)
             .saturating_add(self.records)
     }
+}
+
+fn estimate_record_tokens(messages: &[crate::message::Message]) -> u64 {
+    messages
+        .iter()
+        .map(|message| {
+            let records: Vec<_> = message
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    crate::message::MessagePart::ContextRecord(record) => Some(record),
+                    _ => None,
+                })
+                .collect();
+            if records.is_empty() {
+                0
+            } else if records.len() == message.parts.len() {
+                crate::compaction::estimate_tokens_for_message(message)
+            } else {
+                records
+                    .iter()
+                    .map(|record| crate::provider::estimate_tokens(&record.render_for_model()))
+                    .sum()
+            }
+        })
+        .sum()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -550,6 +762,68 @@ mod tests {
     }
 
     #[test]
+    fn context_record_digest_tracks_semantic_content_not_revision() {
+        let first = ContextRecord::new(
+            "session.goal",
+            1,
+            ContextRecordAuthority::User,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::text("ship it"),
+        );
+        let second = ContextRecord::new(
+            "session.goal",
+            2,
+            ContextRecordAuthority::User,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::text("ship it"),
+        );
+        let changed = ContextRecord::new(
+            "session.goal",
+            3,
+            ContextRecordAuthority::User,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::text("hold"),
+        );
+
+        assert_eq!(first.digest(), second.digest());
+        assert_ne!(first.digest(), changed.digest());
+        let encoded = serde_json::to_value(&first).unwrap();
+        assert_eq!(encoded["key"], "session.goal");
+        assert_eq!(encoded["revision"], 1);
+        assert_eq!(encoded["body"]["kind"], "text");
+        assert!(first.render_for_model().contains("ship it"));
+
+        let mut tampered = encoded;
+        tampered["digest"] = serde_json::Value::String("blake3:invalid".into());
+        let decoded: ContextRecord = serde_json::from_value(tampered).unwrap();
+        assert_eq!(decoded.digest(), first.digest());
+    }
+
+    #[test]
+    fn capability_delta_digest_ignores_json_object_insertion_order() {
+        let first = ContextRecord::new(
+            "catalog.mcp",
+            1,
+            ContextRecordAuthority::Runtime,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::CapabilityDelta {
+                delta: serde_json::json!({"b": 2, "a": {"d": 4, "c": 3}}),
+            },
+        );
+        let second = ContextRecord::new(
+            "catalog.mcp",
+            2,
+            ContextRecordAuthority::Runtime,
+            ContextRecordRetention::Latest,
+            ContextRecordBody::CapabilityDelta {
+                delta: serde_json::json!({"a": {"c": 3, "d": 4}, "b": 2}),
+            },
+        );
+
+        assert_eq!(first.digest(), second.digest());
+    }
+
+    #[test]
     fn plan_identity_is_unique_without_changing_request() {
         let first = ModelContextPlan::new(request());
         let second = ModelContextPlan::new(request());
@@ -581,6 +855,28 @@ mod tests {
         assert!(plan.token_lanes().tools > 0);
         assert!(plan.token_lanes().messages > 0);
         assert_eq!(plan.token_lanes().records, 0);
+        assert_eq!(plan.estimated_input_tokens(), plan.token_lanes().total());
+    }
+
+    #[test]
+    fn token_lanes_attribute_internal_records_separately_from_messages() {
+        let mut request = request();
+        request
+            .messages
+            .push(crate::message::Message::context_record(
+                crate::event::TurnId::now(),
+                ContextRecord::new(
+                    "session.goal",
+                    1,
+                    ContextRecordAuthority::User,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text("ship it"),
+                ),
+            ));
+
+        let plan = ModelContextPlan::new(request);
+        assert_eq!(plan.token_lanes().messages, 0);
+        assert!(plan.token_lanes().records > 0);
         assert_eq!(plan.estimated_input_tokens(), plan.token_lanes().total());
     }
 

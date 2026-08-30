@@ -41,6 +41,7 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut fixed_tokens = 0u64;
     for part in &msg.parts {
         chars += match part {
+            MessagePart::ContextRecord(record) => record.render_for_model().len(),
             MessagePart::CompactSummary { summary, .. } => summary.len(),
             MessagePart::Text { text } => text.len(),
             MessagePart::Thinking { thinking, .. } => thinking.len(),
@@ -784,6 +785,11 @@ fn serialize_message_for_summary(msg: &Message) -> String {
     let mut parts = Vec::new();
     for part in &msg.parts {
         match part {
+            MessagePart::ContextRecord(record) => {
+                if record.retention() == crate::context_plan::ContextRecordRetention::Timeline {
+                    parts.push(record.render_for_model());
+                }
+            }
             MessagePart::CompactSummary { summary, .. } => {
                 parts.push(summary.clone());
             }
@@ -836,7 +842,9 @@ pub fn replace_range_with_summary(
     summary: String,
     turn_id: crate::event::TurnId,
 ) -> Vec<Message> {
-    let mut out = Vec::with_capacity(1 + messages.len().saturating_sub(range.end));
+    let retained_records = latest_context_records_before(messages, range.end);
+    let mut out =
+        Vec::with_capacity(1 + retained_records.len() + messages.len().saturating_sub(range.end));
     out.push(Message::system_compact_summary(
         turn_id,
         summary,
@@ -844,8 +852,42 @@ pub fn replace_range_with_summary(
         range.end.saturating_sub(1) as u64,
         range.end - range.start,
     ));
+    out.extend(retained_records);
     out.extend_from_slice(&messages[range.end..]);
     out
+}
+
+fn latest_context_records_before(messages: &[Message], end: usize) -> Vec<Message> {
+    let suffix_keys: std::collections::HashSet<&str> = messages[end..]
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::ContextRecord(record) => Some(record.key()),
+            _ => None,
+        })
+        .collect();
+    let mut latest = std::collections::HashMap::<&str, (usize, &Message, &MessagePart)>::new();
+    for (index, message) in messages[..end].iter().enumerate() {
+        for part in &message.parts {
+            if let MessagePart::ContextRecord(record) = part
+                && record.retention() == crate::context_plan::ContextRecordRetention::Latest
+                && !suffix_keys.contains(record.key())
+            {
+                latest.insert(record.key(), (index, message, part));
+            }
+        }
+    }
+    let mut retained: Vec<_> = latest.into_values().collect();
+    retained.sort_by_key(|(index, _, _)| *index);
+    retained
+        .into_iter()
+        .map(|(_, message, part)| Message {
+            role: MessageRole::System,
+            parts: vec![part.clone()],
+            turn_id: message.turn_id.clone(),
+            origin: crate::message::MessageOrigin::Internal,
+        })
+        .collect()
 }
 
 /// Result of compacting a messages_handle in place.
@@ -901,6 +943,49 @@ mod tests {
     }
     fn system(text: &str) -> Message {
         Message::system_text(TurnId::now(), text)
+    }
+
+    fn context_record(key: &str, revision: u64, text: &str) -> Message {
+        Message::context_record(
+            TurnId::now(),
+            crate::context_plan::ContextRecord::new(
+                key,
+                revision,
+                crate::context_plan::ContextRecordAuthority::Runtime,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text(text),
+            ),
+        )
+    }
+
+    #[test]
+    fn replacement_keeps_only_the_latest_live_record_per_key() {
+        let messages = vec![
+            user("old"),
+            context_record("session.goal", 1, "first"),
+            context_record("session.goal", 2, "second"),
+            assistant("old answer"),
+            user("current"),
+        ];
+        let replacement = replace_range_with_summary(
+            &messages,
+            &CompactRange {
+                start: 0,
+                end: 4,
+                tokens_saved_estimate: 1,
+            },
+            "summary".into(),
+            TurnId::now(),
+        );
+
+        assert_eq!(replacement.len(), 3);
+        assert!(is_compaction_summary(&replacement[0]));
+        assert!(matches!(
+            replacement[1].parts.as_slice(),
+            [MessagePart::ContextRecord(record)]
+                if record.key() == "session.goal" && record.revision() == 2
+        ));
+        assert_eq!(replacement[2].text_concat(), "current");
     }
 
     #[test]

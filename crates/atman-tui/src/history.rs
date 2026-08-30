@@ -1194,6 +1194,22 @@ mod tests {
     }
 
     #[test]
+    fn internal_context_record_is_hidden_from_transcript() {
+        let message = Message::context_record(
+            TurnId::now(),
+            atman_runtime::ContextRecord::new(
+                "session.goal",
+                1,
+                atman_runtime::ContextRecordAuthority::User,
+                atman_runtime::ContextRecordRetention::Latest,
+                atman_runtime::ContextRecordBody::text("private model context"),
+            ),
+        );
+
+        assert!(flatten_messages(&[message]).is_empty());
+    }
+
+    #[test]
     fn flatten_transcript_dedup_same_handle_terminal_with_final_state() {
         let handle = "term_s_0";
         let mk_tool_pair = |id: &str, text: &str| -> Vec<TranscriptEntry> {

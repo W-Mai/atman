@@ -163,6 +163,14 @@ fn build_wire_message(
     let last_idx = m.parts.len().saturating_sub(1);
     for (i, part) in m.parts.iter().enumerate() {
         blocks.push(match part {
+            MessagePart::ContextRecord(record) => ContentPart::Text {
+                text: record.render_for_model(),
+                cache_control: if apply_cache_control && i == last_idx {
+                    Some(CacheControl { kind: "ephemeral" })
+                } else {
+                    None
+                },
+            },
             MessagePart::CompactSummary { summary, .. } => ContentPart::Text {
                 text: summary.clone(),
                 cache_control: if apply_cache_control && i == last_idx {
@@ -258,6 +266,15 @@ impl Provider for AnthropicProvider {
         req: &LlmRequest,
     ) -> Result<crate::context_plan::ContextPrefixSnapshot, RuntimeError> {
         let body = self.build_body(req, true)?;
+        let record_texts: std::collections::HashSet<String> = req
+            .messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::ContextRecord(record) => Some(record.render_for_model()),
+                _ => None,
+            })
+            .collect();
         let mut builder = crate::context_plan::ContextPrefixSnapshot::builder(
             crate::context_plan::ContextPrefixProfile::AnthropicMessages,
             req,
@@ -275,7 +292,13 @@ impl Provider for AnthropicProvider {
             )?;
             let MessageContent::Blocks(parts) = &message.content;
             for part in parts {
-                builder.push(crate::context_plan::ContextPrefixLane::Messages, part)?;
+                let lane = match part {
+                    ContentPart::Text { text, .. } if record_texts.contains(text) => {
+                        crate::context_plan::ContextPrefixLane::Records
+                    }
+                    _ => crate::context_plan::ContextPrefixLane::Messages,
+                };
+                builder.push(lane, part)?;
             }
         }
         Ok(builder.finish())
@@ -907,5 +930,45 @@ mod tests {
         );
         assert_eq!(observation.reset_reason, None);
         assert_eq!(observation.common_prefix_bytes, first_bytes);
+    }
+
+    #[test]
+    fn internal_context_record_projects_as_framed_user_context() {
+        let provider = AnthropicProvider::new("anthropic", "test-key");
+        let mut request = LlmRequest {
+            model: "claude-test".into(),
+            messages: vec![Message::user_text(crate::event::TurnId::now(), "before")],
+            system: Some("stable".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let before = provider.context_prefix(&request).unwrap();
+        let before_bytes = before.initial_observation().wire_prefix_bytes;
+        request.messages.push(Message::context_record(
+            crate::event::TurnId::now(),
+            crate::context_plan::ContextRecord::new(
+                "session.goal",
+                1,
+                crate::context_plan::ContextRecordAuthority::User,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text("finish the task"),
+            ),
+        ));
+
+        let body = serde_json::to_value(provider.build_body(&request, true).unwrap()).unwrap();
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert!(
+            body["messages"][0]["content"][1]["text"]
+                .as_str()
+                .is_some_and(|content| content.contains("finish the task"))
+        );
+        let after = provider.context_prefix(&request).unwrap();
+        let observation = after.compare("anthropic", "anthropic", "model", "model", &before);
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, before_bytes);
     }
 }
