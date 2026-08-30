@@ -38,7 +38,11 @@ fn intent_risks(
     provenance: &crate::permission::ResourceProvenance,
 ) -> BTreeSet<RiskKind> {
     let mut risks = provenance.risks.clone();
-    if provenance.is_external() {
+    let mut targets = provenance.authorized_targets().peekable();
+    let external_non_temp = provenance.is_external()
+        && (targets.peek().is_none()
+            || targets.any(|target| !crate::fs_access::is_temp_path(target)));
+    if external_non_temp {
         risks.insert(RiskKind::WorkspaceExternal);
     }
     if tier == crate::tool::Tier::Four {
@@ -648,6 +652,44 @@ mod tests {
             },
             ..TrustConfig::default()
         }
+    }
+
+    #[test]
+    fn temp_targets_do_not_add_workspace_external_risk() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new().with_workspace(crate::git_workspace::WorkspaceBinding {
+            workspace_id: "test".into(),
+            repository_root: workspace.path().to_path_buf(),
+            path: workspace.path().to_path_buf(),
+            branch: None,
+        });
+        let provenance = crate::permission::ResourceProvenance::for_ctx(&ctx)
+            .with_cwd(&ctx, Some(scratch.path()))
+            .unwrap();
+
+        let risks = intent_risks(Tier::Four, &provenance);
+
+        assert!(risks.contains(&crate::trust::RiskKind::ProcessSpawn));
+        assert!(!risks.contains(&crate::trust::RiskKind::WorkspaceExternal));
+    }
+
+    #[test]
+    fn non_temp_external_targets_keep_workspace_external_risk() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new().with_workspace(crate::git_workspace::WorkspaceBinding {
+            workspace_id: "test".into(),
+            repository_root: workspace.path().to_path_buf(),
+            path: workspace.path().to_path_buf(),
+            branch: None,
+        });
+        let provenance = crate::permission::ResourceProvenance::for_ctx(&ctx)
+            .with_cwd(&ctx, Some(std::path::Path::new("/etc")))
+            .unwrap();
+
+        let risks = intent_risks(Tier::Four, &provenance);
+
+        assert!(risks.contains(&crate::trust::RiskKind::WorkspaceExternal));
     }
 
     #[tokio::test(start_paused = true)]

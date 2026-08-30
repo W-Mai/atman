@@ -17,9 +17,9 @@ Tool invocation
 
 The gate receives resource information from the tool's real argument schema. It does not guess that an arbitrary positional argument is a path. A resource can carry more than one risk—for example, a Git worktree operation can involve both a repository and a new worktree path.
 
-Shell command text is opaque to the permission gate. `bash.spawn` and `term.spawn` use their `cwd` argument as the structured filesystem scope for both approval and sandbox execution. A command that needs an external directory must set `cwd` to the narrowest required directory; an absolute path embedded only in `cmd` does not expand sandbox access.
+Shell command text is opaque to the permission gate. `bash.spawn` and `term.spawn` use their `cwd` argument as the structured filesystem scope for both approval and sandbox execution. A command that needs an external directory must set `cwd` to the narrowest required directory; an absolute path embedded only in `cmd` does not expand sandbox access. The platform temporary directory and Unix `/tmp` remain part of the controlled writable baseline.
 
-Process execution has a per-invocation boundary. Baseline automatic policy decisions and parent Flow approvals remain sandboxed. An authenticated user approval bypasses the Atman process sandbox for that approved call only; Eager `escalation = "allow"` and Reckless mode also run the approved process directly. Explicit denials and structural authority limits still apply.
+Process execution has a per-invocation boundary. Baseline automatic policy decisions and parent Flow approvals remain sandboxed. In Eager `escalation = "deny"`, an otherwise-Ask invocation whose only unresolved risk is process spawning runs inside the sandbox; the mode denies direct elevation rather than denying the process itself. An authenticated user approval bypasses the Atman process sandbox for that approved call only; Eager `escalation = "allow"` and Reckless mode also run the approved process directly. Explicit denials, other unresolved risks, and structural authority limits still apply.
 
 The main policy actions are:
 
@@ -60,7 +60,7 @@ escalation = "allow"
 
 | `escalation` | Effect in `eager` |
 |---|---|
-| `deny` | Convert an escalation to `deny`. |
+| `deny` | Convert an escalation to `deny`. A process-only request falls back to sandboxed execution instead of being rejected. |
 | `ask` | Keep the escalation as `ask`. This is the default. |
 | `allow` | Convert an escalation to `auto`; process-spawning calls run directly. |
 

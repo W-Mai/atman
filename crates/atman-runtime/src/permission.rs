@@ -3346,6 +3346,30 @@ mod tests {
         let requester = child(&flows, &root);
         let broker = PermissionBroker::new(Arc::clone(&flows));
 
+        let eager_deny = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Deny,
+            ..Default::default()
+        };
+        let SubmissionOutcome::Immediate(sandboxed) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                process_intent(),
+                false,
+                &eager_deny,
+            )
+            .unwrap()
+        else {
+            panic!("expected sandboxed process authorization");
+        };
+        assert!(matches!(
+            sandboxed.authorization,
+            ImmediateAuthorization::Auto {
+                execution_boundary: ExecutionBoundary::Sandboxed
+            }
+        ));
+
         let automatic = TrustConfig {
             mode: TrustMode::Eager,
             tiers: crate::trust::TierPolicyConfig {

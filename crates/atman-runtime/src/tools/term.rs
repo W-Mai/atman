@@ -2427,13 +2427,10 @@ mod tests {
             pty_calls: AtomicUsize::new(0),
         });
         let args = term_args(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let ctx = brokered_term_ctx(
-            workspace.path(),
-            registry,
-            session_dir.path(),
-            eager_spawn_policy(),
-        )
-        .with_sandbox(sandbox.clone());
+        let mut trust = eager_spawn_policy();
+        trust.risks.eager.outside_workspace = Some(crate::trust::PolicyAction::Auto);
+        let ctx = brokered_term_ctx(workspace.path(), registry, session_dir.path(), trust)
+            .with_sandbox(sandbox.clone());
         let ctx = authorize_term_spawn(ctx, &args).await;
         let error = spawn_impl(args, &ctx).await.unwrap_err();
         assert!(error.to_string().contains("strict sentinel"));
@@ -2480,19 +2477,7 @@ mod tests {
     fn eager_spawn_policy() -> crate::trust::TrustConfig {
         crate::trust::TrustConfig {
             mode: crate::trust::TrustMode::Eager,
-            tiers: crate::trust::TierPolicyConfig {
-                eager: crate::trust::TierPolicyOverrides {
-                    tier4: Some(crate::trust::PolicyAction::Auto),
-                    ..crate::trust::TierPolicyOverrides::default()
-                },
-            },
-            risks: crate::trust::RiskPolicyConfig {
-                eager: crate::trust::RiskPolicyOverrides {
-                    outside_workspace: Some(crate::trust::PolicyAction::Auto),
-                    process_spawn: Some(crate::trust::PolicyAction::Auto),
-                    ..crate::trust::RiskPolicyOverrides::default()
-                },
-            },
+            escalation: crate::trust::EscalationPolicy::Deny,
             ..crate::trust::TrustConfig::default()
         }
     }

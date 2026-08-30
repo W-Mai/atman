@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Eager sandbox fallback** — Eager `deny` runs process-only shell, terminal, and test calls inside the sandbox instead of rejecting the invocation, while explicit denials and unresolved external risks remain blocked. Platform temporary directories retain their controlled write access.
 - **Approval-scoped process execution** — authenticated user approvals bypass the Atman process sandbox for the approved `bash.spawn`, `term.spawn`, or `test.run` call, while policy and parent Flow approvals remain sandboxed.
 - **Controlled shell filesystem scope** — `bash.spawn` accepts an explicit working directory that is shared by permission provenance and the process sandbox, while macOS shell startup can read its system selector path.
 - **Reckless approval projection** — unrestricted tool calls resolve their transient permission records before rendering and no longer remain as stale user approvals.

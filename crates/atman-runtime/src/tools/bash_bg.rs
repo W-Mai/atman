@@ -1560,18 +1560,7 @@ mod tests {
     fn eager_sandbox_policy() -> crate::trust::TrustConfig {
         crate::trust::TrustConfig {
             mode: crate::trust::TrustMode::Eager,
-            tiers: crate::trust::TierPolicyConfig {
-                eager: crate::trust::TierPolicyOverrides {
-                    tier4: Some(crate::trust::PolicyAction::Auto),
-                    ..crate::trust::TierPolicyOverrides::default()
-                },
-            },
-            risks: crate::trust::RiskPolicyConfig {
-                eager: crate::trust::RiskPolicyOverrides {
-                    process_spawn: Some(crate::trust::PolicyAction::Auto),
-                    ..crate::trust::RiskPolicyOverrides::default()
-                },
-            },
+            escalation: crate::trust::EscalationPolicy::Deny,
             ..crate::trust::TrustConfig::default()
         }
     }

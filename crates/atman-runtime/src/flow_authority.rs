@@ -146,7 +146,18 @@ impl EffectiveAuthority {
             .fold(self.tier_ceiling[tier_index], |action, risk| {
                 action.most_restrictive(self.risk_ceiling[risk_index(*risk)])
             });
-        let mut resolution = trust.resolve_policy_resolution(tier, risks);
+        let mut resolution = trust.resolve_policy_resolution(tier, risks.iter().copied());
+        if resolution.escalation == PolicyEscalation::Denied
+            && risks.contains(&RiskKind::ProcessSpawn)
+            && risks.iter().all(|risk| {
+                *risk == RiskKind::ProcessSpawn || trust.resolve_risk(*risk) == PolicyAction::Auto
+            })
+        {
+            // Eager Deny rejects direct process elevation, not the safe
+            // sandboxed baseline. Explicit Deny actions never carry the
+            // `Denied` escalation marker and therefore remain final.
+            resolution.action = PolicyAction::Auto;
+        }
         resolution.action = resolution.action.most_restrictive(ceiling);
         (current_execution, resolution)
     }
@@ -337,6 +348,47 @@ mod tests {
         assert_eq!(execution, ExecutionPolicy::Controlled);
         assert_eq!(resolution.action, PolicyAction::Ask);
         assert_eq!(resolution.escalation, PolicyEscalation::Allowed);
+    }
+
+    #[test]
+    fn eager_deny_keeps_sandboxable_processes_automatic() {
+        let trust = TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            escalation: crate::trust::EscalationPolicy::Deny,
+            ..TrustConfig::default()
+        };
+        let root = EffectiveAuthority::root(&trust, true, None);
+
+        let (execution, resolution) =
+            root.constrain_policy_resolution(&trust, Tier::Four, [RiskKind::ProcessSpawn]);
+
+        assert_eq!(execution, ExecutionPolicy::Controlled);
+        assert_eq!(resolution.action, PolicyAction::Auto);
+        assert_eq!(resolution.escalation, PolicyEscalation::Denied);
+    }
+
+    #[test]
+    fn eager_deny_still_rejects_non_sandboxable_risk_and_authority_ceiling() {
+        let trust = TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            escalation: crate::trust::EscalationPolicy::Deny,
+            ..TrustConfig::default()
+        };
+        let root = EffectiveAuthority::root(&trust, true, None);
+        let (_, external) = root.constrain_policy_resolution(
+            &trust,
+            Tier::Four,
+            [RiskKind::ProcessSpawn, RiskKind::WorkspaceExternal],
+        );
+        assert_eq!(external.action, PolicyAction::Deny);
+
+        let constrained = EffectiveAuthority {
+            tier_ceiling: [PolicyAction::Deny; 5],
+            ..root
+        };
+        let (_, denied) =
+            constrained.constrain_policy_resolution(&trust, Tier::Four, [RiskKind::ProcessSpawn]);
+        assert_eq!(denied.action, PolicyAction::Deny);
     }
 
     #[test]

@@ -127,8 +127,7 @@ pub fn check_write(
         }),
         FsAccessMode::WorkspaceWrite => {
             let canonical = canonicalize_stable(target);
-            let temp = canonicalize_stable(&std::env::temp_dir());
-            if canonical.starts_with(&temp) {
+            if is_temp_path(&canonical) {
                 return Ok(());
             }
             let ws = match workspace {
@@ -150,6 +149,18 @@ pub fn check_write(
             }
         }
     }
+}
+
+pub(crate) fn is_temp_path(path: &Path) -> bool {
+    let canonical = canonicalize_stable(path);
+    if canonical.starts_with(canonicalize_stable(&std::env::temp_dir())) {
+        return true;
+    }
+    #[cfg(unix)]
+    if canonical.starts_with(canonicalize_stable(Path::new("/tmp"))) {
+        return true;
+    }
+    false
 }
 
 // canonicalize() only works for existing paths, but we're often asked
@@ -365,6 +376,14 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let scratch = TempDir::new().unwrap();
         let target = scratch.path().join("scratch.txt");
+        assert!(check_write(&target, Some(ws.path()), FsAccessMode::WorkspaceWrite).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_write_allows_platform_tmp_root() {
+        let ws = TempDir::new().unwrap();
+        let target = Path::new("/tmp").join("atman-scratch.txt");
         assert!(check_write(&target, Some(ws.path()), FsAccessMode::WorkspaceWrite).is_ok());
     }
 
