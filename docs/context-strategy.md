@@ -112,6 +112,10 @@ selection preserves a recent tail using all of these lower bounds:
 - at least 5 recent user turns;
 - a recent token tail of roughly 5% of the history budget.
 
+The trigger uses a preflight estimate of the current materialized messages plus the
+current system/tool prefix. It does not reuse the previous provider call's input count,
+which may describe an older window or a different request shape.
+
 The summary replaces the selected range only when the replacement is smaller. Tool
 use/result parts are sanitized without dropping valid text or valid pairs from a
 mixed message, the replacement is checkpointed, and the live session window is

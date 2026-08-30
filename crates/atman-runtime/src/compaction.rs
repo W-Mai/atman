@@ -12,6 +12,10 @@ pub struct CompactionBudgetContext {
 }
 
 impl CompactionBudgetContext {
+    pub fn estimated_input_tokens(self, message_tokens: u64) -> u64 {
+        message_tokens.saturating_add(self.fixed_input_tokens.unwrap_or(0))
+    }
+
     pub fn history_budget(self, info: &crate::model_registry::ModelInfo) -> Option<u64> {
         let fixed_input_tokens = self.fixed_input_tokens?;
         let output_cap = (info.context_budget as f64 * 0.20) as u64;
@@ -362,12 +366,7 @@ async fn maybe_auto_compact_locked(
         .unwrap_or_else(|| info.compaction_target_after());
     let msgs = session.messages();
     let window_tokens = estimate_tokens_for_messages(&msgs);
-    let provider_tokens = session.last_input_tokens();
-    let current = if provider_tokens > 0 {
-        provider_tokens
-    } else {
-        window_tokens
-    };
+    let current = budget_context.estimated_input_tokens(window_tokens);
     if !forced && current <= trigger {
         return;
     }
@@ -970,6 +969,18 @@ mod tests {
             }
             .history_budget(&info),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn compaction_preflight_estimate_uses_current_messages_and_fixed_prefix() {
+        let budget = CompactionBudgetContext {
+            fixed_input_tokens: Some(7_000),
+        };
+        assert_eq!(budget.estimated_input_tokens(11_000), 18_000);
+        assert_eq!(
+            CompactionBudgetContext::default().estimated_input_tokens(11_000),
+            11_000
         );
     }
 

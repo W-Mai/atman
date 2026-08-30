@@ -199,7 +199,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     });
     let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let session = std::sync::Arc::new(Session::open_ephemeral());
-    build_long_history(&session, 20);
+    build_long_history(&session, 32);
 
     let ex = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&ex.tools);
