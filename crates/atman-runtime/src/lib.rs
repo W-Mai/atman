@@ -88,8 +88,10 @@ pub mod workflow;
 
 pub use attachment_store::AttachmentStore;
 pub use context_plan::{
-    ContextCallIdentity, ContextCallPurpose, ContextCallScope, ContextPlanId, ContextTokenLanes,
-    ContextUsageKey, ContextUsageRecord, ModelContextPlan, TokenUsageSource,
+    ContextCacheObservation, ContextCacheResetReason, ContextCallIdentity, ContextCallPurpose,
+    ContextCallScope, ContextPlanId, ContextPrefixLane, ContextPrefixProfile,
+    ContextPrefixSnapshot, ContextTokenLanes, ContextUsageKey, ContextUsageRecord,
+    ModelContextPlan, TokenUsageSource,
 };
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;

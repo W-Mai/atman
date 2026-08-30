@@ -16,6 +16,7 @@ async fn llm_call_event_records_wallclock_and_tokens() {
     return llm.call(
         model: "mock-model",
         prompt: "hello world",
+        cache: true,
     )
 }
 "#;
@@ -40,6 +41,7 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             usage_source,
             context_call_purpose,
             context_call_identity,
+            context_cache,
             usage,
             status,
             ..
@@ -60,6 +62,13 @@ async fn llm_call_event_records_wallclock_and_tokens() {
                     .map(|identity| identity.scope),
                 Some(atman_runtime::ContextCallScope::Root)
             );
+            let cache = context_cache.as_ref().expect("context cache observation");
+            assert_eq!(
+                cache.reset_reason,
+                Some(atman_runtime::ContextCacheResetReason::ColdStart)
+            );
+            assert!(cache.wire_prefix_bytes > 0);
+            assert_eq!(cache.common_prefix_bytes, 0);
             assert!(matches!(status, LlmCallStatus::Ok));
             assert!(usage.input > 0);
             assert!(usage.output > 0);

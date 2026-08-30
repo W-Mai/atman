@@ -119,6 +119,8 @@ pub enum Event {
         context_call_purpose: Option<crate::context_plan::ContextCallPurpose>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_call_identity: Option<crate::context_plan::ContextCallIdentity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_cache: Option<crate::context_plan::ContextCacheObservation>,
         usage: crate::provider::TokenUsage,
         wallclock_ms: u64,
         ttft_ms: Option<u64>,
@@ -729,6 +731,7 @@ mod tests {
                 usage_source: None,
                 context_call_purpose: None,
                 context_call_identity: None,
+                context_cache: None,
                 ..
             }
         ));

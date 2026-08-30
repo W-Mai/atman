@@ -32,6 +32,287 @@ pub struct ModelContextPlan {
     call_identity: ContextCallIdentity,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPrefixProfile {
+    ProviderNeutral,
+    OpenAiChat,
+    AnthropicMessages,
+    CodexResponses,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPrefixLane {
+    Stable,
+    Tools,
+    Messages,
+    Records,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCacheResetReason {
+    ColdStart,
+    CacheDisabled,
+    CacheEnabled,
+    ProviderChanged,
+    ModelChanged,
+    ProjectionChanged,
+    StableChanged,
+    ToolsChanged,
+    Compaction,
+    MessagePrefixChanged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextCacheObservation {
+    pub profile: ContextPrefixProfile,
+    pub wire_prefix_digest: String,
+    pub wire_prefix_bytes: u64,
+    pub wire_prefix_tokens: u64,
+    pub common_prefix_bytes: u64,
+    pub common_prefix_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_reason: Option<ContextCacheResetReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextPrefixSegment {
+    lane: ContextPrefixLane,
+    digest: [u8; 32],
+    bytes: u64,
+}
+
+/// Provider-projected cacheable prompt sequence.
+///
+/// Segments follow the provider's semantic prompt order rather than JSON object
+/// field order. This makes an append-only message suffix preserve the previous
+/// prefix even though the enclosing wire array gains a comma and closing bracket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPrefixSnapshot {
+    profile: ContextPrefixProfile,
+    segments: Vec<ContextPrefixSegment>,
+    digest: String,
+    bytes: u64,
+    tokens: u64,
+    cache_enabled: bool,
+    compaction_digest: Option<[u8; 32]>,
+}
+
+impl ContextPrefixSnapshot {
+    pub fn provider_neutral(request: &LlmRequest) -> Result<Self, crate::error::RuntimeError> {
+        let mut builder =
+            ContextPrefixBuilder::for_request(ContextPrefixProfile::ProviderNeutral, request);
+        for tool in &request.tools {
+            builder.push(ContextPrefixLane::Tools, tool)?;
+        }
+        if let Some(system) = &request.system {
+            builder.push(ContextPrefixLane::Stable, system)?;
+        }
+        if let Some(schema) = &request.schema {
+            builder.push(ContextPrefixLane::Stable, schema)?;
+        }
+        for message in &request.messages {
+            builder.push(ContextPrefixLane::Messages, message)?;
+        }
+        Ok(builder.finish())
+    }
+
+    pub(crate) fn builder(
+        profile: ContextPrefixProfile,
+        request: &LlmRequest,
+    ) -> ContextPrefixBuilder {
+        ContextPrefixBuilder::for_request(profile, request)
+    }
+
+    pub fn initial_observation(&self) -> ContextCacheObservation {
+        self.observation(0, 0, Some(self.default_reset_reason()))
+    }
+
+    fn default_reset_reason(&self) -> ContextCacheResetReason {
+        if self.cache_enabled {
+            ContextCacheResetReason::ColdStart
+        } else {
+            ContextCacheResetReason::CacheDisabled
+        }
+    }
+
+    pub(crate) fn compare(
+        &self,
+        previous_provider: &str,
+        current_provider: &str,
+        previous_model: &str,
+        current_model: &str,
+        previous: &Self,
+    ) -> ContextCacheObservation {
+        let mut common_bytes = self.common_prefix(previous);
+        let mut common_tokens = estimate_prefix_tokens(common_bytes);
+        let reset_reason = if !self.cache_enabled {
+            Some(ContextCacheResetReason::CacheDisabled)
+        } else if previous_provider != current_provider {
+            common_bytes = 0;
+            common_tokens = 0;
+            Some(ContextCacheResetReason::ProviderChanged)
+        } else if previous_model != current_model {
+            common_bytes = 0;
+            common_tokens = 0;
+            Some(ContextCacheResetReason::ModelChanged)
+        } else if previous.profile != self.profile {
+            common_bytes = 0;
+            common_tokens = 0;
+            Some(ContextCacheResetReason::ProjectionChanged)
+        } else if !previous.cache_enabled {
+            Some(ContextCacheResetReason::CacheEnabled)
+        } else if self.lane_digest(ContextPrefixLane::Stable)
+            != previous.lane_digest(ContextPrefixLane::Stable)
+        {
+            Some(ContextCacheResetReason::StableChanged)
+        } else if self.lane_digest(ContextPrefixLane::Tools)
+            != previous.lane_digest(ContextPrefixLane::Tools)
+        {
+            Some(ContextCacheResetReason::ToolsChanged)
+        } else if !previous.is_segment_prefix_of(self) {
+            Some(
+                if self.compaction_digest.is_some()
+                    && self.compaction_digest != previous.compaction_digest
+                {
+                    ContextCacheResetReason::Compaction
+                } else {
+                    ContextCacheResetReason::MessagePrefixChanged
+                },
+            )
+        } else {
+            None
+        };
+        self.observation(common_bytes, common_tokens, reset_reason)
+    }
+
+    fn common_prefix(&self, previous: &Self) -> u64 {
+        self.segments
+            .iter()
+            .zip(&previous.segments)
+            .take_while(|(current, old)| current == old)
+            .fold(0u64, |bytes, (segment, _)| {
+                bytes.saturating_add(segment.bytes)
+            })
+    }
+
+    fn is_segment_prefix_of(&self, current: &Self) -> bool {
+        self.segments.len() <= current.segments.len()
+            && self
+                .segments
+                .iter()
+                .zip(&current.segments)
+                .all(|(old, new)| old == new)
+    }
+
+    fn lane_digest(&self, lane: ContextPrefixLane) -> blake3::Hash {
+        let mut hasher = blake3::Hasher::new();
+        for segment in self.segments.iter().filter(|segment| segment.lane == lane) {
+            hasher.update(&segment.digest);
+            hasher.update(&segment.bytes.to_le_bytes());
+        }
+        hasher.finalize()
+    }
+
+    fn observation(
+        &self,
+        common_prefix_bytes: u64,
+        common_prefix_tokens: u64,
+        reset_reason: Option<ContextCacheResetReason>,
+    ) -> ContextCacheObservation {
+        ContextCacheObservation {
+            profile: self.profile,
+            wire_prefix_digest: self.digest.clone(),
+            wire_prefix_bytes: self.bytes,
+            wire_prefix_tokens: self.tokens,
+            common_prefix_bytes,
+            common_prefix_tokens,
+            reset_reason,
+        }
+    }
+}
+
+pub(crate) struct ContextPrefixBuilder {
+    profile: ContextPrefixProfile,
+    segments: Vec<ContextPrefixSegment>,
+    cache_enabled: bool,
+    compaction_digest: Option<[u8; 32]>,
+}
+
+impl ContextPrefixBuilder {
+    fn for_request(profile: ContextPrefixProfile, request: &LlmRequest) -> Self {
+        let mut compaction_hasher = blake3::Hasher::new();
+        let mut has_compaction = false;
+        for part in request.messages.iter().flat_map(|message| &message.parts) {
+            if let crate::message::MessagePart::CompactSummary {
+                summary,
+                seq_start,
+                seq_end,
+                count,
+            } = part
+            {
+                has_compaction = true;
+                compaction_hasher.update(&(summary.len() as u64).to_le_bytes());
+                compaction_hasher.update(summary.as_bytes());
+                compaction_hasher.update(&seq_start.to_le_bytes());
+                compaction_hasher.update(&seq_end.to_le_bytes());
+                compaction_hasher.update(&(*count as u64).to_le_bytes());
+            }
+        }
+        Self {
+            profile,
+            segments: Vec::new(),
+            cache_enabled: request.cache_prompt,
+            compaction_digest: has_compaction.then(|| *compaction_hasher.finalize().as_bytes()),
+        }
+    }
+
+    pub(crate) fn push<T: Serialize + ?Sized>(
+        &mut self,
+        lane: ContextPrefixLane,
+        value: &T,
+    ) -> Result<(), crate::error::RuntimeError> {
+        let bytes = serde_json::to_vec(value).map_err(|error| {
+            crate::error::RuntimeError::ToolFailed(format!(
+                "serialize context prefix segment: {error}"
+            ))
+        })?;
+        self.segments.push(ContextPrefixSegment {
+            lane,
+            digest: *blake3::hash(&bytes).as_bytes(),
+            bytes: bytes.len() as u64,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> ContextPrefixSnapshot {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[self.profile as u8]);
+        let mut bytes = 0u64;
+        for segment in &self.segments {
+            hasher.update(&[segment.lane as u8]);
+            hasher.update(&segment.bytes.to_le_bytes());
+            hasher.update(&segment.digest);
+            bytes = bytes.saturating_add(segment.bytes);
+        }
+        ContextPrefixSnapshot {
+            profile: self.profile,
+            segments: self.segments,
+            digest: format!("blake3:{}", hasher.finalize().to_hex()),
+            bytes,
+            tokens: estimate_prefix_tokens(bytes),
+            cache_enabled: self.cache_enabled,
+            compaction_digest: self.compaction_digest,
+        }
+    }
+}
+
+fn estimate_prefix_tokens(bytes: u64) -> u64 {
+    ((bytes as f64) / 3.5).ceil() as u64
+}
+
 impl ModelContextPlan {
     pub fn new(request: LlmRequest) -> Self {
         Self::for_call(
@@ -354,5 +635,112 @@ mod tests {
         });
         assert_eq!(child.scope, ContextCallScope::Child);
         assert!(child.flow_run_id.is_some());
+    }
+
+    #[test]
+    fn append_only_messages_preserve_the_previous_projected_prefix() {
+        let mut first_request = request();
+        first_request.cache_prompt = true;
+        first_request
+            .messages
+            .push(crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "first",
+            ));
+        let first = ContextPrefixSnapshot::provider_neutral(&first_request).unwrap();
+
+        let mut second_request = first_request;
+        second_request
+            .messages
+            .push(crate::message::Message::assistant_text(
+                crate::event::TurnId::now(),
+                "second",
+            ));
+        let second = ContextPrefixSnapshot::provider_neutral(&second_request).unwrap();
+        let observation = second.compare("provider", "provider", "model", "model", &first);
+
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, first.bytes);
+        assert_eq!(observation.common_prefix_tokens, first.tokens);
+    }
+
+    #[test]
+    fn cache_reset_reason_distinguishes_tools_compaction_and_model_changes() {
+        let mut first_request = request();
+        first_request.cache_prompt = true;
+        first_request
+            .messages
+            .push(crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "original",
+            ));
+        let first = ContextPrefixSnapshot::provider_neutral(&first_request).unwrap();
+
+        let mut tools_request = first_request.clone();
+        tools_request.tools.push(crate::tool::ToolSpec {
+            name: "fs.read".into(),
+            description: Some("Read a file".into()),
+            input_schema: serde_json::json!({"type": "object"}),
+        });
+        let tools = ContextPrefixSnapshot::provider_neutral(&tools_request).unwrap();
+        assert_eq!(
+            tools
+                .compare("provider", "provider", "model", "model", &first)
+                .reset_reason,
+            Some(ContextCacheResetReason::ToolsChanged)
+        );
+
+        let mut compact_request = first_request;
+        compact_request.messages = vec![crate::message::Message::system_compact_summary(
+            crate::event::TurnId::now(),
+            "summary",
+            1,
+            2,
+            2,
+        )];
+        let compact = ContextPrefixSnapshot::provider_neutral(&compact_request).unwrap();
+        assert_eq!(
+            compact
+                .compare("provider", "provider", "model", "model", &first)
+                .reset_reason,
+            Some(ContextCacheResetReason::Compaction)
+        );
+
+        let mut compact_with_history = compact_request;
+        compact_with_history
+            .messages
+            .push(crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "old suffix",
+            ));
+        let previous_compact =
+            ContextPrefixSnapshot::provider_neutral(&compact_with_history).unwrap();
+        compact_with_history.messages[1] =
+            crate::message::Message::user_text(crate::event::TurnId::now(), "rewritten suffix");
+        let rewritten = ContextPrefixSnapshot::provider_neutral(&compact_with_history).unwrap();
+        assert_eq!(
+            rewritten
+                .compare("provider", "provider", "model", "model", &previous_compact,)
+                .reset_reason,
+            Some(ContextCacheResetReason::MessagePrefixChanged)
+        );
+        assert_eq!(
+            first
+                .compare("provider", "provider", "old", "new", &first)
+                .reset_reason,
+            Some(ContextCacheResetReason::ModelChanged)
+        );
+
+        let mut disabled_request = request();
+        disabled_request.cache_prompt = false;
+        let disabled = ContextPrefixSnapshot::provider_neutral(&disabled_request).unwrap();
+        disabled_request.cache_prompt = true;
+        let enabled = ContextPrefixSnapshot::provider_neutral(&disabled_request).unwrap();
+        assert_eq!(
+            enabled
+                .compare("provider", "provider", "model", "model", &disabled)
+                .reset_reason,
+            Some(ContextCacheResetReason::CacheEnabled)
+        );
     }
 }

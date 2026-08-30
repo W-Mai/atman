@@ -45,6 +45,15 @@ The Session retains the latest usage in bounded provider/model/purpose/identity 
 Only a general root-session call updates the active model-window reading; helper and
 child calls remain visible in their own buckets without replacing it.
 
+Each call also fingerprints the cacheable prompt sequence after OpenAI Chat,
+Anthropic Messages, Codex Responses, or provider-neutral projection. The observation
+records prompt bytes and estimated tokens, plus a conservative common-prefix lower
+bound at complete tool, instruction, message, or content-block boundaries. It reports
+cold starts, cache enablement or disablement, provider/model/projection changes,
+stable-instruction changes, tool changes, compaction, and other message-prefix
+rewrites separately. Transport JSON punctuation and output-only request fields are
+excluded because they do not represent the provider's semantic prompt prefix.
+
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if
 the call itself uses an isolated `prompt:` rather than session messages. The managed

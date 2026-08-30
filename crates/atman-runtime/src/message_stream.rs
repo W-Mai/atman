@@ -273,6 +273,7 @@ mod tests {
                 usage_source: None,
                 context_call_purpose: None,
                 context_call_identity: None,
+                context_cache: None,
                 usage: crate::provider::TokenUsage::default(),
                 wallclock_ms: 0,
                 ttft_ms: None,

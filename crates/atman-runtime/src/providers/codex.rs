@@ -455,6 +455,27 @@ impl Provider for CodexProvider {
         &self.name
     }
 
+    fn context_prefix(
+        &self,
+        req: &LlmRequest,
+    ) -> Result<crate::context_plan::ContextPrefixSnapshot, RuntimeError> {
+        let body = self.build_body(req)?;
+        let mut builder = crate::context_plan::ContextPrefixSnapshot::builder(
+            crate::context_plan::ContextPrefixProfile::CodexResponses,
+            req,
+        );
+        if let Some(instructions) = &body.instructions {
+            builder.push(crate::context_plan::ContextPrefixLane::Stable, instructions)?;
+        }
+        for tool in &body.tools {
+            builder.push(crate::context_plan::ContextPrefixLane::Tools, tool)?;
+        }
+        for item in &body.input {
+            builder.push(crate::context_plan::ContextPrefixLane::Messages, item)?;
+        }
+        Ok(builder.finish())
+    }
+
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         // The Codex backend always uses streaming (Responses API with store=false).
         // We call streaming internally and collect the result.
@@ -1117,6 +1138,38 @@ mod tests {
         let arguments: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
         assert_eq!(arguments["value"], 1);
         assert_eq!(arguments["_atman_intent"], "Inspect provider state");
+    }
+
+    #[test]
+    fn context_prefix_uses_responses_projection_and_preserves_appended_messages() {
+        let (_dir, _hub, provider, _) = managed_provider(
+            "http://localhost/responses".into(),
+            "http://localhost/models".into(),
+        );
+        let mut request = request();
+        request.cache_prompt = true;
+        request.system = Some("stable".into());
+        request.messages.push(crate::message::Message::user_text(
+            crate::event::TurnId::now(),
+            "first",
+        ));
+        let first = provider.context_prefix(&request).unwrap();
+        let first_bytes = first.initial_observation().wire_prefix_bytes;
+        request
+            .messages
+            .push(crate::message::Message::assistant_text(
+                crate::event::TurnId::now(),
+                "second",
+            ));
+        let second = provider.context_prefix(&request).unwrap();
+        let observation = second.compare("codex", "codex", "model", "model", &first);
+
+        assert_eq!(
+            observation.profile,
+            crate::context_plan::ContextPrefixProfile::CodexResponses
+        );
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, first_bytes);
     }
 
     fn request() -> crate::provider::LlmRequest {

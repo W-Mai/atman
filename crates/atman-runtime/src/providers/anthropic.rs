@@ -253,6 +253,34 @@ impl Provider for AnthropicProvider {
         &self.name
     }
 
+    fn context_prefix(
+        &self,
+        req: &LlmRequest,
+    ) -> Result<crate::context_plan::ContextPrefixSnapshot, RuntimeError> {
+        let body = self.build_body(req, true)?;
+        let mut builder = crate::context_plan::ContextPrefixSnapshot::builder(
+            crate::context_plan::ContextPrefixProfile::AnthropicMessages,
+            req,
+        );
+        for tool in &body.tools {
+            builder.push(crate::context_plan::ContextPrefixLane::Tools, tool)?;
+        }
+        if let Some(system) = &body.system {
+            builder.push(crate::context_plan::ContextPrefixLane::Stable, system)?;
+        }
+        for message in &body.messages {
+            builder.push(
+                crate::context_plan::ContextPrefixLane::Messages,
+                &message.role,
+            )?;
+            let MessageContent::Blocks(parts) = &message.content;
+            for part in parts {
+                builder.push(crate::context_plan::ContextPrefixLane::Messages, part)?;
+            }
+        }
+        Ok(builder.finish())
+    }
+
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         if let Err(error) = self.validate_reasoning(&req.reasoning) {
             return Box::pin(async move { Err(error) });
@@ -849,5 +877,35 @@ mod tests {
                 if input == &serde_json::json!({"value": 1})
                     && intent.as_str() == "Inspect provider state"
         ));
+    }
+
+    #[test]
+    fn context_prefix_uses_messages_projection_and_preserves_appended_messages() {
+        let provider = AnthropicProvider::new("anthropic", "test-key");
+        let mut request = LlmRequest {
+            model: "claude-test".into(),
+            messages: vec![Message::user_text(crate::event::TurnId::now(), "first")],
+            system: Some("stable".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let first = provider.context_prefix(&request).unwrap();
+        let first_bytes = first.initial_observation().wire_prefix_bytes;
+        request
+            .messages
+            .push(Message::user_text(crate::event::TurnId::now(), "second"));
+        let second = provider.context_prefix(&request).unwrap();
+        let observation = second.compare("anthropic", "anthropic", "model", "model", &first);
+
+        assert_eq!(
+            observation.profile,
+            crate::context_plan::ContextPrefixProfile::AnthropicMessages
+        );
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, first_bytes);
     }
 }

@@ -351,6 +351,29 @@ impl Provider for OpenAiProvider {
         &self.name
     }
 
+    fn context_prefix(
+        &self,
+        req: &LlmRequest,
+    ) -> Result<crate::context_plan::ContextPrefixSnapshot, RuntimeError> {
+        let body = self.build_body(req, true)?;
+        let mut builder = crate::context_plan::ContextPrefixSnapshot::builder(
+            crate::context_plan::ContextPrefixProfile::OpenAiChat,
+            req,
+        );
+        for tool in &body.tools {
+            builder.push(crate::context_plan::ContextPrefixLane::Tools, tool)?;
+        }
+        for (index, message) in body.messages.iter().enumerate() {
+            let lane = if index == 0 && req.system.is_some() {
+                crate::context_plan::ContextPrefixLane::Stable
+            } else {
+                crate::context_plan::ContextPrefixLane::Messages
+            };
+            builder.push(lane, message)?;
+        }
+        Ok(builder.finish())
+    }
+
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         if let Err(error) = self.validate_reasoning(&req.reasoning) {
             return Box::pin(async move { Err(error) });
@@ -1042,5 +1065,36 @@ mod tests {
                 if input == &serde_json::json!({"value": 1})
                     && intent.as_str() == "Inspect provider state"
         ));
+    }
+
+    #[test]
+    fn context_prefix_uses_chat_projection_and_preserves_appended_messages() {
+        let provider = OpenAiProvider::new("openai", "test-key");
+        let mut request = LlmRequest {
+            model: "gpt-test".into(),
+            messages: vec![Message::user_text(crate::event::TurnId::now(), "first")],
+            system: Some("stable".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let first = provider.context_prefix(&request).unwrap();
+        let first_bytes = first.initial_observation().wire_prefix_bytes;
+        request.messages.push(Message::assistant_text(
+            crate::event::TurnId::now(),
+            "second",
+        ));
+        let second = provider.context_prefix(&request).unwrap();
+        let observation = second.compare("openai", "openai", "model", "model", &first);
+
+        assert_eq!(
+            observation.profile,
+            crate::context_plan::ContextPrefixProfile::OpenAiChat
+        );
+        assert_eq!(observation.reset_reason, None);
+        assert_eq!(observation.common_prefix_bytes, first_bytes);
     }
 }

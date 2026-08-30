@@ -516,6 +516,17 @@ pub trait Provider: Send + Sync {
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
 
+    /// Project the cacheable prompt sequence in provider order.
+    ///
+    /// The default preserves provider-neutral tool/system/message boundaries.
+    /// Providers with a distinct wire projection override this method.
+    fn context_prefix(
+        &self,
+        req: &LlmRequest,
+    ) -> Result<crate::context_plan::ContextPrefixSnapshot, RuntimeError> {
+        crate::context_plan::ContextPrefixSnapshot::provider_neutral(req)
+    }
+
     /// Discover available models without capability provenance.
     fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
         Box::pin(async { vec![] })

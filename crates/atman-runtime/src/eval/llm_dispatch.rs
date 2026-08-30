@@ -265,6 +265,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         context_call_identity: Some(
                             crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
                         ),
+                        context_cache: None,
                         usage: crate::provider::TokenUsage::default(),
                         wallclock_ms: 0,
                         ttft_ms: None,
@@ -318,6 +319,25 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             let context_tokens = context_plan.token_lanes().clone();
             let context_call_purpose = context_plan.call_purpose();
             let context_call_identity = context_plan.call_identity().clone();
+            let context_prefix = provider
+                .context_prefix(context_plan.request())
+                .or_else(|_| {
+                    crate::context_plan::ContextPrefixSnapshot::provider_neutral(
+                        context_plan.request(),
+                    )
+                })
+                .expect("provider-neutral context prefix serialization");
+            let context_cache = if let Some(session) = ctx.session_runtime.as_ref() {
+                session.observe_context_prefix(
+                    provider.name(),
+                    &api_model,
+                    context_call_purpose,
+                    context_call_identity.clone(),
+                    context_prefix,
+                )
+            } else {
+                context_prefix.initial_observation()
+            };
             let estimated_input = context_plan.estimated_input_tokens();
             let start = std::time::Instant::now();
             let outcome = call_and_maybe_stream(
@@ -370,6 +390,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     usage_source: Some(usage_source),
                     context_call_purpose: Some(context_call_purpose),
                     context_call_identity: Some(context_call_identity.clone()),
+                    context_cache: Some(context_cache),
                     usage: usage.clone(),
                     wallclock_ms: elapsed_ms,
                     ttft_ms,

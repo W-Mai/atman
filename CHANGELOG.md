@@ -9,11 +9,12 @@ All notable changes to atman are documented in this file.
 ### ⚠️ Breaking Changes
 
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
-- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, usage source, call purpose, and root/child identity for the provider-neutral plan compiled for the dispatch attempt.
+- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, usage source, call purpose, root/child identity, and provider-projected cache-prefix observation for the plan compiled for the dispatch attempt.
 - **Provider lifecycle result surfaces** — `AuthLogin`, `AuthLogout`, `RefreshProviderModels`, `AddConfigProvider`, and `UpdateConfigProvider` are replaced by `TuiControl::MutateProvider`, `ProviderMutation::UpsertConfig`, `TuiCommand::ProviderMutationResult`, and `TuiCommand::ProviderCatalogRefreshResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. `TuiControl::TestProvider` carries a complete `ProviderEntry` instead of separate type, credential, and endpoint fields. `BootstrapOutcome` exposes `provider_catalog_refresh_plan` and is non-exhaustive. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
 
 ### ✨ Features
 
+- **Context cache diagnostics** — LLM call events identify the provider prompt profile, prefix digest and size, entry-boundary common prefix, and cache reset cause across root, child, and helper calls.
 - **Bounded recent-history excerpts** — `memory.recent_turns` can return a character-limited recent-first excerpt while retaining its lossless `items` result.
 - **Tool call purpose metadata** — LLM-generated built-in, MCP, and spawned-flow calls retain a concise purpose across provider history, workflow replay, approvals, and TUI rendering without changing executable arguments.
 - **Provider-aware reasoning controls** — model settings, DSL calls, TUI submissions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.

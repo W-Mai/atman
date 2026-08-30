@@ -87,6 +87,7 @@ pub struct CompactionState {
     pub review_mode: Mutex<CompactReviewMode>,
     pub lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_context_usage: Mutex<LastContextUsageStore>,
+    last_context_prefix: Mutex<LastContextPrefixStore>,
 }
 
 impl CompactionState {
@@ -97,11 +98,13 @@ impl CompactionState {
             review_mode: Mutex::new(CompactReviewMode::default()),
             lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_context_usage: Mutex::new(LastContextUsageStore::default()),
+            last_context_prefix: Mutex::new(LastContextPrefixStore::default()),
         }
     }
 }
 
 const MAX_LAST_CONTEXT_USAGES: usize = 256;
+const MAX_LAST_CONTEXT_PREFIXES: usize = 32;
 
 #[derive(Default)]
 struct LastContextUsageStore {
@@ -130,6 +133,63 @@ impl LastContextUsageStore {
         key: &crate::context_plan::ContextUsageKey,
     ) -> Option<crate::context_plan::ContextUsageRecord> {
         self.entries.get(key).cloned()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ContextPrefixTraceKey {
+    call_purpose: crate::context_plan::ContextCallPurpose,
+    call_identity: crate::context_plan::ContextCallIdentity,
+}
+
+struct TrackedContextPrefix {
+    provider: String,
+    model: String,
+    snapshot: crate::context_plan::ContextPrefixSnapshot,
+}
+
+#[derive(Default)]
+struct LastContextPrefixStore {
+    entries: HashMap<ContextPrefixTraceKey, TrackedContextPrefix>,
+    order: VecDeque<ContextPrefixTraceKey>,
+}
+
+impl LastContextPrefixStore {
+    fn observe(
+        &mut self,
+        key: ContextPrefixTraceKey,
+        provider: &str,
+        model: &str,
+        snapshot: crate::context_plan::ContextPrefixSnapshot,
+    ) -> crate::context_plan::ContextCacheObservation {
+        let observation = self.entries.get(&key).map_or_else(
+            || snapshot.initial_observation(),
+            |previous| {
+                snapshot.compare(
+                    &previous.provider,
+                    provider,
+                    &previous.model,
+                    model,
+                    &previous.snapshot,
+                )
+            },
+        );
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            TrackedContextPrefix {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                snapshot,
+            },
+        );
+        while self.entries.len() > MAX_LAST_CONTEXT_PREFIXES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        observation
     }
 }
 
@@ -1394,6 +1454,29 @@ impl Session {
             .get(key)
     }
 
+    pub(crate) fn observe_context_prefix(
+        &self,
+        provider: &str,
+        model: &str,
+        call_purpose: crate::context_plan::ContextCallPurpose,
+        call_identity: crate::context_plan::ContextCallIdentity,
+        snapshot: crate::context_plan::ContextPrefixSnapshot,
+    ) -> crate::context_plan::ContextCacheObservation {
+        self.compaction
+            .last_context_prefix
+            .lock()
+            .expect("context prefix lock poisoned")
+            .observe(
+                ContextPrefixTraceKey {
+                    call_purpose,
+                    call_identity,
+                },
+                provider,
+                model,
+                snapshot,
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_llm_usage(
         &self,
@@ -2402,6 +2485,45 @@ mod tests {
                 .keys()
                 .any(|key| key.model == format!("model-{MAX_LAST_CONTEXT_USAGES}"))
         );
+    }
+
+    #[test]
+    fn last_context_prefix_store_evicts_heavy_snapshots_independently() {
+        let request = crate::provider::LlmRequest {
+            model: "model".into(),
+            messages: vec![crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "prompt",
+            )],
+            system: Some("stable".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let snapshot =
+            crate::context_plan::ContextPrefixSnapshot::provider_neutral(&request).unwrap();
+        let mut store = LastContextPrefixStore::default();
+        let mut oldest = None;
+        for index in 0..=MAX_LAST_CONTEXT_PREFIXES {
+            let key = ContextPrefixTraceKey {
+                call_purpose: crate::context_plan::ContextCallPurpose::General,
+                call_identity: crate::context_plan::ContextCallIdentity {
+                    scope: crate::context_plan::ContextCallScope::Child,
+                    session_id: Some("session".into()),
+                    flow_run_id: Some(crate::event::FlowRunId::now()),
+                },
+            };
+            if index == 0 {
+                oldest = Some(key.clone());
+            }
+            store.observe(key, "provider", "model", snapshot.clone());
+        }
+
+        assert_eq!(store.entries.len(), MAX_LAST_CONTEXT_PREFIXES);
+        assert!(!store.entries.contains_key(&oldest.unwrap()));
     }
 
     fn permission_authority() -> crate::flow_authority::EffectiveAuthority {
