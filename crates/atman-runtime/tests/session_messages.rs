@@ -41,6 +41,40 @@ fn append_message_pushes_to_messages_and_emits_event() {
 }
 
 #[test]
+fn context_records_are_append_only_with_per_key_digest_noops() {
+    let session = Session::open_ephemeral();
+    let turn_id = TurnId::now();
+    let spec = |text: &str| {
+        atman_runtime::ContextRecordSpec::new(
+            "session.goal",
+            atman_runtime::ContextRecordAuthority::User,
+            atman_runtime::ContextRecordRetention::Latest,
+            atman_runtime::ContextRecordBody::text(text),
+        )
+    };
+
+    let first = session.append_context_records(turn_id.clone(), [spec("first")]);
+    let unchanged = session.append_context_records(turn_id.clone(), [spec("first")]);
+    let second = session.append_context_records(turn_id, [spec("second")]);
+
+    assert_eq!(first[0].revision(), 1);
+    assert!(unchanged.is_empty());
+    assert_eq!(second[0].revision(), 2);
+    let messages = session.messages();
+    let records: Vec<_> = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            MessagePart::ContextRecord(record) => Some(record),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].revision(), 1);
+    assert_eq!(records[1].revision(), 2);
+}
+
+#[test]
 fn begin_turn_records_turn_start_and_user_msg() {
     let session = Session::open_ephemeral();
     let turn_id = TurnId::now();

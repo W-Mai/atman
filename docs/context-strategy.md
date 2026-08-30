@@ -64,6 +64,10 @@ system messages, Codex Responses uses developer input items, and Anthropic uses
 explicitly framed user context. Latest-value records survive compaction and remain
 hidden from the normal TUI transcript while staying present in event and checkpoint
 data.
+Session appends compare each key against its latest semantic digest. Unchanged
+content is a no-op; changed content receives the next revision and is appended as
+a new internal message. Resume derives the cursor from persisted messages instead
+of resetting revision state.
 
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if

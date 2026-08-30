@@ -106,6 +106,30 @@ pub struct ContextRecord {
     body: ContextRecordBody,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRecordSpec {
+    key: String,
+    authority: ContextRecordAuthority,
+    retention: ContextRecordRetention,
+    body: ContextRecordBody,
+}
+
+impl ContextRecordSpec {
+    pub fn new(
+        key: impl Into<String>,
+        authority: ContextRecordAuthority,
+        retention: ContextRecordRetention,
+        body: ContextRecordBody,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            authority,
+            retention,
+            body,
+        }
+    }
+}
+
 impl From<ContextRecordWire> for ContextRecord {
     fn from(wire: ContextRecordWire) -> Self {
         let ContextRecordWire {
@@ -177,6 +201,70 @@ impl ContextRecord {
             self.body.render()
         )
     }
+}
+
+pub(crate) fn compile_context_records(
+    messages: &[crate::message::Message],
+    specs: impl IntoIterator<Item = ContextRecordSpec>,
+) -> Vec<ContextRecord> {
+    #[derive(Clone)]
+    struct Cursor {
+        max_revision: u64,
+        last_digest: ContentDigest,
+    }
+
+    let mut cursors = std::collections::HashMap::<String, Cursor>::new();
+    for record in messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            crate::message::MessagePart::ContextRecord(record) => Some(record),
+            _ => None,
+        })
+    {
+        cursors
+            .entry(record.key().to_string())
+            .and_modify(|cursor| {
+                cursor.max_revision = cursor.max_revision.max(record.revision());
+                cursor.last_digest = record.digest().clone();
+            })
+            .or_insert_with(|| Cursor {
+                max_revision: record.revision(),
+                last_digest: record.digest().clone(),
+            });
+    }
+
+    let mut records = Vec::new();
+    for spec in specs {
+        let revision = cursors.get(&spec.key).map_or(1, |cursor| {
+            cursor
+                .max_revision
+                .checked_add(1)
+                .expect("context record revision overflow")
+        });
+        let record = ContextRecord::new(
+            spec.key.clone(),
+            revision,
+            spec.authority,
+            spec.retention,
+            spec.body,
+        );
+        if cursors
+            .get(&spec.key)
+            .is_some_and(|cursor| cursor.last_digest == *record.digest())
+        {
+            continue;
+        }
+        cursors.insert(
+            spec.key,
+            Cursor {
+                max_revision: revision,
+                last_digest: record.digest().clone(),
+            },
+        );
+        records.push(record);
+    }
+    records
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -821,6 +909,60 @@ mod tests {
         );
 
         assert_eq!(first.digest(), second.digest());
+    }
+
+    #[test]
+    fn record_compiler_skips_same_digest_and_advances_from_highest_revision() {
+        let turn_id = crate::event::TurnId::now();
+        let messages = vec![
+            crate::message::Message::context_record(
+                turn_id.clone(),
+                ContextRecord::new(
+                    "session.goal",
+                    4,
+                    ContextRecordAuthority::User,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text("old"),
+                ),
+            ),
+            crate::message::Message::context_record(
+                turn_id,
+                ContextRecord::new(
+                    "session.goal",
+                    2,
+                    ContextRecordAuthority::User,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text("current"),
+                ),
+            ),
+        ];
+        let compiled = compile_context_records(
+            &messages,
+            [
+                ContextRecordSpec::new(
+                    "session.goal",
+                    ContextRecordAuthority::User,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text("current"),
+                ),
+                ContextRecordSpec::new(
+                    "session.goal",
+                    ContextRecordAuthority::User,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text("next"),
+                ),
+                ContextRecordSpec::new(
+                    "session.goal",
+                    ContextRecordAuthority::User,
+                    ContextRecordRetention::Latest,
+                    ContextRecordBody::text("next"),
+                ),
+            ],
+        );
+
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].revision(), 5);
+        assert!(compiled[0].render_for_model().contains("next"));
     }
 
     #[test]

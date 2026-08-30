@@ -91,8 +91,8 @@ pub use context_plan::{
     ContentDigest, ContextCacheObservation, ContextCacheResetReason, ContextCallIdentity,
     ContextCallPurpose, ContextCallScope, ContextPlanId, ContextPrefixLane, ContextPrefixProfile,
     ContextPrefixSnapshot, ContextRecord, ContextRecordAuthority, ContextRecordBody,
-    ContextRecordRetention, ContextTokenLanes, ContextUsageKey, ContextUsageRecord,
-    ModelContextPlan, TokenUsageSource,
+    ContextRecordRetention, ContextRecordSpec, ContextTokenLanes, ContextUsageKey,
+    ContextUsageRecord, ModelContextPlan, TokenUsageSource,
 };
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;

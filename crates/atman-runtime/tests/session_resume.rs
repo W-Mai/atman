@@ -40,6 +40,38 @@ async fn open_existing_rehydrates_messages_in_order() {
     reopened.shutdown().await;
 }
 
+#[tokio::test]
+async fn reopened_session_continues_context_record_revisions_without_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let turn_id = atman_runtime::event::TurnId::now();
+    let spec = |text: &str| {
+        atman_runtime::ContextRecordSpec::new(
+            "session.goal",
+            atman_runtime::ContextRecordAuthority::User,
+            atman_runtime::ContextRecordRetention::Latest,
+            atman_runtime::ContextRecordBody::text(text),
+        )
+    };
+    let sid = {
+        let session = Session::open(tmp.path()).unwrap();
+        let records = session.append_context_records(turn_id.clone(), [spec("first")]);
+        assert_eq!(records[0].revision(), 1);
+        let sid = session.id().to_string();
+        session.shutdown().await;
+        sid
+    };
+
+    let reopened = Session::open_existing(tmp.path(), &sid).unwrap();
+    assert!(
+        reopened
+            .append_context_records(turn_id.clone(), [spec("first")])
+            .is_empty()
+    );
+    let records = reopened.append_context_records(turn_id, [spec("second")]);
+    assert_eq!(records[0].revision(), 2);
+    reopened.shutdown().await;
+}
+
 #[test]
 fn open_existing_invalid_id_errors() {
     let tmp = tempfile::tempdir().unwrap();

@@ -1803,6 +1803,23 @@ impl Session {
         AppendMessageCommand { msg, flow_run_id }.execute(self);
     }
 
+    pub fn append_context_records(
+        &self,
+        turn_id: TurnId,
+        specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
+    ) -> Vec<crate::context_plan::ContextRecord> {
+        let mut messages = self.messages.lock().unwrap();
+        let records = crate::context_plan::compile_context_records(&messages, specs);
+        for record in &records {
+            AppendMessageCommand {
+                msg: Message::context_record(turn_id.clone(), record.clone()),
+                flow_run_id: None,
+            }
+            .execute_with_messages(self, &mut messages);
+        }
+        records
+    }
+
     pub fn emit_attachment_degrade(
         &self,
         message_seq: u64,
@@ -2302,6 +2319,11 @@ pub struct AppendMessageCommand {
 
 impl AppendMessageCommand {
     pub fn execute(&self, session: &Session) -> u64 {
+        let mut messages = session.messages.lock().unwrap();
+        self.execute_with_messages(session, &mut messages)
+    }
+
+    fn execute_with_messages(&self, session: &Session, messages: &mut Vec<Message>) -> u64 {
         let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
         let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
             &self.msg,
@@ -2393,7 +2415,7 @@ impl AppendMessageCommand {
                 });
             }
         }
-        session.messages.lock().unwrap().push(msg.clone());
+        messages.push(msg.clone());
         seq
     }
 }
