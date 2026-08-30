@@ -779,7 +779,7 @@ impl Provider for CodexProvider {
                 let body = resp.text().await.unwrap_or_default();
                 Err(format!(
                     "returned {status} — {}",
-                    &body[..body.len().min(200)]
+                    crate::provider::bounded_utf8_prefix(&body, 200)
                 ))
             }
         })
@@ -1410,6 +1410,26 @@ mod tests {
             provider.test_connection().await.unwrap(),
             "\"oauth-account\" responded OK"
         );
+    }
+
+    #[tokio::test]
+    async fn connection_test_handles_multibyte_error_body() {
+        let server = MockServer::start().await;
+        let responses_url = format!("{}/responses", server.uri());
+        let models_url = format!("{}/models", server.uri());
+        let (_dir, _hub, provider, access_token) = managed_provider(responses_url, models_url);
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", format!("Bearer {access_token}")))
+            .and(header("chatgpt-account-id", "account-v2"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("界".repeat(100)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = provider.test_connection().await.unwrap_err();
+        assert!(error.contains("400"));
+        assert!(error.ends_with(&"界".repeat(66)));
     }
 
     #[tokio::test]

@@ -23,6 +23,14 @@ pub(crate) fn reconcile_config_provider_deferred(
     reconcile_config_provider_with(registry, name, entry, |name| std::env::var(name).ok())
 }
 
+/// Build a config-backed provider with the same credential and endpoint resolution as live registration.
+pub fn build_config_provider(
+    name: &str,
+    entry: &ProviderEntry,
+) -> Result<Arc<dyn Provider>, ConfigProviderAvailability> {
+    build_config_provider_with(name, entry, |name| std::env::var(name).ok())
+}
+
 /// Inspect config-backed provider availability without exposing credentials.
 pub fn config_provider_availability(entry: &ProviderEntry) -> ConfigProviderAvailability {
     match resolve_provider_credential(entry, &|name| std::env::var(name).ok()) {
@@ -38,7 +46,7 @@ fn reconcile_config_provider_with(
     read_env: impl Fn(&str) -> Option<String>,
 ) -> (ConfigProviderAvailability, Option<Arc<dyn Provider>>) {
     let registry_key = format!("config:{name}");
-    let provider = match build_config_provider(&registry_key, entry, read_env) {
+    let provider = match build_config_provider_with(&registry_key, entry, read_env) {
         Ok(provider) => provider,
         Err(availability) => {
             return (availability, registry.take_named(&registry_key));
@@ -50,7 +58,7 @@ fn reconcile_config_provider_with(
     )
 }
 
-fn build_config_provider(
+fn build_config_provider_with(
     registry_key: &str,
     entry: &ProviderEntry,
     read_env: impl Fn(&str) -> Option<String>,
@@ -245,7 +253,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            build_config_provider("config:test", &entry, read_from(&[]))
+            build_config_provider_with("config:test", &entry, read_from(&[]))
                 .map(|_| ConfigProviderAvailability::Available)
                 .unwrap_or_else(|availability| availability),
             ConfigProviderAvailability::Available
@@ -253,20 +261,20 @@ mod tests {
 
         entry.enabled = Some(false);
         assert!(matches!(
-            build_config_provider("config:test", &entry, read_from(&[])),
+            build_config_provider_with("config:test", &entry, read_from(&[])),
             Err(ConfigProviderAvailability::Disabled)
         ));
 
         entry.enabled = Some(true);
         entry.api_key = None;
         assert!(matches!(
-            build_config_provider("config:test", &entry, read_from(&[])),
+            build_config_provider_with("config:test", &entry, read_from(&[])),
             Err(ConfigProviderAvailability::MissingCredential)
         ));
 
         entry.kind = "unsupported".into();
         assert!(matches!(
-            build_config_provider("config:test", &entry, read_from(&[])),
+            build_config_provider_with("config:test", &entry, read_from(&[])),
             Err(ConfigProviderAvailability::UnsupportedKind)
         ));
     }

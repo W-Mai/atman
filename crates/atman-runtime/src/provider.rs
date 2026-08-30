@@ -503,6 +503,14 @@ impl AssistantMessage {
     }
 }
 
+pub(crate) fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
@@ -856,6 +864,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct LegacyDiscoveryProvider;
+
+    #[test]
+    fn bounded_utf8_prefix_never_splits_a_character() {
+        let value = format!("{}z", "界".repeat(67));
+        let prefix = bounded_utf8_prefix(&value, 200);
+        assert!(prefix.len() <= 200);
+        assert_eq!(prefix, "界".repeat(66));
+    }
 
     struct OwnerLockProbeProvider {
         name: String,

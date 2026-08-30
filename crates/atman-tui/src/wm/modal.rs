@@ -331,24 +331,7 @@ impl ModalManager {
                     if let Some(ModalAction::OpenModelManager(name)) = pm_action {
                         self.model_manager.open_with_provider(&name);
                     }
-                    if self.provider_manager.refresh_just_triggered {
-                        self.provider_manager.refresh_just_triggered = false;
-                        app.push_toast(
-                            "refreshing models…",
-                            crate::app::NoteLevel::Info,
-                            std::time::Duration::from_secs(2),
-                            crate::app::ToastPosition::TopRight,
-                        );
-                    }
-                    if self.provider_manager.test_just_triggered {
-                        self.provider_manager.test_just_triggered = false;
-                        app.push_toast(
-                            "testing endpoint…",
-                            crate::app::NoteLevel::Info,
-                            std::time::Duration::from_secs(5),
-                            crate::app::ToastPosition::TopRight,
-                        );
-                    }
+                    self.drain_provider_feedback(app);
                     if self.onboarding_open
                         && !self.provider_manager.open
                         && !self.provider_manager.has_pending_mutation()
@@ -417,6 +400,49 @@ impl ModalManager {
                 };
                 (result.is_some(), result)
             }
+        }
+    }
+
+    pub(super) fn handle_provider_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        self.provider_manager.handle_mouse(event, tx);
+        self.drain_provider_feedback(app);
+    }
+
+    fn drain_provider_feedback(&mut self, app: &mut crate::app::AppState) {
+        while let Some(feedback) = self.provider_manager.take_feedback() {
+            let (message, level, duration) = match feedback {
+                crate::provider_manager::ProviderFeedback::RefreshStarted => (
+                    "refreshing models…",
+                    crate::app::NoteLevel::Info,
+                    std::time::Duration::from_secs(2),
+                ),
+                crate::provider_manager::ProviderFeedback::TestStarted => (
+                    "testing endpoint…",
+                    crate::app::NoteLevel::Info,
+                    std::time::Duration::from_secs(5),
+                ),
+                crate::provider_manager::ProviderFeedback::DispatchUnavailable => (
+                    "provider operation is unavailable",
+                    crate::app::NoteLevel::Error,
+                    std::time::Duration::from_secs(5),
+                ),
+                crate::provider_manager::ProviderFeedback::InvalidTestConfiguration => (
+                    "provider test configuration is invalid",
+                    crate::app::NoteLevel::Error,
+                    std::time::Duration::from_secs(5),
+                ),
+            };
+            app.push_toast(
+                message.to_string(),
+                level,
+                duration,
+                crate::app::ToastPosition::TopRight,
+            );
         }
     }
 
@@ -1101,12 +1127,15 @@ mod tests {
         };
         manager.provider_manager.open();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(manager.provider_manager.begin_mutation(
-            crate::ProviderMutation::Refresh {
-                provider_id: "provider-id".into(),
-            },
-            Some(&tx),
-        ));
+        assert_eq!(
+            manager.provider_manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "provider-id".into(),
+                },
+                Some(&tx),
+            ),
+            crate::provider_manager::ProviderDispatchOutcome::Started
+        );
         let mut app = crate::app::AppState::new("session".into(), None);
 
         manager.handle_key_top(
@@ -1119,5 +1148,38 @@ mod tests {
         assert!(!manager.provider_manager.open);
         assert!(manager.provider_manager.has_pending_mutation());
         assert!(manager.onboarding.error.is_none());
+    }
+
+    #[test]
+    fn unavailable_provider_dispatch_becomes_one_error_toast_on_key() {
+        let mut manager = ModalManager::default();
+        manager.provider_manager.open();
+        assert_eq!(
+            manager.provider_manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "provider-id".into(),
+                },
+                None,
+            ),
+            crate::provider_manager::ProviderDispatchOutcome::Unavailable
+        );
+        let mut app = crate::app::AppState::new("session".into(), None);
+
+        manager.handle_key_top(
+            ModalKind::ProviderManager,
+            &crate::keys::KeyAction::Char('x'),
+            &mut app,
+            None,
+        );
+        manager.handle_key_top(
+            ModalKind::ProviderManager,
+            &crate::keys::KeyAction::Char('x'),
+            &mut app,
+            None,
+        );
+
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].level, crate::app::NoteLevel::Error);
+        assert_eq!(app.toasts[0].message, "provider operation is unavailable");
     }
 }

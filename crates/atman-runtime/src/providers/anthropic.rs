@@ -540,7 +540,7 @@ impl Provider for AnthropicProvider {
                 let body = resp.text().await.unwrap_or_default();
                 Err(format!(
                     "returned {status} — {}",
-                    &body[..body.len().min(200)]
+                    crate::provider::bounded_utf8_prefix(&body, 200)
                 ))
             }
         })

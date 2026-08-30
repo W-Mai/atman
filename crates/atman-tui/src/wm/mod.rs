@@ -765,9 +765,14 @@ impl WindowManager {
     pub fn dispatch_mouse(
         &mut self,
         event: &MouseEvent,
-        _app: &mut crate::app::AppState,
-        _control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        app: &mut crate::app::AppState,
+        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
+        self.sync_modals();
+        if self.top_kind() == Some(ModalKind::ProviderManager) {
+            self.modals.handle_provider_mouse(event, app, control_tx);
+            return (true, Vec::new());
+        }
         let Some(id) = self
             .hit_test_panel(event.column, event.row)
             .map(|panel| panel.id)
@@ -1540,6 +1545,43 @@ mod tests {
             "with no modal open, dispatch_key must route to nothing"
         );
         assert!(stack.modal_stack.is_empty());
+    }
+
+    #[test]
+    fn provider_mouse_feedback_is_drained_only_when_provider_is_topmost() {
+        let mut wm = WindowManager::default();
+        wm.modals.provider_manager.open();
+        assert_eq!(
+            wm.modals.provider_manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "provider-id".into(),
+                },
+                None,
+            ),
+            crate::provider_manager::ProviderDispatchOutcome::Unavailable
+        );
+        wm.sync_modals();
+        wm.modals.alias_manager.open();
+        wm.sync_modals();
+        assert_eq!(wm.top_kind(), Some(ModalKind::AliasManager));
+
+        let event = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let mut app = crate::app::AppState::new("session".into(), None);
+        let (consumed, _) = wm.dispatch_mouse(&event, &mut app, None);
+        assert!(!consumed);
+        assert!(app.toasts.is_empty());
+
+        wm.modals.alias_manager.close();
+        let (consumed, _) = wm.dispatch_mouse(&event, &mut app, None);
+        assert!(consumed);
+        assert_eq!(wm.top_kind(), Some(ModalKind::ProviderManager));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].level, crate::app::NoteLevel::Error);
     }
 
     #[test]

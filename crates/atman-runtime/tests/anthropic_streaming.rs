@@ -202,6 +202,21 @@ async fn anthropic_http_error_becomes_tool_failed() {
     ));
 }
 
+#[tokio::test]
+async fn anthropic_connection_test_handles_multibyte_error_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("界".repeat(100)))
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new("anthropic", "bad").with_base_url(server.uri());
+    let error = provider.test_connection().await.unwrap_err();
+    assert!(error.contains("400"));
+    assert!(error.ends_with(&"界".repeat(66)));
+}
+
 // Manual real-endpoint smoke test. Requires:
 //   ATMAN_TEST_GLM_KEY=<key> cargo test --test anthropic_streaming --ignored anthropic_real
 // The endpoint must be Anthropic-Messages-compatible; the test also honors

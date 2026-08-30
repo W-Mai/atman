@@ -2092,17 +2092,10 @@ async fn cmd_repl_once(
                             result,
                         });
                     }
-                    atman_tui::TuiControl::TestProvider {
-                        name,
-                        provider_type,
-                        api_key,
-                        base_url,
-                    } => {
+                    atman_tui::TuiControl::TestProvider { name, entry } => {
                         let tx = cmd_tx_for_models.clone();
                         tokio::spawn(async move {
-                            let (msg, ok) =
-                                test_provider_endpoint(&name, &provider_type, &api_key, &base_url)
-                                    .await;
+                            let (msg, ok) = test_provider_endpoint(&name, &entry).await;
                             let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult((msg, ok)));
                         });
                     }
@@ -7124,28 +7117,27 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn test_provider_endpoint(
     name: &str,
-    provider_type: &str,
-    api_key: &str,
-    base_url: &str,
+    entry: &atman_runtime::model_registry::ProviderEntry,
 ) -> (String, bool) {
-    let provider: Box<dyn atman_runtime::provider::Provider> = if provider_type == "anthropic" {
-        Box::new(
-            atman_runtime::providers::anthropic::AnthropicProvider::new(name, api_key)
-                .with_base_url(base_url),
-        )
-    } else {
-        Box::new(
-            atman_runtime::providers::openai::OpenAiProvider::new(name, api_key)
-                .with_reasoning_format(
-                    atman_runtime::providers::openai::OpenAiReasoningFormat::for_provider_kind(
-                        provider_type,
-                    ),
-                )
-                .with_base_url(base_url),
-        )
+    let provider = match atman_runtime::config_provider::build_config_provider(name, entry) {
+        Ok(provider) => provider,
+        Err(availability) => {
+            let reason = match availability {
+                atman_runtime::config_provider::ConfigProviderAvailability::Disabled => {
+                    "is disabled"
+                }
+                atman_runtime::config_provider::ConfigProviderAvailability::MissingCredential => {
+                    "has no available credential"
+                }
+                atman_runtime::config_provider::ConfigProviderAvailability::UnsupportedKind => {
+                    "uses an unsupported provider kind"
+                }
+                _ => "is unavailable",
+            };
+            return (format!("\"{name}\" {reason}"), false);
+        }
     };
     match tokio::time::timeout(
         std::time::Duration::from_secs(15),

@@ -92,8 +92,6 @@ pub struct ProviderManager {
     pub providers: Vec<ProviderEntry>,
     pub selected: usize,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
-    pub refresh_just_triggered: bool,
-    pub test_just_triggered: bool,
     pub test_btn_rect: Option<Rect>,
     show_add: bool,
     focus: ProviderFocus,
@@ -117,6 +115,22 @@ pub struct ProviderManager {
     confirm_provider_name: String,
     next_mutation_request_id: u64,
     pending_mutation: Option<crate::ProviderMutationRequest>,
+    feedback: Option<ProviderFeedback>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderDispatchOutcome {
+    Started,
+    Busy,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderFeedback {
+    RefreshStarted,
+    TestStarted,
+    DispatchUnavailable,
+    InvalidTestConfiguration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +157,7 @@ impl ProviderManager {
         me: &crossterm::event::MouseEvent,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if !self.in_form {
+        if self.pending_mutation.is_some() || !self.in_form {
             return;
         }
         let Some(rect) = self.test_btn_rect else {
@@ -179,6 +193,16 @@ impl ProviderManager {
 
     pub(crate) fn has_pending_mutation(&self) -> bool {
         self.pending_mutation.is_some()
+    }
+
+    pub(crate) fn take_feedback(&mut self) -> Option<ProviderFeedback> {
+        self.feedback.take()
+    }
+
+    fn record_feedback(&mut self, feedback: ProviderFeedback) {
+        if self.feedback.is_none() {
+            self.feedback = Some(feedback);
+        }
     }
 
     fn pending_help(&self) -> Option<&'static str> {
@@ -511,14 +535,14 @@ impl ProviderManager {
         let Some(id) = self.confirm_provider_id.clone() else {
             return;
         };
-        let sent = match self.confirm_kind {
+        let outcome = match self.confirm_kind {
             Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => self.begin_mutation(
                 crate::ProviderMutation::Remove { provider_id: id },
                 control_tx,
             ),
-            None => false,
+            None => ProviderDispatchOutcome::Busy,
         };
-        if sent {
+        if matches!(outcome, ProviderDispatchOutcome::Started) {
             self.confirm_provider_id = None;
             self.confirm_kind = None;
             self.show_confirm = false;
@@ -534,13 +558,16 @@ impl ProviderManager {
             ..
         }) = self.providers.get(self.selected)
         {
-            if self.begin_mutation(
-                crate::ProviderMutation::Refresh {
-                    provider_id: id.clone(),
-                },
-                control_tx,
+            if matches!(
+                self.begin_mutation(
+                    crate::ProviderMutation::Refresh {
+                        provider_id: id.clone(),
+                    },
+                    control_tx,
+                ),
+                ProviderDispatchOutcome::Started
             ) {
-                self.refresh_just_triggered = true;
+                self.record_feedback(ProviderFeedback::RefreshStarted);
             }
         }
     }
@@ -549,12 +576,13 @@ impl ProviderManager {
         &mut self,
         action: crate::ProviderMutation,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> ProviderDispatchOutcome {
         if self.pending_mutation.is_some() {
-            return false;
+            return ProviderDispatchOutcome::Busy;
         }
         let Some(tx) = control_tx else {
-            return false;
+            self.record_feedback(ProviderFeedback::DispatchUnavailable);
+            return ProviderDispatchOutcome::Unavailable;
         };
         self.next_mutation_request_id = self.next_mutation_request_id.wrapping_add(1);
         let request = crate::ProviderMutationRequest {
@@ -565,10 +593,11 @@ impl ProviderManager {
             .send(crate::TuiControl::MutateProvider(request.clone()))
             .is_err()
         {
-            return false;
+            self.record_feedback(ProviderFeedback::DispatchUnavailable);
+            return ProviderDispatchOutcome::Unavailable;
         }
         self.pending_mutation = Some(request);
-        true
+        ProviderDispatchOutcome::Started
     }
 
     pub(crate) fn resolve_mutation(
@@ -622,19 +651,14 @@ impl ProviderManager {
         if let Some(p) = p {
             if matches!(p.source, ProviderSource::Config) {
                 let providers = atman_runtime::model_registry::all_provider_entries();
-                if let Some(entry) = providers.iter().find(|(n, _)| *n == p.name).map(|(_, e)| e) {
-                    if let (Some(api_key), Some(base_url)) = (&entry.api_key, &entry.base_url) {
-                        let provider_type = entry.kind.clone();
-                        if let Some(tx) = control_tx {
-                            let _ = tx.send(crate::TuiControl::TestProvider {
-                                name: p.name,
-                                provider_type,
-                                api_key: api_key.clone(),
-                                base_url: base_url.clone(),
-                            });
-                            self.test_just_triggered = true;
-                        }
-                    }
+                if let Some(mut entry) = providers
+                    .iter()
+                    .find(|(name, _)| *name == p.name)
+                    .map(|(_, entry)| entry.clone())
+                {
+                    entry.name = p.name.clone();
+                    entry.enabled = Some(true);
+                    self.dispatch_test(p.name, entry, control_tx);
                 }
             }
         }
@@ -683,26 +707,57 @@ impl ProviderManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         let name = self.name_editor.buf().trim().to_string();
-        let api_key = self.api_key_editor.buf().trim().to_string();
-        let base_url = self.base_url_editor.buf().trim().to_string();
-        let provider_type = self.provider_type_editor.buf().trim().to_string();
-        if name.is_empty() || api_key.is_empty() || base_url.is_empty() {
+        if name.is_empty() {
             return;
         }
-        let provider_type = if provider_type.is_empty() {
+        let kind = self.provider_type_editor.buf().trim().to_string();
+        let kind = if kind.is_empty() {
             atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
         } else {
-            provider_type
+            kind
         };
-        if let Some(tx) = control_tx {
-            let _ = tx.send(crate::TuiControl::TestProvider {
-                name,
-                provider_type,
-                api_key,
-                base_url,
-            });
-            self.test_just_triggered = true;
+        let reasoning_format = match self.reasoning_format_editor.buf().parse() {
+            Ok(reasoning_format) => Some(reasoning_format),
+            Err(_) => {
+                self.record_feedback(ProviderFeedback::InvalidTestConfiguration);
+                return;
+            }
+        };
+        let entry = atman_runtime::model_registry::ProviderEntry {
+            name: name.clone(),
+            kind,
+            api_key: non_empty(self.api_key_editor.buf()),
+            api_key_env: non_empty(self.api_key_env_editor.buf()),
+            base_url: non_empty(self.base_url_editor.buf()),
+            max_tokens: self.form_max_tokens,
+            reasoning_format,
+            enabled: Some(true),
+        };
+        self.dispatch_test(name, entry, control_tx);
+    }
+
+    fn dispatch_test(
+        &mut self,
+        name: String,
+        entry: atman_runtime::model_registry::ProviderEntry,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> ProviderDispatchOutcome {
+        if self.pending_mutation.is_some() {
+            return ProviderDispatchOutcome::Busy;
         }
+        let Some(tx) = control_tx else {
+            self.record_feedback(ProviderFeedback::DispatchUnavailable);
+            return ProviderDispatchOutcome::Unavailable;
+        };
+        if tx
+            .send(crate::TuiControl::TestProvider { name, entry })
+            .is_err()
+        {
+            self.record_feedback(ProviderFeedback::DispatchUnavailable);
+            return ProviderDispatchOutcome::Unavailable;
+        }
+        self.record_feedback(ProviderFeedback::TestStarted);
+        ProviderDispatchOutcome::Started
     }
 
     fn handle_add_key(
@@ -982,6 +1037,11 @@ impl ProviderManager {
             control_tx,
         );
     }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn mutation_success_matches(
@@ -1532,6 +1592,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.test_btn_rect = None;
         if area.height < 4 {
             return;
         }
@@ -1822,6 +1883,213 @@ mod tests {
     }
 
     #[test]
+    fn provider_test_dispatch_uses_the_complete_draft_and_truthful_feedback() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+        manager.api_key_editor.replace_with("");
+        manager.base_url_editor.replace_with("");
+        manager.form_max_tokens = Some(16_384);
+
+        manager.test_form(Some(&tx));
+        assert_eq!(manager.take_feedback(), Some(ProviderFeedback::TestStarted));
+        let crate::TuiControl::TestProvider { name, entry } = rx.try_recv().unwrap() else {
+            panic!("expected provider test");
+        };
+        assert_eq!(name, "gateway");
+        assert_eq!(entry.name, "gateway");
+        assert_eq!(entry.kind, "openai-compat");
+        assert_eq!(entry.api_key, None);
+        assert_eq!(entry.api_key_env.as_deref(), Some("GATEWAY_API_KEY"));
+        assert_eq!(entry.base_url, None);
+        assert_eq!(entry.max_tokens, Some(16_384));
+        assert_eq!(
+            entry.reasoning_format,
+            Some(atman_runtime::providers::openai::OpenAiReasoningFormat::CompatibleThinking)
+        );
+        assert_eq!(entry.enabled, Some(true));
+
+        manager.reasoning_format_editor.replace_with("invalid");
+        manager.test_form(Some(&tx));
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::InvalidTestConfiguration)
+        );
+        assert!(rx.try_recv().is_err());
+        manager
+            .reasoning_format_editor
+            .replace_with("thinking-toggle");
+
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(closed_rx);
+        manager.test_form(Some(&closed_tx));
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::DispatchUnavailable)
+        );
+        assert!(manager.in_form);
+
+        manager.test_form(None);
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::DispatchUnavailable)
+        );
+        assert!(manager.in_form);
+    }
+
+    #[test]
+    fn config_form_survives_an_unavailable_dispatch() {
+        let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(closed_rx);
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+
+        manager.commit_form(Some(&closed_tx));
+
+        assert!(manager.pending_mutation.is_none());
+        assert!(manager.in_form);
+        assert!(manager.show_add);
+        assert_eq!(manager.api_key_editor.buf(), "test-key");
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::DispatchUnavailable)
+        );
+    }
+
+    #[test]
+    fn selected_provider_test_preserves_env_configuration_and_forces_test_enabled() {
+        struct RegistryReset;
+        impl Drop for RegistryReset {
+            fn drop(&mut self) {
+                atman_runtime::model_registry::set_provider_config(Default::default());
+            }
+        }
+
+        let _registry = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reset = RegistryReset;
+        let mut config = atman_runtime::model_registry::ProviderConfig::default();
+        config.providers.insert(
+            "gateway".into(),
+            atman_runtime::model_registry::ProviderEntry {
+                kind: "openai-compat".into(),
+                api_key_env: Some("GATEWAY_API_KEY".into()),
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        atman_runtime::model_registry::set_provider_config(config);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager {
+            providers: vec![ProviderEntry {
+                source: ProviderSource::Config,
+                name: "gateway".into(),
+                kind: "openai-compat".into(),
+                status: ProviderStatus::Disabled,
+                detail: String::new(),
+            }],
+            ..Default::default()
+        };
+
+        manager.test_selected(Some(&tx));
+        assert_eq!(manager.take_feedback(), Some(ProviderFeedback::TestStarted));
+        let crate::TuiControl::TestProvider { name, entry } = rx.try_recv().unwrap() else {
+            panic!("expected provider test");
+        };
+        assert_eq!(name, "gateway");
+        assert_eq!(entry.api_key_env.as_deref(), Some("GATEWAY_API_KEY"));
+        assert_eq!(entry.enabled, Some(true));
+        let saved = atman_runtime::model_registry::all_provider_entries()
+            .into_iter()
+            .find(|(name, _)| name == "gateway")
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(saved.enabled, Some(false));
+    }
+
+    #[test]
+    fn pending_mutation_blocks_mouse_provider_tests() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+        manager.test_btn_rect = Some(Rect::new(4, 3, 6, 1));
+        assert_eq!(
+            manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "auth-id".into(),
+                },
+                Some(&tx),
+            ),
+            ProviderDispatchOutcome::Started
+        );
+        let _ = receive_mutation(&mut rx);
+
+        manager.handle_mouse(
+            &crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 4,
+                row: 3,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            Some(&tx),
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(manager.take_feedback(), None);
+    }
+
+    #[test]
+    fn mouse_provider_test_records_started_only_after_a_successful_send() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+        manager.test_btn_rect = Some(Rect::new(4, 3, 6, 1));
+
+        manager.handle_mouse(
+            &crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 4,
+                row: 3,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            Some(&tx),
+        );
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::TuiControl::TestProvider { .. })
+        ));
+        assert_eq!(manager.take_feedback(), Some(ProviderFeedback::TestStarted));
+    }
+
+    #[test]
+    fn rendering_a_form_clears_an_obsolete_test_hit_region() {
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+        manager.test_btn_rect = Some(Rect::new(4, 3, 6, 1));
+        let app = crate::app::AppState::new("session".into(), None);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 3)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <ProviderManager as crate::wm::modal::ModalOverlay>::render_content(
+                    &mut manager,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &theme,
+                );
+            })
+            .unwrap();
+
+        assert!(manager.test_btn_rect.is_none());
+    }
+
+    #[test]
     fn config_edit_keeps_name_and_hidden_max_tokens() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = ProviderManager::default();
@@ -2060,7 +2328,10 @@ mod tests {
                 provider_id: "auth-id".into()
             }
         );
-        assert!(refresh_manager.refresh_just_triggered);
+        assert_eq!(
+            refresh_manager.take_feedback(),
+            Some(ProviderFeedback::RefreshStarted)
+        );
     }
 
     #[test]
@@ -2120,16 +2391,38 @@ mod tests {
 
     #[test]
     fn failed_dispatch_and_pending_request_reject_additional_mutations() {
+        let mut manager = ProviderManager::default();
+        assert_eq!(
+            manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "auth-id".into(),
+                },
+                None,
+            ),
+            ProviderDispatchOutcome::Unavailable
+        );
+        assert!(manager.pending_mutation.is_none());
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::DispatchUnavailable)
+        );
+
         let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel();
         drop(closed_rx);
-        let mut manager = ProviderManager::default();
-        assert!(!manager.begin_mutation(
-            crate::ProviderMutation::Refresh {
-                provider_id: "auth-id".into(),
-            },
-            Some(&closed_tx),
-        ));
+        assert_eq!(
+            manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "auth-id".into(),
+                },
+                Some(&closed_tx),
+            ),
+            ProviderDispatchOutcome::Unavailable
+        );
         assert!(manager.pending_mutation.is_none());
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::DispatchUnavailable)
+        );
 
         manager.confirm_provider_id = Some("auth-id".into());
         manager.confirm_provider_name = "Auth".into();
@@ -2139,20 +2432,31 @@ mod tests {
         assert_eq!(manager.confirm_provider_id.as_deref(), Some("auth-id"));
         assert_eq!(manager.confirm_kind, Some(ConfirmKind::Logout));
         assert!(manager.show_confirm);
+        assert_eq!(
+            manager.take_feedback(),
+            Some(ProviderFeedback::DispatchUnavailable)
+        );
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(manager.begin_mutation(
-            crate::ProviderMutation::Refresh {
-                provider_id: "first".into(),
-            },
-            Some(&tx),
-        ));
-        assert!(!manager.begin_mutation(
-            crate::ProviderMutation::Remove {
-                provider_id: "second".into(),
-            },
-            Some(&tx),
-        ));
+        assert_eq!(
+            manager.begin_mutation(
+                crate::ProviderMutation::Refresh {
+                    provider_id: "first".into(),
+                },
+                Some(&tx),
+            ),
+            ProviderDispatchOutcome::Started
+        );
+        assert_eq!(
+            manager.begin_mutation(
+                crate::ProviderMutation::Remove {
+                    provider_id: "second".into(),
+                },
+                Some(&tx),
+            ),
+            ProviderDispatchOutcome::Busy
+        );
+        assert_eq!(manager.take_feedback(), None);
         assert_eq!(
             receive_mutation(&mut rx).action,
             crate::ProviderMutation::Refresh {

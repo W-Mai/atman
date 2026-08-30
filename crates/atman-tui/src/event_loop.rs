@@ -319,10 +319,6 @@ pub(crate) async fn run_frames(
                             }
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
-                            app.wm.sync_modals();
-                            if app.wm.modals.provider_manager.open {
-                                app.wm.modals.provider_manager.handle_mouse(&me, handle.control_tx.as_ref());
-                            }
                             let (consumed, commands) = app.wm.dispatch_mouse(
                                 &me,
                                 &mut app.app,
@@ -1776,11 +1772,12 @@ mod tests {
         action: crate::ProviderMutation,
     ) -> crate::ProviderMutationRequest {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(
+        assert_eq!(
             app.wm
                 .modals
                 .provider_manager
-                .begin_mutation(action, Some(&tx))
+                .begin_mutation(action, Some(&tx)),
+            crate::provider_manager::ProviderDispatchOutcome::Started
         );
         match rx.try_recv().unwrap() {
             crate::TuiControl::MutateProvider(request) => request,

@@ -153,9 +153,7 @@ pub enum TuiControl {
     },
     TestProvider {
         name: String,
-        provider_type: String,
-        api_key: String,
-        base_url: String,
+        entry: atman_runtime::model_registry::ProviderEntry,
     },
     TermResize {
         handle: String,

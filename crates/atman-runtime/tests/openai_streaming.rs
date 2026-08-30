@@ -245,6 +245,21 @@ async fn openai_http_error_becomes_tool_failed() {
     ));
 }
 
+#[tokio::test]
+async fn openai_connection_test_handles_multibyte_error_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("界".repeat(100)))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new("openai", "bad").with_base_url(server.uri());
+    let error = provider.test_connection().await.unwrap_err();
+    assert!(error.contains("400"));
+    assert!(error.ends_with(&"界".repeat(66)));
+}
+
 // Manual OpenAI-compat smoke test — needs an Ollama-like server on the wire.
 // Run: `cargo test --test openai_streaming --ignored openai_real`.
 // Env: ATMAN_TEST_OLLAMA_{BASE_URL,MODEL,KEY} — key can be any string, Ollama ignores it.
