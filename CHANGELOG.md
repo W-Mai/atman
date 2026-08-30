@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Live trust policy and nested sandbox propagation** — active flows evaluate the current Session trust mode for every invocation, while orchestration tools retain the configured sandbox for controlled child execution.
 - **Ordered trust-mode submission** — TUI prompts wait behind preceding trust-policy commits, failed policy updates block the affected submission, and every trust picker opens on the active Session mode.
 - **Explicit model routing** — provider resolution honors a model's configured provider before falling back to slash-prefix routing.
 - **Acknowledged model switching** — the model picker stays pending until the alias update and session context change complete, then applies only the matching success or failure result.

@@ -43,30 +43,17 @@ pub struct EffectiveAuthority {
 }
 
 impl EffectiveAuthority {
-    pub fn root(trust: &TrustConfig, shell: bool, workspace_root: Option<PathBuf>) -> Self {
-        let execution_policy = trust.execution_policy();
-        let allowed_tiers =
-            [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four].map(|tier| {
-                execution_policy == ExecutionPolicy::Unrestricted
-                    || trust.resolve_tier(tier) != PolicyAction::Deny
-            });
+    pub fn root(_trust: &TrustConfig, shell: bool, workspace_root: Option<PathBuf>) -> Self {
         let risks = all_risks();
-        let allowed_risks = risks
-            .into_iter()
-            .filter(|risk| {
-                execution_policy == ExecutionPolicy::Unrestricted
-                    || trust.resolve_risk(*risk) != PolicyAction::Deny
-            })
-            .collect();
-        let tier_ceiling = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four]
-            .map(|tier| trust.resolve_policy(tier, []));
-        let risk_ceiling = risks.map(|risk| trust.resolve_policy(Tier::Zero, [risk]));
         Self {
-            execution_policy,
-            allowed_tiers,
-            allowed_risks,
-            tier_ceiling,
-            risk_ceiling,
+            // Session trust is evaluated per invocation. Root authority records
+            // structural ceilings only, so a user policy change is not frozen at
+            // flow start while delegated child restrictions remain monotonic.
+            execution_policy: ExecutionPolicy::Unrestricted,
+            allowed_tiers: [true; 5],
+            allowed_risks: risks.into_iter().collect(),
+            tier_ceiling: [PolicyAction::Auto; 5],
+            risk_ceiling: [PolicyAction::Auto; 6],
             shell,
             // The session root is the trust boundary for permission decisions.
             // Child authorities can only retain this bit through intersection.
@@ -280,6 +267,38 @@ mod tests {
         assert_eq!(child.allowed_risks, BTreeSet::from([RiskKind::Network]));
         assert!(!child.shell);
         assert!(!child.permission_management);
+    }
+
+    #[test]
+    fn root_authority_applies_each_live_session_policy_snapshot() {
+        let started_controlled = TrustConfig::default();
+        let root = EffectiveAuthority::root(&started_controlled, true, None);
+        let reckless = TrustConfig {
+            mode: crate::trust::TrustMode::Reckless,
+            ..TrustConfig::default()
+        };
+
+        assert_eq!(
+            root.constrain_policy(&reckless, Tier::Four, [RiskKind::ProcessSpawn]),
+            (ExecutionPolicy::Unrestricted, PolicyAction::Auto)
+        );
+        assert_eq!(
+            root.constrain_policy(&started_controlled, Tier::Four, [RiskKind::ProcessSpawn]),
+            (ExecutionPolicy::Controlled, PolicyAction::Ask)
+        );
+
+        let restricted = EffectiveAuthority {
+            execution_policy: ExecutionPolicy::Controlled,
+            tier_ceiling: [PolicyAction::Deny; 5],
+            ..root.clone()
+        };
+        let child = root.for_child(&restricted, true, None).unwrap();
+        assert_eq!(
+            child.constrain_policy(&reckless, Tier::Four, [RiskKind::ProcessSpawn]),
+            (ExecutionPolicy::Controlled, PolicyAction::Deny)
+        );
+        assert_eq!(child.shell, root.shell);
+        assert_eq!(child.workspace_root, root.workspace_root);
     }
 
     #[test]

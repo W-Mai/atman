@@ -3261,6 +3261,57 @@ mod tests {
     }
 
     #[test]
+    fn registered_root_applies_live_session_policy_changes() {
+        let flows = Arc::new(FlowRegistry::default());
+        let started_controlled = TrustConfig::default();
+        let requester = flows
+            .register_root(
+                "session".into(),
+                FlowRunId::now(),
+                EffectiveAuthority::root(&started_controlled, true, None),
+            )
+            .unwrap();
+        let broker = PermissionBroker::new(flows);
+        let reckless = TrustConfig {
+            mode: TrustMode::Reckless,
+            ..TrustConfig::default()
+        };
+
+        let SubmissionOutcome::Immediate(unrestricted) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                intent(),
+                false,
+                &reckless,
+            )
+            .unwrap()
+        else {
+            panic!("live Reckless policy must authorize the registered root");
+        };
+        assert!(matches!(
+            unrestricted.authorization,
+            ImmediateAuthorization::Unrestricted
+        ));
+
+        let SubmissionOutcome::Pending(pending) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                intent(),
+                false,
+                &ask_policy(),
+            )
+            .unwrap()
+        else {
+            panic!("the same root must return to controlled policy");
+        };
+        broker
+            .cancel(&pending.request.request_id, "test cleanup")
+            .unwrap();
+    }
+
+    #[test]
     fn broker_bound_user_authority_cannot_be_reused() {
         let flows = Arc::new(FlowRegistry::default());
         let requester = register_root(&flows, "session", false);

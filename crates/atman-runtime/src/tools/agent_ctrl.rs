@@ -1571,11 +1571,32 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{AgentSpawn, FlowRegistry, FlowRunStatus, terminal_then_emit};
+    use crate::permission::PermissionBroker;
     use crate::provider::ProviderRegistry;
-    use crate::tool::{Tool, ToolArgs, ToolCtx, ToolRegistry};
+    use crate::tool::{Tier, Tool, ToolArgs, ToolCtx, ToolRegistry};
     use crate::{InvocationEnv, Value};
     use std::cell::Cell;
     use std::sync::Arc;
+
+    struct SandboxProbe;
+
+    impl Tool for SandboxProbe {
+        fn name(&self) -> &str {
+            "sandbox.probe"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: ToolArgs,
+            ctx: &'a ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async move { Ok(Value::Bool(ctx.sandbox.is_some())) })
+        }
+    }
 
     #[test]
     fn terminal_transition_happens_before_flow_end_emit() {
@@ -1673,5 +1694,58 @@ mod tests {
                 FlowRunStatus::Ok { final_text, .. } if final_text == "high"
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn flow_spawn_retains_sandbox_for_child_tool_invocations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("child.at");
+        std::fs::write(&path, r#"flow child() -> bool { return sandbox.probe() }"#).unwrap();
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SandboxProbe));
+        let flows = Arc::new(FlowRegistry::new());
+        let broker = PermissionBroker::shared(Arc::clone(&flows));
+        let root_run_id = crate::event::FlowRunId::now();
+        let trust = crate::trust::TrustConfig::default();
+        let root_identity = flows
+            .register_root(
+                "test-session".into(),
+                root_run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&trust, false, None),
+            )
+            .unwrap();
+        let sandbox: Arc<dyn crate::sandbox::Sandbox> =
+            Arc::new(crate::sandbox::SandboxExec::new(dir.path()));
+        let mut ctx = ToolCtx::new()
+            .with_registry(tools)
+            .with_providers(Arc::new(ProviderRegistry::new()))
+            .with_flow_registry(Arc::clone(&flows))
+            .with_permission_broker(broker)
+            .with_session_id("test-session")
+            .with_trust(trust)
+            .with_sandbox(sandbox)
+            .for_tool_invocation(Tier::Two);
+        ctx.flow_run_id = Some(root_run_id);
+        ctx.flow_identity = Some(root_identity);
+
+        let result = AgentSpawn
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        (
+                            "flow".into(),
+                            Value::Str(format!("{}@child", path.display())),
+                        ),
+                        ("async".into(), Value::Bool(false)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, Value::Bool(true)));
     }
 }

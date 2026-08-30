@@ -455,9 +455,6 @@ impl ToolCtx {
             })
             .unwrap_or_else(|| trust.execution_policy());
         self.execution_policy = Some(execution_policy);
-        if tier != Tier::Four || execution_policy == crate::trust::ExecutionPolicy::Unrestricted {
-            self.sandbox = None;
-        }
         self
     }
 
@@ -711,16 +708,29 @@ mod tests {
         );
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
             std::sync::Arc::new(crate::sandbox::SandboxExec::new(dir.path()));
-        let base = ToolCtx::new()
+        let flows = std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+        let identity = flows
+            .register_root(
+                session.id().to_string(),
+                crate::event::FlowRunId::now(),
+                crate::flow_authority::EffectiveAuthority::root(&initial, true, None),
+            )
+            .unwrap();
+        let mut base = ToolCtx::new()
             .with_trust(crate::trust::TrustConfig {
                 mode: crate::trust::TrustMode::Reckless,
                 ..crate::trust::TrustConfig::default()
             })
             .with_session_runtime(std::sync::Arc::clone(&session))
             .with_sandbox(sandbox);
+        base.flow_identity = Some(identity);
 
         let controlled = base.clone().for_tool_invocation(Tier::Four);
         assert_eq!(controlled.trust, Some(initial));
+        assert_eq!(
+            controlled.execution_policy(),
+            Some(crate::trust::ExecutionPolicy::Controlled)
+        );
         assert!(controlled.sandbox.is_some());
 
         let reckless = crate::trust::TrustConfig {
@@ -731,24 +741,29 @@ mod tests {
         let unrestricted = base.for_tool_invocation(Tier::Four);
 
         assert_eq!(unrestricted.trust, Some(reckless));
-        assert!(unrestricted.sandbox.is_none());
+        assert_eq!(
+            unrestricted.execution_policy(),
+            Some(crate::trust::ExecutionPolicy::Unrestricted)
+        );
+        assert!(unrestricted.sandbox.is_some());
         assert!(controlled.sandbox.is_some());
     }
 
     #[test]
-    fn invocation_snapshot_only_exposes_sandbox_to_controlled_tier4() {
+    fn invocation_context_retains_sandbox_across_control_tools() {
         let dir = tempfile::tempdir().unwrap();
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
             std::sync::Arc::new(crate::sandbox::SandboxExec::new(dir.path()));
         let base = ToolCtx::new().with_sandbox(sandbox);
 
+        let control_ctx = base.for_tool_invocation(Tier::Two);
+        assert!(control_ctx.sandbox.is_some());
         assert!(
-            base.clone()
-                .for_tool_invocation(Tier::Three)
+            control_ctx
+                .for_tool_invocation(Tier::Four)
                 .sandbox
-                .is_none()
+                .is_some()
         );
-        assert!(base.for_tool_invocation(Tier::Four).sandbox.is_some());
     }
 
     fn binding(path: std::path::PathBuf) -> crate::git_workspace::WorkspaceBinding {
