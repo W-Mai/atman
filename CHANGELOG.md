@@ -26,6 +26,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction input accounting** — history budgets count the system prompt and tool definitions once, without reserving space for unsent structured input or double-counting an appended prompt already present in messages.
 - **Workflow tool border alignment** — approval badges preserve the declared card width so the top and bottom borders end in the same column.
 - **Eager sandbox fallback** — Eager `deny` runs process-only shell, terminal, and test calls inside the sandbox instead of rejecting the invocation, while explicit denials and unresolved external risks remain blocked. Platform temporary directories retain their controlled write access.
 - **Approval-scoped process execution** — authenticated user approvals bypass the Atman process sandbox for the approved `bash.spawn`, `term.spawn`, or `test.run` call, while policy and parent Flow approvals remain sandboxed.

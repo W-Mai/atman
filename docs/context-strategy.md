@@ -88,14 +88,15 @@ model context budget
 - safety margin
 - fixed request tokens
   - system prompt and runtime system context
-  - structured input
   - tool schemas
-  - appended prompt
 = budget available to session messages
 ```
 
-This distinction matters: a large tool registry or system prompt reduces the space
-available to conversation history even when the message list has not changed.
+The prompt is already part of the message list and is counted there. The structured
+`input` value is not serialized by the current provider adapters, so neither is
+counted again as fixed request input. A large tool registry or system prompt still
+reduces the space available to conversation history even when the message list has
+not changed.
 
 When the active window exceeds the model-derived trigger, auto-compaction selects an
 older contiguous range and asks an LLM for an anchored handoff summary. Range

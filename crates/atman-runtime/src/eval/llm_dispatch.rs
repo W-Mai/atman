@@ -105,12 +105,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         }
     }
     let compaction_budget = crate::compaction::CompactionBudgetContext {
-        fixed_input_tokens: Some(fixed_input_tokens(
-            &system,
-            &input,
-            &tool_specs,
-            args.prompt.as_deref(),
-        )),
+        fixed_input_tokens: Some(fixed_wire_prefix_tokens(&system, &tool_specs)),
     };
     if !matches!(context_mode, ContextMode::None)
         && !has_messages_override
@@ -647,30 +642,37 @@ fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message
     ));
 }
 
-fn fixed_input_tokens(
-    system: &Option<String>,
-    input: &Value,
-    tools: &[crate::tool::ToolSpec],
-    prompt: Option<&str>,
-) -> u64 {
+fn fixed_wire_prefix_tokens(system: &Option<String>, tools: &[crate::tool::ToolSpec]) -> u64 {
     let system_tokens = system
         .as_deref()
         .map(crate::provider::estimate_tokens)
         .unwrap_or(0);
-    let input_tokens = crate::provider::estimate_tokens(&input.to_json().to_string());
     let tool_tokens = serde_json::to_string(tools)
         .map(|json| crate::provider::estimate_tokens(&json))
         .unwrap_or(0);
-    let prompt_tokens = prompt.map(crate::provider::estimate_tokens).unwrap_or(0);
-    system_tokens
-        .saturating_add(input_tokens)
-        .saturating_add(tool_tokens)
-        .saturating_add(prompt_tokens)
+    system_tokens.saturating_add(tool_tokens)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_wire_prefix_counts_only_system_and_tool_definitions() {
+        let system = Some("stable instructions".to_string());
+        let tools = vec![crate::tool::ToolSpec {
+            name: "read".into(),
+            description: Some("Read a file".into()),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            }),
+        }];
+
+        let expected = crate::provider::estimate_tokens(system.as_deref().unwrap())
+            + crate::provider::estimate_tokens(&serde_json::to_string(&tools).unwrap());
+        assert_eq!(fixed_wire_prefix_tokens(&system, &tools), expected);
+    }
 
     #[tokio::test]
     async fn llm_diagnostic_uses_session_stream_without_content_streaming() {
