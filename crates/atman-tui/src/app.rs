@@ -1275,7 +1275,8 @@ impl AppState {
             }
             StreamFrame::PermissionRequestApproved { payload, .. }
             | StreamFrame::PermissionRequestDenied { payload, .. }
-            | StreamFrame::PermissionRequestCancelled { payload, .. } => {
+            | StreamFrame::PermissionRequestCancelled { payload, .. }
+            | StreamFrame::UnrestrictedExecution { payload, .. } => {
                 if let Some(request_id) = &payload.request_id {
                     self.pending_permissions.remove(request_id);
                 }
@@ -2365,6 +2366,16 @@ mod tests {
         });
         assert!(!app.pending_permissions.contains_key(&root_id));
         assert_eq!(app.pending_permissions.len(), 1);
+
+        let child_id = child_payload.request_id.clone().unwrap();
+        let mut unrestricted = child_payload;
+        unrestricted.revision = 2;
+        app.apply_stream_frame(StreamFrame::UnrestrictedExecution {
+            run_id: unrestricted.requesting_run_id.to_string(),
+            payload: unrestricted,
+        });
+        assert!(!app.pending_permissions.contains_key(&child_id));
+        assert!(app.pending_permissions.is_empty());
     }
 
     #[test]
