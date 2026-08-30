@@ -165,6 +165,7 @@ async fn context_session_feeds_session_history_into_llm_call() {
                 id: "call_0".into(),
                 name: "fs.read".into(),
                 input: serde_json::json!({"path": file_path.display().to_string()}),
+                intent: None,
             },
         ],
         vec![MessagePart::Text {

@@ -5167,6 +5167,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             tool_use_id: tool_use_id.clone(),
             tool: (*tool).into(),
             args_preview: (*args).into(),
+            call_intent: None,
         });
         let flow_run_id = FlowRunId(uuid::Uuid::parse_str(&run_id).unwrap());
         let _ = tx.send(StreamFrame::PermissionRequestCreated {
@@ -5180,6 +5181,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
                 root_run_id: flow_run_id,
                 tool_use_id,
                 tool: (*tool).into(),
+                call_intent: None,
                 tier: Tier::Four,
                 execution_boundary: Default::default(),
                 provenance: PermissionProvenanceSummary {

@@ -206,7 +206,7 @@ fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
                 });
             }
             MessageRole::Assistant => {
-                let (text, tool_calls) = split_assistant_parts(&m.parts);
+                let (text, tool_calls) = split_assistant_parts(&m.parts, &req.tools);
                 if let Some(t) = text {
                     items.push(InputItem {
                         role: Some("assistant".into()),
@@ -305,16 +305,30 @@ struct AssistantSplit {
     arguments: String,
 }
 
-fn split_assistant_parts(parts: &[MessagePart]) -> (Option<String>, Vec<AssistantSplit>) {
+fn split_assistant_parts(
+    parts: &[MessagePart],
+    tool_specs: &[crate::tool::ToolSpec],
+) -> (Option<String>, Vec<AssistantSplit>) {
     let mut text = String::new();
     let mut tools: Vec<AssistantSplit> = Vec::new();
     for p in parts {
         match p {
             MessagePart::Text { text: t } => text.push_str(t),
-            MessagePart::ToolUse { id, name, input } => tools.push(AssistantSplit {
+            MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } => tools.push(AssistantSplit {
                 id: id.clone(),
                 name: crate::tool_naming::to_wire(name),
-                arguments: serde_json::to_string(input).unwrap_or_default(),
+                arguments: serde_json::to_string(&crate::message::encode_tool_call_input(
+                    input,
+                    intent.as_ref(),
+                    name,
+                    tool_specs,
+                ))
+                .unwrap_or_default(),
             }),
             _ => {}
         }
@@ -638,10 +652,14 @@ impl Provider for CodexProvider {
                     } else {
                         serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null)
                     };
+                    let name = crate::tool_naming::from_wire(&tc.name, &streaming_tools);
+                    let (input, intent) =
+                        crate::message::decode_tool_call_input(input, &name, &streaming_tools);
                     parts.push(MessagePart::ToolUse {
                         id: tc.id,
-                        name: crate::tool_naming::from_wire(&tc.name, &streaming_tools),
+                        name,
                         input,
+                        intent,
                     });
                 }
 
@@ -1056,12 +1074,50 @@ struct OutputTokensDetails {
 mod tests {
     use super::{
         CodexCredentialSource, CodexProvider, normalize_input_tokens, oauth_account_id,
-        parse_codex_models,
+        parse_codex_models, split_assistant_parts,
     };
+    use crate::message::MessagePart;
     use crate::provider::Provider;
     use base64::Engine;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct IntentTool;
+
+    impl crate::tool::Tool for IntentTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn tier(&self) -> crate::tool::Tier {
+            crate::tool::Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: crate::tool::ToolArgs,
+            _ctx: &'a crate::tool::ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async { Ok(crate::Value::Unit) })
+        }
+    }
+
+    #[test]
+    fn tool_call_intent_is_serialized_into_function_arguments() {
+        let tools = vec![crate::tool::tool_spec(&IntentTool)];
+        let (_, calls) = split_assistant_parts(
+            &[MessagePart::ToolUse {
+                id: "call-1".into(),
+                name: "probe".into(),
+                input: serde_json::json!({"value": 1}),
+                intent: crate::message::ToolCallIntent::new("Inspect provider state"),
+            }],
+            &tools,
+        );
+        let arguments: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(arguments["value"], 1);
+        assert_eq!(arguments["_atman_intent"], "Inspect provider state");
+    }
 
     fn request() -> crate::provider::LlmRequest {
         crate::provider::LlmRequest {

@@ -18,6 +18,7 @@ fn tool_with_approval(
             tool_use_id: id.into(),
             tool: tool.into(),
             args_preview: args_preview.into(),
+            call_intent: None,
             result_preview: None,
         },
         label: tool.into(),

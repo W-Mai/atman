@@ -98,6 +98,8 @@ pub enum WorkflowNodeKind {
         tool_use_id: String,
         tool: String,
         args_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
         result_preview: Option<String>,
     },
     Subflow {
@@ -312,6 +314,7 @@ impl WorkflowGraph {
                 tool_use_id,
                 tool_name,
                 args_preview,
+                call_intent,
                 ..
             } => {
                 let rid = run_id.0.to_string();
@@ -326,6 +329,7 @@ impl WorkflowGraph {
                         tool_use_id: tool_use_id.clone(),
                         tool: tool_name.clone(),
                         args_preview: args_preview.clone(),
+                        call_intent: call_intent.clone(),
                         result_preview: None,
                     },
                     label: tool_name.clone(),
@@ -757,6 +761,7 @@ impl WorkflowGraph {
                 tool_use_id,
                 tool,
                 args_preview,
+                call_intent,
                 ..
             } => {
                 let scoped_parent = scope_id(run_id, parent_node_id);
@@ -770,6 +775,7 @@ impl WorkflowGraph {
                         tool_use_id: tool_use_id.clone(),
                         tool: tool.clone(),
                         args_preview: args_preview.clone(),
+                        call_intent: call_intent.clone(),
                         result_preview: None,
                     },
                     label: tool.clone(),
@@ -975,6 +981,9 @@ fn collect_flow_run_ids(node: &WorkflowNode, out: &mut Vec<String>) {
 
 pub fn permission_preview(payload: &PermissionRequestAudit) -> Option<String> {
     let mut lines = vec![format!("intent: {} ({:?})", payload.tool, payload.tier)];
+    if let Some(call_intent) = &payload.call_intent {
+        lines.push(format!("purpose: {}", call_intent.as_str()));
+    }
     let provenance = &payload.provenance;
     if let Some(path) = &provenance.path {
         lines.push(format!("path: {path}"));
@@ -1136,6 +1145,7 @@ mod tests {
             root_run_id,
             tool_use_id: tool_use_id.into(),
             tool: "fs.read".into(),
+            call_intent: None,
             tier: crate::tool::Tier::Two,
             execution_boundary: Default::default(),
             provenance: crate::permission_audit::PermissionProvenanceSummary {
@@ -1173,6 +1183,7 @@ mod tests {
             tool_use_id: tool_use_id.into(),
             tool_name: "fs.read".into(),
             args_preview: String::new(),
+            call_intent: None,
         });
     }
 
@@ -1223,8 +1234,17 @@ mod tests {
             tool_use_id: "tu_1".into(),
             tool_name: "fs.read".into(),
             args_preview: "{\"path\":\"a\"}".into(),
+            call_intent: crate::message::ToolCallIntent::new("Inspect source"),
         });
         g.apply_event(&stmt_end(rid.clone(), "stmt_0", FlowNodeStatus::Ok));
+        let tool = g
+            .find_node(&tool_node_id(&rid.0.to_string(), "tu_1"))
+            .expect("tool node");
+        assert!(matches!(
+            &tool.kind,
+            WorkflowNodeKind::ToolCall { call_intent: Some(intent), .. }
+                if intent.as_str() == "Inspect source"
+        ));
         g.apply_event(&Event::FlowEnd {
             run_id: rid.clone(),
             flow_name: "main".into(),
@@ -1258,6 +1278,7 @@ mod tests {
                     id: "tu_1".into(),
                     name: "fs.read".into(),
                     input: serde_json::json!({"path": "a.rs"}),
+                    intent: None,
                 }],
                 turn_id: TurnId::now(),
                 origin: MessageOrigin::User,
@@ -1272,6 +1293,7 @@ mod tests {
             tool_use_id: "tu_1".into(),
             tool: "fs.read".into(),
             args_preview: "{path: a.rs}".into(),
+            call_intent: None,
         });
         graph.apply_stream_frame(&StreamFrame::ToolResultMsg {
             flow_run_id: Some(run.clone()),
@@ -1321,6 +1343,7 @@ mod tests {
                 tool_use_id: "same_id".into(),
                 tool: "fs.read".into(),
                 args_preview: String::new(),
+                call_intent: None,
             });
         }
         graph.apply_stream_frame(&StreamFrame::ToolResultMsg {
@@ -1692,6 +1715,7 @@ mod tests {
                     tool_use_id: tool.into(),
                     tool_name: "fs.read".into(),
                     args_preview: String::new(),
+                    call_intent: None,
                 });
             }
         }
@@ -1973,6 +1997,7 @@ mod tests {
             tool_use_id: "tu".into(),
             tool_name: "t".into(),
             args_preview: "{}".into(),
+            call_intent: None,
         });
         assert!(g.root.is_empty());
     }

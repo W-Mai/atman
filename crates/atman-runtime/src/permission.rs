@@ -174,6 +174,7 @@ impl ResourceProvenance {
 pub struct PermissionIntent {
     pub tool_use_id: String,
     pub tool_name: String,
+    pub call_intent: Option<crate::message::ToolCallIntent>,
     pub tier: Tier,
     pub risks: BTreeSet<RiskKind>,
     pub args_digest: String,
@@ -190,6 +191,7 @@ impl PermissionIntent {
         Self {
             tool_use_id: tool_use_id.into(),
             tool_name: tool_name.into(),
+            call_intent: None,
             tier,
             risks: BTreeSet::new(),
             args_digest: String::new(),
@@ -2949,6 +2951,7 @@ mod tests {
         PermissionIntent {
             tool_use_id: "call-1".into(),
             tool_name: "bash.spawn".into(),
+            call_intent: None,
             tier: Tier::Two,
             risks: BTreeSet::new(),
             args_digest: "sha256:test".into(),

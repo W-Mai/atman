@@ -3453,13 +3453,20 @@ fn append_workflow_node_boxed(
     };
     let label = match &node.kind {
         WorkflowNodeKind::ToolCall {
-            tool, args_preview, ..
+            tool,
+            args_preview,
+            call_intent,
+            ..
         } => {
-            let short_args = crate::width::truncate(args_preview, 30);
-            if short_args.is_empty() {
-                tool.to_string()
+            if let Some(call_intent) = call_intent {
+                format!("{tool} · {}", call_intent.as_str())
             } else {
-                format!("{tool}({short_args})")
+                let short_args = crate::width::truncate(args_preview, 30);
+                if short_args.is_empty() {
+                    tool.to_string()
+                } else {
+                    format!("{tool}({short_args})")
+                }
             }
         }
         WorkflowNodeKind::FanoutBranch { branch_index } => {
@@ -3777,6 +3784,9 @@ fn permission_detail_sections(
     )];
     if let Some(reason) = &payload.reason {
         sections.push(("reason", reason.clone()));
+    }
+    if let Some(call_intent) = &payload.call_intent {
+        sections.push(("purpose", call_intent.as_str().into()));
     }
     if let Some(actor) = &payload.actor {
         sections.push(("actor", format!("{actor:?}")));
@@ -5537,6 +5547,7 @@ mod tests {
                 tool_use_id: id.into(),
                 tool: label.into(),
                 args_preview: String::new(),
+                call_intent: None,
                 result_preview: None,
             },
             label: label.into(),
@@ -5549,6 +5560,32 @@ mod tests {
             approval: None,
             llm_stats: None,
         }
+    }
+
+    #[test]
+    fn workflow_tool_header_prefers_call_intent_over_argument_preview() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let mut node = make_tool_node("tool-1", "bash.spawn", Some(chrono::Utc::now()));
+        if let atman_runtime::workflow::WorkflowNodeKind::ToolCall {
+            args_preview,
+            call_intent,
+            ..
+        } = &mut node.kind
+        {
+            *args_preview = "secret command arguments".into();
+            *call_intent = atman_runtime::message::ToolCallIntent::new("Inspect active processes");
+        }
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![node],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let (lines, _) = render_collapsed_workflow_card(&graph, 0, 100, false, 10);
+        let rendered = flatten_lines(&lines);
+        assert!(rendered.contains("bash.spawn · Inspect active processes"));
+        assert!(!rendered.contains("secret command arguments"));
     }
 
     #[test]

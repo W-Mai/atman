@@ -66,7 +66,12 @@ pub fn render(
             (
                 p.payload.tool.clone(),
                 format!(
-                    "{}{execution} · {}",
+                    "{}{}{execution} · {}",
+                    p.payload
+                        .call_intent
+                        .as_ref()
+                        .map(|intent| format!("{} · ", intent.as_str()))
+                        .unwrap_or_default(),
                     p.request_id,
                     p.payload.provenance.targets.join(", ")
                 ),
@@ -103,8 +108,17 @@ pub fn render(
                     .iter()
                     .find(|request| &request.request_id == request_id)
                 {
+                    let purpose = request
+                        .payload
+                        .call_intent
+                        .as_ref()
+                        .map(|intent| format!(" · {}", intent.as_str()))
+                        .unwrap_or_default();
                     lines.push(Line::from(Span::styled(
-                        format!("  └ {} · {}", request.payload.tool, request.request_id),
+                        format!(
+                            "  └ {}{purpose} · {}",
+                            request.payload.tool, request.request_id
+                        ),
                         Style::default().fg(crate::theme::theme().subtle_fg.into()),
                     )));
                 }

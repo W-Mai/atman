@@ -60,9 +60,9 @@ async fn openai_non_streaming_returns_tool_use_parts_from_tool_calls() {
         .parts
         .iter()
         .find_map(|p| match p {
-            MessagePart::ToolUse { id, name, input } => {
-                Some((id.clone(), name.clone(), input.clone()))
-            }
+            MessagePart::ToolUse {
+                id, name, input, ..
+            } => Some((id.clone(), name.clone(), input.clone())),
             _ => None,
         })
         .expect("expected a ToolUse part parsed from tool_calls");
@@ -109,9 +109,9 @@ async fn openai_streaming_accumulates_tool_calls_across_chunks() {
         .parts
         .iter()
         .find_map(|p| match p {
-            MessagePart::ToolUse { id, name, input } => {
-                Some((id.clone(), name.clone(), input.clone()))
-            }
+            MessagePart::ToolUse {
+                id, name, input, ..
+            } => Some((id.clone(), name.clone(), input.clone())),
             _ => None,
         })
         .expect("expected accumulated ToolUse across streamed chunks");

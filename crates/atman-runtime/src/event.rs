@@ -245,6 +245,8 @@ pub enum Event {
         tool_use_id: String,
         tool_name: String,
         args_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
     },
     AttachmentDegraded {
         turn_id: Option<TurnId>,
@@ -554,6 +556,7 @@ mod tests {
             tool_use_id: "tu_abc".into(),
             tool_name: "fs.read".into(),
             args_preview: "{\"path\":\"a.rs\"}".into(),
+            call_intent: crate::message::ToolCallIntent::new("Inspect source"),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "tool_node");
@@ -562,6 +565,7 @@ mod tests {
         assert_eq!(v["tool_use_id"], "tu_abc");
         assert_eq!(v["tool_name"], "fs.read");
         assert_eq!(v["args_preview"], "{\"path\":\"a.rs\"}");
+        assert_eq!(v["call_intent"], "Inspect source");
     }
 
     #[test]
@@ -572,6 +576,7 @@ mod tests {
             tool_use_id: "t".into(),
             tool_name: "n".into(),
             args_preview: "{}".into(),
+            call_intent: None,
         };
     }
 

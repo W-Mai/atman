@@ -97,7 +97,7 @@ data: [DONE]\n\n";
     let message = obs.output.await.unwrap().message;
     assert!(matches!(
         message.parts.as_slice(),
-        [atman_runtime::message::MessagePart::ToolUse { id, name, input }]
+        [atman_runtime::message::MessagePart::ToolUse { id, name, input, .. }]
             if id == "call_fastai"
                 && name == "fs.list"
                 && input == &serde_json::json!({"path": "/tmp/project"})

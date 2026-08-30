@@ -4,6 +4,77 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::TurnId;
 
+pub const TOOL_CALL_INTENT_FIELD: &str = "_atman_intent";
+pub const TOOL_CALL_INTENT_MAX_CHARS: usize = 120;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ToolCallIntent(String);
+
+impl ToolCallIntent {
+    pub fn new(value: impl AsRef<str>) -> Option<Self> {
+        let normalized = value
+            .as_ref()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(TOOL_CALL_INTENT_MAX_CHARS)
+            .collect::<String>();
+        (!normalized.is_empty()).then_some(Self(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCallIntent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| serde::de::Error::custom("tool call intent is empty"))
+    }
+}
+
+pub fn decode_tool_call_input(
+    wire_input: serde_json::Value,
+    tool_name: &str,
+    tools: &[crate::tool::ToolSpec],
+) -> (serde_json::Value, Option<ToolCallIntent>) {
+    if !crate::tool::tool_spec_supports_call_intent(tool_name, tools) {
+        return (wire_input, None);
+    }
+    let serde_json::Value::Object(mut input) = wire_input else {
+        return (wire_input, None);
+    };
+    let intent = input
+        .remove(TOOL_CALL_INTENT_FIELD)
+        .and_then(|value| value.as_str().and_then(ToolCallIntent::new));
+    (serde_json::Value::Object(input), intent)
+}
+
+pub fn encode_tool_call_input(
+    clean_input: &serde_json::Value,
+    intent: Option<&ToolCallIntent>,
+    tool_name: &str,
+    tools: &[crate::tool::ToolSpec],
+) -> serde_json::Value {
+    let Some(intent) = intent else {
+        return clean_input.clone();
+    };
+    if crate::tool::tool_spec_blocks_call_intent(tool_name, tools) {
+        return clean_input.clone();
+    }
+    let serde_json::Value::Object(mut input) = clean_input.clone() else {
+        return clean_input.clone();
+    };
+    input.insert(
+        TOOL_CALL_INTENT_FIELD.into(),
+        serde_json::Value::String(intent.as_str().into()),
+    );
+    serde_json::Value::Object(input)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageOrigin {
@@ -90,6 +161,8 @@ pub enum MessagePart {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<ToolCallIntent>,
     },
     ToolResult {
         tool_use_id: String,
@@ -391,5 +464,26 @@ mod tests {
         let msg: Message = serde_json::from_str(json).unwrap();
         assert_eq!(msg.origin, MessageOrigin::User);
         assert_eq!(msg.text_concat(), "legacy");
+    }
+
+    #[test]
+    fn tool_call_intent_normalizes_whitespace_and_caps_unicode_chars() {
+        let raw = format!("  inspect\n\t{}  ", "界".repeat(200));
+        let intent = ToolCallIntent::new(raw).unwrap();
+        assert_eq!(intent.as_str().chars().count(), TOOL_CALL_INTENT_MAX_CHARS);
+        assert!(intent.as_str().starts_with("inspect 界"));
+        assert!(!intent.as_str().contains('\n'));
+    }
+
+    #[test]
+    fn legacy_tool_use_defaults_intent_to_none() {
+        let part: MessagePart = serde_json::from_value(serde_json::json!({
+            "type": "tool_use",
+            "id": "call-1",
+            "name": "probe",
+            "input": {"value": 1}
+        }))
+        .unwrap();
+        assert!(matches!(part, MessagePart::ToolUse { intent: None, .. }));
     }
 }

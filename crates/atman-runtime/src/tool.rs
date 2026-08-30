@@ -138,6 +138,7 @@ pub struct ToolCtx {
     pub trust: Option<crate::trust::TrustConfig>,
     pub safety: Option<crate::safety::SafetyConfig>,
     pub current_model: Option<String>,
+    pub call_intent: Option<crate::message::ToolCallIntent>,
     pub(crate) invocation_env: crate::invocation_env::InvocationEnv,
     pub watch_rules: Option<crate::streaming::WatchRules>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
@@ -166,6 +167,11 @@ impl ToolCtx {
 
     pub fn with_history_segment(mut self, segment: HistorySegment) -> Self {
         self.history_segment = segment;
+        self
+    }
+
+    pub fn with_call_intent(mut self, call_intent: Option<crate::message::ToolCallIntent>) -> Self {
+        self.call_intent = call_intent;
         self
     }
 
@@ -586,11 +592,67 @@ pub trait Tool: Send + Sync {
 }
 
 pub fn tool_spec(tool: &dyn Tool) -> ToolSpec {
+    let mut input_schema = tool.input_schema();
+    decorate_tool_input_schema(&mut input_schema);
     ToolSpec {
         name: tool.name().to_string(),
         description: tool.description().map(str::to_string),
-        input_schema: tool.input_schema(),
+        input_schema,
     }
+}
+
+fn tool_call_intent_schema() -> serde_json::Value {
+    serde_json::json!({"type": "string"})
+}
+
+fn decorate_tool_input_schema(schema: &mut serde_json::Value) {
+    let Some(root) = schema.as_object_mut() else {
+        return;
+    };
+    if root.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        return;
+    }
+    let properties = root
+        .entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    let Some(properties) = properties.as_object_mut() else {
+        return;
+    };
+    if properties.contains_key(crate::message::TOOL_CALL_INTENT_FIELD) {
+        return;
+    }
+    properties.insert(
+        crate::message::TOOL_CALL_INTENT_FIELD.into(),
+        tool_call_intent_schema(),
+    );
+}
+
+fn tool_spec_call_intent_support(tool_name: &str, tools: &[ToolSpec]) -> Option<bool> {
+    tools
+        .iter()
+        .find(|tool| tool.name == tool_name)
+        .map(|tool| {
+            tool.input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|properties| properties.get(crate::message::TOOL_CALL_INTENT_FIELD))
+                == Some(&tool_call_intent_schema())
+        })
+}
+
+pub fn tool_spec_supports_call_intent(tool_name: &str, tools: &[ToolSpec]) -> bool {
+    tool_spec_call_intent_support(tool_name, tools) == Some(true)
+}
+
+pub fn tool_spec_blocks_call_intent(tool_name: &str, tools: &[ToolSpec]) -> bool {
+    tool_spec_call_intent_support(tool_name, tools) == Some(false)
+}
+
+pub fn tool_schema_uses_call_intent_field(schema: &serde_json::Value) -> bool {
+    schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|properties| properties.contains_key(crate::message::TOOL_CALL_INTENT_FIELD))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -659,6 +721,53 @@ mod tests {
 
     struct ReservedEnvTool;
 
+    struct ObjectTool;
+
+    impl Tool for ObjectTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"]
+            })
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { Ok(Value::Unit) })
+        }
+    }
+
+    struct CollidingTool;
+
+    impl Tool for CollidingTool {
+        fn name(&self) -> &str {
+            "collision"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"_atman_intent": {"type": "integer"}}
+            })
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { Ok(Value::Unit) })
+        }
+    }
+
     impl Tool for ReservedEnvTool {
         fn name(&self) -> &str {
             "env"
@@ -677,6 +786,74 @@ mod tests {
     #[should_panic(expected = "tool name `env` is reserved for an evaluator intrinsic")]
     fn evaluator_intrinsic_names_cannot_be_registered_as_tools() {
         ToolRegistry::new().register(std::sync::Arc::new(ReservedEnvTool));
+    }
+
+    #[test]
+    fn tool_spec_adds_optional_call_intent_without_mutating_required() {
+        let spec = tool_spec(&ObjectTool);
+        assert_eq!(spec.input_schema["required"], serde_json::json!(["value"]));
+        assert_eq!(
+            spec.input_schema["properties"][crate::message::TOOL_CALL_INTENT_FIELD],
+            tool_call_intent_schema()
+        );
+        assert!(tool_spec_supports_call_intent("probe", &[spec]));
+        assert_eq!(
+            serde_json::to_vec(&tool_spec(&ObjectTool)).unwrap(),
+            serde_json::to_vec(&tool_spec(&ObjectTool)).unwrap()
+        );
+    }
+
+    #[test]
+    fn tool_spec_preserves_business_field_collision() {
+        let spec = tool_spec(&CollidingTool);
+        assert_eq!(
+            spec.input_schema["properties"][crate::message::TOOL_CALL_INTENT_FIELD],
+            serde_json::json!({"type": "integer"})
+        );
+        assert!(!tool_spec_supports_call_intent("collision", &[spec]));
+    }
+
+    #[test]
+    fn tool_call_input_codec_round_trips_metadata_and_preserves_collisions() {
+        let spec = tool_spec(&ObjectTool);
+        let wire = serde_json::json!({
+            "value": 7,
+            "_atman_intent": "  inspect\nstate  "
+        });
+        let (clean, intent) =
+            crate::message::decode_tool_call_input(wire, "probe", std::slice::from_ref(&spec));
+        assert_eq!(clean, serde_json::json!({"value": 7}));
+        assert_eq!(
+            intent.as_ref().map(|value| value.as_str()),
+            Some("inspect state")
+        );
+        assert_eq!(
+            crate::message::encode_tool_call_input(&clean, intent.as_ref(), "probe", &[spec]),
+            serde_json::json!({"value": 7, "_atman_intent": "inspect state"})
+        );
+        assert_eq!(
+            crate::message::encode_tool_call_input(&clean, intent.as_ref(), "probe", &[]),
+            serde_json::json!({"value": 7, "_atman_intent": "inspect state"})
+        );
+
+        let spec = tool_spec(&ObjectTool);
+        let (clean, intent) = crate::message::decode_tool_call_input(
+            serde_json::json!({"value": 7, "_atman_intent": 42}),
+            "probe",
+            &[spec],
+        );
+        assert_eq!(clean, serde_json::json!({"value": 7}));
+        assert!(intent.is_none());
+
+        let collision = tool_spec(&CollidingTool);
+        let business_input = serde_json::json!({"_atman_intent": 42});
+        let (clean, intent) = crate::message::decode_tool_call_input(
+            business_input.clone(),
+            "collision",
+            &[collision],
+        );
+        assert_eq!(clean, business_input);
+        assert!(intent.is_none());
     }
 
     #[test]

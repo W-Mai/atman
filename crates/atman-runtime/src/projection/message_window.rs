@@ -65,6 +65,7 @@ pub enum TranscriptEntry {
         tool_use_id: String,
         tool_name: String,
         args_preview: String,
+        call_intent: Option<crate::message::ToolCallIntent>,
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     FlowDone {
@@ -235,6 +236,7 @@ fn legacy_permission_payload(
             .as_str()
             .unwrap_or("unknown legacy tool")
             .into(),
+        call_intent: None,
         tier: crate::tool::Tier::Zero,
         execution_boundary: Default::default(),
         provenance: PermissionProvenanceSummary {
@@ -488,6 +490,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let tool_use_id = v["tool_use_id"].as_str().unwrap_or("").to_string();
                 let tool_name = v["tool_name"].as_str().unwrap_or("").to_string();
                 let args_preview = v["args_preview"].as_str().unwrap_or("").to_string();
+                let call_intent = v
+                    .get("call_intent")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok());
                 let ts = parse_ts(v);
                 out.push(TranscriptEntry::ToolNode {
                     run_id,
@@ -495,6 +500,7 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     tool_use_id,
                     tool_name,
                     args_preview,
+                    call_intent,
                     ts,
                 });
             }
@@ -926,6 +932,7 @@ mod tests {
             root_run_id: run_id,
             tool_use_id: tool_use_id.into(),
             tool: "fs.read".into(),
+            call_intent: None,
             tier: crate::tool::Tier::Two,
             execution_boundary: Default::default(),
             provenance: Default::default(),

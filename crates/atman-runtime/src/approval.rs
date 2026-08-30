@@ -293,6 +293,7 @@ pub async fn request_approval_with_additional_risks(
     let intent = crate::permission::PermissionIntent {
         tool_use_id: id.to_string(),
         tool_name: name.to_string(),
+        call_intent: ctx.call_intent.clone(),
         tier,
         risks,
         args_digest: args_digest(&args_preview),
@@ -723,6 +724,7 @@ mod tests {
                 crate::permission::PermissionIntent {
                     tool_use_id: "call-1".into(),
                     tool_name: "probe.tool".into(),
+                    call_intent: None,
                     tier: Tier::Two,
                     risks: Default::default(),
                     args_digest: "sha256:test".into(),

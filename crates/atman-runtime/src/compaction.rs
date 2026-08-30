@@ -50,7 +50,18 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
                 });
                 0
             }
-            MessagePart::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
+            MessagePart::ToolUse {
+                name,
+                input,
+                intent,
+                ..
+            } => {
+                name.len()
+                    + input.to_string().len()
+                    + intent.as_ref().map_or(0, |intent| {
+                        crate::message::TOOL_CALL_INTENT_FIELD.len() + intent.as_str().len() + 5
+                    })
+            }
         };
     }
     chars = chars.saturating_add(estimate_role_overhead(msg.role));
@@ -816,14 +827,23 @@ fn serialize_message_for_summary(msg: &Message) -> String {
                 let truncated: String = thinking.chars().take(1000).collect();
                 parts.push(format!("[thinking: {truncated}]"));
             }
-            MessagePart::ToolUse { name, input, .. } => {
+            MessagePart::ToolUse {
+                name,
+                input,
+                intent,
+                ..
+            } => {
                 let input_str = if input.is_null() {
                     String::new()
                 } else {
                     input.to_string()
                 };
                 let truncated: String = input_str.chars().take(2000).collect();
-                parts.push(format!("[tool_call: {name}({truncated})]"));
+                let purpose = intent
+                    .as_ref()
+                    .map(|intent| format!(" purpose={}", intent.as_str()))
+                    .unwrap_or_default();
+                parts.push(format!("[tool_call: {name}{purpose}({truncated})]"));
             }
             MessagePart::ToolResult {
                 content,
@@ -1374,6 +1394,7 @@ mod tests {
                     id: "call_test".into(),
                     name: tool_name.into(),
                     input,
+                    intent: None,
                 },
             ],
             turn_id: TurnId::now(),
@@ -1597,6 +1618,7 @@ mod tests {
                     id: "call_1".into(),
                     name: "fs.read".into(),
                     input: serde_json::json!({}),
+                    intent: None,
                 }],
                 turn_id: turn.clone(),
                 origin: MessageOrigin::User,

@@ -2267,6 +2267,7 @@ mod tests {
                 root_run_id: run_id,
                 tool_use_id: tool_use_id.into(),
                 tool: "fs.read".into(),
+                call_intent: None,
                 tier: Tier::Two,
                 execution_boundary: Default::default(),
                 provenance: PermissionProvenanceSummary::default(),
@@ -2996,6 +2997,7 @@ mod tests {
             tool_use_id: "tu".into(),
             tool: "t".into(),
             args_preview: "{}".into(),
+            call_intent: None,
         });
         assert_ne!(
             app.items_version, after_flow,
@@ -3027,6 +3029,7 @@ mod tests {
             tool_use_id: "tu_last".into(),
             tool: "fs.read".into(),
             args_preview: "{}".into(),
+            call_intent: None,
         });
         assert!(app.toggle_last_tool_expansion());
         let expanded = app.items.iter().find_map(|it| match it {
@@ -3060,6 +3063,7 @@ mod tests {
             tool_use_id: "tu_1".into(),
             tool: "fs.read".into(),
             args_preview: "{}".into(),
+            call_intent: None,
         });
         let panel = app
             .items
@@ -3231,6 +3235,7 @@ mod tests {
             tool_use_id: "tu_1".into(),
             tool: "fs.read".into(),
             args_preview: String::new(),
+            call_intent: None,
         });
         app.apply_stream_frame(StreamFrame::ToolResultMsg {
             flow_run_id: Some("r1".into()),

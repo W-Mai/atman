@@ -42,6 +42,7 @@ impl ScriptedAgentProvider {
                     id: format!("call_{idx}"),
                     name: name.clone(),
                     input: input.clone(),
+                    intent: None,
                 },
             ],
             Some(AgentTurn::FinalText(t)) => vec![MessagePart::Text { text: t.clone() }],

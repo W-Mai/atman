@@ -2275,6 +2275,7 @@ mod tests {
         let intent = crate::permission::PermissionIntent {
             tool_use_id: "session-constructor-call".into(),
             tool_name: "bash.spawn".into(),
+            call_intent: None,
             tier: crate::tool::Tier::Two,
             risks: BTreeSet::new(),
             args_digest: "sha256:session-constructor".into(),

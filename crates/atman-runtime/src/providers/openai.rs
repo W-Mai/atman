@@ -119,7 +119,7 @@ impl OpenAiProvider {
             });
         }
         for m in &req.messages {
-            wire_messages.push(build_wire_message(m)?);
+            wire_messages.push(build_wire_message(m, &req.tools)?);
         }
         let tools: Vec<WireToolSpec> = req
             .tools
@@ -210,7 +210,10 @@ fn compatible_thinking(selection: &ReasoningSelection) -> Option<ThinkingConfig>
     }
 }
 
-fn build_wire_message(m: &Message) -> Result<ChatMessage, RuntimeError> {
+fn build_wire_message(
+    m: &Message,
+    tools: &[crate::tool::ToolSpec],
+) -> Result<ChatMessage, RuntimeError> {
     Ok(match m.role {
         MessageRole::System => ChatMessage {
             role: "system",
@@ -228,7 +231,7 @@ fn build_wire_message(m: &Message) -> Result<ChatMessage, RuntimeError> {
             }
         }
         MessageRole::Assistant => {
-            let (text_parts, tool_uses) = split_assistant_parts(&m.parts);
+            let (text_parts, tool_uses) = split_assistant_parts(&m.parts, tools);
             let content = if text_parts.is_empty() {
                 None
             } else {
@@ -309,18 +312,32 @@ fn extract_tool_result(m: &Message) -> (String, String) {
     (String::new(), m.text_concat())
 }
 
-fn split_assistant_parts(parts: &[MessagePart]) -> (Vec<String>, Vec<WireToolCall>) {
+fn split_assistant_parts(
+    parts: &[MessagePart],
+    tool_specs: &[crate::tool::ToolSpec],
+) -> (Vec<String>, Vec<WireToolCall>) {
     let mut text = Vec::new();
     let mut tools = Vec::new();
     for p in parts {
         match p {
             MessagePart::Text { text: t } => text.push(t.clone()),
-            MessagePart::ToolUse { id, name, input } => tools.push(WireToolCall {
+            MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } => tools.push(WireToolCall {
                 id: id.clone(),
                 kind: "function",
                 function: WireFunctionCall {
                     name: crate::tool_naming::to_wire(name),
-                    arguments: input.to_string(),
+                    arguments: crate::message::encode_tool_call_input(
+                        input,
+                        intent.as_ref(),
+                        name,
+                        tool_specs,
+                    )
+                    .to_string(),
                 },
             }),
             _ => {}
@@ -521,10 +538,14 @@ impl Provider for OpenAiProvider {
                     } else {
                         serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null)
                     };
+                    let name = crate::tool_naming::from_wire(&tc.name, &streaming_tools);
+                    let (input, intent) =
+                        crate::message::decode_tool_call_input(input, &name, &streaming_tools);
                     parts.push(MessagePart::ToolUse {
                         id: tc.id,
-                        name: crate::tool_naming::from_wire(&tc.name, &streaming_tools),
+                        name,
                         input,
+                        intent,
                     });
                 }
 
@@ -715,10 +736,14 @@ fn response_to_assistant(
                         serde_json::from_str(&tc.function.arguments)
                             .unwrap_or(serde_json::Value::Null)
                     };
+                    let name = crate::tool_naming::from_wire(&tc.function.name, tools);
+                    let (input, intent) =
+                        crate::message::decode_tool_call_input(input, &name, tools);
                     parts.push(MessagePart::ToolUse {
                         id: tc.id,
-                        name: crate::tool_naming::from_wire(&tc.function.name, tools),
+                        name,
                         input,
+                        intent,
                     });
                 }
             }
@@ -946,4 +971,76 @@ struct RespFunctionCall {
     name: String,
     #[serde(default)]
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct IntentTool;
+
+    impl crate::tool::Tool for IntentTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn tier(&self) -> crate::tool::Tier {
+            crate::tool::Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: crate::tool::ToolArgs,
+            _ctx: &'a crate::tool::ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async { Ok(crate::Value::Unit) })
+        }
+    }
+
+    #[test]
+    fn tool_call_intent_round_trips_through_chat_arguments() {
+        let tools = vec![crate::tool::tool_spec(&IntentTool)];
+        let intent = crate::message::ToolCallIntent::new("Inspect provider state");
+        let (_, calls) = split_assistant_parts(
+            &[MessagePart::ToolUse {
+                id: "call-1".into(),
+                name: "probe".into(),
+                input: serde_json::json!({"value": 1}),
+                intent: intent.clone(),
+            }],
+            &tools,
+        );
+        let arguments: serde_json::Value =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(arguments["_atman_intent"], "Inspect provider state");
+
+        let assistant = response_to_assistant(
+            ChatCompletionsResponse {
+                choices: vec![ChatChoice {
+                    message: Some(ChatChoiceMessage {
+                        content: None,
+                        tool_calls: Some(vec![RespToolCall {
+                            id: "call-1".into(),
+                            function: RespFunctionCall {
+                                name: "probe".into(),
+                                arguments: arguments.to_string(),
+                            },
+                        }]),
+                    }),
+                    finish_reason: Some("tool_calls".into()),
+                }],
+                usage: None,
+                model: None,
+                id: None,
+            },
+            crate::event::TurnId::now(),
+            &tools,
+        );
+        assert!(matches!(
+            assistant.message.parts.as_slice(),
+            [MessagePart::ToolUse { input, intent: Some(intent), .. }]
+                if input == &serde_json::json!({"value": 1})
+                    && intent.as_str() == "Inspect provider state"
+        ));
+    }
 }

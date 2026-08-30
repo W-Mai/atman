@@ -119,6 +119,8 @@ pub enum StreamFrame {
         tool_use_id: String,
         tool: String,
         args_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
     },
     AssistantMsg {
         flow_run_id: Option<String>,
@@ -335,6 +337,7 @@ mod tests {
             tool_use_id: "tu_1".into(),
             tool: "fs.read".into(),
             args_preview: "{}".into(),
+            call_intent: None,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();

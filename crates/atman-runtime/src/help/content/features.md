@@ -4,7 +4,7 @@
 
 - **Flows** — Declarative `.at` files define agent workflows as functions with typed params, contracts, and return values.
 - **LLM calls** — `llm.call(...)` node with prompt caching, retry, and structured output via schema types.
-- **Tool dispatch** — Tools are called as `tool.name(args)` in flows. The agent loop extracts tool_uses from LLM responses and dispatches them via `dispatch_all`.
+- **Tool dispatch** — Tools are called as `tool.name(args)` in flows. LLM-generated calls can carry a concise purpose through provider history, approvals, workflow replay, and TUI rendering; `dispatch_all` removes that metadata before invoking built-in, MCP, or spawned-flow tools.
 - **Subflows** — `subflow(name, args)` enables recursion and delegation. Each subflow gets its own turn context.
 
 ## Memory

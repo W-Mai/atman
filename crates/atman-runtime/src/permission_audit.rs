@@ -200,6 +200,8 @@ pub struct PermissionRequestAudit {
     pub root_run_id: FlowRunId,
     pub tool_use_id: String,
     pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_intent: Option<crate::message::ToolCallIntent>,
     pub tier: Tier,
     /// Process boundary selected for this approval. Pending user approvals
     /// report the boundary that an approval will grant; denied and non-process
@@ -244,6 +246,7 @@ impl PermissionRequestAudit {
             root_run_id: request.root_run_id.clone(),
             tool_use_id: request.intent.tool_use_id.clone(),
             tool: request.intent.tool_name.clone(),
+            call_intent: request.intent.call_intent.clone(),
             tier: request.intent.tier,
             execution_boundary: request
                 .intent
@@ -560,6 +563,7 @@ mod tests {
             root_run_id: run_id.clone(),
             tool_use_id: "tool-use".into(),
             tool: "fs.read".into(),
+            call_intent: None,
             tier: Tier::Two,
             execution_boundary: None,
             provenance: PermissionProvenanceSummary::default(),

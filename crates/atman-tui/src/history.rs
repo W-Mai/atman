@@ -440,6 +440,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 tool_use_id,
                 tool_name,
                 args_preview,
+                call_intent,
                 ts,
             } => {
                 if spawned_set.contains(run_id.as_str()) {
@@ -455,6 +456,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         tool_use_id: tool_use_id.clone(),
                         tool: tool_name.clone(),
                         args_preview: args_preview.clone(),
+                        call_intent: call_intent.clone(),
                     },
                     *ts,
                 );
@@ -678,6 +680,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         tool_use_id,
                         tool_name,
                         args_preview,
+                        call_intent,
                         ts,
                     } => (
                         StreamFrame::ToolNode {
@@ -686,6 +689,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                             tool_use_id: tool_use_id.clone(),
                             tool: tool_name.clone(),
                             args_preview: args_preview.clone(),
+                            call_intent: call_intent.clone(),
                         },
                         *ts,
                     ),
@@ -1087,6 +1091,7 @@ mod tests {
                 root_run_id: run_id,
                 tool_use_id: tool_use_id.into(),
                 tool: "fs.read".into(),
+                call_intent: None,
                 tier: atman_runtime::tool::Tier::Zero,
                 execution_boundary: Default::default(),
                 provenance: Default::default(),
@@ -1145,6 +1150,7 @@ mod tests {
                 id: "toolu_1".into(),
                 name: "fs.read".into(),
                 input: json!({}),
+                intent: None,
             }]),
             Message {
                 role: MessageRole::Tool,
@@ -1199,6 +1205,7 @@ mod tests {
                             id: id.into(),
                             name: "term.capture".into(),
                             input: serde_json::json!({}),
+                            intent: None,
                         }],
                         turn_id: TurnId::now(),
                         origin: atman_runtime::message::MessageOrigin::User,
@@ -1481,6 +1488,7 @@ mod tests {
                         id: tool_use_id.into(),
                         name: "bash.spawn".into(),
                         input: serde_json::json!({}),
+                        intent: None,
                     }],
                     turn_id: TurnId::now(),
                     origin: atman_runtime::message::MessageOrigin::User,
@@ -1529,6 +1537,7 @@ mod tests {
                         id: tool_use_id.into(),
                         name: "bash.spawn".into(),
                         input: serde_json::json!({}),
+                        intent: None,
                     }],
                     turn_id: TurnId::now(),
                     origin: atman_runtime::message::MessageOrigin::User,
@@ -1574,6 +1583,7 @@ mod tests {
                         id: tool_use_id.into(),
                         name: "bash.spawn".into(),
                         input: serde_json::json!({}),
+                        intent: None,
                     }],
                     turn_id: TurnId::now(),
                     origin: atman_runtime::message::MessageOrigin::User,
@@ -1622,6 +1632,7 @@ mod tests {
                         id: tool_use_id.into(),
                         name: "fs.edit".into(),
                         input: serde_json::json!({}),
+                        intent: None,
                     }],
                     turn_id: TurnId::now(),
                     origin: atman_runtime::message::MessageOrigin::User,
@@ -1681,6 +1692,7 @@ mod tests {
                 tool_use_id: "tu_persisted".into(),
                 tool_name: "fs.read".into(),
                 args_preview: String::new(),
+                call_intent: None,
                 ts: None,
             },
             TranscriptEntry::Message {
@@ -1812,6 +1824,7 @@ mod tests {
                 tool_use_id: "spawned-tool".into(),
                 tool_name: "fs.read".into(),
                 args_preview: "Cargo.toml".into(),
+                call_intent: None,
                 ts: None,
             },
             approved_permission(research_flow_run_id, "spawned-tool"),
@@ -2021,6 +2034,7 @@ mod tests {
                 tool_use_id: "tool_001".into(),
                 tool_name: "fs.grep".into(),
                 args_preview: "pattern".into(),
+                call_intent: None,
                 ts: None,
             },
             TranscriptEntry::FlowNodeEnd {

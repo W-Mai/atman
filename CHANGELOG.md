@@ -8,10 +8,12 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
 - **Provider lifecycle result surfaces** — `AuthLogin`, `AuthLogout`, `RefreshProviderModels`, `AddConfigProvider`, and `UpdateConfigProvider` are replaced by `TuiControl::MutateProvider`, `ProviderMutation::UpsertConfig`, `TuiCommand::ProviderMutationResult`, and `TuiCommand::ProviderCatalogRefreshResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. `TuiControl::TestProvider` carries a complete `ProviderEntry` instead of separate type, credential, and endpoint fields. `BootstrapOutcome` exposes `provider_catalog_refresh_plan` and is non-exhaustive. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
 
 ### ✨ Features
 
+- **Tool call purpose metadata** — LLM-generated built-in, MCP, and spawned-flow calls retain a concise purpose across provider history, workflow replay, approvals, and TUI rendering without changing executable arguments.
 - **Provider-aware reasoning controls** — model settings, DSL calls, TUI submissions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
 - **Multimodal image input** — OpenAI Chat Completions, Codex Responses, and Anthropic Messages accept persistent image attachments from TUI clipboard paste, CLI paths, daemon requests, and DSL messages.
 - **TUI generation controls** — the input border displays the effective reasoning depth, while pending images use a dedicated attachment bar and removable `[image N]` editor references.

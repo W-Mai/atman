@@ -1650,6 +1650,7 @@ mod tests {
                 root_run_id: run_id,
                 tool_use_id: format!("tool-{revision}"),
                 tool: "fs.read".into(),
+                call_intent: None,
                 tier: atman_runtime::tool::Tier::Two,
                 execution_boundary: Default::default(),
                 provenance: PermissionProvenanceSummary::default(),

@@ -862,6 +862,7 @@ async fn dispatch_tool_call<'a>(
             tool_use_id: tool_call_id.clone(),
             tool_name: name.clone(),
             args_preview: args_preview.clone(),
+            call_intent: None,
         });
         if let Some(tx) = &stream_tx {
             let _ = tx.send(crate::stream::StreamFrame::ToolNode {
@@ -870,6 +871,7 @@ async fn dispatch_tool_call<'a>(
                 tool_use_id: tool_call_id.clone(),
                 tool: name.clone(),
                 args_preview: args_preview.clone(),
+                call_intent: None,
             });
         }
     }
@@ -3222,6 +3224,7 @@ mod sanitize_tests {
                     id: "call_orphan".into(),
                     name: "bash.exec".into(),
                     input: serde_json::json!({}),
+                    intent: None,
                 }],
                 turn_id: turn.clone(),
                 origin: MessageOrigin::User,
@@ -3257,6 +3260,7 @@ mod sanitize_tests {
                     id: "call_ok".into(),
                     name: "bash.exec".into(),
                     input: serde_json::json!({}),
+                    intent: None,
                 }],
                 turn_id: turn.clone(),
                 origin: MessageOrigin::User,

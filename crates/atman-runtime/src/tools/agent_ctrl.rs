@@ -53,6 +53,7 @@ pub enum FlowEvent {
 pub struct FlowEntry {
     pub handle: String,
     pub goal: String,
+    pub display_label: String,
     pub status: Arc<Mutex<FlowRunStatus>>,
     pub output: Arc<Mutex<String>>,
     pub cancel: tokio_util::sync::CancellationToken,
@@ -516,10 +517,31 @@ impl FlowRegistry {
         child_run_id: FlowRunId,
         workspace: Option<WorkspaceBinding>,
     ) -> Arc<FlowEntry> {
+        let display_label = goal.clone();
+        self.create_entry_with_workspace_label(
+            handle,
+            goal,
+            display_label,
+            model,
+            child_run_id,
+            workspace,
+        )
+    }
+
+    fn create_entry_with_workspace_label(
+        &self,
+        handle: String,
+        goal: String,
+        display_label: String,
+        model: String,
+        child_run_id: FlowRunId,
+        workspace: Option<WorkspaceBinding>,
+    ) -> Arc<FlowEntry> {
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
         let entry = Arc::new(FlowEntry {
             handle: handle.clone(),
             goal,
+            display_label,
             status: Arc::new(Mutex::new(FlowRunStatus::Running {
                 started_at: chrono::Utc::now(),
             })),
@@ -903,6 +925,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     };
     child_ctx.flow_run_id = Some(run_id.clone());
     child_ctx.flow_identity = Some(child_identity);
+    child_ctx.call_intent = None;
     let child_messages = Arc::new(Mutex::new(Vec::new()));
     if should_inherit_context(&args)
         && let Some(parent) = &ctx.session_messages_handle
@@ -922,7 +945,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     // Use the first string-typed argument as a display label for the FlowEntry.
-    let display_label = match args.named("arguments") {
+    let goal = match args.named("arguments") {
         Some(Value::Struct(fields)) => fields.iter().find_map(|(_, value)| match value {
             Value::Str(value) => Some(value.clone()),
             _ => None,
@@ -930,6 +953,11 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         _ => None,
     }
     .unwrap_or_default();
+    let display_label = ctx
+        .call_intent
+        .as_ref()
+        .map(|intent| intent.as_str().to_string())
+        .unwrap_or_else(|| goal.clone());
     let inherit_context = should_inherit_context(&args);
     let flow_registry = ctx.flow_registry.clone().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
@@ -957,8 +985,9 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     )?;
     let lifecycle_guard = flow_registry.lifecycle_guard(&child_run_id);
     let workspace = workspace_guard.binding().cloned();
-    let entry = flow_registry.create_entry_with_workspace(
+    let entry = flow_registry.create_entry_with_workspace_label(
         handle.clone(),
+        goal,
         display_label,
         String::new(),
         child_run_id.clone(),
@@ -1001,7 +1030,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         if let Some(tx) = &parent_stream_tx {
             let _ = tx.send(crate::stream::StreamFrame::SubAgentStarted {
                 handle: entry_clone.handle.clone(),
-                goal: entry_clone.goal.clone(),
+                goal: entry_clone.display_label.clone(),
                 child_run_id: child_run_id_str.clone(),
                 model: entry_clone.model.clone(),
             });
@@ -1014,6 +1043,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         // independently.
         let mut ctx_for_flow = ctx_clone;
         ctx_for_flow.cancel = entry_clone.cancel.clone();
+        ctx_for_flow.call_intent = None;
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
         ctx_for_flow.flow_run_id = Some(child_run_id.clone());
         ctx_for_flow.flow_identity = Some(child_identity);
@@ -1664,6 +1694,21 @@ mod tests {
     struct SandboxProbe;
 
     struct SessionTextProbe;
+
+    #[test]
+    fn flow_entry_keeps_execution_goal_separate_from_display_label() {
+        let registry = FlowRegistry::new();
+        let entry = registry.create_entry_with_workspace_label(
+            "agent-test".into(),
+            "Audit the full provider chain".into(),
+            "Review provider routing".into(),
+            "smart".into(),
+            crate::event::FlowRunId::now(),
+            None,
+        );
+        assert_eq!(entry.goal, "Audit the full provider chain");
+        assert_eq!(entry.display_label, "Review provider routing");
+    }
 
     impl Tool for SandboxProbe {
         fn name(&self) -> &str {

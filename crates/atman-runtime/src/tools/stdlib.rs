@@ -786,7 +786,7 @@ impl Tool for ExtractToolUses {
     fn description(&self) -> Option<&str> {
         Some(
             "Pull the tool_use parts out of an assistant Message. Returns a list of \
-             {id, name, input} structs suitable for dispatch_all.",
+             {id, name, input, intent?} structs suitable for dispatch_all.",
         )
     }
 
@@ -816,12 +816,22 @@ impl Tool for ExtractToolUses {
             };
             let mut out = Vec::new();
             for part in &m.parts {
-                if let crate::message::MessagePart::ToolUse { id, name, input } = part {
-                    out.push(Value::Struct(vec![
+                if let crate::message::MessagePart::ToolUse {
+                    id,
+                    name,
+                    input,
+                    intent,
+                } = part
+                {
+                    let mut fields = vec![
                         ("id".into(), Value::Str(id.clone())),
                         ("name".into(), Value::Str(name.clone())),
                         ("input".into(), Value::from_json(input.clone())),
-                    ]));
+                    ];
+                    if let Some(intent) = intent {
+                        fields.push(("intent".into(), Value::Str(intent.as_str().into())));
+                    }
+                    out.push(Value::Struct(fields));
                 }
             }
             Ok(Value::List(out))
@@ -880,6 +890,7 @@ enum PreparedEntry {
         name: String,
         tool: std::sync::Arc<dyn Tool>,
         call_args: ToolArgs,
+        call_intent: Option<crate::message::ToolCallIntent>,
     },
     Failed {
         index: usize,
@@ -924,24 +935,51 @@ fn prepare_dispatch(
                     ));
                 }
             };
-            Ok((index, id, name, get("input").unwrap_or(Value::Unit)))
+            let call_intent = match get("intent") {
+                Some(Value::Str(value)) => crate::message::ToolCallIntent::new(value),
+                _ => None,
+            };
+            Ok((
+                index,
+                id,
+                name,
+                get("input").unwrap_or(Value::Unit),
+                call_intent,
+            ))
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
 
     let mut prepared = Vec::with_capacity(parsed.len());
-    for (index, id, name, input) in parsed {
-        emit_tool_node(ctx, &id, &name, &input);
+    for (index, id, name, input, mut call_intent) in parsed {
         let Some(tool) = registry.get(&name) else {
+            emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
             prepared.push(PreparedEntry::Failed {
                 index,
                 msg: build_error_result(ctx, &id, &format!("dispatch_all: unknown tool `{name}`")),
             });
             continue;
         };
+        let raw_schema = tool.input_schema();
         let named = match &input {
-            Value::Struct(fields) => fields.clone(),
+            Value::Struct(fields) => {
+                let mut fields = fields.clone();
+                if !crate::tool::tool_schema_uses_call_intent_field(&raw_schema)
+                    && let Some(index) = fields
+                        .iter()
+                        .position(|(name, _)| name == crate::message::TOOL_CALL_INTENT_FIELD)
+                {
+                    let (_, value) = fields.remove(index);
+                    if call_intent.is_none()
+                        && let Value::Str(value) = value
+                    {
+                        call_intent = crate::message::ToolCallIntent::new(value);
+                    }
+                }
+                fields
+            }
             Value::Unit => Vec::new(),
             other => {
+                emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
                 prepared.push(PreparedEntry::Failed {
                     index,
                     msg: build_error_result(
@@ -956,7 +994,14 @@ fn prepare_dispatch(
                 continue;
             }
         };
-        let missing = missing_required_fields(&tool.input_schema(), &named);
+        emit_tool_node(
+            ctx,
+            &id,
+            &name,
+            &Value::Struct(named.clone()),
+            call_intent.as_ref(),
+        );
+        let missing = missing_required_fields(&raw_schema, &named);
         if !missing.is_empty() {
             let content = format!(
                 "tool `{name}` received empty/incomplete input. Missing required fields: {}. Retry with a complete argument object like {{{}}} — do NOT reuse an empty {{}} input.",
@@ -982,6 +1027,7 @@ fn prepare_dispatch(
                 positional: Vec::new(),
                 named,
             },
+            call_intent,
         });
     }
     Ok(prepared)
@@ -1027,8 +1073,12 @@ async fn partition_and_gate(
                 name,
                 tool,
                 call_args,
+                call_intent,
             } => {
-                let invocation_ctx = ctx.clone().for_tool_invocation(tool.tier());
+                let invocation_ctx = ctx
+                    .clone()
+                    .for_tool_invocation(tool.tier())
+                    .with_call_intent(call_intent);
                 let level = tool.approval_level(&call_args, &invocation_ctx);
                 ready.push(ReadyEntry {
                     index,
@@ -1199,7 +1249,13 @@ fn value_struct_string(value: &Value, field: &str) -> Option<String> {
     }
 }
 
-fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
+fn emit_tool_node(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    input: &Value,
+    call_intent: Option<&crate::message::ToolCallIntent>,
+) {
     let (Some(run_id), Some(parent_node)) = (&ctx.flow_run_id, &ctx.current_node_id) else {
         return;
     };
@@ -1214,6 +1270,7 @@ fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
             tool_use_id: id.to_string(),
             tool_name: name.to_string(),
             args_preview: args_preview.clone(),
+            call_intent: call_intent.cloned(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {
@@ -1223,6 +1280,7 @@ fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
             tool_use_id: id.to_string(),
             tool: name.to_string(),
             args_preview,
+            call_intent: call_intent.cloned(),
         });
     }
 }
@@ -1507,6 +1565,63 @@ mod tests {
             crate::message::MessagePart::ToolResult { content, is_error: false, .. }
                 if content == "true"
         )));
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_strips_wire_intent_and_isolates_parallel_contexts() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(PermitProbeTool));
+        let ctx = authorized_ctx(std::sync::Arc::new(registry));
+        let uses = vec![
+            Value::Struct(vec![
+                ("id".into(), Value::Str("first".into())),
+                ("name".into(), Value::Str("permit.probe".into())),
+                (
+                    "input".into(),
+                    Value::Struct(vec![(
+                        crate::message::TOOL_CALL_INTENT_FIELD.into(),
+                        Value::Str("Inspect first target".into()),
+                    )]),
+                ),
+            ]),
+            Value::Struct(vec![
+                ("id".into(), Value::Str("second".into())),
+                ("name".into(), Value::Str("permit.probe".into())),
+                (
+                    "input".into(),
+                    Value::Struct(vec![(
+                        crate::message::TOOL_CALL_INTENT_FIELD.into(),
+                        Value::Str("Inspect second target".into()),
+                    )]),
+                ),
+            ]),
+        ];
+        let prepared = prepare_dispatch(&uses, ctx.registry.as_ref().unwrap(), &ctx).unwrap();
+        let (parallel, serial, _) = partition_and_gate(prepared, &ctx).await;
+
+        assert!(serial.is_empty());
+        assert_eq!(parallel.len(), 2);
+        assert!(parallel.iter().all(|call| {
+            call.call_args
+                .named(crate::message::TOOL_CALL_INTENT_FIELD)
+                .is_none()
+        }));
+        assert_eq!(
+            parallel[0]
+                .call_ctx
+                .call_intent
+                .as_ref()
+                .map(|intent| intent.as_str()),
+            Some("Inspect first target")
+        );
+        assert_eq!(
+            parallel[1]
+                .call_ctx
+                .call_intent
+                .as_ref()
+                .map(|intent| intent.as_str()),
+            Some("Inspect second target")
+        );
     }
 
     struct ControlledTool {

@@ -17,6 +17,7 @@ fn tool_node(id: &str, label: &str) -> WorkflowNode {
             tool_use_id: id.into(),
             tool: label.into(),
             args_preview: String::new(),
+            call_intent: None,
             result_preview: None,
         },
         label: label.into(),

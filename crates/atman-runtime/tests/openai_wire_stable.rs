@@ -48,6 +48,7 @@ fn assistant_with_tool_use(text: &str, id: &str, name: &str, input: serde_json::
                 id: id.to_string(),
                 name: name.to_string(),
                 input,
+                intent: None,
             },
         ],
         turn_id: tid(),

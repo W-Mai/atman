@@ -58,7 +58,7 @@ impl AnthropicProvider {
         let raw_wire: Vec<WireMessage> = req
             .messages
             .iter()
-            .map(|m| build_wire_message(m, false))
+            .map(|m| build_wire_message(m, false, &req.tools))
             .collect::<Result<_, _>>()?;
         let wire_messages = merge_consecutive_same_role(raw_wire);
         let tools: Vec<WireTool> = req
@@ -148,7 +148,11 @@ fn anthropic_reasoning(
     }
 }
 
-fn build_wire_message(m: &Message, apply_cache_control: bool) -> Result<WireMessage, RuntimeError> {
+fn build_wire_message(
+    m: &Message,
+    apply_cache_control: bool,
+    tools: &[crate::tool::ToolSpec],
+) -> Result<WireMessage, RuntimeError> {
     let role = match m.role {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
@@ -185,10 +189,15 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> Result<WireMess
                     },
                 }
             }
-            MessagePart::ToolUse { id, name, input } => ContentPart::ToolUse {
+            MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } => ContentPart::ToolUse {
                 id: id.clone(),
                 name: crate::tool_naming::to_wire(name),
-                input: input.clone(),
+                input: crate::message::encode_tool_call_input(input, intent.as_ref(), name, tools),
             },
             MessagePart::Thinking {
                 thinking,
@@ -483,10 +492,14 @@ impl Provider for AnthropicProvider {
                     } else {
                         serde_json::from_str(&pu.input_json).unwrap_or(serde_json::Value::Null)
                     };
+                    let name = crate::tool_naming::from_wire(&pu.name, &tools);
+                    let (input, intent) =
+                        crate::message::decode_tool_call_input(input, &name, &tools);
                     parts.push(MessagePart::ToolUse {
                         id: pu.id,
-                        name: crate::tool_naming::from_wire(&pu.name, &tools),
+                        name,
                         input,
+                        intent,
                     });
                 }
                 Ok(AssistantMessage {
@@ -569,11 +582,16 @@ fn response_to_assistant(
                 thinking,
                 signature,
             }),
-            ContentBlock::ToolUse { id, name, input } => parts.push(MessagePart::ToolUse {
-                id,
-                name: crate::tool_naming::from_wire(&name, tools),
-                input,
-            }),
+            ContentBlock::ToolUse { id, name, input } => {
+                let name = crate::tool_naming::from_wire(&name, tools);
+                let (input, intent) = crate::message::decode_tool_call_input(input, &name, tools);
+                parts.push(MessagePart::ToolUse {
+                    id,
+                    name,
+                    input,
+                    intent,
+                });
+            }
             ContentBlock::Other => {}
         }
     }
@@ -763,4 +781,73 @@ enum ContentBlock {
     },
     #[serde(other)]
     Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct IntentTool;
+
+    impl crate::tool::Tool for IntentTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn tier(&self) -> crate::tool::Tier {
+            crate::tool::Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: crate::tool::ToolArgs,
+            _ctx: &'a crate::tool::ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async { Ok(crate::Value::Unit) })
+        }
+    }
+
+    #[test]
+    fn tool_call_intent_round_trips_through_tool_use_input() {
+        let tools = vec![crate::tool::tool_spec(&IntentTool)];
+        let message = Message {
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::ToolUse {
+                id: "call-1".into(),
+                name: "probe".into(),
+                input: serde_json::json!({"value": 1}),
+                intent: crate::message::ToolCallIntent::new("Inspect provider state"),
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        };
+        let wire =
+            serde_json::to_value(build_wire_message(&message, false, &tools).unwrap()).unwrap();
+        assert_eq!(
+            wire["content"][0]["input"]["_atman_intent"],
+            "Inspect provider state"
+        );
+
+        let assistant = response_to_assistant(
+            MessagesResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "probe".into(),
+                    input: wire["content"][0]["input"].clone(),
+                }],
+                stop_reason: Some("tool_use".into()),
+                usage: None,
+                model: None,
+                id: None,
+            },
+            crate::event::TurnId::now(),
+            &tools,
+        );
+        assert!(matches!(
+            assistant.message.parts.as_slice(),
+            [MessagePart::ToolUse { input, intent: Some(intent), .. }]
+                if input == &serde_json::json!({"value": 1})
+                    && intent.as_str() == "Inspect provider state"
+        ));
+    }
 }

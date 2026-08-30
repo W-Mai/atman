@@ -26,6 +26,7 @@ fn make_tool_node(idx: usize, running: bool) -> WorkflowNode {
             args_preview: format!(
                 "{{\"path\":\"src/lib_{idx}.rs\",\"start\":1,\"limit\":40,\"n\":{idx}}}"
             ),
+            call_intent: None,
             result_preview: Some(format!(
                 "lines 1..40 from src/lib_{idx}.rs — some content about the file at index {idx} that spans a few characters"
             )),

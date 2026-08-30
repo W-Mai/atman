@@ -39,6 +39,7 @@ fn is_plan_related_matches_plan_tool_use_and_result() {
             id: "t1".into(),
             name: "plan.write".into(),
             input: serde_json::json!({"title":"x"}),
+            intent: None,
         }],
         origin: MessageOrigin::User,
     };
@@ -74,6 +75,7 @@ fn find_compact_range_keeps_recent_tail_containing_plan_messages() {
                 id: "t1".into(),
                 name: "plan.tick".into(),
                 input: serde_json::json!({}),
+                intent: None,
             }],
             origin: MessageOrigin::User,
         },

@@ -53,6 +53,7 @@ fn pending_request(
     let intent = PermissionIntent {
         tool_use_id: tool_use_id.into(),
         tool_name: "bash.spawn".into(),
+        call_intent: None,
         tier: Tier::Two,
         risks: BTreeSet::new(),
         args_digest: format!("sha256:{tool_use_id}"),
