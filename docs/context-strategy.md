@@ -28,6 +28,9 @@ LlmRequest
 `schema` controls structured output; it is not conversation history. Pending runtime
 injections may also be rendered into the message list immediately before dispatch.
 Provider adapters serialize these components into the provider-specific wire format.
+Explicit tool selectors retain their declared order, wildcard matches are sorted by
+qualified name, and overlaps are removed. Tool schema object keys are recursively
+canonicalized, so registry insertion order does not change the provider prefix.
 
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if

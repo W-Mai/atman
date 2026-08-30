@@ -326,15 +326,22 @@ pub fn resolve_tool_specs_from_values(
     tools: &crate::tool::ToolRegistry,
 ) -> Result<Vec<crate::tool::ToolSpec>, String> {
     let mut out = Vec::with_capacity(values.len());
+    let mut seen = std::collections::HashSet::new();
     for item in values {
         match item {
             Value::Str(name) => {
                 if let Some(prefix) = wildcard_prefix_value(name) {
-                    for tool_name in tools.names() {
-                        if tool_name.starts_with(&prefix) {
-                            if let Some(tool) = tools.get(&tool_name) {
-                                out.push(crate::tool::tool_spec(tool.as_ref()));
-                            }
+                    let mut matches: Vec<_> = tools
+                        .names()
+                        .into_iter()
+                        .filter(|tool_name| tool_name.starts_with(&prefix))
+                        .collect();
+                    matches.sort_unstable();
+                    for tool_name in matches {
+                        if seen.insert(tool_name.clone())
+                            && let Some(tool) = tools.get(&tool_name)
+                        {
+                            out.push(crate::tool::tool_spec(tool.as_ref()));
                         }
                     }
                     continue;
@@ -342,7 +349,9 @@ pub fn resolve_tool_specs_from_values(
                 let tool = tools
                     .get(name)
                     .ok_or_else(|| format!("llm.tools: unknown tool `{name}`"))?;
-                out.push(crate::tool::tool_spec(tool.as_ref()));
+                if seen.insert(name.clone()) {
+                    out.push(crate::tool::tool_spec(tool.as_ref()));
+                }
             }
             other => {
                 return Err(format!(
@@ -370,6 +379,26 @@ fn wildcard_prefix_value(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NamedTool(String);
+
+    impl crate::tool::Tool for NamedTool {
+        fn name(&self) -> &str {
+            &self.0
+        }
+
+        fn tier(&self) -> crate::tool::Tier {
+            crate::tool::Tier::Zero
+        }
+
+        fn call<'a>(
+            &'a self,
+            _args: crate::tool::ToolArgs,
+            _ctx: &'a crate::tool::ToolCtx,
+        ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+            Box::pin(async { Ok(Value::Unit) })
+        }
+    }
 
     fn parse(named: Vec<(String, Value)>) -> Result<LlmNodeArgs, RuntimeError> {
         parse_llm_args_from_toolargs(
@@ -483,6 +512,40 @@ mod tests {
                 matches!(result, Err(RuntimeError::ToolFailed(message)) if message.contains("cannot be used together"))
             );
         }
+    }
+
+    #[test]
+    fn tool_resolution_is_stable_and_deduplicates_overlapping_selectors() {
+        fn registry(names: &[&str]) -> crate::tool::ToolRegistry {
+            let registry = crate::tool::ToolRegistry::new();
+            for name in names {
+                registry.register(std::sync::Arc::new(NamedTool((*name).into())));
+            }
+            registry
+        }
+
+        let selectors = vec![
+            Value::Str("native.read".into()),
+            Value::Str("mcp.*".into()),
+            Value::Str("mcp.zeta".into()),
+        ];
+        let left = resolve_tool_specs_from_values(
+            &selectors,
+            &registry(&["mcp.zeta", "native.read", "mcp.alpha"]),
+        )
+        .unwrap();
+        let right = resolve_tool_specs_from_values(
+            &selectors,
+            &registry(&["mcp.alpha", "mcp.zeta", "native.read"]),
+        )
+        .unwrap();
+
+        let names: Vec<_> = left.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(names, ["native.read", "mcp.alpha", "mcp.zeta"]);
+        assert_eq!(
+            serde_json::to_vec(&left).unwrap(),
+            serde_json::to_vec(&right).unwrap()
+        );
     }
 
     #[test]

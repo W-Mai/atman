@@ -594,10 +594,30 @@ pub trait Tool: Send + Sync {
 pub fn tool_spec(tool: &dyn Tool) -> ToolSpec {
     let mut input_schema = tool.input_schema();
     decorate_tool_input_schema(&mut input_schema);
+    canonicalize_json_object_keys(&mut input_schema);
     ToolSpec {
         name: tool.name().to_string(),
         description: tool.description().map(str::to_string),
         input_schema,
+    }
+}
+
+fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, value) in &mut entries {
+                canonicalize_json_object_keys(value);
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            object.extend(entries);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonicalize_json_object_keys(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -811,6 +831,20 @@ mod tests {
             serde_json::json!({"type": "integer"})
         );
         assert!(!tool_spec_supports_call_intent("collision", &[spec]));
+    }
+
+    #[test]
+    fn canonical_json_orders_nested_object_keys() {
+        let mut left: serde_json::Value =
+            serde_json::from_str(r#"{"zeta":{"y":1,"x":2},"alpha":0}"#).unwrap();
+        let mut right: serde_json::Value =
+            serde_json::from_str(r#"{"alpha":0,"zeta":{"x":2,"y":1}}"#).unwrap();
+        canonicalize_json_object_keys(&mut left);
+        canonicalize_json_object_keys(&mut right);
+        assert_eq!(
+            serde_json::to_vec(&left).unwrap(),
+            serde_json::to_vec(&right).unwrap()
+        );
     }
 
     #[test]
