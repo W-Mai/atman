@@ -71,6 +71,52 @@ fn anthropic_wire_body_omits_tools_field_when_list_empty() {
 }
 
 #[test]
+fn anthropic_compact_resume_keeps_summary_tail_tool_pair_and_definitions() {
+    let p = provider();
+    let mut req = request_with_tools();
+    let turn = TurnId(Uuid::nil());
+    req.system = Some("stable instructions".into());
+    req.messages = vec![
+        Message::system_compact_summary(turn.clone(), "retained summary", 1, 9, 9),
+        Message::user_text(turn.clone(), "current request"),
+        Message {
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::ToolUse {
+                id: "call_resume".into(),
+                name: "fs.list".into(),
+                input: serde_json::json!({"path": "."}),
+                intent: None,
+            }],
+            turn_id: turn.clone(),
+            origin: MessageOrigin::User,
+        },
+        Message {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: "call_resume".into(),
+                content: "entries".into(),
+                is_error: false,
+            }],
+            turn_id: turn,
+            origin: MessageOrigin::User,
+        },
+    ];
+
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    assert_eq!(body["system"], "stable instructions");
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "retained summary");
+    assert_eq!(messages[0]["content"][1]["text"], "current request");
+    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[1]["content"][0]["id"], "call_resume");
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_resume");
+    assert_eq!(body["tools"][0]["name"], "fs_list");
+}
+
+#[test]
 fn anthropic_effort_uses_adaptive_thinking_and_output_config() {
     let p = provider();
     let mut req = request_with_tools();

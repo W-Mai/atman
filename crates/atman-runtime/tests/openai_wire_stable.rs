@@ -192,6 +192,40 @@ fn openai_wire_body_prefix_stable_when_new_message_appended() {
 }
 
 #[test]
+fn openai_compact_resume_keeps_summary_tail_tool_pair_and_definitions() {
+    let p = provider();
+    let mut req = fixed_request();
+    req.messages = vec![
+        Message::system_compact_summary(tid(), "retained summary", 1, 9, 9),
+        user("current request"),
+        assistant_with_tool_use(
+            "reading",
+            "call_resume",
+            "fs.read",
+            serde_json::json!({"path": "README.md"}),
+        ),
+        tool_result("call_resume", "contents"),
+    ];
+    req.tools = vec![atman_runtime::tool::ToolSpec {
+        name: "fs.read".into(),
+        description: Some("read a file".into()),
+        input_schema: serde_json::json!({"type": "object"}),
+    }];
+
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "you are a helpful assistant.");
+    assert_eq!(messages[1]["role"], "system");
+    assert_eq!(messages[1]["content"], "retained summary");
+    assert_eq!(messages[2]["content"], "current request");
+    assert_eq!(messages[3]["tool_calls"][0]["id"], "call_resume");
+    assert_eq!(messages[4]["tool_call_id"], "call_resume");
+    assert_eq!(messages[4]["content"], "contents");
+    assert_eq!(body["tools"][0]["function"]["name"], "fs_read");
+}
+
+#[test]
 fn official_openai_profile_uses_reasoning_effort_and_completion_budget() {
     let provider = OpenAiProvider::new("openai", "test-key")
         .with_reasoning_format(atman_runtime::providers::openai::OpenAiReasoningFormat::Official)

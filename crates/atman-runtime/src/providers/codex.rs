@@ -1412,6 +1412,68 @@ mod tests {
         assert_eq!(body["input"][0]["content"], "retained summary");
     }
 
+    #[test]
+    fn compact_resume_keeps_summary_tail_tool_pair_and_definitions() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let turn = crate::event::TurnId::now();
+        let request = crate::provider::LlmRequest {
+            model: "codex/gpt-test".into(),
+            messages: vec![
+                crate::message::Message::system_compact_summary(
+                    turn.clone(),
+                    "retained summary",
+                    1,
+                    9,
+                    9,
+                ),
+                crate::message::Message::user_text(turn.clone(), "current request"),
+                crate::message::Message {
+                    role: crate::message::MessageRole::Assistant,
+                    parts: vec![crate::message::MessagePart::ToolUse {
+                        id: "call_resume".into(),
+                        name: "fs.read".into(),
+                        input: serde_json::json!({"path": "README.md"}),
+                        intent: None,
+                    }],
+                    turn_id: turn.clone(),
+                    origin: crate::message::MessageOrigin::User,
+                },
+                crate::message::Message {
+                    role: crate::message::MessageRole::Tool,
+                    parts: vec![crate::message::MessagePart::ToolResult {
+                        tool_use_id: "call_resume".into(),
+                        content: "contents".into(),
+                        is_error: false,
+                    }],
+                    turn_id: turn,
+                    origin: crate::message::MessageOrigin::User,
+                },
+            ],
+            system: Some("stable instructions".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            tools: vec![crate::tool::ToolSpec {
+                name: "fs.read".into(),
+                description: Some("read a file".into()),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
+        assert_eq!(body["instructions"], "stable instructions");
+        assert_eq!(body["input"][0]["content"], "retained summary");
+        assert_eq!(body["input"][1]["content"], "current request");
+        assert_eq!(body["input"][2]["type"], "function_call");
+        assert_eq!(body["input"][2]["call_id"], "call_resume");
+        assert_eq!(body["input"][3]["type"], "function_call_output");
+        assert_eq!(body["input"][3]["call_id"], "call_resume");
+        assert_eq!(body["input"][3]["output"], "contents");
+        assert_eq!(body["tools"][0]["name"], "fs_read");
+    }
+
     #[tokio::test]
     async fn streaming_call_acquires_credentials_before_sending_request() {
         let server = MockServer::start().await;
