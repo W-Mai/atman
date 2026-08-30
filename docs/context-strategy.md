@@ -75,13 +75,16 @@ and model information are synchronized into `session.*` records. The current use
 message enters history first; changed records append after it and remain in the same
 event, compaction, checkpoint, and resume stream. Isolated prompts and explicit
 message lists receive only the latest live runtime records, not conversational
-history. The managed agent still selects relevant rules and past confessions in its
-workflow-owned system layer.
+history. The managed agent selects relevant rules and past confessions as independently
+keyed retrieved records instead of rewriting its system prompt.
 
-The stable system template does not contain a working-directory placeholder. Root
-calls append one workspace record from session metadata; spawned flows append one to
-their local history from the effective tool workspace. This prevents duplicate root
-context and literal placeholders in child requests.
+The stable system template contains only authority, scope, execution, transaction,
+batching, interaction, safety, and completion rules. Detailed shell, terminal, flow,
+watcher, memory, and form manuals stay in tool descriptions or `help.show`. The
+template does not contain a working-directory placeholder. Root calls append one
+workspace record from session metadata; spawned flows append one to their local
+history from the effective tool workspace. This prevents duplicate root context and
+literal placeholders in child requests.
 
 ## Message selection
 
@@ -203,8 +206,8 @@ Different stores solve different retention problems:
 
 | Store | Prompt behavior | Intended use |
 |---|---|---|
-| Goal | Runtime appends it to every session-backed LLM system prompt | The current objective |
-| Plan | Runtime appends the active plan to the system prompt | High-level ordered route |
+| Goal | Runtime synchronizes it to the versioned `session.goal` record | The current objective |
+| Plan | Runtime synchronizes it to the versioned `session.plan` record | High-level ordered route |
 | Todos | Not automatically injected as a list; available through tools and UI | Concrete execution items inside a plan step |
 | Confessions | Managed agent selects relevant records before its main loop | Avoid repeating known failures |
 | Rules | Managed agent selects and loads relevant rules before its main loop | Task-specific operating constraints |

@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 - **Context record revisions** — Session record appends suppress unchanged per-key digests and assign the next revision atomically, including after session resume.
 - **Session state records** — Goal, workspace, active plan, and model context append as versioned records; clearing live state writes a tombstone, while isolated calls receive current records without conversational history.
 - **Retrieved context records** — Managed rule and confession selection appends per-item internal records with digest no-ops instead of rebuilding the system prompt each turn.
+- **Compact managed instructions** — The stable agent prompt retains authority, execution, transaction, batching, interaction, safety, and completion rules while detailed tool manuals remain available through tool descriptions and built-in help.
 - **Bounded recent-history excerpts** — `memory.recent_turns` can return a character-limited recent-first excerpt while retaining its lossless `items` result.
 - **Tool call purpose metadata** — LLM-generated built-in, MCP, and spawned-flow calls retain a concise purpose across provider history, workflow replay, approvals, and TUI rendering without changing executable arguments.
 - **Provider-aware reasoning controls** — model settings, DSL calls, TUI submissions, CLI runs, and daemon requests support exact reasoning efforts, execution modes, and token budgets with provider capability validation.
