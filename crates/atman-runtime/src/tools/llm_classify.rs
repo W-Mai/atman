@@ -66,6 +66,7 @@ impl Tool for LlmClassifyTool {
                 llm_args.retry_count = 0;
                 llm_args.messages_override = None;
                 llm_args.fallback_value = None;
+                llm_args.call_purpose = crate::context_plan::ContextCallPurpose::Classification;
                 llm_args.prompt = Some(if attempt == 0 {
                     tool_prompt.clone()
                 } else {

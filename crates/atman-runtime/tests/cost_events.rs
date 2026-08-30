@@ -38,6 +38,8 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             context_plan_id,
             context_tokens,
             usage_source,
+            context_call_purpose,
+            context_call_identity,
             usage,
             status,
             ..
@@ -48,6 +50,16 @@ async fn llm_call_event_records_wallclock_and_tokens() {
             let tokens = context_tokens.as_ref().expect("context token lanes");
             assert!(tokens.messages > 0);
             assert!(usage_source.is_some());
+            assert_eq!(
+                *context_call_purpose,
+                Some(atman_runtime::ContextCallPurpose::General)
+            );
+            assert_eq!(
+                context_call_identity
+                    .as_ref()
+                    .map(|identity| identity.scope),
+                Some(atman_runtime::ContextCallScope::Root)
+            );
             assert!(matches!(status, LlmCallStatus::Ok));
             assert!(usage.input > 0);
             assert!(usage.output > 0);

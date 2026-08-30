@@ -16,6 +16,7 @@ pub struct LlmNodeArgs {
     pub fallback_value: Option<crate::value::Value>,
     pub tool_specs: Vec<crate::tool::ToolSpec>,
     pub reasoning: Option<crate::provider::ReasoningSelection>,
+    pub call_purpose: crate::context_plan::ContextCallPurpose,
     pub stall_timeout_secs: u64,
 }
 
@@ -301,6 +302,7 @@ pub fn parse_llm_args_from_toolargs(
                 }
             })
         }),
+        call_purpose: crate::context_plan::ContextCallPurpose::General,
         stall_timeout_secs,
     })
 }

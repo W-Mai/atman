@@ -28,15 +28,31 @@ pub struct ModelContextPlan {
     id: ContextPlanId,
     request: LlmRequest,
     token_lanes: ContextTokenLanes,
+    call_purpose: ContextCallPurpose,
+    call_identity: ContextCallIdentity,
 }
 
 impl ModelContextPlan {
     pub fn new(request: LlmRequest) -> Self {
+        Self::for_call(
+            request,
+            ContextCallPurpose::General,
+            ContextCallIdentity::detached(),
+        )
+    }
+
+    pub fn for_call(
+        request: LlmRequest,
+        call_purpose: ContextCallPurpose,
+        call_identity: ContextCallIdentity,
+    ) -> Self {
         let token_lanes = ContextTokenLanes::for_request(&request);
         Self {
             id: ContextPlanId::now(),
             request,
             token_lanes,
+            call_purpose,
+            call_identity,
         }
     }
 
@@ -56,8 +72,70 @@ impl ModelContextPlan {
         self.token_lanes.total()
     }
 
+    pub fn call_purpose(&self) -> ContextCallPurpose {
+        self.call_purpose
+    }
+
+    pub fn call_identity(&self) -> &ContextCallIdentity {
+        &self.call_identity
+    }
+
     pub fn into_request(self) -> LlmRequest {
         self.request
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCallPurpose {
+    #[default]
+    General,
+    Classification,
+    Extraction,
+    BranchGeneration,
+    Compaction,
+    InterjectionClassification,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCallScope {
+    Root,
+    Child,
+    #[default]
+    Detached,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ContextCallIdentity {
+    pub scope: ContextCallScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_run_id: Option<crate::event::FlowRunId>,
+}
+
+impl ContextCallIdentity {
+    pub fn detached() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn from_tool_context(ctx: &crate::tool::ToolCtx) -> Self {
+        let session_id = ctx.session_id.clone().or_else(|| {
+            ctx.session_runtime
+                .as_ref()
+                .map(|session| session.id().to_string())
+        });
+        let scope = match ctx.history_segment {
+            crate::tool::HistorySegment::Spawned => ContextCallScope::Child,
+            crate::tool::HistorySegment::Root if session_id.is_some() => ContextCallScope::Root,
+            crate::tool::HistorySegment::Root => ContextCallScope::Detached,
+        };
+        Self {
+            scope,
+            session_id,
+            flow_run_id: ctx.flow_run_id.clone(),
+        }
     }
 }
 
@@ -175,6 +253,8 @@ mod tests {
         assert_eq!(first.request().model, "test-model");
         assert_eq!(first.request().system.as_deref(), Some("stable"));
         assert!(first.request().cache_prompt);
+        assert_eq!(first.call_purpose(), ContextCallPurpose::General);
+        assert_eq!(first.call_identity().scope, ContextCallScope::Detached);
     }
 
     #[test]
@@ -226,5 +306,27 @@ mod tests {
         assert_eq!(usage.output, 20);
         assert_eq!(usage.reasoning_tokens, 5);
         assert_eq!(source, TokenUsageSource::Mixed);
+    }
+
+    #[test]
+    fn tool_context_identity_distinguishes_root_child_and_detached_calls() {
+        let detached = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx::default());
+        assert_eq!(detached.scope, ContextCallScope::Detached);
+
+        let root = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx {
+            session_id: Some("session-1".into()),
+            flow_run_id: Some(crate::event::FlowRunId::now()),
+            ..Default::default()
+        });
+        assert_eq!(root.scope, ContextCallScope::Root);
+        assert_eq!(root.session_id.as_deref(), Some("session-1"));
+
+        let child = ContextCallIdentity::from_tool_context(&crate::tool::ToolCtx {
+            session_id: Some("session-1".into()),
+            flow_run_id: Some(crate::event::FlowRunId::now()),
+            history_segment: crate::tool::HistorySegment::Spawned,
+            ..Default::default()
+        });
+        assert_eq!(child.scope, ContextCallScope::Child);
     }
 }

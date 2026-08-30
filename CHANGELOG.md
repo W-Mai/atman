@@ -9,7 +9,7 @@ All notable changes to atman are documented in this file.
 ### ⚠️ Breaking Changes
 
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
-- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, and usage source for the provider-neutral plan compiled for the dispatch attempt.
+- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, usage source, call purpose, and root/child identity for the provider-neutral plan compiled for the dispatch attempt.
 - **Provider lifecycle result surfaces** — `AuthLogin`, `AuthLogout`, `RefreshProviderModels`, `AddConfigProvider`, and `UpdateConfigProvider` are replaced by `TuiControl::MutateProvider`, `ProviderMutation::UpsertConfig`, `TuiCommand::ProviderMutationResult`, and `TuiCommand::ProviderCatalogRefreshResult`; `ProviderModelsUpdated` is replaced by `ProviderCatalogChanged`. `TuiControl::TestProvider` carries a complete `ProviderEntry` instead of separate type, credential, and endpoint fields. `BootstrapOutcome` exposes `provider_catalog_refresh_plan` and is non-exhaustive. Public protocol enums are non-exhaustive, so downstream matches require a wildcard arm. This is a major-version API change.
 
 ### ✨ Features

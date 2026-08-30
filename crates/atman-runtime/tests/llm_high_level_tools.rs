@@ -1,5 +1,5 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::Executor;
+use atman_runtime::{ContextCallPurpose, Event, Executor};
 mod common;
 
 use atman_runtime::providers::mock::MockProvider;
@@ -7,6 +7,10 @@ use atman_runtime::value::Value;
 use std::sync::Arc;
 
 fn run(src: &str, provider: MockProvider) -> Value {
+    run_with_events(src, provider).0
+}
+
+fn run_with_events(src: &str, provider: MockProvider) -> (Value, Vec<Event>) {
     let _registry =
         common::SyncModelRegistryGuard::acquire(common::config([common::model_for_provider(
             "m", "mock", 8_192, None,
@@ -15,11 +19,65 @@ fn run(src: &str, provider: MockProvider) -> Value {
     let ex = Executor::new();
     ex.providers.register(Arc::new(provider));
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(ex.run(&parsed, "test", vec![]))
-        .expect("flow failed")
+    let result = rt
+        .block_on(ex.run(&parsed, "test", vec![]))
+        .expect("flow failed");
+    (result, ex.events.snapshot())
 }
 
 // === llm.classify ===
+
+#[test]
+fn high_level_calls_record_their_context_purpose() {
+    let src = r#"
+flow test() -> string {
+    llm.classify(model: "m", prompt: "safe?")
+    llm.extract(
+        model: "m",
+        prompt: "extract",
+        fields: { value: string -- "value" },
+    )
+    llm.generate_branches(model: "m", prompt: "split", count: 1)
+    return "done"
+}
+"#;
+    let provider = MockProvider::new("mock")
+        .with_prefix(
+            "m",
+            "Answer with exactly one word",
+            Value::Str("yes".into()),
+        )
+        .with_prefix(
+            "m",
+            "Extract structured information",
+            Value::Str(r#"{"value":"ok"}"#.into()),
+        )
+        .with_prefix(
+            "m",
+            "Decompose the following task",
+            Value::Str(r#"["one"]"#.into()),
+        );
+
+    let (_, events) = run_with_events(src, provider);
+    let purposes: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::LlmCall {
+                context_call_purpose,
+                ..
+            } => context_call_purpose,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        purposes,
+        vec![
+            ContextCallPurpose::Classification,
+            ContextCallPurpose::Extraction,
+            ContextCallPurpose::BranchGeneration,
+        ]
+    );
+}
 
 #[test]
 fn classify_binary_yes() {

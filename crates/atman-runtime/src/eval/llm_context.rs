@@ -108,6 +108,7 @@ mod tests {
             fallback_value: None,
             tool_specs: Vec::new(),
             reasoning: None,
+            call_purpose: crate::context_plan::ContextCallPurpose::General,
             stall_timeout_secs: 0,
         }
     }

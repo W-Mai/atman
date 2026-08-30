@@ -87,7 +87,10 @@ pub mod watch;
 pub mod workflow;
 
 pub use attachment_store::AttachmentStore;
-pub use context_plan::{ContextPlanId, ContextTokenLanes, ModelContextPlan, TokenUsageSource};
+pub use context_plan::{
+    ContextCallIdentity, ContextCallPurpose, ContextCallScope, ContextPlanId, ContextTokenLanes,
+    ModelContextPlan, TokenUsageSource,
+};
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;
 pub use error::RuntimeError;

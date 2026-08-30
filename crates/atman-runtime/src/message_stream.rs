@@ -271,6 +271,8 @@ mod tests {
                 context_plan_id: None,
                 context_tokens: None,
                 usage_source: None,
+                context_call_purpose: None,
+                context_call_identity: None,
                 usage: crate::provider::TokenUsage::default(),
                 wallclock_ms: 0,
                 ttft_ms: None,

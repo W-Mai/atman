@@ -39,7 +39,8 @@ key between the compiled plan and its resulting call event. The event also separ
 estimated stable-instruction, tool-definition, message, and context-record tokens.
 Provider usage remains authoritative when present; missing input or output counts use
 the complete plan estimate and the event identifies provider, estimated, or mixed
-usage.
+usage. The same event classifies general, extraction, classification, and branch
+generation calls and identifies detached, root-session, and spawned-child contexts.
 
 When an `llm.call` runs with a session runtime, the runtime appends goal,
 working-directory, active-plan, and model information to its system prompt, even if

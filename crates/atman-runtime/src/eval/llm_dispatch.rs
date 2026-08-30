@@ -261,6 +261,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         context_plan_id: None,
                         context_tokens: None,
                         usage_source: None,
+                        context_call_purpose: Some(args.call_purpose),
+                        context_call_identity: Some(
+                            crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
+                        ),
                         usage: crate::provider::TokenUsage::default(),
                         wallclock_ms: 0,
                         ttft_ms: None,
@@ -305,9 +309,15 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 reasoning: reasoning.clone(),
                 stall_timeout_secs,
             };
-            let context_plan = crate::context_plan::ModelContextPlan::new(req);
+            let context_plan = crate::context_plan::ModelContextPlan::for_call(
+                req,
+                args.call_purpose,
+                crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
+            );
             let context_plan_id = context_plan.id().clone();
             let context_tokens = context_plan.token_lanes().clone();
+            let context_call_purpose = context_plan.call_purpose();
+            let context_call_identity = context_plan.call_identity().clone();
             let estimated_input = context_plan.estimated_input_tokens();
             let start = std::time::Instant::now();
             let outcome = call_and_maybe_stream(
@@ -358,6 +368,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     context_plan_id: Some(context_plan_id),
                     context_tokens: Some(context_tokens),
                     usage_source: Some(usage_source),
+                    context_call_purpose: Some(context_call_purpose),
+                    context_call_identity: Some(context_call_identity),
                     usage: usage.clone(),
                     wallclock_ms: elapsed_ms,
                     ttft_ms,

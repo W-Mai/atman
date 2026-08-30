@@ -100,6 +100,8 @@ mod tests {
             context_plan_id: None,
             context_tokens: None,
             usage_source: None,
+            context_call_purpose: None,
+            context_call_identity: None,
             usage: TokenUsage {
                 input: in_tok,
                 output: out_tok,
@@ -121,6 +123,8 @@ mod tests {
             context_plan_id: None,
             context_tokens: None,
             usage_source: None,
+            context_call_purpose: None,
+            context_call_identity: None,
             usage: TokenUsage {
                 input: 5,
                 ..Default::default()
