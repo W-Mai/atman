@@ -79,6 +79,14 @@ pub fn spawn_mcp_boot(
             .map(|hub| hub.load_mcp())
             .unwrap_or_default(),
     };
+    let retained_namespaces = configs
+        .iter()
+        .filter(|config| !config.disabled)
+        .map(|config| atman_runtime::mcp::mcp_tool_namespace(&config.name))
+        .collect::<Vec<_>>();
+    executor
+        .tools
+        .retain_namespaces("mcp.", &retained_namespaces);
     if configs.is_empty() {
         return None;
     }
@@ -157,7 +165,6 @@ pub fn spawn_mcp_boot(
                     };
                     match outcome {
                         Ok(client) => {
-                            let tool_count = client.tools.len();
                             let providers = executor.providers.clone();
                             client.set_sampling_handler(std::sync::Arc::new(
                                 move |req: atman_runtime::mcp::SamplingRequest| {
@@ -217,22 +224,19 @@ pub fn spawn_mcp_boot(
                                 },
                             ));
                             let arc_client = std::sync::Arc::new(client);
-                            for tool in &arc_client.tools {
-                                let adapter = atman_runtime::mcp::McpToolAdapter::new(
-                                    arc_client.clone(),
-                                    &tool.name,
-                                    tier,
-                                    tool.input_schema.as_ref(),
-                                    tool.description.as_deref(),
-                                );
-                                executor.tools.register(std::sync::Arc::new(adapter));
-                            }
+                            let snapshot = arc_client.tool_snapshot();
+                            atman_runtime::mcp::publish_tool_snapshot(
+                                &executor.tools,
+                                arc_client,
+                                tier,
+                                &snapshot,
+                            );
                             session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
                                 name,
                                 transport,
                                 state: atman_runtime::mcp::McpServerState::Connected {
-                                    tool_count,
-                                    tools: arc_client
+                                    tool_count: snapshot.tools.len(),
+                                    tools: snapshot
                                         .tools
                                         .iter()
                                         .map(|t| atman_runtime::mcp::McpToolInfo {

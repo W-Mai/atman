@@ -1718,7 +1718,6 @@ async fn cmd_repl_once(
             .context("provider lifecycle unavailable")?;
         let data_root_for_ctrl = root.clone();
         let executor_for_ctrl = executor.clone();
-        let tools_for_ctrl = executor.tools.clone();
         let reporter_for_ctrl = reporter.clone();
         let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
@@ -2253,7 +2252,6 @@ async fn cmd_repl_once(
                         if let Some(tx) = mcp_shutdown_tx.take() {
                             let _ = tx.send(());
                         }
-                        tools_for_ctrl.unregister_prefix("mcp.");
                         mcp_shutdown_tx = atman_daemon::bootstrap::spawn_mcp_boot(
                             executor_for_ctrl.clone(),
                             session_for_ctrl.clone(),
@@ -6935,8 +6933,9 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                 anyhow::bail!("MCP server \"{}\" not found", name);
             };
             let client = connect_mcp_client(cfg).await?;
-            println!("Tools from {} ({}):", name, client.tools.len());
-            for t in &client.tools {
+            let snapshot = client.tool_snapshot();
+            println!("Tools from {} ({}):", name, snapshot.tools.len());
+            for t in snapshot.tools.iter() {
                 println!(
                     "  - {} — {}",
                     t.name,

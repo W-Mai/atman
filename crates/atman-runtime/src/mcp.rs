@@ -60,13 +60,64 @@ pub struct JsonRpcError {
     pub data: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpToolSchema {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpToolSnapshot {
+    pub fingerprint: String,
+    pub tools: Arc<[McpToolSchema]>,
+}
+
+impl McpToolSnapshot {
+    fn build(mut tools: Vec<McpToolSchema>) -> Result<Self, McpError> {
+        for tool in &mut tools {
+            if let Some(schema) = &mut tool.input_schema {
+                canonicalize_json(schema);
+            }
+        }
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        if let Some(duplicate) = tools
+            .windows(2)
+            .find(|pair| pair[0].name == pair[1].name)
+            .map(|pair| pair[0].name.clone())
+        {
+            return Err(McpError::Protocol(format!(
+                "tools/list returned duplicate tool `{duplicate}`"
+            )));
+        }
+        let bytes = serde_json::to_vec(&tools)
+            .map_err(|error| McpError::Protocol(format!("serialize tool snapshot: {error}")))?;
+        Ok(Self {
+            fingerprint: format!("blake3:{}", blake3::hash(&bytes).to_hex()),
+            tools: tools.into(),
+        })
+    }
+}
+
+fn canonicalize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
+            for (_, value) in &mut entries {
+                canonicalize_json(value);
+            }
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            object.extend(entries);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonicalize_json(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -710,7 +761,7 @@ impl McpTransport for McpHttpTransport {
 pub struct McpClient {
     pub name: String,
     transport: std::sync::Mutex<Arc<dyn McpTransport>>,
-    pub tools: Vec<McpToolSchema>,
+    tool_snapshot: std::sync::RwLock<Arc<McpToolSnapshot>>,
     reconnect: Option<ReconnectConfig>,
     notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
     sampling_handler: SharedSamplingHandler,
@@ -835,13 +886,12 @@ impl McpClient {
         transport
             .notify("notifications/initialized", serde_json::Value::Null)
             .await?;
-        let list = transport.call("tools/list", serde_json::json!({})).await?;
-        let tools = parse_tools_list(&list)?;
+        let tool_snapshot = fetch_tool_snapshot(transport.as_ref()).await?;
         let (notification_tx, _) = tokio::sync::broadcast::channel(256);
         Ok(Self {
             name,
             transport: std::sync::Mutex::new(transport),
-            tools,
+            tool_snapshot: std::sync::RwLock::new(Arc::new(tool_snapshot)),
             reconnect: None,
             notification_tx,
             sampling_handler: Arc::new(std::sync::Mutex::new(None)),
@@ -859,6 +909,21 @@ impl McpClient {
 
     pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<McpNotification> {
         self.notification_tx.subscribe()
+    }
+
+    pub fn tool_snapshot(&self) -> Arc<McpToolSnapshot> {
+        self.tool_snapshot.read().unwrap().clone()
+    }
+
+    pub async fn refresh_tool_snapshot(&self) -> Result<Option<Arc<McpToolSnapshot>>, McpError> {
+        let transport = { self.transport.lock().unwrap().clone() };
+        let candidate = Arc::new(fetch_tool_snapshot(transport.as_ref()).await?);
+        let mut current = self.tool_snapshot.write().unwrap();
+        if current.fingerprint == candidate.fingerprint {
+            return Ok(None);
+        }
+        *current = candidate.clone();
+        Ok(Some(candidate))
     }
 
     async fn reconnect(&self) -> Result<(), McpError> {
@@ -988,7 +1053,38 @@ impl McpClient {
     }
 }
 
-fn parse_tools_list(v: &serde_json::Value) -> Result<Vec<McpToolSchema>, McpError> {
+const MAX_TOOLS_LIST_PAGES: usize = 1024;
+
+async fn fetch_tool_snapshot(transport: &dyn McpTransport) -> Result<McpToolSnapshot, McpError> {
+    let mut tools = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    for _ in 0..MAX_TOOLS_LIST_PAGES {
+        let params = cursor.as_ref().map_or_else(
+            || serde_json::json!({}),
+            |cursor| serde_json::json!({"cursor": cursor}),
+        );
+        let page = transport.call("tools/list", params).await?;
+        let (mut page_tools, next_cursor) = parse_tools_list_page(&page)?;
+        tools.append(&mut page_tools);
+        let Some(next_cursor) = next_cursor else {
+            return McpToolSnapshot::build(tools);
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(McpError::Protocol(format!(
+                "tools/list repeated cursor `{next_cursor}`"
+            )));
+        }
+        cursor = Some(next_cursor);
+    }
+    Err(McpError::Protocol(format!(
+        "tools/list exceeded {MAX_TOOLS_LIST_PAGES} pages"
+    )))
+}
+
+fn parse_tools_list_page(
+    v: &serde_json::Value,
+) -> Result<(Vec<McpToolSchema>, Option<String>), McpError> {
     let arr = v.get("tools").and_then(|t| t.as_array()).ok_or_else(|| {
         McpError::Protocol(format!("tools/list response missing `tools` array: {v}"))
     })?;
@@ -998,7 +1094,16 @@ fn parse_tools_list(v: &serde_json::Value) -> Result<Vec<McpToolSchema>, McpErro
             .map_err(|e| McpError::Protocol(format!("tool schema: {e}")))?;
         out.push(schema);
     }
-    Ok(out)
+    let next_cursor = match v.get("nextCursor") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(cursor)) => Some(cursor.clone()),
+        Some(other) => {
+            return Err(McpError::Protocol(format!(
+                "tools/list `nextCursor` must be a string: {other}"
+            )));
+        }
+    };
+    Ok((out, next_cursor))
 }
 
 pub fn mcp_result_to_value(result: serde_json::Value) -> crate::value::Value {
@@ -1380,24 +1485,15 @@ pub async fn register_from_configs(
         };
         match outcome {
             Ok(client) => {
-                let tool_count = client.tools.len();
                 let transport_kind = client.transport_kind();
                 let arc_client = Arc::new(client);
-                for tool in &arc_client.tools {
-                    let adapter = McpToolAdapter::new(
-                        arc_client.clone(),
-                        &tool.name,
-                        cfg.tier,
-                        tool.input_schema.as_ref(),
-                        tool.description.as_deref(),
-                    );
-                    reg.register(Arc::new(adapter));
-                }
+                let snapshot = arc_client.tool_snapshot();
+                publish_tool_snapshot(reg, arc_client.clone(), cfg.tier, &snapshot);
                 out.push(Ok(McpClientStatus {
                     name: cfg.name.clone(),
-                    tool_count,
+                    tool_count: snapshot.tools.len(),
                     transport: transport_kind,
-                    tools: arc_client
+                    tools: snapshot
                         .tools
                         .iter()
                         .map(|t| McpToolInfo {
@@ -1414,6 +1510,32 @@ pub async fn register_from_configs(
         }
     }
     out
+}
+
+pub fn mcp_tool_namespace(server_name: &str) -> String {
+    format!("mcp.{server_name}.")
+}
+
+pub fn publish_tool_snapshot(
+    registry: &crate::tool::ToolRegistry,
+    client: Arc<McpClient>,
+    tier: crate::tool::Tier,
+    snapshot: &McpToolSnapshot,
+) {
+    let tools = snapshot
+        .tools
+        .iter()
+        .map(|tool| {
+            Arc::new(McpToolAdapter::new(
+                client.clone(),
+                &tool.name,
+                tier,
+                tool.input_schema.as_ref(),
+                tool.description.as_deref(),
+            )) as Arc<dyn crate::tool::Tool>
+        })
+        .collect();
+    registry.replace_namespace(&mcp_tool_namespace(&client.name), tools);
 }
 
 #[derive(Debug)]
@@ -1434,6 +1556,111 @@ pub struct McpBootError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PagedToolTransport {
+        repeated_cursor: bool,
+        calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl PagedToolTransport {
+        fn new(repeated_cursor: bool) -> Self {
+            Self {
+                repeated_cursor,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl McpTransport for PagedToolTransport {
+        fn call<'a>(
+            &'a self,
+            method: &'a str,
+            params: serde_json::Value,
+        ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+            let result = match method {
+                "initialize" => Ok(serde_json::json!({})),
+                "tools/list" if params.get("cursor").is_none() => Ok(serde_json::json!({
+                    "tools": [{
+                        "name": "zeta",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"z": {"type": "string"}, "a": {"type": "string"}}
+                        }
+                    }],
+                    "nextCursor": "page-2"
+                })),
+                "tools/list" if self.repeated_cursor => Ok(serde_json::json!({
+                    "tools": [],
+                    "nextCursor": "page-2"
+                })),
+                "tools/list" => Ok(serde_json::json!({
+                    "tools": [{"name": "alpha", "inputSchema": {"type": "object"}}]
+                })),
+                other => Err(McpError::Protocol(format!("unexpected call `{other}`"))),
+            };
+            Box::pin(async move { result })
+        }
+
+        fn notify<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: serde_json::Value,
+        ) -> BoxFut<'a, Result<(), McpError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_reads_every_tools_page_into_one_canonical_snapshot() {
+        let transport = Arc::new(PagedToolTransport::new(false));
+        let client = McpClient::connect_with_transport("paged", transport.clone())
+            .await
+            .unwrap();
+
+        let snapshot = client.tool_snapshot();
+        assert_eq!(
+            snapshot
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
+        let list_params = transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "tools/list")
+            .map(|(_, params)| params.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            list_params,
+            vec![
+                serde_json::json!({}),
+                serde_json::json!({"cursor": "page-2"})
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_repeated_tools_page_cursor() {
+        let transport = Arc::new(PagedToolTransport::new(true));
+        let error = match McpClient::connect_with_transport("paged", transport).await {
+            Ok(_) => panic!("repeated cursor should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("repeated cursor `page-2`"));
+    }
 
     #[tokio::test]
     async fn stdio_transport_call_returns_result() {

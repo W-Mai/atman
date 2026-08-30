@@ -801,6 +801,36 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Replace one qualified tool namespace while holding a single write lock.
+    pub fn replace_namespace(&self, prefix: &str, tools: Vec<std::sync::Arc<dyn Tool>>) {
+        assert!(!prefix.is_empty(), "tool namespace prefix cannot be empty");
+        assert!(
+            tools.iter().all(|tool| tool.name().starts_with(prefix)),
+            "replacement tools must belong to namespace `{prefix}`"
+        );
+        let mut registry = self.tools.write().unwrap();
+        registry.retain(|name, _| !name.starts_with(prefix));
+        for tool in tools {
+            registry.insert(tool.name().to_string(), tool);
+        }
+    }
+
+    /// Remove namespaced tools that are no longer backed by an enabled source.
+    pub fn retain_namespaces(&self, root_prefix: &str, retained_prefixes: &[String]) {
+        assert!(
+            retained_prefixes
+                .iter()
+                .all(|prefix| prefix.starts_with(root_prefix)),
+            "retained namespaces must belong to root `{root_prefix}`"
+        );
+        self.tools.write().unwrap().retain(|name, _| {
+            !name.starts_with(root_prefix)
+                || retained_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        });
+    }
+
     /// Remove all tools whose name starts with `prefix` (e.g. `"mcp."`).
     pub fn unregister_prefix(&self, prefix: &str) {
         self.tools
@@ -813,6 +843,52 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NamedTool(&'static str);
+
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { Ok(crate::value::Value::Unit) })
+        }
+    }
+
+    #[test]
+    fn namespace_replacement_removes_stale_tools_without_touching_peers() {
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(NamedTool("mcp.alpha.old")));
+        registry.register(std::sync::Arc::new(NamedTool("mcp.beta.keep")));
+
+        registry.replace_namespace(
+            "mcp.alpha.",
+            vec![std::sync::Arc::new(NamedTool("mcp.alpha.new"))],
+        );
+
+        assert!(!registry.has("mcp.alpha.old"));
+        assert!(registry.has("mcp.alpha.new"));
+        assert!(registry.has("mcp.beta.keep"));
+    }
+
+    #[test]
+    fn namespace_retention_only_removes_disabled_sources() {
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(NamedTool("mcp.alpha.keep")));
+        registry.register(std::sync::Arc::new(NamedTool("mcp.beta.remove")));
+        registry.register(std::sync::Arc::new(NamedTool("fs.read")));
+
+        registry.retain_namespaces("mcp.", &["mcp.alpha.".to_string()]);
+
+        assert!(registry.has("mcp.alpha.keep"));
+        assert!(!registry.has("mcp.beta.remove"));
+        assert!(registry.has("fs.read"));
+    }
 
     #[test]
     fn model_tool_exposure_is_scoped_exact_and_single_use() {
