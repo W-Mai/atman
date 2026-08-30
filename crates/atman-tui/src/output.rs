@@ -179,8 +179,7 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
     let trailing_w = 2usize; // `─╮`
     let status_seg = if status_w > 0 { status_w + 1 } else { 0 };
     let kind_seg = if kind_w > 0 { kind_w + 1 } else { 0 };
-    let approval_gap = if approval_text.is_some() { 2 } else { 0 };
-    let fixed = leading_w + status_seg + kind_seg + approval_w + approval_gap + trailing_w;
+    let fixed = leading_w + status_seg + kind_seg + approval_w + trailing_w;
     let label_budget = (outer_width as usize).saturating_sub(fixed).max(1);
     let label_display = crate::width::middle_truncate(label, label_budget);
     let label_w = crate::width::width(label_display.as_str());
@@ -5002,6 +5001,13 @@ mod tests {
             idx_label < idx_approval,
             "approval must appear after label: {top:?}"
         );
+        for (index, line) in out.iter().enumerate() {
+            assert_eq!(
+                crate::width::width(plain_line(line).as_str()),
+                rect.outer_width as usize,
+                "box line {index} must match its declared width"
+            );
+        }
     }
 
     #[test]
