@@ -1685,7 +1685,9 @@ async fn cmd_repl_once(
     let flow_names = discover_flow_names();
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ReplInput>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
-        let tui_submit_tx = spawn_tui_submission_bridge(input_tx.clone(), session.clone());
+        // The control task is the sole TUI-side owner of the REPL input sender.
+        // Dropping the TUI closes ctrl_rx, which drops this sink and wakes input_rx.
+        let tui_input_sink = TuiControlInputSink::new(input_tx, session.clone());
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
         let sh_tx_shared: std::sync::Arc<
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -1708,7 +1710,6 @@ async fn cmd_repl_once(
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let cmd_tx_for_models = cmd_tx.clone();
         let session_for_ctrl = std::sync::Arc::clone(&session);
-        let input_tx_for_ctrl = input_tx.clone();
         let session_for_ctrl_term_registry = executor.tool_ctx.term_registry.clone();
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
@@ -1813,11 +1814,7 @@ async fn cmd_repl_once(
                             ));
                             continue;
                         }
-                        if let Err(mut error) =
-                            input_tx_for_ctrl.send(ReplInput::from_tui(submission))
-                        {
-                            error.0.restore_images(&session_for_ctrl);
-                        }
+                        tui_input_sink.send(submission);
                     }
                     atman_tui::TuiControl::UpdateTrust(mut trust) => {
                         trust.theme = session_for_ctrl.trust_config().theme;
@@ -2291,7 +2288,7 @@ async fn cmd_repl_once(
                 .task_registry
                 .as_ref()
                 .map(|tr| tr.subscribe()),
-            submit_tx: Some(tui_submit_tx),
+            submit_tx: None,
             note_rx: Some(note_rx),
             shutdown_rx: Some(sh_rx),
             control_tx: Some(ctrl_tx),
@@ -3080,21 +3077,24 @@ impl std::ops::Deref for ReplInput {
     }
 }
 
-fn spawn_tui_submission_bridge(
+struct TuiControlInputSink {
     input_tx: tokio::sync::mpsc::UnboundedSender<ReplInput>,
     session: std::sync::Arc<Session>,
-) -> tokio::sync::mpsc::UnboundedSender<atman_tui::TuiSubmission> {
-    let (tui_submit_tx, mut tui_submit_rx) =
-        tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiSubmission>();
-    tokio::spawn(async move {
-        while let Some(submission) = tui_submit_rx.recv().await {
-            if let Err(mut error) = input_tx.send(ReplInput::from_tui(submission)) {
-                error.0.restore_images(&session);
-                break;
-            }
+}
+
+impl TuiControlInputSink {
+    fn new(
+        input_tx: tokio::sync::mpsc::UnboundedSender<ReplInput>,
+        session: std::sync::Arc<Session>,
+    ) -> Self {
+        Self { input_tx, session }
+    }
+
+    fn send(&self, submission: atman_tui::TuiSubmission) {
+        if let Err(mut error) = self.input_tx.send(ReplInput::from_tui(submission)) {
+            error.0.restore_images(&self.session);
         }
-    });
-    tui_submit_tx
+    }
 }
 
 fn spawn_stdin_reader(
@@ -7198,16 +7198,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_tui_submission_sender_closes_repl_input() {
+    async fn dropping_tui_input_sink_closes_repl_input() {
         let session = std::sync::Arc::new(Session::open_ephemeral());
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-        let tui_submit_tx = spawn_tui_submission_bridge(input_tx, session);
+        let tui_input_sink = TuiControlInputSink::new(input_tx, session);
 
-        drop(tui_submit_tx);
+        drop(tui_input_sink);
 
         let received = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
             .await
-            .expect("submission bridge kept the REPL input channel open");
+            .expect("TUI input sink kept the REPL input channel open");
         assert!(received.is_none());
     }
 
@@ -7215,25 +7215,21 @@ mod tests {
     async fn consecutive_tui_submissions_keep_invocation_effort_isolated() {
         let session = std::sync::Arc::new(Session::open_ephemeral());
         let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-        let tui_submit_tx = spawn_tui_submission_bridge(input_tx, session);
+        let tui_input_sink = TuiControlInputSink::new(input_tx, session);
 
-        tui_submit_tx
-            .send(atman_tui::TuiSubmission {
-                text: "first".into(),
-                images: Vec::new(),
-                reasoning: Some(atman_runtime::provider::ReasoningSelection::Effort {
-                    effort: atman_runtime::provider::ReasoningEffort::High,
-                    execution_mode: None,
-                }),
-            })
-            .unwrap();
-        tui_submit_tx
-            .send(atman_tui::TuiSubmission {
-                text: "second".into(),
-                images: Vec::new(),
-                reasoning: None,
-            })
-            .unwrap();
+        tui_input_sink.send(atman_tui::TuiSubmission {
+            text: "first".into(),
+            images: Vec::new(),
+            reasoning: Some(atman_runtime::provider::ReasoningSelection::Effort {
+                effort: atman_runtime::provider::ReasoningEffort::High,
+                execution_mode: None,
+            }),
+        });
+        tui_input_sink.send(atman_tui::TuiSubmission {
+            text: "second".into(),
+            images: Vec::new(),
+            reasoning: None,
+        });
 
         let first = input_rx.recv().await.unwrap();
         let second = input_rx.recv().await.unwrap();

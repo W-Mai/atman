@@ -24,6 +24,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **TUI exit lifecycle** — TUI shutdown releases the sole REPL input sender so double Ctrl+C exits an idle session without waiting on the input channel.
 - **Subflow agent prompt seeding** — spawned flows initialize isolated message context from an explicitly declared invocation parameter while root turns remain owned by the invoking client.
 - **Bounded permission replay** — session restore batches permission projection, traverses each workflow tree once, and partitions spawned-flow entries in one transcript pass.
 - **Live trust policy and nested sandbox propagation** — active flows evaluate the current Session trust mode for every invocation, while orchestration tools retain the configured sandbox for controlled child execution.
