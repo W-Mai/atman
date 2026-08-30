@@ -88,6 +88,73 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
     assert_ne!(result.after_tokens, 50_000);
 }
 
+#[tokio::test]
+async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
+    use atman_runtime::compaction::{
+        CompactionBudgetContext, is_compaction_summary, maybe_auto_compact_handle_locked,
+    };
+    use atman_runtime::provider::ProviderRegistry;
+    use atman_runtime::providers::mock::MockProvider;
+    use atman_runtime::value::Value;
+    use std::sync::{Arc, Mutex};
+
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
+    let base = "x".repeat(4_000);
+    let mut history = vec![Message::context_record(
+        TurnId::now(),
+        atman_runtime::context_plan::ContextRecord::new(
+            "handoff.parent",
+            1,
+            atman_runtime::context_plan::ContextRecordAuthority::Runtime,
+            atman_runtime::context_plan::ContextRecordRetention::Latest,
+            atman_runtime::context_plan::ContextRecordBody::text("scoped child handoff"),
+        ),
+    )];
+    history.extend(
+        (0..60)
+            .map(|index| {
+                let turn = TurnId::now();
+                if index % 2 == 0 {
+                    Message::user_text(turn, format!("{base} user {index}"))
+                } else {
+                    Message::assistant_text(turn, format!("{base} assistant {index}"))
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
+    let messages = Arc::new(Mutex::new(history));
+    let providers = ProviderRegistry::new();
+    providers.register(Arc::new(
+        MockProvider::new("mock-summary")
+            .with_fallback(Value::Str("isolated child summary".into())),
+    ));
+
+    let result = maybe_auto_compact_handle_locked(
+        &messages,
+        "mock-summary",
+        &providers,
+        CompactionBudgetContext::default(),
+        false,
+    )
+    .await
+    .expect("isolated history should compact");
+
+    assert!(result.after_tokens < result.before_tokens);
+    assert_eq!(result.summary, "isolated child summary");
+    assert_eq!(*messages.lock().unwrap(), result.checkpoint_messages);
+    assert!(result.checkpoint_messages.iter().any(is_compaction_summary));
+    assert!(result.checkpoint_messages.iter().any(|message| {
+        message.parts.iter().any(|part| {
+            matches!(
+                part,
+                atman_runtime::message::MessagePart::ContextRecord(record)
+                    if record.key() == "handoff.parent"
+            )
+        })
+    }));
+    assert!(result.compacted_count > 0);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn workflow_second_llm_waits_for_compacted_session_history() {
     use std::sync::Arc;

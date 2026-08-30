@@ -899,6 +899,108 @@ pub struct HandleCompactResult {
     pub compacted_end: usize,
 }
 
+/// Result of applying the automatic compaction policy to an isolated message
+/// handle. The caller must hold that handle's async compaction lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandleAutoCompactResult {
+    pub before_tokens: u64,
+    pub after_tokens: u64,
+    pub compacted_start: usize,
+    pub compacted_end: usize,
+    pub compacted_count: usize,
+    pub summary: String,
+    pub checkpoint_messages: Vec<Message>,
+}
+
+/// Apply the root compaction budget, range, summary, and replacement policy to
+/// an isolated message handle. This function does not acquire the async lock
+/// and does not emit session events.
+pub async fn maybe_auto_compact_handle_locked(
+    handle: &std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+    budget_context: CompactionBudgetContext,
+    forced: bool,
+) -> Option<HandleAutoCompactResult> {
+    let snapshot = handle.lock().unwrap().clone();
+    let info = crate::model_registry::model_info(model);
+    let trigger = info.compaction_trigger_threshold();
+    let target = budget_context
+        .history_budget(&info)
+        .map(|budget| budget.min(info.compaction_target_after()))
+        .unwrap_or_else(|| info.compaction_target_after());
+    let before_tokens = estimate_tokens_for_messages(&snapshot);
+    let current = budget_context.estimated_input_tokens(before_tokens);
+    if !forced && current <= trigger {
+        return None;
+    }
+
+    let (replacement, summary, compacted_start, compacted_end, compacted_count, must_fit_target) =
+        if let Some(range) = find_compact_range(&snapshot, target) {
+            let mut filtered = snapshot[range.start..range.end].to_vec();
+            filter_orphan_tool_messages(&mut filtered);
+            let (anchor, new_messages) = extract_anchor(&filtered)
+                .map(|(anchor, remaining)| (Some(anchor), remaining.to_vec()))
+                .unwrap_or_else(|| (None, filtered));
+            let summary = generate_llm_summary(anchor.as_deref(), &new_messages, model, providers)
+                .await
+                .unwrap_or_else(|_| {
+                    format!(
+                        "[atman: compacted {} messages; summary unavailable]",
+                        range.end - range.start
+                    )
+                });
+            let replacement =
+                build_budgeted_replacement(&snapshot, &range, &summary, target, model, providers)
+                    .await;
+            let compacted_end = range.end.saturating_sub(1);
+            let compacted_count = range.end - range.start;
+            (
+                replacement,
+                summary,
+                range.start,
+                compacted_end,
+                compacted_count,
+                false,
+            )
+        } else {
+            let (replacement, rewritten_count) =
+                build_budgeted_turn_rewrite(&snapshot, target, model, providers).await;
+            if rewritten_count == 0 {
+                return None;
+            }
+            (
+                replacement,
+                format!(
+                    "[atman: persistently compacted output from {rewritten_count} retained messages]"
+                ),
+                0,
+                0,
+                rewritten_count,
+                true,
+            )
+        };
+    let after_tokens = estimate_tokens_for_messages(&replacement);
+    if after_tokens >= before_tokens || (must_fit_target && after_tokens > target) {
+        return None;
+    }
+
+    let mut messages = handle.lock().unwrap();
+    if *messages != snapshot {
+        return None;
+    }
+    *messages = replacement.clone();
+    Some(HandleAutoCompactResult {
+        before_tokens,
+        after_tokens,
+        compacted_start,
+        compacted_end,
+        compacted_count,
+        summary,
+        checkpoint_messages: replacement,
+    })
+}
+
 /// Compact a messages_handle in place (data-layer primitive, operates on any
 /// FlowRun's segment). Returns `None` if under `budget` or no compactable
 /// range. Caller should hold the FlowRun's `compact_lock`.

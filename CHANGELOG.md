@@ -19,6 +19,7 @@ All notable changes to atman are documented in this file.
 
 - **Context cache diagnostics** — LLM call events identify the provider prompt profile, prefix digest and size, entry-boundary common prefix, cache reset cause, and assistant tool-batch width across root, child, and helper calls; tool result metrics compare raw output with its model-visible excerpt.
 - **Persistent context records** — Internal context records serialize through session events and checkpoints, retain the latest live value through compaction, stay hidden from the normal TUI transcript, and project to provider-appropriate model context.
+- **Isolated child compaction** — spawned flows apply the session compaction budget, anchored summaries, live-record retention, and owned checkpoints to their independent model histories.
 - **Context record revisions** — Session record appends suppress unchanged per-key digests and assign the next revision atomically, including after session resume.
 - **Session state records** — Goal, workspace, active plan, and model context append as versioned records; clearing live state writes a tombstone, while isolated calls receive current records without conversational history.
 - **Retrieved context records** — Managed rule and confession selection appends per-item internal records with digest no-ops instead of rebuilding the system prompt each turn.

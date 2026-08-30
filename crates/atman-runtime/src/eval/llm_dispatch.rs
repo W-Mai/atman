@@ -124,14 +124,39 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         )
         .await;
     }
-    let mut compact_guard = if !matches!(context_mode, ContextMode::None)
-        && !has_messages_override
-        && let Some(session) = ctx.session_runtime.as_ref()
-    {
-        Some(session.acquire_compact_lock().await)
+    let uses_managed_context = !matches!(context_mode, ContextMode::None) && !has_messages_override;
+    let uses_spawned_context = uses_managed_context
+        && ctx.session_runtime.is_none()
+        && matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
+        && ctx.session_messages_handle.is_some();
+    let mut compact_guard = if uses_managed_context {
+        if let Some(session) = ctx.session_runtime.as_ref() {
+            Some(session.acquire_compact_lock().await)
+        } else if uses_spawned_context {
+            match ctx.compact_lock_handle.as_ref() {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
+    if uses_spawned_context
+        && compact_guard.is_some()
+        && let Some(messages) = ctx.session_messages_handle.as_ref()
+        && let Some(result) = crate::compaction::maybe_auto_compact_handle_locked(
+            messages,
+            &model,
+            &providers_reg,
+            compaction_budget,
+            false,
+        )
+        .await
+    {
+        record_spawned_compaction(ctx, &result);
+    }
     let llm_context = match llm_context::build_llm_context(
         &args,
         context_mode,
@@ -217,9 +242,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         }
     }
     let retry_base_messages = final_messages.clone();
-    let can_rebuild_from_session = !matches!(context_mode, ContextMode::None)
-        && !has_messages_override
-        && ctx.session_runtime.is_some();
+    let can_rebuild_from_managed_context = uses_managed_context
+        && (ctx.session_runtime.is_some() || (uses_spawned_context && compact_guard.is_some()));
     let mut compact_after_overflow_used = false;
     let mut saw_context_overflow = false;
     let mut last_err: Option<RuntimeError> = None;
@@ -494,7 +518,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         format!("LLM call failed: {e}"),
                     );
                     if is_context_overflow_error(&e)
-                        && can_rebuild_from_session
+                        && can_rebuild_from_managed_context
                         && !compact_after_overflow_used
                     {
                         compact_after_overflow_used = true;
@@ -504,28 +528,53 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 "context overflow — compacting and retrying".into(),
                             ));
                         }
-                        let session = ctx
-                            .session_runtime
-                            .as_ref()
-                            .expect("checked by can_rebuild_from_session");
-                        session.request_manual_compact();
-                        drop(compact_guard.take());
-                        crate::compaction::maybe_auto_compact_with_budget(
-                            session,
-                            &model,
-                            &providers_reg,
-                            compaction_budget,
-                        )
-                        .await;
-                        final_messages = rebuild_session_llm_messages(
-                            session,
-                            context_mode,
-                            &turn_id,
-                            Some(prompt.as_str()),
-                            &retry_base_messages[session_messages_len..],
-                        );
-                        last_err = Some(e);
-                        continue 'llm_attempts;
+                        if let Some(session) = ctx.session_runtime.as_ref() {
+                            session.request_manual_compact();
+                            drop(compact_guard.take());
+                            crate::compaction::maybe_auto_compact_with_budget(
+                                session,
+                                &model,
+                                &providers_reg,
+                                compaction_budget,
+                            )
+                            .await;
+                            final_messages = rebuild_session_llm_messages(
+                                session,
+                                context_mode,
+                                &turn_id,
+                                Some(prompt.as_str()),
+                                &retry_base_messages[session_messages_len..],
+                            );
+                            last_err = Some(e);
+                            continue 'llm_attempts;
+                        }
+                        if let Some(messages) = ctx.session_messages_handle.as_ref()
+                            && let Some(result) =
+                                crate::compaction::maybe_auto_compact_handle_locked(
+                                    messages,
+                                    &model,
+                                    &providers_reg,
+                                    compaction_budget,
+                                    true,
+                                )
+                                .await
+                        {
+                            record_spawned_compaction(ctx, &result);
+                            match llm_context::build_llm_context(
+                                &args,
+                                context_mode,
+                                None,
+                                Some(messages),
+                                &turn_id,
+                                ctx.events.as_ref(),
+                                ctx.flow_run_id.as_ref(),
+                            ) {
+                                Ok(context) => final_messages = context.messages,
+                                Err(value) => return value,
+                            }
+                            last_err = Some(e);
+                            continue 'llm_attempts;
+                        }
                     }
                     if is_context_overflow_error(&e) {
                         last_err = Some(e);
@@ -669,6 +718,46 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     Value::Err(error)
 }
 
+fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAutoCompactResult) {
+    let Some(flow_run_id) = ctx.message_flow_run_id() else {
+        return;
+    };
+    let Some(sink) = ctx.events.as_ref() else {
+        return;
+    };
+    let session_id = ctx
+        .session_id
+        .clone()
+        .or_else(|| ctx.turn_id.as_ref().map(ToString::to_string))
+        .unwrap_or_default();
+    sink.emit(crate::event::Event::ContextCompact {
+        session_id: session_id.clone(),
+        flow_run_id: Some(flow_run_id.clone()),
+        before_tokens: result.before_tokens,
+        after_tokens: result.after_tokens,
+        compacted_range_start: result.compacted_start as u64,
+        compacted_range_end: result.compacted_end as u64,
+        summary_text: Some(result.summary.clone()),
+        replacement_msg_seq: None,
+    });
+    sink.emit(crate::event::Event::CompactionSummary {
+        session_id: session_id.clone(),
+        flow_run_id: Some(flow_run_id.clone()),
+        range_start: result.compacted_start as u64,
+        range_end: result.compacted_end as u64,
+        compacted_count: result.compacted_count,
+        before_tokens: result.before_tokens,
+        after_tokens: result.after_tokens,
+        summary: result.summary.clone(),
+    });
+    sink.emit(crate::event::Event::Checkpoint {
+        session_id,
+        flow_run_id: Some(flow_run_id),
+        messages: result.checkpoint_messages.clone(),
+        window_tokens: result.after_tokens,
+    });
+}
+
 fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message: String) {
     let tx = ctx
         .session_runtime
@@ -810,6 +899,49 @@ mod tests {
                 message,
                 ..
             }) if key.ends_with(":7.iter[0].0") && message.contains("invalid request")
+        ));
+    }
+
+    #[test]
+    fn spawned_compaction_audit_is_owned_and_checkpointed() {
+        let sink = crate::event::EventSink::new();
+        let expected_run_id = crate::event::FlowRunId::now();
+        let checkpoint = vec![crate::message::Message::system_compact_summary(
+            crate::event::TurnId::now(),
+            "summary",
+            0,
+            1,
+            2,
+        )];
+        let ctx = ToolCtx::new()
+            .with_history_segment(crate::tool::HistorySegment::Spawned)
+            .with_anchors(None, Some(expected_run_id.clone()), None)
+            .with_events(sink.clone());
+        let result = crate::compaction::HandleAutoCompactResult {
+            before_tokens: 100,
+            after_tokens: 10,
+            compacted_start: 0,
+            compacted_end: 1,
+            compacted_count: 2,
+            summary: "summary".into(),
+            checkpoint_messages: checkpoint.clone(),
+        };
+
+        record_spawned_compaction(&ctx, &result);
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| match event {
+            crate::event::Event::ContextCompact { flow_run_id, .. }
+            | crate::event::Event::CompactionSummary { flow_run_id, .. }
+            | crate::event::Event::Checkpoint { flow_run_id, .. } => {
+                flow_run_id.as_ref() == Some(&expected_run_id)
+            }
+            _ => false,
+        }));
+        assert!(matches!(
+            &events[2],
+            crate::event::Event::Checkpoint { messages, .. } if messages == &checkpoint
         ));
     }
 
