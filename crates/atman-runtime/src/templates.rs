@@ -182,7 +182,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
-                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check",
                 "form.ask",
                 "help.show",
                 "preview.push",
@@ -529,6 +529,9 @@ mod tests {
         assert!(!AGENT_AT.contains("## Relevant Rules"));
         assert!(!AGENT_AT.contains("## Relevant Past Mistakes"));
         assert!(AGENT_AT.contains("system_prompt = @\"../prompts/system.md\"\n    loop"));
+        assert!(AGENT_AT.contains("\"flow.search\""));
+        assert!(AGENT_AT.contains("\"flow.describe\""));
+        assert!(!AGENT_AT.contains("\"flow.list\""));
     }
 
     #[test]

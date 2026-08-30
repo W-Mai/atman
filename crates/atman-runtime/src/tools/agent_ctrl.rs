@@ -606,8 +606,8 @@ impl Tool for AgentSpawn {
         Some(
             "Spawn a DSL flow as an independent sub-agent with its own message history and \
              iteration counter. All named args except `flow` and `async` pass through to the \
-             flow as parameters — call flow.list first to discover available flows and their \
-             parameter signatures.\n\n\
+             flow as parameters. Use flow.search for bounded discovery and flow.describe for \
+             the selected parameter contract.\n\n\
              Flow reference syntax: `file@flow_name`\n\
              - \"subagent.at@subagent\" — run the `subagent` flow in subagent.at\n\
              - \"subagent@research_loop\" — .at suffix optional\n\
@@ -617,8 +617,7 @@ impl Tool for AgentSpawn {
              Required: `flow`. `async` is optional (default true). Other named args pass through to the flow. \
              A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
-             Best practice: call flow.list to see available flows and params, then pass \
-             matching named args. Missing params use flow-defined defaults.",
+             Pass only parameters declared by flow.describe. Missing params use flow-defined defaults.",
         )
     }
 
@@ -630,7 +629,7 @@ impl Tool for AgentSpawn {
                 "arguments": {
                     "type": "object",
                     "additionalProperties": true,
-                    "description": "Target flow parameters as key-value pairs. You MUST call flow.list first to discover the flow's description and parameter signatures (names, types, required/optional), then construct this object accordingly. Example: arguments={\"goal\":\"read Cargo.toml\",\"role\":\"research\"}"
+                    "description": "Target flow parameters as key-value pairs. Use flow.search then flow.describe when the parameter contract is unknown. Example: arguments={\"goal\":\"read Cargo.toml\",\"role\":\"research\"}"
                 },
                 "async": {"type": "boolean", "default": true, "description": "If true (default), run in background and return a handle. If false, block until done."},
                 "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with a snapshot of the parent's messages."},
