@@ -1210,6 +1210,14 @@ fn working_directory_system_prompt(session: &crate::session::Session) -> Option<
     Some(lines.join("\n"))
 }
 
+pub(super) fn tool_context_working_directory_system_prompt(ctx: &ToolCtx) -> Option<String> {
+    let cwd = ctx.resolve_cwd(None).ok()?;
+    Some(format!(
+        "[working directory]\n{}\n[/working directory]",
+        cwd.display()
+    ))
+}
+
 fn preview_tool_value(v: &Value) -> String {
     let raw = match v {
         Value::Str(s) => format!("{s:?}"),
@@ -2306,6 +2314,19 @@ mod tests {
             });
         }
         ctx
+    }
+
+    #[test]
+    fn spawned_tool_context_renders_one_resolved_working_directory_block() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = authorized_eval_tool_ctx(Some(temp.path()))
+            .with_history_segment(crate::tool::HistorySegment::Spawned);
+        let rendered = tool_context_working_directory_system_prompt(&ctx).unwrap();
+
+        assert_eq!(rendered.matches("[working directory]").count(), 1);
+        assert_eq!(rendered.matches("[/working directory]").count(), 1);
+        assert!(rendered.contains(&temp.path().display().to_string()));
+        assert!(!rendered.contains("{pwd}"));
     }
 
     #[test]

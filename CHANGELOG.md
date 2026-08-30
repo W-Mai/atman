@@ -27,6 +27,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Working-directory context** — root and spawned LLM calls receive one resolved working-directory block without duplicating dynamic context or leaking a `{pwd}` placeholder.
 - **Compaction preflight freshness** — automatic compaction evaluates the current message window and fixed provider prefix instead of reusing the previous request's input-token count.
 - **Managed-agent history consumption** — rule selection and stall checks consume a 12,000-character recent-history excerpt instead of serializing unbounded raw turns into auxiliary prompts.
 - **Compaction tool-pair sanitation** — orphaned or duplicate tool parts are removed individually, preserving valid text and valid tool pairs that share the same message.

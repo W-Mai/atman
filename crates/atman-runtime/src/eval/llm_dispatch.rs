@@ -8,6 +8,7 @@ use super::ContextMode;
 use super::{
     StreamCallCtx, is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages,
     render_injections, sanitize_tool_pairs, session_system_context,
+    tool_context_working_directory_system_prompt,
 };
 use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
 
@@ -18,16 +19,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         return Value::Err(RuntimeError::MissingArg("llm.model".into()));
     };
     let mut system = args.system.clone();
-    // Substitute {pwd} placeholder with session working directory
-    if let Some(s) = system.as_mut()
-        && let Some(session) = ctx.session_runtime.as_ref()
-    {
-        if let Some(meta) = session.meta() {
-            if let Some(cwd) = meta.start_path.as_deref().or(meta.project_root.as_deref()) {
-                *s = s.replace("{pwd}", &cwd.display().to_string());
-            }
-        }
-    }
+    normalize_working_directory_context(&mut system, request_working_directory(ctx).as_deref());
     let input = args.input.clone();
     let retry_count = args.retry_count;
     let retry_kinds = args.retry_kinds.clone();
@@ -86,6 +78,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let has_messages_override = args.messages_override.is_some();
     if let Some(session) = ctx.session_runtime.as_ref() {
         append_system_context(&mut system, session_system_context(session).await);
+    } else if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
+        && let Some(cwd_note) = tool_context_working_directory_system_prompt(ctx)
+    {
+        append_system_context(&mut system, vec![cwd_note]);
     }
     if let Some(budget) = args.context_budget {
         if let Some(p) = args.prompt.as_mut() {
@@ -653,6 +649,24 @@ fn fixed_wire_prefix_tokens(system: &Option<String>, tools: &[crate::tool::ToolS
     system_tokens.saturating_add(tool_tokens)
 }
 
+fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
+    ctx.session_runtime
+        .as_ref()
+        .and_then(|session| session.meta())
+        .and_then(|meta| meta.start_path.or(meta.project_root))
+        .or_else(|| ctx.resolve_cwd(None).ok())
+}
+
+fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<&std::path::Path>) {
+    let Some(system) = system.as_mut() else {
+        return;
+    };
+    *system = system.replace("[working directory]\n{pwd}\n\n", "");
+    if let Some(cwd) = cwd {
+        *system = system.replace("{pwd}", &cwd.display().to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +686,20 @@ mod tests {
         let expected = crate::provider::estimate_tokens(system.as_deref().unwrap())
             + crate::provider::estimate_tokens(&serde_json::to_string(&tools).unwrap());
         assert_eq!(fixed_wire_prefix_tokens(&system, &tools), expected);
+    }
+
+    #[test]
+    fn legacy_working_directory_block_is_removed_before_runtime_context() {
+        let cwd = std::path::Path::new("/tmp/atman-context-test");
+        let mut system =
+            Some("stable\n\n[working directory]\n{pwd}\n\nrule path: {pwd}".to_string());
+
+        normalize_working_directory_context(&mut system, Some(cwd));
+
+        let system = system.unwrap();
+        assert!(!system.contains("[working directory]"));
+        assert!(!system.contains("{pwd}"));
+        assert!(system.contains("rule path: /tmp/atman-context-test"));
     }
 
     #[tokio::test]

@@ -14,9 +14,6 @@ pub const SESSION_NAME_AT: &str = r#"flow session_name(input: string) -> string 
 
 pub const SYSTEM_MD: &str = r#"You are atman. atman witnesses; code exists. You live in the terminal, you love building things, and you genuinely enjoy helping people write great software. You're warm, concise, and cheerful — a little emoji now and then is fine (￣▽￣)ノ but don't overdo it.
 
-[working directory]
-{pwd}
-
 ## Before you do anything
 Explore the repository for relevant Markdown and other descriptive documentation before acting. Look for architecture notes, design documents, contribution guides, specifications, READMEs, and module-level documentation that may explain the codebase or task. Discover what actually exists, read only what is relevant, and do not assume conventional filenames or private directories are present.
 
@@ -642,6 +639,8 @@ mod tests {
         assert!(SYSTEM_MD.contains("## Before you do anything"));
         assert!(SYSTEM_MD.contains("relevant Markdown"));
         assert!(SYSTEM_MD.contains("descriptive documentation"));
+        assert!(!SYSTEM_MD.contains("{pwd}"));
+        assert!(!SYSTEM_MD.contains("[working directory]"));
         for forbidden in [".local/", "Read AGENTS.md", "Read CLAUDE.md"] {
             assert!(
                 !SYSTEM_MD.contains(forbidden),

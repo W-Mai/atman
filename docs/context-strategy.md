@@ -40,6 +40,11 @@ relevant rules and past confessions, and includes those in its own `system:` val
 Rules and confessions are therefore selected by the managed workflow, not injected
 automatically by every `llm.call`.
 
+The stable system template does not contain a working-directory placeholder. Root
+calls receive one working-directory block from session context; spawned flows receive
+one block resolved from their effective tool workspace. This prevents duplicate root
+context and literal placeholders in child requests.
+
 ## Message selection
 
 The flow chooses one message source:
