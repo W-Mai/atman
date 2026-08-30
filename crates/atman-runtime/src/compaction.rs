@@ -762,7 +762,7 @@ async fn build_budgeted_replacement(
     }
 
     if estimate_tokens_for_messages(&replacement) > history_budget {
-        replacement.retain(|message| message.role == MessageRole::User);
+        replacement = compaction_floor(&replacement);
     }
 
     filter_orphan_tool_messages(&mut replacement);
@@ -792,6 +792,56 @@ fn deterministic_turn_omission(messages: &[Message]) -> String {
         "[atman: omitted {} oversized assistant/system/tool messages during persistent compaction]",
         messages.len()
     )
+}
+
+fn compaction_floor(messages: &[Message]) -> Vec<Message> {
+    let mut out = Vec::new();
+    if let Some(anchor) = messages
+        .iter()
+        .find(|message| is_compaction_summary(message))
+    {
+        out.push(anchor.clone());
+    }
+
+    let mut latest =
+        std::collections::HashMap::<&str, (&crate::context_plan::ContextRecord, &Message)>::new();
+    for message in messages {
+        for part in &message.parts {
+            if let MessagePart::ContextRecord(record) = part {
+                latest
+                    .entry(record.key())
+                    .and_modify(|(current, source)| {
+                        if record.revision() >= current.revision() {
+                            *current = record;
+                            *source = message;
+                        }
+                    })
+                    .or_insert((record, message));
+            }
+        }
+    }
+    let mut records: Vec<_> = latest.into_values().collect();
+    records.sort_by(|(left, _), (right, _)| left.key().cmp(right.key()));
+    out.extend(
+        records.into_iter().map(|(record, source)| {
+            Message::context_record(source.turn_id.clone(), record.clone())
+        }),
+    );
+
+    out.extend(messages.iter().filter_map(|message| {
+        if message.role != MessageRole::User {
+            return None;
+        }
+        let mut user = message.clone();
+        user.parts.retain(|part| {
+            !matches!(
+                part,
+                MessagePart::CompactSummary { .. } | MessagePart::ContextRecord(_)
+            )
+        });
+        (!user.parts.is_empty()).then_some(user)
+    }));
+    out
 }
 
 fn format_slice_for_summary(slice: &[Message]) -> String {
@@ -1084,6 +1134,19 @@ mod tests {
         )
     }
 
+    fn context_tombstone(key: &str, revision: u64) -> Message {
+        Message::context_record(
+            TurnId::now(),
+            crate::context_plan::ContextRecord::new(
+                key,
+                revision,
+                crate::context_plan::ContextRecordAuthority::Runtime,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::tombstone(),
+            ),
+        )
+    }
+
     #[test]
     fn replacement_keeps_only_the_latest_live_record_per_key() {
         let messages = vec![
@@ -1221,6 +1284,61 @@ mod tests {
             })
         }));
         assert_eq!(user_turn_ranges(&replacement).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn budgeted_replacement_floor_keeps_anchor_records_and_user_inputs() {
+        let messages = vec![
+            system("old system"),
+            context_record("session.goal", 1, "old goal"),
+            context_record("session.goal", 2, "current goal"),
+            context_tombstone("session.workspace", 3),
+            user("first user"),
+            assistant("first output"),
+            user("current user"),
+            assistant("current output"),
+        ];
+        let replacement = build_budgeted_replacement(
+            &messages,
+            &CompactRange {
+                start: 0,
+                end: 4,
+                tokens_saved_estimate: 1,
+            },
+            "anchor",
+            1,
+            "missing-provider",
+            &crate::provider::ProviderRegistry::default(),
+        )
+        .await;
+
+        assert!(is_compaction_summary(&replacement[0]));
+        let records: Vec<_> = replacement
+            .iter()
+            .flat_map(|message| &message.parts)
+            .filter_map(|part| match part {
+                MessagePart::ContextRecord(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].key(), "session.goal");
+        assert_eq!(records[0].revision(), 2);
+        assert_eq!(records[1].key(), "session.workspace");
+        assert!(records[1].body().is_tombstone());
+        assert_eq!(
+            replacement
+                .iter()
+                .filter(|message| message.role == MessageRole::User)
+                .map(Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["first user", "current user"]
+        );
+        assert!(
+            !replacement
+                .iter()
+                .any(|message| message.role == MessageRole::Assistant)
+        );
     }
 
     #[tokio::test]
