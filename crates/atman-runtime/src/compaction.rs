@@ -128,6 +128,29 @@ fn find_kth_recent_user(messages: &[Message], k: usize) -> usize {
     0
 }
 
+fn align_compact_end_to_tool_transactions(messages: &[Message], end: usize) -> usize {
+    let mut tool_use_messages = std::collections::HashMap::new();
+    for (index, message) in messages.iter().take(end).enumerate() {
+        for part in &message.parts {
+            if let MessagePart::ToolUse { id, .. } = part {
+                tool_use_messages.entry(id.as_str()).or_insert(index);
+            }
+        }
+    }
+
+    let mut aligned_end = end;
+    for message in messages.iter().skip(end) {
+        for part in &message.parts {
+            if let MessagePart::ToolResult { tool_use_id, .. } = part
+                && let Some(&use_index) = tool_use_messages.get(tool_use_id.as_str())
+            {
+                aligned_end = aligned_end.min(use_index);
+            }
+        }
+    }
+    aligned_end
+}
+
 pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRange> {
     let total = estimate_tokens_for_messages(messages);
     if total <= budget || messages.len() < 4 {
@@ -152,6 +175,7 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     let end = message_end
         .min(token_end)
         .min(find_kth_recent_user(messages, KEEP_RECENT_USER_TURNS));
+    let end = align_compact_end_to_tool_transactions(messages, end);
     if end < start + 2 {
         return None;
     }
@@ -1332,6 +1356,98 @@ mod tests {
     }
 
     #[test]
+    fn find_compact_range_keeps_tool_use_with_later_result() {
+        let mut msgs = (0..11)
+            .map(|index| assistant(&format!("old {index}")))
+            .collect::<Vec<_>>();
+        msgs.push(assistant_with_tool_use(
+            "calling tool",
+            "fs.read",
+            serde_json::json!({"path": "/tmp/example"}),
+        ));
+        msgs.push(tool_result("call_test", "result", false));
+        msgs.extend((0..9).map(|index| {
+            if index % 2 == 0 {
+                user(&format!("recent user {index}"))
+            } else {
+                assistant(&format!("recent assistant {index}"))
+            }
+        }));
+
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.end, 11);
+        assert!(matches!(
+            msgs[range.end].parts.as_slice(),
+            [MessagePart::Text { .. }, MessagePart::ToolUse { id, .. }] if id == "call_test"
+        ));
+    }
+
+    #[test]
+    fn find_compact_range_keeps_parallel_tool_batch_together() {
+        let mut msgs = (0..10)
+            .map(|index| assistant(&format!("old {index}")))
+            .collect::<Vec<_>>();
+        msgs.push(assistant_with_tool_uses(&["call_a", "call_b"]));
+        msgs.push(tool_result("call_a", "first result", false));
+        msgs.push(tool_result("call_b", "second result", false));
+        msgs.extend((0..9).map(|index| {
+            if index % 2 == 0 {
+                user(&format!("recent user {index}"))
+            } else {
+                assistant(&format!("recent assistant {index}"))
+            }
+        }));
+
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.end, 10);
+        assert_eq!(
+            msgs[range.end]
+                .parts
+                .iter()
+                .filter(|part| matches!(part, MessagePart::ToolUse { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn find_compact_range_keeps_boundary_after_closed_tool_batch() {
+        let mut msgs = (0..9)
+            .map(|index| assistant(&format!("old {index}")))
+            .collect::<Vec<_>>();
+        msgs.push(assistant_with_tool_uses(&["call_a", "call_b"]));
+        msgs.push(Message {
+            role: MessageRole::Tool,
+            parts: vec![
+                MessagePart::ToolResult {
+                    tool_use_id: "call_a".into(),
+                    content: "first result".into(),
+                    is_error: false,
+                },
+                MessagePart::ToolResult {
+                    tool_use_id: "call_b".into(),
+                    content: "second result".into(),
+                    is_error: false,
+                },
+            ],
+            turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
+        });
+        msgs.push(assistant("batch complete"));
+        msgs.extend((0..10).map(|index| {
+            if index % 2 == 0 {
+                user(&format!("recent user {index}"))
+            } else {
+                assistant(&format!("recent assistant {index}"))
+            }
+        }));
+
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.end, 12);
+        assert_eq!(msgs[range.end].role, MessageRole::User);
+    }
+
+    #[test]
     fn find_compact_range_preserves_minimum_window_for_large_tool_result() {
         let mut msgs = vec![user(&"h".repeat(500_000))];
         for index in 1..31 {
@@ -1563,6 +1679,23 @@ mod tests {
                     intent: None,
                 },
             ],
+            turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
+        }
+    }
+
+    fn assistant_with_tool_uses(ids: &[&str]) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            parts: ids
+                .iter()
+                .map(|id| MessagePart::ToolUse {
+                    id: (*id).into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path": format!("/tmp/{id}")}),
+                    intent: None,
+                })
+                .collect(),
             turn_id: TurnId::now(),
             origin: MessageOrigin::User,
         }

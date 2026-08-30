@@ -40,6 +40,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Transaction-aligned compaction** — compaction cutoffs retreat before an assistant tool-call batch when any matching result remains in the recent raw tail.
 - **Scoped compaction events** — child flow compaction summaries, range replacements, and checkpoints retain their flow owner and cannot rewrite the root model window or transcript projection.
 
 - **Scoped context usage** — provider/model/purpose/root-or-child buckets retain their latest plan usage independently, so child and helper calls cannot replace the root session's active-window reading.
