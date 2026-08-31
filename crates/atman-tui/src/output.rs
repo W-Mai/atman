@@ -488,7 +488,7 @@ pub fn render_item_with_regions(
         ..
     } = item
     {
-        render_workflow_panel_with_regions(
+        render_workflow_projection_with_regions(
             graph,
             expanded_nodes,
             *panel_expanded,
@@ -2772,7 +2772,7 @@ fn format_workflow_stats_footer(
 
 #[allow(clippy::too_many_arguments)]
 fn render_workflow_panel(
-    graph: &atman_runtime::workflow::WorkflowGraph,
+    graph: &atman_runtime::projection::workflow::WorkflowProjection,
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,
     cancelled: bool,
@@ -2781,7 +2781,7 @@ fn render_workflow_panel(
     animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    render_workflow_panel_with_regions(
+    render_workflow_projection_with_regions(
         graph,
         expanded_nodes,
         panel_expanded,
@@ -2795,6 +2795,50 @@ fn render_workflow_panel(
 
 pub fn render_workflow_panel_with_regions(
     graph: &atman_runtime::workflow::WorkflowGraph,
+    expanded_nodes: &std::collections::HashSet<String>,
+    panel_expanded: bool,
+    cancelled: bool,
+    animation_frame: u32,
+    panel_width: u16,
+    max_body_rows: usize,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    render_workflow_panel_impl(
+        graph,
+        None,
+        expanded_nodes,
+        panel_expanded,
+        cancelled,
+        animation_frame,
+        panel_width,
+        max_body_rows,
+    )
+}
+
+pub fn render_workflow_projection_with_regions(
+    graph: &atman_runtime::projection::workflow::WorkflowProjection,
+    expanded_nodes: &std::collections::HashSet<String>,
+    panel_expanded: bool,
+    cancelled: bool,
+    animation_frame: u32,
+    panel_width: u16,
+    max_body_rows: usize,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    render_workflow_panel_impl(
+        graph.graph(),
+        Some(graph),
+        expanded_nodes,
+        panel_expanded,
+        cancelled,
+        animation_frame,
+        panel_width,
+        max_body_rows,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_workflow_panel_impl(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,
     cancelled: bool,
@@ -2836,6 +2880,7 @@ pub fn render_workflow_panel_with_regions(
     if !panel_expanded {
         return render_collapsed_workflow_card(
             graph,
+            permission_projection,
             animation_frame,
             panel_width,
             running,
@@ -2866,6 +2911,7 @@ pub fn render_workflow_panel_with_regions(
                     &mut lines,
                     &mut regions,
                     graph,
+                    permission_projection,
                     node,
                     expanded_nodes,
                     "",
@@ -2887,6 +2933,7 @@ pub fn render_workflow_panel_with_regions(
                 &mut lines,
                 &mut regions,
                 graph,
+                permission_projection,
                 node,
                 expanded_nodes,
                 &[],
@@ -3096,6 +3143,7 @@ fn collect_visible_nodes<'a>(
 
 fn render_collapsed_workflow_card(
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     animation_frame: u32,
     panel_width: u16,
     running: bool,
@@ -3240,6 +3288,7 @@ fn render_collapsed_workflow_card(
             &mut body_lines,
             &mut regions,
             graph,
+            permission_projection,
             node,
             &std::collections::HashSet::new(),
             &[],
@@ -3423,6 +3472,7 @@ fn append_fanout_horizontal(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     branches: &[atman_runtime::workflow::WorkflowNode],
     expanded_nodes: &std::collections::HashSet<String>,
     child_prefix: &str,
@@ -3448,6 +3498,7 @@ fn append_fanout_horizontal(
             &mut b_lines,
             &mut b_regions,
             graph,
+            permission_projection,
             branch,
             expanded_nodes,
             "",
@@ -3613,6 +3664,7 @@ fn append_workflow_node_boxed(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_last: &[bool],
@@ -3705,13 +3757,13 @@ fn append_workflow_node_boxed(
     let approval = approval_badge(
         node.approval.as_ref(),
         pending_number,
-        permission_request_for_node(graph, node)
+        permission_request_for_node(graph, permission_projection, node)
             .is_some_and(|request| !request.payload.group_ids.is_empty()),
     );
     let is_expanded = auto_expand || expanded_nodes.contains(path);
     let mut inner_lines: Vec<Line<'static>> = Vec::new();
     if is_expanded {
-        collect_boxed_details(graph, node, &mut inner_lines);
+        collect_boxed_details(graph, permission_projection, node, &mut inner_lines);
     }
     let approval_seg = approval
         .as_ref()
@@ -3779,6 +3831,7 @@ fn append_workflow_node_boxed(
             out,
             regions,
             graph,
+            permission_projection,
             &node.children,
             expanded_nodes,
             &child_ancestor_last,
@@ -3803,6 +3856,7 @@ fn append_workflow_node_boxed(
             out,
             regions,
             graph,
+            permission_projection,
             child,
             expanded_nodes,
             &child_ancestor_last,
@@ -3823,6 +3877,7 @@ fn append_fanout_horizontal_boxed(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     branches: &[atman_runtime::workflow::WorkflowNode],
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_last: &[bool],
@@ -3855,6 +3910,7 @@ fn append_fanout_horizontal_boxed(
             &mut b_lines,
             &mut b_regions,
             graph,
+            permission_projection,
             branch,
             expanded_nodes,
             &[],
@@ -3953,8 +4009,12 @@ fn approval_badge(
 
 fn permission_request_for_node<'a>(
     graph: &'a atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&'a atman_runtime::projection::workflow::WorkflowProjection>,
     node: &atman_runtime::workflow::WorkflowNode,
 ) -> Option<&'a atman_runtime::workflow::WorkflowPermissionRequest> {
+    if let Some(projection) = permission_projection {
+        return projection.permission_request_for_node(&node.id);
+    }
     let atman_runtime::workflow::WorkflowNodeKind::ToolCall { tool_use_id, .. } = &node.kind else {
         return None;
     };
@@ -3970,9 +4030,10 @@ fn permission_request_for_node<'a>(
 
 fn permission_detail_sections(
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     node: &atman_runtime::workflow::WorkflowNode,
 ) -> Vec<(&'static str, String)> {
-    let Some(request) = permission_request_for_node(graph, node) else {
+    let Some(request) = permission_request_for_node(graph, permission_projection, node) else {
         return Vec::new();
     };
     let payload = &request.payload;
@@ -4043,27 +4104,28 @@ fn permission_detail_sections(
     }
     for group_id in &payload.group_ids {
         if let Some(group) = graph.permission_groups.get(group_id) {
-            let resolved = group
-                .request_ids
-                .iter()
-                .filter(|request_id| {
-                    graph.permission_requests.iter().any(|(identity, request)| {
-                        matches!(
-                            identity,
-                            atman_runtime::workflow::WorkflowPermissionIdentity::Canonical {
-                                request_id: id
-                            } if id == *request_id
-                        ) && !request.state.is_pending()
-                    })
-                })
-                .count();
+            let (resolved, total) = permission_projection
+                .and_then(|projection| projection.permission_group_progress(group_id))
+                .unwrap_or_else(|| {
+                    let resolved = group
+                        .request_ids
+                        .iter()
+                        .filter(|request_id| {
+                            graph.permission_requests.iter().any(|(identity, request)| {
+                                matches!(
+                                    identity,
+                                    atman_runtime::workflow::WorkflowPermissionIdentity::Canonical {
+                                        request_id: id
+                                    } if id == *request_id
+                                ) && !request.state.is_pending()
+                            })
+                        })
+                        .count();
+                    (resolved, group.request_ids.len())
+                });
             sections.push((
                 "group",
-                format!(
-                    "{} · {resolved}/{} resolved",
-                    group.label,
-                    group.request_ids.len()
-                ),
+                format!("{} · {resolved}/{total} resolved", group.label),
             ));
         }
     }
@@ -4075,6 +4137,7 @@ fn permission_detail_sections(
 
 fn collect_boxed_details(
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     node: &atman_runtime::workflow::WorkflowNode,
     out: &mut Vec<Line<'static>>,
 ) {
@@ -4117,7 +4180,7 @@ fn collect_boxed_details(
     if let Some(p) = &node.output_preview {
         push_detail_section(out, "output", p);
     }
-    if permission_request_for_node(graph, node).is_none()
+    if permission_request_for_node(graph, permission_projection, node).is_none()
         && let Some(ApprovalState::Pending {
             level,
             preview: Some(p),
@@ -4125,7 +4188,7 @@ fn collect_boxed_details(
     {
         push_detail_section(out, &format!("approval ({level})"), p);
     }
-    for (label, body) in permission_detail_sections(graph, node) {
+    for (label, body) in permission_detail_sections(graph, permission_projection, node) {
         push_detail_section(out, label, &body);
     }
     if let (Some(start), Some(end)) = (node.started_at, node.ended_at) {
@@ -4155,6 +4218,7 @@ fn append_workflow_node(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_prefix: &str,
@@ -4241,7 +4305,7 @@ fn append_workflow_node(
     let approval = approval_badge(
         effective.approval.as_ref(),
         pending_number,
-        permission_request_for_node(graph, effective)
+        permission_request_for_node(graph, permission_projection, effective)
             .is_some_and(|request| !request.payload.group_ids.is_empty()),
     );
     let label = base_label;
@@ -4276,7 +4340,7 @@ fn append_workflow_node(
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
     if is_expanded {
-        append_expanded_details(out, graph, effective, &child_prefix);
+        append_expanded_details(out, graph, permission_projection, effective, &child_prefix);
     }
     let child_count = effective.children.len();
     if child_count > 1
@@ -4287,6 +4351,7 @@ fn append_workflow_node(
             out,
             regions,
             graph,
+            permission_projection,
             &effective.children,
             expanded_nodes,
             &child_prefix,
@@ -4305,6 +4370,7 @@ fn append_workflow_node(
             out,
             regions,
             graph,
+            permission_projection,
             child,
             expanded_nodes,
             &child_prefix,
@@ -4343,6 +4409,7 @@ fn workflow_tool_label(
 fn append_expanded_details(
     out: &mut Vec<Line<'static>>,
     graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
     node: &atman_runtime::workflow::WorkflowNode,
     prefix: &str,
 ) {
@@ -4377,7 +4444,11 @@ fn append_expanded_details(
     {
         sections.push(("diff", p.clone()));
     }
-    sections.extend(permission_detail_sections(graph, node));
+    sections.extend(permission_detail_sections(
+        graph,
+        permission_projection,
+        node,
+    ));
     for (label, body) in sections {
         out.push(Line::from(vec![Span::styled(
             format!("{prefix}  ▪ {label}:"),
@@ -5112,6 +5183,97 @@ mod tests {
             ended_at: None,
             cancelled: false,
         }
+    }
+
+    #[test]
+    fn permission_details_use_the_indexed_winner() {
+        use atman_runtime::workflow::{
+            ApprovalState, NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
+            WorkflowPermissionIdentity, WorkflowPermissionRequest, WorkflowPermissionState,
+        };
+        let run_id = atman_runtime::event::FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let tool_node_id = format!("tool:{run_id_text}:shared");
+        let at = chrono::Utc::now();
+        let canonical_id = atman_runtime::permission::PermissionRequestId::now();
+        let legacy_id = atman_runtime::permission::PermissionRequestId::now();
+        let mut canonical = permission_request(canonical_id.clone(), &run_id, "shared".into());
+        canonical.at = at + chrono::Duration::seconds(10);
+        canonical.reason = Some("canonical".into());
+        let mut legacy = permission_request(legacy_id, &run_id, "shared".into());
+        legacy.at = at;
+        legacy.reason = Some("legacy pending".into());
+        let mut requests = std::collections::BTreeMap::new();
+        requests.insert(
+            WorkflowPermissionIdentity::Canonical {
+                request_id: canonical_id,
+            },
+            WorkflowPermissionRequest {
+                payload: canonical,
+                state: WorkflowPermissionState::Approved,
+            },
+        );
+        requests.insert(
+            WorkflowPermissionIdentity::Legacy {
+                seq: 7,
+                run_id: run_id_text.clone(),
+                tool_use_id: "shared".into(),
+            },
+            WorkflowPermissionRequest {
+                payload: legacy,
+                state: WorkflowPermissionState::Pending,
+            },
+        );
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![WorkflowNode {
+                id: run_id_text.clone(),
+                kind: WorkflowNodeKind::Flow {
+                    run_id: run_id_text,
+                    flow_name: "root".into(),
+                },
+                label: "root".into(),
+                status: NodeStatus::Running,
+                started_at: Some(at),
+                ended_at: None,
+                output_preview: None,
+                children: vec![WorkflowNode {
+                    id: tool_node_id.clone(),
+                    kind: WorkflowNodeKind::ToolCall {
+                        tool_use_id: "shared".into(),
+                        tool: "fs.read".into(),
+                        args_preview: "{}".into(),
+                        call_intent: None,
+                        result_preview: None,
+                    },
+                    label: "fs.read".into(),
+                    status: NodeStatus::Running,
+                    started_at: Some(at),
+                    ended_at: None,
+                    output_preview: None,
+                    children: Vec::new(),
+                    parallelism: Parallelism::Serial,
+                    approval: Some(ApprovalState::Pending {
+                        level: "two".into(),
+                        preview: None,
+                    }),
+                    llm_stats: None,
+                }],
+                parallelism: Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }],
+            permission_requests: requests,
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let projection = atman_runtime::projection::workflow::WorkflowProjection::from(graph);
+        let node = projection.find_node(&tool_node_id).unwrap();
+        let sections = permission_detail_sections(projection.graph(), Some(&projection), node);
+
+        assert_eq!(sections[0], ("approval", "pending · two".into()));
+        assert!(sections.contains(&("reason", "legacy pending".into())));
+        assert!(!sections.contains(&("reason", "canonical".into())));
     }
 
     fn plain_line(line: &Line<'_>) -> String {
@@ -6502,7 +6664,7 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, _) = render_collapsed_workflow_card(&graph, 0, 100, false, 10);
+        let (lines, _) = render_collapsed_workflow_card(&graph, None, 0, 100, false, 10);
         let rendered = flatten_lines(&lines);
         assert!(rendered.contains("Inspect active processes · bash.spawn"));
         assert!(!rendered.contains("secret command arguments"));
@@ -6557,7 +6719,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let total = lines.len();
         assert!(
             total <= 30,
@@ -6586,7 +6748,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let flat = flatten_lines(&lines);
         let tool_count = flat.matches("tool_").count();
         assert!(
@@ -6616,7 +6778,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, regions) =
-            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let total = lines.len() as u32;
         for r in &regions {
             assert!(
@@ -6650,7 +6812,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let flat = flatten_lines(&lines);
         let old_pos = flat.find("old_tool").unwrap_or(usize::MAX);
         let new_pos = flat.find("new_tool").unwrap_or(0);

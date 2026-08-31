@@ -595,7 +595,7 @@ impl WorkflowGraph {
         }
     }
 
-    pub(crate) fn refresh_permission_tool_approvals(&mut self) {
+    fn refresh_permission_tool_approvals(&mut self) {
         if self.permission_requests.is_empty() {
             return;
         }

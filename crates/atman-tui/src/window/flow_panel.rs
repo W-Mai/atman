@@ -114,7 +114,7 @@ impl WindowComponent for FlowPanelContent {
                 } else {
                     ctx.animation_frame
                 };
-                let (lines, regions) = crate::output::render_workflow_panel_with_regions(
+                let (lines, regions) = crate::output::render_workflow_projection_with_regions(
                     graph,
                     expanded_nodes,
                     true,

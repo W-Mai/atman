@@ -13,8 +13,9 @@ use crate::workflow::{
     WorkflowPermissionState,
 };
 
+use super::workflow_permission::{PermissionProjection, ToolKey};
+
 type NodePath = Vec<usize>;
-type ToolKey = (String, String);
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,6 +59,7 @@ struct WorkflowIndex {
     node_paths: HashMap<String, NodePath>,
     tool_paths: HashMap<ToolKey, NodePath>,
     first_tool_paths: HashMap<String, NodePath>,
+    tool_keys_by_node: HashMap<String, ToolKey>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -79,6 +81,7 @@ struct PendingDelta {
     dirty_nodes: Vec<String>,
     structural_changed: bool,
     layout_changed: bool,
+    projection_changed: bool,
 }
 
 impl PendingDelta {
@@ -88,6 +91,7 @@ impl PendingDelta {
             self.dirty_nodes.push(node_id);
         }
         self.layout_changed = true;
+        self.projection_changed = true;
     }
 
     fn mark_structure(&mut self, parent_id: Option<&str>, node_id: &str) {
@@ -104,10 +108,14 @@ impl PendingDelta {
         }
         self.structural_changed |= other.structural_changed;
         self.layout_changed |= other.layout_changed;
+        self.projection_changed |= other.projection_changed;
     }
 
     fn changed(&self) -> bool {
-        self.structural_changed || self.layout_changed || !self.dirty_nodes.is_empty()
+        self.projection_changed
+            || self.structural_changed
+            || self.layout_changed
+            || !self.dirty_nodes.is_empty()
     }
 }
 
@@ -115,6 +123,7 @@ impl PendingDelta {
 pub struct WorkflowProjection {
     graph: WorkflowGraph,
     index: WorkflowIndex,
+    permissions: PermissionProjection,
     revision: u64,
 }
 
@@ -155,6 +164,7 @@ impl From<WorkflowGraph> for WorkflowProjection {
         let mut projection = Self {
             graph,
             index: WorkflowIndex::default(),
+            permissions: PermissionProjection::default(),
             revision: 0,
         };
         projection.rebuild_index();
@@ -196,14 +206,25 @@ impl WorkflowProjection {
         };
         let mut run_ids = Vec::new();
         collect_flow_run_ids(node, &mut run_ids);
-        self.graph
-            .permission_requests
-            .values()
-            .filter(|request| {
-                request.state.is_pending()
-                    && run_ids.contains(&request.payload.requesting_run_id.0.to_string())
-            })
-            .count()
+        run_ids.sort_unstable();
+        run_ids.dedup();
+        run_ids
+            .iter()
+            .map(|run_id| self.permissions.pending_count_for_run(run_id))
+            .sum()
+    }
+
+    pub fn permission_request_for_node(&self, node_id: &str) -> Option<&WorkflowPermissionRequest> {
+        let tool_key = self.index.tool_keys_by_node.get(node_id)?;
+        self.permissions
+            .winner_request_for_tool(&self.graph, tool_key)
+    }
+
+    pub fn permission_group_progress(
+        &self,
+        group_id: &crate::permission::PermissionGroupId,
+    ) -> Option<(usize, usize)> {
+        self.permissions.group_progress(group_id)
     }
 
     pub fn apply_batch<'a>(
@@ -236,33 +257,25 @@ impl WorkflowProjection {
     }
 
     pub fn interrupt_pending_permissions(&mut self) -> ProjectionDelta {
-        if !self
-            .graph
-            .permission_requests
-            .values()
-            .any(|request| request.state.is_pending())
-        {
+        let pending_identities = self.permissions.pending_identities();
+        if pending_identities.is_empty() {
             return ProjectionDelta {
                 revision: self.revision,
                 ..ProjectionDelta::default()
             };
         }
-        let dirty_nodes = self
-            .graph
-            .permission_requests
-            .values()
-            .filter(|request| request.state.is_pending())
-            .map(|request| {
-                tool_node_id(
-                    &request.payload.requesting_run_id.0.to_string(),
-                    &request.payload.tool_use_id,
-                )
-            })
-            .collect::<Vec<_>>();
-        self.graph.interrupt_pending_permissions();
         let mut pending = PendingDelta::default();
-        for node_id in dirty_nodes {
-            pending.mark(node_id);
+        for identity in pending_identities {
+            let Some(request) = self.graph.permission_requests.get(&identity).cloned() else {
+                continue;
+            };
+            let mut payload = request.payload;
+            payload.reason = Some("interrupted at end of persisted history".into());
+            pending.merge(self.apply_permission_transition(
+                identity,
+                payload,
+                WorkflowPermissionState::Interrupted,
+            ));
         }
         self.commit(pending)
     }
@@ -304,28 +317,10 @@ impl WorkflowProjection {
             ),
         >,
     ) -> ProjectionDelta {
-        let requests = requests.into_iter().collect::<Vec<_>>();
-        let changed = requests.iter().any(|(identity, payload, state)| {
-            self.graph.permission_requests.get(identity)
-                != Some(&WorkflowPermissionRequest {
-                    payload: payload.clone(),
-                    state: *state,
-                })
-        });
-        if !changed {
-            return ProjectionDelta {
-                revision: self.revision,
-                ..ProjectionDelta::default()
-            };
-        }
         let mut pending = PendingDelta::default();
-        for (_, payload, _) in &requests {
-            pending.mark(tool_node_id(
-                &payload.requesting_run_id.0.to_string(),
-                &payload.tool_use_id,
-            ));
+        for (identity, payload, state) in requests {
+            pending.merge(self.apply_permission_transition(identity, payload, state));
         }
-        self.graph.apply_permission_requests(requests);
         self.commit(pending)
     }
 
@@ -334,28 +329,7 @@ impl WorkflowProjection {
         payload: &PermissionGroupAudit,
         resolved: bool,
     ) -> ProjectionDelta {
-        let before_group = self.graph.permission_groups.get(&payload.group_id).cloned();
-        let before_resolved = self
-            .graph
-            .resolved_permission_groups
-            .contains(&payload.group_id);
-        self.graph.apply_permission_group(payload, resolved);
-        if before_group == self.graph.permission_groups.get(&payload.group_id).cloned()
-            && before_resolved
-                == self
-                    .graph
-                    .resolved_permission_groups
-                    .contains(&payload.group_id)
-        {
-            return ProjectionDelta {
-                revision: self.revision,
-                ..ProjectionDelta::default()
-            };
-        }
-        let pending = PendingDelta {
-            layout_changed: true,
-            ..PendingDelta::default()
-        };
+        let pending = self.apply_permission_group_update(payload, resolved);
         self.commit(pending)
     }
 
@@ -856,6 +830,7 @@ impl WorkflowProjection {
             return PendingDelta::default();
         }
         let parent_id = scope_id(run_id, parent_node_id);
+        let tool_key = (run_id.to_string(), tool_use_id.to_string());
         let node = WorkflowNode {
             id: id.clone(),
             kind: WorkflowNodeKind::ToolCall {
@@ -872,17 +847,11 @@ impl WorkflowProjection {
             output_preview: None,
             children: Vec::new(),
             parallelism: Parallelism::Serial,
-            approval: None,
+            approval: self.permissions.approval_for_tool(&self.graph, &tool_key),
             llm_stats: None,
         };
         if !self.append_child(&parent_id, node, Some((run_id, tool_use_id))) {
             return PendingDelta::default();
-        }
-        if self.graph.permission_requests.values().any(|request| {
-            request.payload.requesting_run_id.0.to_string() == run_id
-                && request.payload.tool_use_id == tool_use_id
-        }) {
-            self.graph.refresh_permission_tool_approvals();
         }
         let mut delta = PendingDelta::default();
         delta.mark_structure(Some(&parent_id), &id);
@@ -1038,21 +1007,7 @@ impl WorkflowProjection {
             return PendingDelta::default();
         };
         let identity = WorkflowPermissionIdentity::Canonical { request_id };
-        let request = WorkflowPermissionRequest {
-            payload: payload.clone(),
-            state,
-        };
-        if self.graph.permission_requests.get(&identity) == Some(&request) {
-            return PendingDelta::default();
-        }
-        self.graph
-            .apply_permission_requests([(identity, payload.clone(), state)]);
-        let mut delta = PendingDelta::default();
-        delta.mark(tool_node_id(
-            &payload.requesting_run_id.0.to_string(),
-            &payload.tool_use_id,
-        ));
-        delta
+        self.apply_permission_transition(identity, payload.clone(), state)
     }
 
     fn apply_permission_group_inner(
@@ -1060,23 +1015,63 @@ impl WorkflowProjection {
         payload: &PermissionGroupAudit,
         resolved: bool,
     ) -> PendingDelta {
-        let before_group = self.graph.permission_groups.get(&payload.group_id).cloned();
-        let before_resolved = self
-            .graph
-            .resolved_permission_groups
-            .contains(&payload.group_id);
-        self.graph.apply_permission_group(payload, resolved);
-        let mut delta = PendingDelta::default();
-        if before_group != self.graph.permission_groups.get(&payload.group_id).cloned()
-            || before_resolved
-                != self
-                    .graph
-                    .resolved_permission_groups
-                    .contains(&payload.group_id)
-        {
-            delta.layout_changed = true;
+        self.apply_permission_group_update(payload, resolved)
+    }
+
+    fn apply_permission_transition(
+        &mut self,
+        identity: WorkflowPermissionIdentity,
+        payload: PermissionRequestAudit,
+        state: WorkflowPermissionState,
+    ) -> PendingDelta {
+        let update = self
+            .permissions
+            .apply_request(&mut self.graph, identity, payload, state);
+        if !update.changed {
+            return PendingDelta::default();
+        }
+        let mut delta = PendingDelta {
+            projection_changed: true,
+            layout_changed: update.group_progress_changed,
+            ..PendingDelta::default()
+        };
+        for (run_id, tool_use_id) in update.winner_tools {
+            let node_id = tool_node_id(&run_id, &tool_use_id);
+            if !self.index.node_paths.contains_key(&node_id) {
+                continue;
+            }
+            let approval = self
+                .permissions
+                .approval_for_tool(&self.graph, &(run_id, tool_use_id));
+            self.mutate_node(&node_id, |node| {
+                if node.approval == approval {
+                    false
+                } else {
+                    node.approval = approval;
+                    true
+                }
+            });
+            delta.mark(node_id);
         }
         delta
+    }
+
+    fn apply_permission_group_update(
+        &mut self,
+        payload: &PermissionGroupAudit,
+        resolved: bool,
+    ) -> PendingDelta {
+        if !self
+            .permissions
+            .apply_group(&mut self.graph, payload, resolved)
+        {
+            return PendingDelta::default();
+        }
+        PendingDelta {
+            layout_changed: true,
+            projection_changed: true,
+            ..PendingDelta::default()
+        }
     }
 
     fn append_root(&mut self, node: WorkflowNode, tool: Option<(&str, &str)>) {
@@ -1112,6 +1107,10 @@ impl WorkflowProjection {
     }
 
     fn index_tool(&mut self, run_id: &str, tool_use_id: &str, path: NodePath) {
+        self.index.tool_keys_by_node.insert(
+            tool_node_id(run_id, tool_use_id),
+            (run_id.to_string(), tool_use_id.to_string()),
+        );
         self.index
             .tool_paths
             .entry((run_id.to_string(), tool_use_id.to_string()))
@@ -1143,6 +1142,7 @@ impl WorkflowProjection {
         self.index = WorkflowIndex::default();
         let mut path = Vec::new();
         index_nodes(&self.graph.root, &mut path, None, &mut self.index);
+        self.permissions = PermissionProjection::rebuild(&self.graph);
     }
 
     fn commit(&mut self, pending: PendingDelta) -> ProjectionDelta {
@@ -1179,6 +1179,9 @@ fn index_nodes(
         if let WorkflowNodeKind::ToolCall { tool_use_id, .. } = &node.kind
             && let Some(run_id) = run_id
         {
+            index
+                .tool_keys_by_node
+                .insert(node.id.clone(), (run_id.to_string(), tool_use_id.clone()));
             index
                 .tool_paths
                 .entry((run_id.to_string(), tool_use_id.clone()))
@@ -1267,18 +1270,32 @@ fn parse_branch_index(node_id: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::workflow_permission::{
+        PermissionPerfCounters, perf_counters as permission_perf_counters,
+        reset_perf_counters as reset_permission_perf_counters,
+    };
     use super::*;
+    use crate::event::FlowRunId;
+    use crate::permission::{PermissionGroupId, PermissionRequestId};
+    use crate::permission_audit::{
+        PermissionAuditTarget, PermissionGroupAudit, PermissionGroupAuditOwner,
+        PermissionPolicyReference, PermissionRequestAudit,
+    };
 
     fn start_projection() -> WorkflowProjection {
+        projection_for_run("root")
+    }
+
+    fn projection_for_run(run_id: &str) -> WorkflowProjection {
         let mut projection = WorkflowProjection::new(TurnId::now());
         projection.apply_stream_frame(&StreamFrame::FlowStart {
-            run_id: "root".into(),
+            run_id: run_id.into(),
             flow_name: "root".into(),
             parent_run_id: None,
             parent_node_id: None,
         });
         projection.apply_stream_frame(&StreamFrame::FlowNodeStart {
-            run_id: "root".into(),
+            run_id: run_id.into(),
             node_id: "dispatch".into(),
             kind: crate::nodegraph::NodeKind::ToolCall {
                 path: "dispatch_all".into(),
@@ -1287,6 +1304,69 @@ mod tests {
             parent_node_id: None,
         });
         projection
+    }
+
+    fn permission_payload(
+        request_id: PermissionRequestId,
+        run_id: &FlowRunId,
+        tool_use_id: impl Into<String>,
+        at: DateTime<Utc>,
+    ) -> PermissionRequestAudit {
+        PermissionRequestAudit {
+            request_id: Some(request_id),
+            revision: 1,
+            session_id: "session".into(),
+            requesting_run_id: run_id.clone(),
+            parent_run_id: None,
+            root_run_id: run_id.clone(),
+            tool_use_id: tool_use_id.into(),
+            tool: "fs.read".into(),
+            call_intent: None,
+            tier: crate::tool::Tier::Two,
+            execution_boundary: None,
+            provenance: Default::default(),
+            target: PermissionAuditTarget::User,
+            group_ids: Vec::new(),
+            policy: PermissionPolicyReference {
+                snapshot_id: "snapshot".into(),
+                rule_id: "rule".into(),
+            },
+            escalation_path: Vec::new(),
+            decision_id: None,
+            actor: None,
+            scope: None,
+            reason: None,
+            at,
+        }
+    }
+
+    fn add_tool(projection: &mut WorkflowProjection, run_id: &str, tool_use_id: &str) {
+        projection.apply_stream_frame(&StreamFrame::ToolNode {
+            run_id: run_id.into(),
+            parent_node_id: "dispatch".into(),
+            tool_use_id: tool_use_id.into(),
+            tool: "fs.read".into(),
+            args_preview: "{}".into(),
+            call_intent: None,
+        });
+    }
+
+    fn permission_group(
+        group_id: PermissionGroupId,
+        owner: &FlowRunId,
+        request_ids: Vec<PermissionRequestId>,
+        at: DateTime<Utc>,
+    ) -> PermissionGroupAudit {
+        PermissionGroupAudit {
+            group_id,
+            owner: PermissionGroupAuditOwner::Flow {
+                run_id: owner.clone(),
+            },
+            label: "batch".into(),
+            request_ids,
+            revision: 1,
+            at,
+        }
     }
 
     fn without_timestamps(mut graph: WorkflowGraph) -> WorkflowGraph {
@@ -1627,5 +1707,347 @@ mod tests {
             projection.find_node("tool:second:shared").unwrap().status,
             NodeStatus::Running
         );
+    }
+
+    #[test]
+    fn indexed_permission_transition_is_bounded_after_large_rebuild() {
+        const ENTRIES: usize = 10_000;
+        let run_id = FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let at = Utc::now();
+        let mut projection = projection_for_run(&run_id_text);
+        for idx in 0..ENTRIES {
+            add_tool(&mut projection, &run_id_text, &format!("tool-{idx}"));
+        }
+        let mut graph = projection.into_graph();
+        let mut final_request = None;
+        for idx in 0..ENTRIES {
+            let request_id = PermissionRequestId::now();
+            let identity = WorkflowPermissionIdentity::Canonical {
+                request_id: request_id.clone(),
+            };
+            let payload = permission_payload(request_id, &run_id, format!("tool-{idx}"), at);
+            graph.permission_requests.insert(
+                identity.clone(),
+                WorkflowPermissionRequest {
+                    payload: payload.clone(),
+                    state: WorkflowPermissionState::Pending,
+                },
+            );
+            if idx + 1 == ENTRIES {
+                final_request = Some((identity, payload));
+            }
+        }
+        let mut projection = WorkflowProjection::from(graph);
+        assert_eq!(projection.permissions.pending_tool_count(), ENTRIES);
+        let (identity, mut payload) = final_request.unwrap();
+        payload.reason = Some("approved".into());
+        payload.at += chrono::Duration::seconds(1);
+
+        reset_perf_counters();
+        reset_permission_perf_counters();
+        let delta = projection.apply_permission_request_with_identity(
+            identity,
+            &payload,
+            WorkflowPermissionState::Approved,
+        );
+        let workflow_counters = perf_counters();
+        let permission_counters = permission_perf_counters();
+
+        assert_eq!(
+            workflow_counters,
+            PerfCounters {
+                indexed_lookups: 1,
+                path_steps: 3,
+            }
+        );
+        assert_eq!(
+            permission_counters,
+            PermissionPerfCounters {
+                winner_selections: 1,
+                group_member_visits: 0,
+            }
+        );
+        assert_eq!(delta.dirty_nodes, [format!("tool:{run_id_text}:tool-9999")]);
+        assert_eq!(projection.permissions.pending_tool_count(), ENTRIES - 1);
+    }
+
+    #[test]
+    fn permission_before_tool_attaches_without_refreshing_other_nodes() {
+        let run_id = FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let request_id = PermissionRequestId::now();
+        let payload = permission_payload(request_id, &run_id, "late-tool", Utc::now());
+        let mut projection = projection_for_run(&run_id_text);
+
+        projection.apply_permission_request(&payload, WorkflowPermissionState::Pending);
+        reset_perf_counters();
+        add_tool(&mut projection, &run_id_text, "late-tool");
+
+        assert_eq!(
+            perf_counters(),
+            PerfCounters {
+                indexed_lookups: 1,
+                path_steps: 2,
+            }
+        );
+        let node_id = format!("tool:{run_id_text}:late-tool");
+        assert!(matches!(
+            projection.find_node(&node_id).unwrap().approval,
+            Some(ApprovalState::Pending { .. })
+        ));
+        assert_eq!(
+            projection
+                .permission_request_for_node(&node_id)
+                .unwrap()
+                .payload
+                .tool_use_id,
+            "late-tool"
+        );
+    }
+
+    #[test]
+    fn indexed_permission_winner_matches_recursive_canonical_and_legacy_semantics() {
+        let run_id = FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let at = Utc::now();
+        let canonical_id = PermissionRequestId::now();
+        let legacy_request_id = PermissionRequestId::now();
+        let canonical_identity = WorkflowPermissionIdentity::Canonical {
+            request_id: canonical_id.clone(),
+        };
+        let legacy_identity = WorkflowPermissionIdentity::Legacy {
+            seq: 7,
+            run_id: run_id_text.clone(),
+            tool_use_id: "shared".into(),
+        };
+        let mut canonical = permission_payload(canonical_id, &run_id, "shared", at);
+        canonical.reason = Some("canonical".into());
+        let mut legacy = permission_payload(legacy_request_id, &run_id, "shared", at);
+        legacy.reason = Some("legacy".into());
+        let mut indexed = projection_for_run(&run_id_text);
+        add_tool(&mut indexed, &run_id_text, "shared");
+        let mut recursive = indexed.graph().clone();
+
+        for (identity, payload, state) in [
+            (
+                canonical_identity.clone(),
+                canonical.clone(),
+                WorkflowPermissionState::Denied,
+            ),
+            (
+                legacy_identity.clone(),
+                legacy.clone(),
+                WorkflowPermissionState::Denied,
+            ),
+        ] {
+            recursive.apply_permission_request_with_identity(identity.clone(), &payload, state);
+            indexed.apply_permission_request_with_identity(identity, &payload, state);
+        }
+        assert_eq!(indexed.graph(), &recursive);
+        let node_id = format!("tool:{run_id_text}:shared");
+        assert_eq!(
+            indexed
+                .permission_request_for_node(&node_id)
+                .unwrap()
+                .payload
+                .reason
+                .as_deref(),
+            Some("canonical")
+        );
+
+        legacy.at -= chrono::Duration::seconds(1);
+        recursive.apply_permission_request_with_identity(
+            legacy_identity.clone(),
+            &legacy,
+            WorkflowPermissionState::Pending,
+        );
+        indexed.apply_permission_request_with_identity(
+            legacy_identity.clone(),
+            &legacy,
+            WorkflowPermissionState::Pending,
+        );
+        canonical.at += chrono::Duration::seconds(10);
+        recursive.apply_permission_request_with_identity(
+            canonical_identity.clone(),
+            &canonical,
+            WorkflowPermissionState::Approved,
+        );
+        indexed.apply_permission_request_with_identity(
+            canonical_identity,
+            &canonical,
+            WorkflowPermissionState::Approved,
+        );
+        assert_eq!(indexed.graph(), &recursive);
+        assert!(matches!(
+            indexed.find_node(&node_id).unwrap().approval,
+            Some(ApprovalState::Pending { .. })
+        ));
+
+        recursive.apply_permission_request_with_identity(
+            legacy_identity.clone(),
+            &legacy,
+            WorkflowPermissionState::Denied,
+        );
+        indexed.apply_permission_request_with_identity(
+            legacy_identity,
+            &legacy,
+            WorkflowPermissionState::Denied,
+        );
+        assert_eq!(indexed.graph(), &recursive);
+        assert_eq!(
+            indexed.find_node(&node_id).unwrap().approval,
+            Some(ApprovalState::Approved)
+        );
+    }
+
+    #[test]
+    fn repeated_tool_use_ids_remain_scoped_by_run() {
+        let run_a = FlowRunId::now();
+        let run_b = FlowRunId::now();
+        let run_a_text = run_a.0.to_string();
+        let run_b_text = run_b.0.to_string();
+        let mut projection = projection_for_run(&run_a_text);
+        projection.apply_stream_frame(&StreamFrame::FlowStart {
+            run_id: run_b_text.clone(),
+            flow_name: "second".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        projection.apply_stream_frame(&StreamFrame::FlowNodeStart {
+            run_id: run_b_text.clone(),
+            node_id: "dispatch".into(),
+            kind: crate::nodegraph::NodeKind::ToolCall {
+                path: "dispatch_all".into(),
+            },
+            label: "dispatch".into(),
+            parent_node_id: None,
+        });
+        add_tool(&mut projection, &run_a_text, "shared");
+        add_tool(&mut projection, &run_b_text, "shared");
+        let payload_a =
+            permission_payload(PermissionRequestId::now(), &run_a, "shared", Utc::now());
+        let payload_b =
+            permission_payload(PermissionRequestId::now(), &run_b, "shared", Utc::now());
+
+        projection.apply_permission_request(&payload_a, WorkflowPermissionState::Pending);
+        projection.apply_permission_request(&payload_b, WorkflowPermissionState::Approved);
+
+        assert!(matches!(
+            projection
+                .find_node(&format!("tool:{run_a_text}:shared"))
+                .unwrap()
+                .approval,
+            Some(ApprovalState::Pending { .. })
+        ));
+        assert_eq!(
+            projection
+                .find_node(&format!("tool:{run_b_text}:shared"))
+                .unwrap()
+                .approval,
+            Some(ApprovalState::Approved)
+        );
+    }
+
+    #[test]
+    fn group_progress_updates_incrementally_and_rebuilds_from_graph_dto() {
+        let run_id = FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let at = Utc::now();
+        let group_id = PermissionGroupId(uuid::Uuid::now_v7());
+        let request_a_id = PermissionRequestId::now();
+        let request_b_id = PermissionRequestId::now();
+        let mut request_a = permission_payload(request_a_id.clone(), &run_id, "a", at);
+        let mut request_b = permission_payload(request_b_id.clone(), &run_id, "b", at);
+        request_a.group_ids.push(group_id.clone());
+        request_b.group_ids.push(group_id.clone());
+        let group = permission_group(
+            group_id.clone(),
+            &run_id,
+            vec![request_a_id.clone(), request_a_id, request_b_id],
+            at,
+        );
+        let mut projection = projection_for_run(&run_id_text);
+        add_tool(&mut projection, &run_id_text, "a");
+        add_tool(&mut projection, &run_id_text, "b");
+        projection.apply_permission_request(&request_a, WorkflowPermissionState::Pending);
+        projection.apply_permission_request(&request_b, WorkflowPermissionState::Pending);
+        projection.apply_permission_group(&group, false);
+        assert_eq!(
+            projection.permission_group_progress(&group_id),
+            Some((0, 3))
+        );
+
+        request_a.at += chrono::Duration::seconds(1);
+        reset_permission_perf_counters();
+        projection.apply_permission_request(&request_a, WorkflowPermissionState::Approved);
+        assert_eq!(
+            projection.permission_group_progress(&group_id),
+            Some((2, 3))
+        );
+        assert_eq!(
+            permission_perf_counters(),
+            PermissionPerfCounters {
+                winner_selections: 1,
+                group_member_visits: 0,
+            }
+        );
+
+        let restored = WorkflowProjection::from(projection.into_graph());
+        assert_eq!(restored.permission_group_progress(&group_id), Some((2, 3)));
+        assert_eq!(restored.descendant_pending_permissions(&run_id_text), 1);
+    }
+
+    #[test]
+    fn interrupt_updates_canonical_and_legacy_pending_indices_then_becomes_noop() {
+        let run_id = FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let canonical_id = PermissionRequestId::now();
+        let canonical = permission_payload(canonical_id.clone(), &run_id, "canonical", Utc::now());
+        let legacy = permission_payload(PermissionRequestId::now(), &run_id, "legacy", Utc::now());
+        let mut projection = projection_for_run(&run_id_text);
+        add_tool(&mut projection, &run_id_text, "canonical");
+        add_tool(&mut projection, &run_id_text, "legacy");
+        projection.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical {
+                request_id: canonical_id,
+            },
+            &canonical,
+            WorkflowPermissionState::Pending,
+        );
+        projection.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Legacy {
+                seq: 11,
+                run_id: run_id_text.clone(),
+                tool_use_id: "legacy".into(),
+            },
+            &legacy,
+            WorkflowPermissionState::Pending,
+        );
+        assert_eq!(projection.descendant_pending_permissions(&run_id_text), 2);
+        assert_eq!(projection.permissions.pending_tool_count(), 2);
+
+        let interrupted = projection.interrupt_pending_permissions();
+        assert!(interrupted.changed());
+        assert_eq!(interrupted.dirty_nodes.len(), 2);
+        assert_eq!(projection.descendant_pending_permissions(&run_id_text), 0);
+        assert_eq!(projection.permissions.pending_tool_count(), 0);
+        assert!(
+            projection
+                .graph
+                .permission_requests
+                .values()
+                .all(|request| {
+                    request.state == WorkflowPermissionState::Interrupted
+                        && request.payload.reason.as_deref()
+                            == Some("interrupted at end of persisted history")
+                })
+        );
+
+        let revision = projection.revision();
+        let noop = projection.interrupt_pending_permissions();
+        assert!(!noop.changed());
+        assert_eq!(noop.revision, revision);
+        assert_eq!(projection.revision(), revision);
     }
 }

@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Incremental permission projection** — permission transitions update indexed per-tool winners, pending counts, and group progress without rescanning the complete permission table or workflow tree; out-of-order tools, canonical and legacy requests, repeated tool IDs across runs, and resumed graph state retain their existing semantics.
 - **Indexed workflow projection** — live and restored workflow updates use append-stable node and tool paths, preserve exact flow-scoped tool completion, ignore duplicate structural frames, and report precise projection changes without recursively searching the complete workflow tree.
 - **Incremental transcript layout** — TUI frames update transcript layout once from exact item revisions, use indexed viewport lookup, patch visible animation spans without rebuilding transcript or flow-panel projections, and retain only visible, overscanned, and bounded recent render rows instead of rescanning and caching the complete session.
 - **Stable prompt-cache routing** — default-endpoint OpenAI and Codex calls use opaque per-context cache keys that remain stable across append-only turns and output-setting changes, then rotate after stable instructions, tools, compaction checkpoints, or isolated child-history rewrites change. Codex requests carry matching session and thread routing headers and replay the backend's sticky routing token within a turn. Custom OpenAI base URLs and compatible gateways require explicit opt-in.
