@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Windowed secondary panels** — History ordering follows task revisions, visible rows use bounded overscan and indexed output summaries, Flow panels cache by local content and interaction revisions, covered panels skip projection, and floating-panel scroll positions remain correct beyond 65,535 rows.
 - **Linear replay transforms** — Flow ownership uses adjacency traversal, message replacement uses sequence indexes, transcript compaction preserves interleaved workflow and child-flow entries, terminal final states use handle indexes, and restored tool outputs are deduplicated in one pass.
 - **Event-driven message caches** — Session message views advance flow ownership and replay cursors for every event while rebuilding full and compacted caches only when their projected messages change.
 - **Single-pass session replay** — session resume streams each persisted event once into message, context, ownership, sequence, and optional TUI transcript projections; TUI startup consumes the replay handoff plus in-memory startup events without reopening the event log.

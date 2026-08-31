@@ -7,7 +7,7 @@ use crate::wm::component::{
 
 pub struct MermaidPanelContent {
     pub item_id: String,
-    pub scroll: u16,
+    pub scroll: u32,
     pub h_scroll: u16,
     pub split: bool,
 }
@@ -73,10 +73,11 @@ impl WindowComponent for MermaidPanelContent {
                         ])
                     })
                     .collect();
-                let src_max = (src_lines.len() as u16).saturating_sub(left_area.height);
+                let src_max = (src_lines.len() as u32).saturating_sub(left_area.height as u32);
                 self.scroll = self.scroll.min(src_max);
                 frame.render_widget(
-                    ratatui::widgets::Paragraph::new(src_lines).scroll((self.scroll, 0)),
+                    ratatui::widgets::Paragraph::new(src_lines)
+                        .scroll((self.scroll.min(u16::MAX as u32) as u16, 0)),
                     left_area,
                 );
 
@@ -99,7 +100,7 @@ impl WindowComponent for MermaidPanelContent {
                 }
             } else {
                 let lines = crate::mermaid::render_mermaid(source, inner_area.width);
-                let max_scroll = (lines.len() as u16).saturating_sub(inner_area.height);
+                let max_scroll = (lines.len() as u32).saturating_sub(inner_area.height as u32);
                 self.scroll = self.scroll.min(max_scroll);
                 let content_w = lines
                     .iter()
@@ -148,13 +149,13 @@ impl WindowComponent for MermaidPanelContent {
         }
     }
 
-    fn sync_state(&mut self, scroll: u16, h_scroll: u16, split: bool) {
+    fn sync_state(&mut self, scroll: u32, h_scroll: u16, split: bool) {
         self.scroll = scroll;
         self.h_scroll = h_scroll;
         self.split = split;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, self.h_scroll, self.split)
     }
 

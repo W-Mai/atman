@@ -18,6 +18,7 @@ pub fn render_shell(
     btn_hover: Option<PanelBtn>,
     panel_close_armed: Option<(&str, bool)>,
     snapshots: &[TaskSnapshot],
+    task_handle_index: &std::collections::HashMap<String, usize>,
     t: &crate::theme::Theme,
 ) {
     let panel_bg: Color = if is_focused {
@@ -127,9 +128,10 @@ pub fn render_shell(
 
         if panel.rect.height >= 8 {
             let killable = match &panel.content_kind {
-                WindowContent::Task { handle, .. } => snapshots
-                    .iter()
-                    .any(|s| s.source_handle == *handle && s.is_running()),
+                WindowContent::Task { handle, .. } => task_handle_index
+                    .get(handle)
+                    .and_then(|&index| snapshots.get(index))
+                    .is_some_and(|snapshot| snapshot.is_running()),
                 _ => false,
             };
             if killable {

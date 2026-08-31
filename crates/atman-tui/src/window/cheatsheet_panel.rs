@@ -9,7 +9,7 @@ use crate::wm::component::{
 };
 
 pub struct CheatsheetPanelContent {
-    pub scroll: u16,
+    pub scroll: u32,
 }
 
 impl WindowComponent for CheatsheetPanelContent {
@@ -26,7 +26,7 @@ impl WindowComponent for CheatsheetPanelContent {
             area.height,
         );
         let lines = completion::cheatsheet_lines();
-        let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+        let max_scroll = (lines.len() as u32).saturating_sub(area.height as u32);
         self.scroll = self.scroll.min(max_scroll);
         let scroll = self.scroll;
         let visible: Vec<Line> = lines.into_iter().skip(scroll as usize).collect();
@@ -38,11 +38,11 @@ impl WindowComponent for CheatsheetPanelContent {
         WmEventResult::Ignored
     }
 
-    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+    fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, 0, false)
     }
 

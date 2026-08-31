@@ -145,6 +145,7 @@ pub fn render(
     snapshots: &[TaskSnapshot],
     activity_nodes: &[ActivityNode],
     items: &[crate::app::OutputItem],
+    handle_index: &std::collections::HashMap<String, usize>,
     collapsed: bool,
     collapsed_groups: &std::collections::HashSet<TaskKind>,
     hover: &TaskPanelHover,
@@ -391,7 +392,8 @@ pub fn render(
             let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
 
             // compute content lines (used for both collapsed summary and expanded view)
-            let content_lines: Vec<String> = compute_content_lines(snap, activity_nodes, items);
+            let content_lines: Vec<String> =
+                compute_content_lines(snap, activity_nodes, items, handle_index);
             let watcher_lines: Vec<String> = if let Some(hub) = watch_hub {
                 let watchers = hub.list_watchers_for_handle(&snap.source_handle);
                 if watchers.is_empty() {
@@ -889,17 +891,15 @@ pub fn compute_content_lines(
     snap: &TaskSnapshot,
     activity_nodes: &[ActivityNode],
     items: &[crate::app::OutputItem],
+    handle_index: &std::collections::HashMap<String, usize>,
 ) -> Vec<String> {
+    let item = handle_index
+        .get(&snap.source_handle)
+        .and_then(|&index| items.get(index));
     match snap.kind {
         TaskKind::Flow => {
             // Async sub-agents (flow.spawn) appear as SubAgentActivity items;
             // background flows appear as activity nodes. Try both.
-            let item = items.iter().rev().find(|it| match it {
-                crate::app::OutputItem::SubAgentActivity { handle, .. } => {
-                    *handle == snap.source_handle
-                }
-                _ => false,
-            });
             if let Some(crate::app::OutputItem::SubAgentActivity { output, .. }) = item {
                 let mut found: Vec<String> = Vec::new();
                 for line in output.lines().rev() {
@@ -921,10 +921,6 @@ pub fn compute_content_lines(
             sub.map(|n| vec![n.label.clone()]).unwrap_or_default()
         }
         TaskKind::Bash => {
-            let item = items.iter().rev().find(|it| match it {
-                crate::app::OutputItem::Bash { handle, .. } => *handle == snap.source_handle,
-                _ => false,
-            });
             let mut found: Vec<String> = Vec::new();
             if let Some(crate::app::OutputItem::Bash { output, .. }) = item {
                 for line in output.lines().rev() {
@@ -941,10 +937,6 @@ pub fn compute_content_lines(
             found
         }
         TaskKind::Terminal => {
-            let item = items.iter().rev().find(|it| match it {
-                crate::app::OutputItem::Terminal { handle, .. } => *handle == snap.source_handle,
-                _ => false,
-            });
             let mut found: Vec<String> = Vec::new();
             if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
                 let cols = screen.cols as usize;
@@ -1223,6 +1215,7 @@ mod tests {
                     &snapshots,
                     &[],
                     &items,
+                    &std::collections::HashMap::from([("term_0".to_string(), 0)]),
                     false,
                     &std::collections::HashSet::new(),
                     &hover,

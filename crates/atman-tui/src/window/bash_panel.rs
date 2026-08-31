@@ -10,7 +10,7 @@ use crate::wm::component::{
 
 pub struct BashPanelContent {
     pub handle: String,
-    pub scroll: u16,
+    pub scroll: u32,
 }
 
 impl WindowComponent for BashPanelContent {
@@ -22,13 +22,13 @@ impl WindowComponent for BashPanelContent {
             area.height,
         );
         let snap = ctx
-            .snapshots
-            .iter()
-            .find(|s| s.source_handle == self.handle);
-        let item = ctx.items.iter().rev().find(|it| match it {
-            crate::app::OutputItem::Bash { handle, .. } => *handle == self.handle,
-            _ => false,
-        });
+            .task_handle_index
+            .get(&self.handle)
+            .and_then(|&index| ctx.snapshots.get(index));
+        let item = ctx
+            .handle_index
+            .get(&self.handle)
+            .and_then(|&index| ctx.items.get(index));
         use crate::app::OutputItem;
         if let Some(OutputItem::Bash {
             title,
@@ -76,11 +76,11 @@ impl WindowComponent for BashPanelContent {
         WmEventResult::Ignored
     }
 
-    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+    fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, 0, false)
     }
 
@@ -99,7 +99,7 @@ fn render_bash_content(
     snap: &atman_runtime::TaskSnapshot,
     command: Option<&str>,
     output: &str,
-    scroll: &mut u16,
+    scroll: &mut u32,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -158,7 +158,7 @@ fn render_bash_screen(
     command: Option<&str>,
     output: &str,
     done: bool,
-    scroll: &mut u16,
+    scroll: &mut u32,
 ) {
     let t = crate::theme::theme();
     let icon = if done { "✓" } else { "◐" };
@@ -207,7 +207,6 @@ fn bash_detail_lines(command: Option<&str>, output: &str, width: usize) -> Vec<L
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::OutputItem;
     use atman_runtime::task_registry::{TaskSnapshot, TaskStatus};
     use std::collections::HashSet;
 
@@ -236,32 +235,6 @@ mod tests {
             output: output.to_string(),
             done,
             expanded: false,
-        }
-    }
-
-    fn ctx<'a>(
-        items: &'a [OutputItem],
-        snaps: &'a [TaskSnapshot],
-        hovered: &'a Option<String>,
-        empty_tools: &'a HashSet<String>,
-        empty_mcp: &'a HashSet<String>,
-        browser: &'a crate::mcp_manager::McpBrowserState<'a>,
-    ) -> RenderCtx<'a> {
-        RenderCtx {
-            window_id: crate::wm::WindowId(1),
-            snapshots: snaps,
-            items,
-            animation_frame: 0,
-            expanded_tools: empty_tools,
-            activity_nodes: &[],
-            items_version: 0,
-            expanded_version: 0,
-            mcp_servers: &[],
-            expanded_mcp_servers: empty_mcp,
-            mcp_selected: 0,
-            hovered_mcp_row: &None,
-            mcp_browser: browser,
-            hovered_history_row: hovered,
         }
     }
 
@@ -299,10 +272,29 @@ mod tests {
             resources: &empty_resources,
             prompts: &empty_prompts,
         };
-        let lines = render(
-            &mut panel,
-            &ctx(&items, &snaps, &None, &empty_tools, &empty_mcp, &browser),
-        );
+        let handle_index = std::collections::HashMap::from([("bg_s_1".to_string(), 0)]);
+        let task_handle_index = std::collections::HashMap::from([("bg_s_1".to_string(), 0)]);
+        let ctx = RenderCtx {
+            window_id: crate::wm::WindowId(1),
+            snapshots: &snaps,
+            items: &items,
+            item_revisions: &[],
+            handle_index: &handle_index,
+            task_handle_index: &task_handle_index,
+            workflow_run_to_panel: &handle_index,
+            task_snapshots_revision: 0,
+            interaction_revision: 0,
+            animation_frame: 0,
+            expanded_tools: &empty_tools,
+            activity_nodes: &[],
+            mcp_servers: &[],
+            expanded_mcp_servers: &empty_mcp,
+            mcp_selected: 0,
+            hovered_mcp_row: &None,
+            mcp_browser: &browser,
+            hovered_history_row: &None,
+        };
+        let lines = render(&mut panel, &ctx);
         let joined = lines.join("\n");
         assert!(
             joined.contains("hello") && joined.contains("world"),

@@ -139,8 +139,7 @@ mod tests {
             h_scroll: 0,
             split: false,
             expanded_tools: std::collections::HashSet::new(),
-            render_cache: None,
-            content_version: 0,
+            interaction_revision: 0,
         }
     }
 

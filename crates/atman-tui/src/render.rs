@@ -165,15 +165,10 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let show_sidebar = !startup_active && !intro_active;
     let sidebar_effective_collapsed = app.sidebar_collapsed;
     let status_height: u16 = 1;
-    let grouped_request_ids: std::collections::BTreeSet<_> = app
-        .pending_permission_groups
-        .values()
-        .flat_map(|group| group.payload.request_ids.iter().cloned())
-        .collect();
     let standalone_canonical = app
         .pending_permissions
         .keys()
-        .filter(|id| !grouped_request_ids.contains(*id))
+        .filter(|id| !app.grouped_permission_request_ids.contains(*id))
         .count();
     let pending_count = app.pending_permissions.len();
     let visible_rows = standalone_canonical;
@@ -443,6 +438,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             &app.task_snapshots,
             &app.activity_nodes,
             &app.items,
+            &app.handle_index,
             app.task_panel_collapsed,
             &app.task_panel_collapsed_groups,
             &hover,
@@ -500,13 +496,12 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if let Some(area) = approvals_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
-        let canonical: Vec<_> = app.pending_permissions.values().cloned().collect();
-        let groups: Vec<_> = app.pending_permission_groups.values().cloned().collect();
         approval_bar::render(
             f,
             area,
-            &canonical,
-            &groups,
+            &app.pending_permissions,
+            &app.pending_permission_groups,
+            &app.grouped_permission_request_ids,
             app.selected_permission_group.as_ref(),
         );
     }

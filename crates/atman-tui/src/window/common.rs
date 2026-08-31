@@ -39,14 +39,16 @@ pub(crate) fn render_scrolled_lines(
     f: &mut Frame,
     area: Rect,
     lines: Vec<Line<'static>>,
-    scroll: &mut u16,
+    scroll: &mut u32,
 ) {
     let max_scroll = lines
         .len()
         .saturating_sub(area.height as usize)
-        .min(u16::MAX as usize) as u16;
+        .min(u32::MAX as usize) as u32;
     *scroll = (*scroll).min(max_scroll);
-    f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
+    let start = *scroll as usize;
+    let end = start.saturating_add(area.height as usize).min(lines.len());
+    f.render_widget(Paragraph::new(lines[start.min(end)..end].to_vec()), area);
 }
 
 pub(crate) fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
@@ -68,7 +70,7 @@ pub(crate) fn render_task_meta(
     area: Rect,
     kind: TaskKind,
     snap: &atman_runtime::TaskSnapshot,
-    scroll: &mut u16,
+    scroll: &mut u32,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![

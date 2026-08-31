@@ -498,7 +498,18 @@ pub(crate) async fn run_frames(
                                         })
                                         .cloned()
                                     {
-                                        app.app.toggle_tool_expansion(&tool_id);
+                                        if let Some(panel) = app
+                                            .wm
+                                            .panels
+                                            .iter_mut()
+                                            .find(|panel| panel.id == panel_id)
+                                        {
+                                            if !panel.expanded_tools.remove(&tool_id) {
+                                                panel.expanded_tools.insert(tool_id);
+                                            }
+                                            panel.interaction_revision =
+                                                panel.interaction_revision.wrapping_add(1);
+                                        }
                                     } else {
                                         app.wm.focus(panel_id);
                                     }
@@ -694,9 +705,7 @@ pub(crate) async fn run_frames(
                                             app.wm.panels.iter_mut().find(|p| p.content_key == crate::wm::ContentKey::History)
                                         {
                                             p.content = Some(Box::new(
-                                                crate::window::history_panel::HistoryPanelContent {
-                                                    scroll: 0,
-                                                },
+                                                crate::window::history_panel::HistoryPanelContent::default(),
                                             ));
                                         }
                                     } else if let Some((run_id, node_id, _)) = hm

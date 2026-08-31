@@ -7,8 +7,17 @@ use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 pub fn render(
     f: &mut ratatui::Frame,
     area: Rect,
-    canonical: &[PendingPermission],
-    groups: &[crate::app::PendingPermissionGroup],
+    canonical: &std::collections::BTreeMap<
+        atman_runtime::permission::PermissionRequestId,
+        PendingPermission,
+    >,
+    groups: &std::collections::BTreeMap<
+        atman_runtime::permission::PermissionGroupId,
+        crate::app::PendingPermissionGroup,
+    >,
+    grouped_request_ids: &std::collections::BTreeSet<
+        atman_runtime::permission::PermissionRequestId,
+    >,
     selected_group: Option<&atman_runtime::permission::PermissionGroupId>,
 ) {
     let pending_len = canonical.len();
@@ -41,17 +50,8 @@ pub fn render(
     let inner_width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(area.height as usize);
     let rows: Vec<(String, Option<String>, String)> = canonical
-        .iter()
-        .filter(|p| {
-            p.payload.group_ids.is_empty()
-                || !groups.iter().any(|group| {
-                    group
-                        .payload
-                        .request_ids
-                        .iter()
-                        .any(|request_id| request_id == &p.request_id)
-                })
-        })
+        .values()
+        .filter(|p| !grouped_request_ids.contains(&p.request_id))
         .map(|p| {
             let execution = match (
                 p.payload.provenance.risks.contains("ProcessSpawn"),
@@ -76,7 +76,7 @@ pub fn render(
             )
         })
         .collect();
-    for group in groups {
+    for group in groups.values() {
         let selected = if selected_group == Some(&group.group_id) {
             "● "
         } else {
@@ -102,10 +102,7 @@ pub fn render(
         ]));
         if group.expanded {
             for request_id in &group.payload.request_ids {
-                if let Some(request) = canonical
-                    .iter()
-                    .find(|request| &request.request_id == request_id)
-                {
+                if let Some(request) = canonical.get(request_id) {
                     let (title, technical) = approval_labels(
                         &request.payload.tool,
                         request.payload.call_intent.as_ref(),

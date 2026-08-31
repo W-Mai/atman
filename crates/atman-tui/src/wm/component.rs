@@ -91,11 +91,15 @@ pub struct RenderCtx<'a> {
     pub window_id: crate::wm::WindowId,
     pub snapshots: &'a [atman_runtime::TaskSnapshot],
     pub items: &'a [crate::app::OutputItem],
+    pub item_revisions: &'a [crate::app::OutputRevision],
+    pub handle_index: &'a std::collections::HashMap<String, usize>,
+    pub task_handle_index: &'a std::collections::HashMap<String, usize>,
+    pub workflow_run_to_panel: &'a std::collections::HashMap<String, usize>,
+    pub task_snapshots_revision: u64,
+    pub interaction_revision: u64,
     pub animation_frame: u32,
     pub expanded_tools: &'a HashSet<String>,
     pub activity_nodes: &'a [crate::task_panel::ActivityNode],
-    pub items_version: u64,
-    pub expanded_version: u64,
     pub mcp_servers: &'a [atman_runtime::mcp::McpServerStatus],
     pub expanded_mcp_servers: &'a std::collections::HashSet<String>,
     pub mcp_selected: usize,
@@ -107,7 +111,7 @@ pub struct RenderCtx<'a> {
 /// Mutable event context — allows components to send commands and mutate
 /// their own scroll/state.
 pub struct EventCtx<'a> {
-    pub scroll: &'a mut u16,
+    pub scroll: &'a mut u32,
     pub h_scroll: &'a mut u16,
 }
 
@@ -146,14 +150,6 @@ pub trait WindowComponent: Send {
     #[allow(dead_code)]
     fn on_resize(&mut self, _area: Rect, _ctx: &mut EventCtx) {}
 
-    fn wants_background_updates(&self) -> bool {
-        false
-    }
-
-    fn content_version(&self) -> u64 {
-        0
-    }
-
     /// Optional suffix appended to the title (e.g., Mermaid's "Tab: split").
     fn title_suffix(&self) -> Option<String> {
         None
@@ -161,12 +157,12 @@ pub trait WindowComponent: Send {
 
     /// Sync scroll/state from the Window shell into this content before
     /// rendering. Default no-op.
-    fn sync_state(&mut self, _scroll: u16, _h_scroll: u16, _split: bool) {}
+    fn sync_state(&mut self, _scroll: u32, _h_scroll: u16, _split: bool) {}
 
     /// Extract current scroll/state from this content after rendering.
     /// Returns `(scroll, h_scroll, split)`. Used to sync clamped values
     /// (e.g. scroll→max_scroll) back to the Window shell.
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (0, 0, false)
     }
 }

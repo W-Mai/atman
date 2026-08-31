@@ -131,7 +131,7 @@ impl OutputItem {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct OutputRevision {
+pub struct OutputRevision {
     pub id: u64,
     pub semantic: u64,
     pub interaction: u64,
@@ -390,6 +390,8 @@ pub struct AppState {
         atman_runtime::permission::PermissionGroupId,
         PendingPermissionGroup,
     >,
+    pub grouped_permission_request_ids:
+        std::collections::BTreeSet<atman_runtime::permission::PermissionRequestId>,
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
     pub yank_mode: bool,
     pub yank_index: usize,
@@ -431,6 +433,7 @@ pub struct AppState {
     pub approval_scope_index: u8,
     pub selected_permission_group: Option<atman_runtime::permission::PermissionGroupId>,
     pub items_version: u64,
+    pub task_snapshots_revision: u64,
     pub wm_visual_version: u64,
     pub expanded_version: u64,
     pub terminal_throttle: Option<Instant>,
@@ -441,6 +444,8 @@ pub struct AppState {
     pub last_items_len: usize,
     pub mouse_captured: bool,
     pub handle_index: std::collections::HashMap<String, usize>,
+    pub task_handle_index: std::collections::HashMap<String, usize>,
+    pub task_id_index: std::collections::HashMap<atman_runtime::TaskId, usize>,
     pub last_workflow_panel_idx: Option<usize>,
     pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
     pub top_level_run_ids: std::collections::HashSet<String>,
@@ -692,6 +697,49 @@ impl AppState {
         self.items.replace(items);
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.inline_note_indices.clear();
+        self.handle_index.clear();
+        self.workflow_run_to_panel.clear();
+        self.sub_agent_run_ids.clear();
+        self.last_workflow_panel_idx = None;
+        for (index, item) in self.items.iter().enumerate() {
+            if let Some(handle) = item.handle() {
+                self.handle_index.insert(handle.to_owned(), index);
+            }
+            let (graph, subagent) = match item {
+                OutputItem::WorkflowPanel {
+                    graph, ended_at, ..
+                } => {
+                    if ended_at.is_none() {
+                        self.last_workflow_panel_idx = Some(index);
+                    }
+                    (Some(graph), false)
+                }
+                OutputItem::SubAgentActivity {
+                    child_run_id,
+                    workflow_graph,
+                    ..
+                } => {
+                    self.sub_agent_run_ids.insert(child_run_id.clone(), index);
+                    (Some(workflow_graph), true)
+                }
+                _ => (None, false),
+            };
+            if let Some(graph) = graph {
+                let mut nodes = graph.root.iter().collect::<Vec<_>>();
+                while let Some(node) = nodes.pop() {
+                    if let atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } =
+                        &node.kind
+                    {
+                        if subagent {
+                            self.sub_agent_run_ids.insert(run_id.clone(), index);
+                        } else {
+                            self.workflow_run_to_panel.insert(run_id.clone(), index);
+                        }
+                    }
+                    nodes.extend(node.children.iter());
+                }
+            }
+        }
         self.items_version = self.items_version.wrapping_add(1);
         self.layout_cache.invalidate();
         self
@@ -1359,7 +1407,9 @@ impl AppState {
     pub fn push_item(&mut self, item: OutputItem) {
         let idx = self.items.len();
         match &item {
-            OutputItem::Terminal { handle, .. } | OutputItem::Bash { handle, .. } => {
+            OutputItem::Terminal { handle, .. }
+            | OutputItem::Bash { handle, .. }
+            | OutputItem::SubAgentActivity { handle, .. } => {
                 self.handle_index.insert(handle.clone(), idx);
             }
             OutputItem::WorkflowPanel { ended_at: None, .. } => {
@@ -1544,7 +1594,12 @@ impl AppState {
     pub fn apply_task_event(&mut self, event: atman_runtime::TaskEvent) {
         match event {
             atman_runtime::TaskEvent::Registered(snap) => {
+                self.task_id_index
+                    .insert(snap.id.clone(), self.task_snapshots.len());
+                self.task_handle_index
+                    .insert(snap.source_handle.clone(), self.task_snapshots.len());
                 self.task_snapshots.push(snap);
+                self.task_snapshots_revision = self.task_snapshots_revision.wrapping_add(1);
                 self.mark_visual_dirty();
             }
             atman_runtime::TaskEvent::StatusChanged {
@@ -1553,16 +1608,36 @@ impl AppState {
                 termination,
                 ..
             } => {
-                if let Some(s) = self.task_snapshots.iter_mut().find(|s| s.id == id) {
+                if let Some(s) = self
+                    .task_id_index
+                    .get(&id)
+                    .and_then(|&index| self.task_snapshots.get_mut(index))
+                {
                     s.status = new;
                     s.termination = termination;
                     s.ended_at = Some(std::time::Instant::now());
+                    self.task_snapshots_revision = self.task_snapshots_revision.wrapping_add(1);
                     self.mark_visual_dirty();
                 }
             }
             atman_runtime::TaskEvent::Reaped { id } => {
-                self.task_snapshots.retain(|s| s.id != id);
-                self.mark_visual_dirty();
+                if let Some(index) = self.task_id_index.remove(&id) {
+                    self.task_snapshots.remove(index);
+                    self.task_handle_index.retain(|_, task_index| {
+                        if *task_index == index {
+                            false
+                        } else {
+                            *task_index -= usize::from(*task_index > index);
+                            true
+                        }
+                    });
+                    self.task_id_index.retain(|_, task_index| {
+                        *task_index -= usize::from(*task_index > index);
+                        true
+                    });
+                    self.task_snapshots_revision = self.task_snapshots_revision.wrapping_add(1);
+                    self.mark_visual_dirty();
+                }
             }
         }
     }
@@ -1613,15 +1688,26 @@ impl AppState {
                             .is_some_and(|group| group.expanded),
                     },
                 );
+                self.refresh_grouped_permission_request_ids();
             }
             StreamFrame::PermissionGroupResolved { payload, .. } => {
                 self.pending_permission_groups.remove(&payload.group_id);
+                self.refresh_grouped_permission_request_ids();
                 if self.selected_permission_group.as_ref() == Some(&payload.group_id) {
                     self.selected_permission_group = None;
                 }
             }
             _ => {}
         }
+    }
+
+    fn refresh_grouped_permission_request_ids(&mut self) {
+        self.grouped_permission_request_ids.clear();
+        self.grouped_permission_request_ids.extend(
+            self.pending_permission_groups
+                .values()
+                .flat_map(|group| group.payload.request_ids.iter().cloned()),
+        );
     }
 
     fn upsert_activity_node(&mut self, node: crate::task_panel::ActivityNode) {
@@ -3768,6 +3854,54 @@ mod tests {
     }
 
     #[test]
+    fn initial_items_build_the_shared_handle_index() {
+        let app = AppState::new("session".into(), None).with_initial_items(vec![
+            OutputItem::Bash {
+                handle: "bash-1".into(),
+                title: None,
+                command: None,
+                output: String::new(),
+                done: true,
+                expanded: false,
+            },
+            OutputItem::SubAgentActivity {
+                handle: "flow-1".into(),
+                goal: String::new(),
+                child_run_id: String::new(),
+                model: String::new(),
+                status: "ok".into(),
+                output: String::new(),
+                iteration: 1,
+                done: true,
+                expanded: false,
+                messages: Vec::new(),
+                workflow_graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
+                expanded_nodes: HashSet::new(),
+                workflow_expanded: false,
+            },
+        ]);
+
+        assert_eq!(app.handle_index.get("bash-1"), Some(&0));
+        assert_eq!(app.handle_index.get("flow-1"), Some(&1));
+    }
+
+    #[test]
+    fn initial_workflow_items_restore_the_run_lookup() {
+        let mut source = AppState::new("source".into(), None);
+        source.apply_stream_frame(StreamFrame::FlowStart {
+            run_id: "restored-run".into(),
+            flow_name: "restored".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        let restored = AppState::new("restored".into(), None)
+            .with_initial_items(source.items.iter().cloned().collect());
+
+        assert_eq!(restored.workflow_run_to_panel.get("restored-run"), Some(&0));
+        assert_eq!(restored.last_workflow_panel_idx, Some(0));
+    }
+
+    #[test]
     fn output_store_detects_same_cardinality_interaction_change() {
         let mut store = OutputStore::default();
         store.push(OutputItem::WorkflowPanel {
@@ -4809,9 +4943,12 @@ mod terminal_e2e_tests {
         let wm = &mut app.wm;
         let snapshots = &app.app.task_snapshots;
         let items = &app.app.items;
+        let item_revisions = app.app.items.revisions();
+        let handle_index = &app.app.handle_index;
+        let task_handle_index = &app.app.task_handle_index;
+        let workflow_run_to_panel = &app.app.workflow_run_to_panel;
+        let task_snapshots_revision = app.app.task_snapshots_revision;
         let activity_nodes = &app.app.activity_nodes;
-        let items_version = app.app.items_version;
-        let expanded_version = app.app.expanded_version;
 
         terminal
             .draw(|f| {
@@ -4830,6 +4967,11 @@ mod terminal_e2e_tests {
                     &mut wm.panels[0],
                     snapshots,
                     items,
+                    item_revisions,
+                    handle_index,
+                    task_handle_index,
+                    workflow_run_to_panel,
+                    task_snapshots_revision,
                     activity_nodes,
                     &None,
                     &None,
@@ -4842,8 +4984,6 @@ mod terminal_e2e_tests {
                     0,
                     &None,
                     &browser,
-                    items_version,
-                    expanded_version,
                 );
             })
             .unwrap();

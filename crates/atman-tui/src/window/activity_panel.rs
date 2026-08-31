@@ -11,7 +11,7 @@ use crate::wm::component::{
 
 pub struct ActivityPanelContent {
     pub run_id: String,
-    pub scroll: u16,
+    pub scroll: u32,
 }
 
 impl WindowComponent for ActivityPanelContent {
@@ -41,11 +41,11 @@ impl WindowComponent for ActivityPanelContent {
         WmEventResult::Ignored
     }
 
-    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+    fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, 0, false)
     }
 

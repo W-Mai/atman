@@ -18,7 +18,7 @@ use crate::wm::component::{
 
 pub struct FlowPanelContent {
     pub handle: String,
-    pub scroll: u16,
+    pub scroll: u32,
     pub render_cache: Option<PanelRenderCache>,
 }
 
@@ -32,15 +32,12 @@ impl WindowComponent for FlowPanelContent {
         );
         let mut hitmap_out: Vec<HitRegion> = Vec::new();
 
-        let mut found: Option<(usize, &OutputItem)> = None;
-        for (i, item) in ctx.items.iter().enumerate().rev() {
-            if let OutputItem::SubAgentActivity { handle, .. } = item {
-                if handle == &self.handle {
-                    found = Some((i, item));
-                    break;
-                }
-            }
-        }
+        let found = ctx
+            .handle_index
+            .get(&self.handle)
+            .copied()
+            .and_then(|index| ctx.items.get(index).map(|item| (index, item)))
+            .filter(|(_, item)| matches!(item, OutputItem::SubAgentActivity { .. }));
 
         if let Some((
             item_idx,
@@ -78,35 +75,54 @@ impl WindowComponent for FlowPanelContent {
                 ctx.animation_frame,
                 &mut hitmap_out,
                 item_idx,
-                ctx.items_version,
-                ctx.expanded_version,
+                ctx.item_revisions
+                    .get(item_idx)
+                    .copied()
+                    .unwrap_or_default(),
+                ctx.interaction_revision,
                 &mut self.render_cache,
             );
-        } else if let Some((panel_idx, _)) = ctx.items.iter().enumerate().rev().find(|(_, it)| {
-            if let OutputItem::WorkflowPanel { graph, .. } = it {
-                graph.root.iter().any(|node| {
-                    matches!(
-                        &node.kind,
-                        WorkflowNodeKind::Flow { run_id, .. } if run_id == &self.handle
-                    )
-                })
-            } else {
-                false
-            }
-        }) && let Some(OutputItem::WorkflowPanel {
-            graph,
-            expanded_nodes,
-            ended_at,
-            ..
-        }) = ctx.items.get(panel_idx)
+        } else if let Some(panel_idx) = ctx
+            .workflow_run_to_panel
+            .get(&self.handle)
+            .copied()
+            .or_else(|| {
+                ctx.items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, it)| {
+                        if let OutputItem::WorkflowPanel { graph, .. } = it {
+                            graph.root.iter().any(|node| {
+                                matches!(
+                                    &node.kind,
+                                    WorkflowNodeKind::Flow { run_id, .. } if run_id == &self.handle
+                                )
+                            })
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(index, _)| index)
+            })
+            && let Some(OutputItem::WorkflowPanel {
+                graph,
+                expanded_nodes,
+                ended_at,
+                ..
+            }) = ctx.items.get(panel_idx)
         {
+            let revision = ctx
+                .item_revisions
+                .get(panel_idx)
+                .copied()
+                .unwrap_or_default();
             let cache_hit = self.render_cache.as_ref().is_some_and(|cache| {
-                cache.items_version == ctx.items_version
-                    && cache.expanded_version == ctx.expanded_version
+                cache.item_id == revision.id
+                    && cache.content_revision == revision.layout
+                    && cache.interaction_revision == ctx.interaction_revision
                     && cache.width == area.width
-                    && cache.messages_len == 0
                     && cache.workflow_expanded
-                    && cache.expanded_tools_len == 0
             });
             if !cache_hit {
                 let render_width = area.width.max(300);
@@ -126,12 +142,11 @@ impl WindowComponent for FlowPanelContent {
                 );
                 let dynamic_paint = crate::output::workflow_dynamic_paint(graph, true, &lines, 0);
                 self.render_cache = Some(PanelRenderCache {
-                    items_version: ctx.items_version,
-                    expanded_version: ctx.expanded_version,
+                    item_id: revision.id,
+                    content_revision: revision.layout,
+                    interaction_revision: ctx.interaction_revision,
                     width: area.width,
-                    messages_len: 0,
                     workflow_expanded: true,
-                    expanded_tools_len: 0,
                     lines,
                     dynamic_paint,
                     regions,
@@ -140,11 +155,17 @@ impl WindowComponent for FlowPanelContent {
                 });
             }
             let cache = self.render_cache.as_ref().unwrap();
-            let max_scroll = (cache.lines.len() as u16).saturating_sub(area.height);
+            let max_scroll = (cache.lines.len() as u32).saturating_sub(area.height as u32);
             self.scroll = self.scroll.min(max_scroll);
-            for r in &cache.regions {
-                let row0 = area.y as u32 + r.start_row.saturating_sub(self.scroll as u32);
-                let row1 = area.y as u32 + r.end_row.saturating_sub(self.scroll as u32);
+            let visible_end = self.scroll.saturating_add(area.height as u32);
+            for r in cache
+                .regions
+                .iter()
+                .skip_while(|region| region.end_row <= self.scroll)
+                .take_while(|region| region.start_row < visible_end)
+            {
+                let row0 = area.y as u32 + r.start_row.saturating_sub(self.scroll);
+                let row1 = area.y as u32 + r.end_row.min(visible_end).saturating_sub(self.scroll);
                 let col0 = area.x + r.col_start;
                 let col1 = area.x + r.col_end;
                 if col1 > col0 && row1 > row0 {
@@ -172,9 +193,9 @@ impl WindowComponent for FlowPanelContent {
             );
             frame.render_widget(Paragraph::new(lines), area);
         } else if let Some(snap) = ctx
-            .snapshots
-            .iter()
-            .find(|s| s.source_handle == self.handle)
+            .task_handle_index
+            .get(&self.handle)
+            .and_then(|&index| ctx.snapshots.get(index))
         {
             super::common::render_task_meta(
                 frame,
@@ -194,11 +215,11 @@ impl WindowComponent for FlowPanelContent {
         WmEventResult::Ignored
     }
 
-    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+    fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, 0, false)
     }
 
@@ -208,10 +229,6 @@ impl WindowComponent for FlowPanelContent {
             max: None,
             preferred: (88, 29),
         }
-    }
-
-    fn wants_background_updates(&self) -> bool {
-        true
     }
 }
 
@@ -231,29 +248,36 @@ pub(crate) fn render_sub_agent_panel(
     expanded_nodes: &HashSet<String>,
     workflow_expanded: bool,
     expanded_tools: &HashSet<String>,
-    scroll: &mut u16,
+    scroll: &mut u32,
     animation_frame: u32,
     hitmap_out: &mut Vec<HitRegion>,
     item_idx: usize,
-    items_version: u64,
-    expanded_version: u64,
+    item_revision: crate::app::OutputRevision,
+    interaction_revision: u64,
     render_cache: &mut Option<PanelRenderCache>,
 ) {
     if render_cache.as_ref().is_some_and(|cache| {
-        cache.items_version == items_version
-            && cache.expanded_version == expanded_version
+        cache.item_id == item_revision.id
+            && cache.content_revision == item_revision.layout
+            && cache.interaction_revision == interaction_revision
             && cache.width == area.width
-            && cache.messages_len == messages.len()
             && cache.workflow_expanded == workflow_expanded
-            && cache.expanded_tools_len == expanded_tools.len()
     }) {
         let cache = render_cache.as_ref().unwrap();
-        let max_scroll = (cache.lines.len() as u16).saturating_sub(area.height);
+        let max_scroll = (cache.lines.len() as u32).saturating_sub(area.height as u32);
         *scroll = (*scroll).min(max_scroll);
-        for r in &cache.regions {
-            let row0 =
-                area.y as u32 + (r.start_row + cache.wf_offset).saturating_sub(*scroll as u32);
-            let row1 = area.y as u32 + (r.end_row + cache.wf_offset).saturating_sub(*scroll as u32);
+        let visible_end = scroll.saturating_add(area.height as u32);
+        for r in cache
+            .regions
+            .iter()
+            .skip_while(|region| region.end_row + cache.wf_offset <= *scroll)
+            .take_while(|region| region.start_row + cache.wf_offset < visible_end)
+        {
+            let row0 = area.y as u32 + (r.start_row + cache.wf_offset).saturating_sub(*scroll);
+            let row1 = area.y as u32
+                + (r.end_row + cache.wf_offset)
+                    .min(visible_end)
+                    .saturating_sub(*scroll);
             let col0 = area.x + r.col_start;
             let col1 = area.x + r.col_end;
             if col1 > col0 && row1 > row0 {
@@ -268,11 +292,13 @@ pub(crate) fn render_sub_agent_panel(
                 });
             }
         }
-        for r in &cache.tool_headers {
-            let row = area.y as u32 + (r.row + cache.wf_offset).saturating_sub(*scroll as u32);
-            if row < area.y as u32 || row >= area.y as u32 + area.height as u32 {
-                continue;
-            }
+        for r in cache
+            .tool_headers
+            .iter()
+            .skip_while(|header| header.row + cache.wf_offset < *scroll)
+            .take_while(|header| header.row + cache.wf_offset < visible_end)
+        {
+            let row = area.y as u32 + (r.row + cache.wf_offset).saturating_sub(*scroll);
             hitmap_out.push(HitRegion {
                 target: HitTarget::ToolHeader(r.tool_id.clone()),
                 rect: Rect {
@@ -409,12 +435,20 @@ pub(crate) fn render_sub_agent_panel(
         )
     };
 
-    let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+    let max_scroll = (lines.len() as u32).saturating_sub(area.height as u32);
     *scroll = (*scroll).min(max_scroll);
 
-    for r in &regions {
-        let row0 = area.y as u32 + (r.start_row + wf_offset).saturating_sub(*scroll as u32);
-        let row1 = area.y as u32 + (r.end_row + wf_offset).saturating_sub(*scroll as u32);
+    let visible_end = scroll.saturating_add(area.height as u32);
+    for r in regions
+        .iter()
+        .skip_while(|region| region.end_row + wf_offset <= *scroll)
+        .take_while(|region| region.start_row + wf_offset < visible_end)
+    {
+        let row0 = area.y as u32 + (r.start_row + wf_offset).saturating_sub(*scroll);
+        let row1 = area.y as u32
+            + (r.end_row + wf_offset)
+                .min(visible_end)
+                .saturating_sub(*scroll);
         let col0 = area.x + r.col_start;
         let col1 = area.x + r.col_end;
         if col1 > col0 && row1 > row0 {
@@ -429,14 +463,12 @@ pub(crate) fn render_sub_agent_panel(
             });
         }
     }
-    for r in &tool_headers {
-        let row = area.y as u32 + (r.row + wf_offset).saturating_sub(*scroll as u32);
-        if row < area.y as u32 {
-            continue;
-        }
-        if row >= area.y as u32 + area.height as u32 {
-            continue;
-        }
+    for r in tool_headers
+        .iter()
+        .skip_while(|header| header.row + wf_offset < *scroll)
+        .take_while(|header| header.row + wf_offset < visible_end)
+    {
+        let row = area.y as u32 + (r.row + wf_offset).saturating_sub(*scroll);
         hitmap_out.push(HitRegion {
             target: HitTarget::ToolHeader(r.tool_id.clone()),
             rect: Rect {
@@ -458,12 +490,11 @@ pub(crate) fn render_sub_agent_panel(
         start,
     );
     *render_cache = Some(PanelRenderCache {
-        items_version,
-        expanded_version,
+        item_id: item_revision.id,
+        content_revision: item_revision.layout,
+        interaction_revision,
         width: area.width,
-        messages_len: messages.len(),
         workflow_expanded,
-        expanded_tools_len: expanded_tools.len(),
         lines,
         dynamic_paint,
         regions,
@@ -489,7 +520,8 @@ fn subagent_status_label(status: &str, done: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::time::Instant;
 
     use atman_runtime::projection::workflow::WorkflowProjection;
     use atman_runtime::workflow::{
@@ -497,8 +529,12 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::text::Line;
 
-    use super::{render_sub_agent_panel, subagent_status_label};
+    use crate::app::OutputItem;
+    use crate::wm::WindowComponent;
+
+    use super::{FlowPanelContent, render_sub_agent_panel, subagent_status_label};
 
     #[test]
     fn subagent_status_uses_task_style_labels() {
@@ -559,7 +595,11 @@ mod tests {
                     0,
                     &mut hitmap,
                     0,
-                    1,
+                    crate::app::OutputRevision {
+                        id: 1,
+                        layout: 1,
+                        ..Default::default()
+                    },
                     1,
                     &mut cache,
                 );
@@ -601,7 +641,11 @@ mod tests {
                     1,
                     &mut hitmap,
                     0,
-                    1,
+                    crate::app::OutputRevision {
+                        id: 1,
+                        layout: 1,
+                        ..Default::default()
+                    },
                     1,
                     &mut cache,
                 );
@@ -617,5 +661,118 @@ mod tests {
         assert_eq!(cache.as_ref().unwrap().lines.as_ptr(), cached_lines);
         assert_ne!(first_screen, second_screen);
         assert!(!second_screen.contains('\u{e000}'));
+    }
+
+    #[test]
+    fn animation_ticks_reuse_root_flow_panel_projection() {
+        let run_id = "root-flow".to_string();
+        let graph = WorkflowProjection::from(WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![WorkflowNode {
+                id: run_id.clone(),
+                kind: WorkflowNodeKind::Flow {
+                    run_id: run_id.clone(),
+                    flow_name: "root".into(),
+                },
+                label: "root".into(),
+                status: NodeStatus::Running,
+                started_at: Some(chrono::Utc::now()),
+                ended_at: None,
+                output_preview: None,
+                children: Vec::new(),
+                parallelism: Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        });
+        let items = vec![OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph,
+            expanded_nodes: HashSet::new(),
+            panel_expanded: true,
+            started_at: Instant::now(),
+            ended_at: None,
+            cancelled: false,
+        }];
+        let revisions = vec![crate::app::OutputRevision {
+            id: 7,
+            layout: 9,
+            ..Default::default()
+        }];
+        let workflow_index = HashMap::from([(run_id.clone(), 0)]);
+        let empty_index = HashMap::new();
+        let empty_set = HashSet::new();
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::default(),
+            resources: &resources,
+            prompts: &prompts,
+        };
+        let mut panel = FlowPanelContent {
+            handle: run_id,
+            scroll: 0,
+            render_cache: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let mut cached_lines = None;
+        for animation_frame in [0, 1] {
+            terminal
+                .draw(|frame| {
+                    panel.render_content(
+                        frame.area(),
+                        frame,
+                        &crate::wm::RenderCtx {
+                            window_id: crate::wm::WindowId(1),
+                            snapshots: &[],
+                            items: &items,
+                            item_revisions: &revisions,
+                            handle_index: &empty_index,
+                            task_handle_index: &empty_index,
+                            workflow_run_to_panel: &workflow_index,
+                            task_snapshots_revision: 0,
+                            interaction_revision: 0,
+                            animation_frame,
+                            expanded_tools: &empty_set,
+                            activity_nodes: &[],
+                            mcp_servers: &[],
+                            expanded_mcp_servers: &empty_set,
+                            mcp_selected: 0,
+                            hovered_mcp_row: &None,
+                            mcp_browser: &browser,
+                            hovered_history_row: &None,
+                        },
+                    );
+                })
+                .unwrap();
+            let pointer = panel.render_cache.as_ref().unwrap().lines.as_ptr();
+            if let Some(cached_lines) = cached_lines {
+                assert_eq!(pointer, cached_lines);
+                assert!(
+                    panel
+                        .render_cache
+                        .as_ref()
+                        .unwrap()
+                        .lines
+                        .iter()
+                        .any(|line| {
+                            line.spans
+                                .iter()
+                                .any(|span| span.content == "cache-sentinel")
+                        })
+                );
+            } else {
+                panel
+                    .render_cache
+                    .as_mut()
+                    .unwrap()
+                    .lines
+                    .push(Line::from("cache-sentinel"));
+            }
+            cached_lines = Some(panel.render_cache.as_ref().unwrap().lines.as_ptr());
+        }
     }
 }

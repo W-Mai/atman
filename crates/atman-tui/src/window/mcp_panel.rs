@@ -7,7 +7,7 @@ use crate::wm::component::{
 };
 
 pub struct McpPanelContent {
-    pub scroll: u16,
+    pub scroll: u32,
 }
 
 impl WindowComponent for McpPanelContent {
@@ -19,10 +19,11 @@ impl WindowComponent for McpPanelContent {
             area.height,
         );
         let mut hitmap = WmHitmap::default();
+        let mut scroll = self.scroll.min(u16::MAX as u32) as u16;
         crate::mcp_manager::render_panel(
             frame,
             area,
-            &mut self.scroll,
+            &mut scroll,
             ctx.mcp_servers,
             ctx.expanded_mcp_servers,
             ctx.mcp_selected,
@@ -31,6 +32,7 @@ impl WindowComponent for McpPanelContent {
             ctx.mcp_browser,
             ctx.window_id,
         );
+        self.scroll = scroll as u32;
         hitmap
             .mcp_row_rects
             .into_iter()
@@ -45,11 +47,11 @@ impl WindowComponent for McpPanelContent {
         WmEventResult::Ignored
     }
 
-    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+    fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, 0, false)
     }
 

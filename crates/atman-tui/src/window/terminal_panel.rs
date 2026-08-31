@@ -12,7 +12,7 @@ use crate::wm::component::{
 
 pub struct TerminalPanelContent {
     pub handle: String,
-    pub scroll: u16,
+    pub scroll: u32,
 }
 
 impl WindowComponent for TerminalPanelContent {
@@ -24,13 +24,13 @@ impl WindowComponent for TerminalPanelContent {
             area.height,
         );
         let snap = ctx
-            .snapshots
-            .iter()
-            .find(|s| s.source_handle == self.handle);
-        let item = ctx.items.iter().rev().find(|it| match it {
-            crate::app::OutputItem::Terminal { handle, .. } => *handle == self.handle,
-            _ => false,
-        });
+            .task_handle_index
+            .get(&self.handle)
+            .and_then(|&index| ctx.snapshots.get(index));
+        let item = ctx
+            .handle_index
+            .get(&self.handle)
+            .and_then(|&index| ctx.items.get(index));
         use crate::app::OutputItem;
         if let Some(OutputItem::Terminal {
             title,
@@ -76,11 +76,11 @@ impl WindowComponent for TerminalPanelContent {
         WmEventResult::Ignored
     }
 
-    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+    fn sync_state(&mut self, scroll: u32, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
     }
 
-    fn extract_state(&self) -> (u16, u16, bool) {
+    fn extract_state(&self) -> (u32, u16, bool) {
         (self.scroll, 0, false)
     }
 
@@ -99,7 +99,7 @@ fn render_terminal_content(
     snap: &TaskSnapshot,
     command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
-    scroll: &mut u16,
+    scroll: &mut u32,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -139,7 +139,7 @@ fn render_terminal_screen(
     title: &str,
     command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
-    scroll: &mut u16,
+    scroll: &mut u32,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![

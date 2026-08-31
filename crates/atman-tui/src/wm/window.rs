@@ -101,7 +101,7 @@ pub struct WindowState {
     pub mode: WindowMode,
     pub rect: Rect,
     pub restore_rect: Option<Rect>,
-    pub scroll: u16,
+    pub scroll: u32,
     pub h_scroll: u16,
     pub z: u32,
     pub split: bool,

@@ -56,28 +56,24 @@ pub struct WindowInstance {
     pub z: u32,
     pub maximized: bool,
     pub prev_rect: Option<Rect>,
-    pub scroll: u16,
+    pub scroll: u32,
     pub h_scroll: u16,
     pub split: bool,
     pub expanded_tools: HashSet<String>,
-    pub render_cache: Option<PanelRenderCache>,
-    /// Latest `WindowComponent::content_version()`, tracked each frame.
-    /// Used for future background-update rendering decisions.
-    pub content_version: u64,
+    pub interaction_revision: u64,
 }
 
 /// Cached render output for sub-agent / workflow floating panels.
 /// On a cache hit we skip workflow graph traversal, flatten_message, and
-/// build_lines — just draw the stored lines and recompute hitmap rects from
-/// the stored regions using the *current* scroll/area.
+/// build_lines — just draw the stored lines and project visible hit regions
+/// using the current scroll and area.
 #[derive(Clone, Debug)]
 pub struct PanelRenderCache {
-    pub(crate) items_version: u64,
-    pub(crate) expanded_version: u64,
+    pub(crate) item_id: u64,
+    pub(crate) content_revision: u64,
+    pub(crate) interaction_revision: u64,
     pub(crate) width: u16,
-    pub(crate) messages_len: usize,
     pub(crate) workflow_expanded: bool,
-    pub(crate) expanded_tools_len: usize,
 
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) dynamic_paint: crate::output::DynamicPaint,
@@ -387,8 +383,7 @@ impl WindowManager {
             h_scroll: 0,
             split: false,
             expanded_tools: HashSet::new(),
-            render_cache: None,
-            content_version: 0,
+            interaction_revision: 0,
         };
         self.panels.push(panel);
         if matches!(focus_policy, FocusPolicy::Steal) {
@@ -866,6 +861,11 @@ impl WindowManager {
                 self,
                 &app.task_snapshots,
                 &app.items,
+                app.items.revisions(),
+                &app.handle_index,
+                &app.task_handle_index,
+                &app.workflow_run_to_panel,
+                app.task_snapshots_revision,
                 &app.activity_nodes,
                 &hovered_panel_btn,
                 &hovered_history_row,
@@ -878,8 +878,6 @@ impl WindowManager {
                 app.mcp_selected,
                 &hovered_mcp_row,
                 &app.mcp_browser_state(),
-                app.items_version,
-                app.expanded_version,
             );
         }
 
@@ -958,6 +956,11 @@ pub fn render(
     panels: &mut WindowManager,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
+    item_revisions: &[crate::app::OutputRevision],
+    handle_index: &std::collections::HashMap<String, usize>,
+    task_handle_index: &std::collections::HashMap<String, usize>,
+    workflow_run_to_panel: &std::collections::HashMap<String, usize>,
+    task_snapshots_revision: u64,
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(WindowId, PanelBtn)>,
     hovered_history_row: &Option<String>,
@@ -970,8 +973,6 @@ pub fn render(
     mcp_selected: usize,
     hovered_mcp_row: &Option<String>,
     mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
-    items_version: u64,
-    expanded_version: u64,
 ) -> WmHitmap {
     let mut all_hitmap = WmHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
@@ -984,7 +985,20 @@ pub fn render(
     }
 
     let t = crate::theme::theme();
-    for &idx in &sorted {
+    for (z_index, &idx) in sorted.iter().enumerate() {
+        let panel_rect = panels.panels[idx].rect;
+        let covered = sorted[z_index + 1..].iter().any(|&cover_idx| {
+            let cover = panels.panels[cover_idx].rect;
+            cover.x <= panel_rect.x
+                && cover.y <= panel_rect.y
+                && cover.x.saturating_add(cover.width)
+                    >= panel_rect.x.saturating_add(panel_rect.width)
+                && cover.y.saturating_add(cover.height)
+                    >= panel_rect.y.saturating_add(panel_rect.height)
+        });
+        if covered {
+            continue;
+        }
         let panel = &mut panels.panels[idx];
         let is_focused = panels.focus.active == Some(panel.id);
         let btn_hover = hovered_btn
@@ -998,6 +1012,7 @@ pub fn render(
             btn_hover,
             panel_close_armed,
             snapshots,
+            task_handle_index,
             &t,
         );
 
@@ -1022,6 +1037,11 @@ pub fn render(
                 panel,
                 snapshots,
                 items,
+                item_revisions,
+                handle_index,
+                task_handle_index,
+                workflow_run_to_panel,
+                task_snapshots_revision,
                 activity_nodes,
                 hovered_btn,
                 hovered_history_row,
@@ -1034,8 +1054,6 @@ pub fn render(
                 mcp_selected,
                 hovered_mcp_row,
                 mcp_browser,
-                items_version,
-                expanded_version,
             );
             all_hitmap
                 .history_row_rects
@@ -1046,6 +1064,9 @@ pub fn render(
             all_hitmap
                 .mcp_row_rects
                 .append(&mut panel_hitmap.mcp_row_rects);
+            all_hitmap
+                .tool_header_rects
+                .append(&mut panel_hitmap.tool_header_rects);
         }
 
         shadow::render_shadow(f, panel.rect, &t);
@@ -1056,7 +1077,32 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    struct CountingContent(Arc<AtomicUsize>);
+
+    impl WindowComponent for CountingContent {
+        fn render_content(
+            &mut self,
+            _area: Rect,
+            _frame: &mut Frame,
+            _ctx: &RenderCtx,
+        ) -> Vec<HitRegion> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
+
+        fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+            WmEventResult::Ignored
+        }
+
+        fn preferred_size(&self, _viewport: Rect) -> SizeHint {
+            SizeHint::default()
+        }
+    }
 
     fn canvas() -> Rect {
         Rect::new(0, 0, 100, 40)
@@ -1623,6 +1669,80 @@ mod tests {
     }
 
     #[test]
+    fn fully_covered_panel_skips_content_projection() {
+        let mut wm = WindowManager::default();
+        let canvas = Rect::new(0, 0, 100, 40);
+        let lower = wm.open(
+            "lower",
+            ContentKey::Task("lower".into()),
+            task_content("lower"),
+            "lower",
+            canvas,
+        );
+        let upper = wm.open(
+            "upper",
+            ContentKey::Task("upper".into()),
+            task_content("upper"),
+            "upper",
+            canvas,
+        );
+        let rect = Rect::new(10, 5, 60, 24);
+        let lower_count = Arc::new(AtomicUsize::new(0));
+        let upper_count = Arc::new(AtomicUsize::new(0));
+        for panel in &mut wm.panels {
+            panel.rect = rect;
+            if panel.id == lower {
+                panel.content = Some(Box::new(CountingContent(lower_count.clone())));
+            } else if panel.id == upper {
+                panel.content = Some(Box::new(CountingContent(upper_count.clone())));
+            }
+        }
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        let empty_set = std::collections::HashSet::new();
+        let empty_map = std::collections::HashMap::new();
+        let resources = std::collections::HashMap::new();
+        let prompts = std::collections::HashMap::new();
+        let browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::default(),
+            resources: &resources,
+            prompts: &prompts,
+        };
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &mut wm,
+                    &[],
+                    &[],
+                    &[],
+                    &empty_map,
+                    &empty_map,
+                    &empty_map,
+                    0,
+                    &[],
+                    &None,
+                    &None,
+                    0,
+                    None,
+                    frame.area(),
+                    false,
+                    &[],
+                    &empty_set,
+                    0,
+                    &None,
+                    &browser,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(lower_count.load(Ordering::Relaxed), 0);
+        assert_eq!(upper_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn clamp_to_canvas_very_small() {
         let mut wm = WindowManager::default();
         wm.open(
@@ -1685,6 +1805,11 @@ mod tests {
                     &mut wm,
                     snapshots,
                     items,
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
+                    0,
                     activity_nodes,
                     &hovered_btn,
                     &hovered_history_row,
@@ -1697,8 +1822,6 @@ mod tests {
                     0, // mcp_selected
                     &hovered_mcp_row,
                     &mcp_browser,
-                    0, // items_version
-                    0, // expanded_version
                 );
             })
             .unwrap();
@@ -1756,6 +1879,11 @@ mod tests {
                     &mut wm,
                     snapshots,
                     items,
+                    &[],
+                    &std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
+                    0,
                     activity_nodes,
                     &hovered_btn,
                     &hovered_history_row,
@@ -1768,8 +1896,6 @@ mod tests {
                     0, // mcp_selected
                     &hovered_mcp_row,
                     &mcp_browser,
-                    0, // items_version
-                    0, // expanded_version
                 );
             })
             .unwrap();
