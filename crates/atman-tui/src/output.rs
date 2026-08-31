@@ -401,6 +401,7 @@ fn item_content_hash(
         }
         OutputItem::Terminal {
             handle,
+            title,
             screen,
             accumulated_bytes,
             mode,
@@ -410,6 +411,7 @@ fn item_content_hash(
         } => {
             7u8.hash(&mut h);
             handle.hash(&mut h);
+            title.hash(&mut h);
             screen.rows.hash(&mut h);
             screen.cols.hash(&mut h);
             screen.alt_screen.hash(&mut h);
@@ -424,12 +426,14 @@ fn item_content_hash(
         }
         OutputItem::Bash {
             handle,
+            title,
             output,
             done,
             expanded,
         } => {
             8u8.hash(&mut h);
             handle.hash(&mut h);
+            title.hash(&mut h);
             str_fp(output).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
@@ -1590,6 +1594,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         ),
         OutputItem::Terminal {
             handle,
+            title,
             screen,
             accumulated_bytes,
             mode,
@@ -1598,6 +1603,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             scroll_offset: _,
         } => render_terminal(
             handle,
+            title.as_deref(),
             screen,
             accumulated_bytes,
             *mode,
@@ -1608,11 +1614,13 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         ),
         OutputItem::Bash {
             handle,
+            title,
             output,
             done,
             expanded,
         } => render_bash(
             handle,
+            title.as_deref(),
             output,
             *done,
             *expanded,
@@ -1705,7 +1713,7 @@ fn render_sub_agent_activity(
         format!(" iter {iteration}")
     };
     let label = format!("flow[{handle}]{iter_str}");
-    render_output_block(&label, glyph, output, expanded, panel_width)
+    render_output_block(&label, None, glyph, output, expanded, panel_width)
 }
 
 fn render_mermaid_preview(
@@ -4306,8 +4314,25 @@ pub fn empty_hint<'a>() -> Paragraph<'a> {
         .wrap(Wrap { trim: true })
 }
 
+fn compact_header_label(title: &str, metadata: Option<&str>, max_width: usize) -> String {
+    let title = crate::width::truncate(title, max_width);
+    let Some(metadata) = metadata else {
+        return title;
+    };
+    let title_width = crate::width::width(title.as_str());
+    let separator = " · ";
+    let separator_width = crate::width::width(separator);
+    let remaining = max_width.saturating_sub(title_width);
+    if remaining <= separator_width + 3 {
+        return title;
+    }
+    let metadata = crate::width::middle_truncate(metadata, remaining - separator_width);
+    format!("{title}{separator}{metadata}")
+}
+
 fn render_output_block(
-    label: &str,
+    title: &str,
+    metadata: Option<&str>,
     glyph: &str,
     output: &str,
     expanded: bool,
@@ -4330,7 +4355,13 @@ fn render_output_block(
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
 
-    let header_prefix = format!("  {glyph} {label} ");
+    let header_lead = format!("  {glyph} ");
+    let header_trailing = " ⤢ ";
+    let label_budget = target
+        .saturating_sub(crate::width::width(header_lead.as_str()))
+        .saturating_sub(crate::width::width(header_trailing));
+    let label = compact_header_label(title, metadata, label_budget);
+    let header_prefix = format!("{header_lead}{label}");
     let header_used = crate::width::width(header_prefix.as_str());
     let fs_btn = "⤢";
     let fs_btn_used = crate::width::width(fs_btn);
@@ -4395,6 +4426,7 @@ fn render_output_block(
 #[allow(clippy::too_many_arguments)]
 fn render_bash(
     handle: &str,
+    title: Option<&str>,
     output: &str,
     done: bool,
     expanded: bool,
@@ -4406,17 +4438,21 @@ fn render_bash(
     } else {
         spinner_char(animation_frame)
     };
-    let label = if done {
-        format!("bash[{handle}]")
-    } else {
-        format!("bash[{handle}]…")
-    };
-    render_output_block(&label, glyph, output, expanded, panel_width)
+    let metadata = format!("bash[{handle}]");
+    render_output_block(
+        title.unwrap_or("bash"),
+        Some(&metadata),
+        glyph,
+        output,
+        expanded,
+        panel_width,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_terminal(
     handle: &str,
+    title: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
     accumulated_bytes: &[u8],
     mode: crate::app::TerminalViewMode,
@@ -4446,34 +4482,32 @@ fn render_terminal(
         crate::app::TerminalViewMode::Capture => "capture",
         crate::app::TerminalViewMode::Stream => "stream",
     };
-    let label = if done {
-        format!("terminal[{handle}] {mode_label}")
-    } else {
-        format!("terminal[{handle}] {mode_label}…")
-    };
-
     let target = panel_width.max(20) as usize;
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
 
-    let header_prefix = format!("  {glyph} {label} ");
-    let header_used = crate::width::width(header_prefix.as_str());
+    let header_lead = format!("  {glyph} ");
     let dims = format!("{}×{}", screen.cols, screen.rows);
-    let dims_used = crate::width::width(dims.as_str());
+    let metadata = format!("terminal[{handle}] {mode_label} · {dims}");
+    let header_trailing = " ⤢ ";
+    let label_budget = target
+        .saturating_sub(crate::width::width(header_lead.as_str()))
+        .saturating_sub(crate::width::width(header_trailing));
+    let label = compact_header_label(title.unwrap_or("terminal"), Some(&metadata), label_budget);
+    let header_prefix = format!("{header_lead}{label}");
+    let header_used = crate::width::width(header_prefix.as_str());
     let fs_btn = "⤢";
     let fs_btn_used = crate::width::width(fs_btn);
     let gap = 1;
     let header_pad = target
         .saturating_sub(header_used)
-        .saturating_sub(dims_used)
         .saturating_sub(fs_btn_used)
         .saturating_sub(gap * 2);
     let mut header_spans = vec![Span::styled(header_prefix, header_style)];
     if header_pad > 0 {
         header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
     }
-    header_spans.push(Span::styled(dims, hint_style));
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     header_spans.push(Span::styled(
         fs_btn.to_string(),
@@ -4654,6 +4688,7 @@ mod terminal_render_tests {
         let scr = screen(2, 5, "hello");
         let lines = render_terminal(
             "term_s_0",
+            None,
             &scr,
             &[],
             TerminalViewMode::Capture,
@@ -4689,6 +4724,7 @@ line2
 ";
         let lines = render_terminal(
             "term_s_0",
+            None,
             &scr,
             bytes,
             TerminalViewMode::Stream,
@@ -4709,6 +4745,30 @@ line2
             rendered.contains("line2"),
             "stream should show line2: {rendered}"
         );
+    }
+
+    #[test]
+    fn terminal_header_prefers_localized_intent_and_respects_width() {
+        let scr = screen(2, 5, "hello");
+        let lines = render_terminal(
+            "term_session_with_a_long_handle",
+            Some("检查终端输出"),
+            &scr,
+            &[],
+            TerminalViewMode::Capture,
+            false,
+            false,
+            0,
+            32,
+        );
+        let header = &lines[1];
+        let rendered = header
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("检查终端输出"));
+        assert!(crate::width::spans_width(&header.spans) <= 32);
     }
 }
 

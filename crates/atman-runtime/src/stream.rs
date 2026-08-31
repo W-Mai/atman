@@ -208,12 +208,16 @@ pub enum StreamFrame {
         bytes: Vec<u8>,
         screen: Option<crate::tools::term::TerminalScreen>,
         state: crate::tools::term::TermStateSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
         #[serde(default)]
         run_id: Option<String>,
     },
     TerminalExited {
         handle: String,
         exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
         #[serde(default)]
         run_id: Option<String>,
     },
@@ -221,6 +225,8 @@ pub enum StreamFrame {
         handle: String,
         kind: String,
         line: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
         #[serde(default)]
         run_id: Option<String>,
     },
@@ -229,6 +235,8 @@ pub enum StreamFrame {
         exit_code: Option<i32>,
         #[serde(default)]
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_intent: Option<crate::message::ToolCallIntent>,
         #[serde(default)]
         run_id: Option<String>,
     },
@@ -416,6 +424,7 @@ mod tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen),
             state: crate::tools::term::TermStateSnapshot::Running,
+            call_intent: crate::message::ToolCallIntent::new("Inspect terminal output"),
             run_id: None,
         };
         let json = serde_json::to_string(&f).unwrap();
@@ -426,11 +435,16 @@ mod tests {
                 bytes,
                 screen,
                 state,
+                call_intent,
                 run_id,
             } => {
                 assert_eq!(handle, "term_s_0");
                 assert_eq!(bytes, b"hi");
                 assert!(run_id.is_none());
+                assert_eq!(
+                    call_intent.as_ref().map(|intent| intent.as_str()),
+                    Some("Inspect terminal output")
+                );
                 let screen = screen.expect("screen should be Some");
                 assert_eq!(screen.rows, 2);
                 assert_eq!(screen.cols, 3);
@@ -451,13 +465,20 @@ mod tests {
             handle: "bg_s_1".into(),
             exit_code: None,
             error: Some("open log: permission denied".into()),
+            call_intent: crate::message::ToolCallIntent::new("Run verification"),
             run_id: None,
         };
         let json = serde_json::to_string(&frame).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();
         match back {
-            StreamFrame::BashExited { error, .. } => {
+            StreamFrame::BashExited {
+                error, call_intent, ..
+            } => {
                 assert_eq!(error.as_deref(), Some("open log: permission denied"));
+                assert_eq!(
+                    call_intent.as_ref().map(|intent| intent.as_str()),
+                    Some("Run verification")
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -465,7 +486,12 @@ mod tests {
         let legacy = r#"{"BashExited":{"handle":"bg_s_1","exit_code":null,"run_id":null}}"#;
         let back: StreamFrame = serde_json::from_str(legacy).unwrap();
         match back {
-            StreamFrame::BashExited { error, .. } => assert!(error.is_none()),
+            StreamFrame::BashExited {
+                error, call_intent, ..
+            } => {
+                assert!(error.is_none());
+                assert!(call_intent.is_none());
+            }
             _ => panic!("wrong variant"),
         }
     }
@@ -475,6 +501,7 @@ mod tests {
         let f = StreamFrame::TerminalExited {
             handle: "term_s_1".into(),
             exit_code: Some(0),
+            call_intent: None,
             run_id: None,
         };
         let json = serde_json::to_string(&f).unwrap();
@@ -488,6 +515,16 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+
+        let legacy = r#"{"TerminalExited":{"handle":"term_s_1","exit_code":0,"run_id":null}}"#;
+        let back: StreamFrame = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            back,
+            StreamFrame::TerminalExited {
+                call_intent: None,
+                ..
+            }
+        ));
     }
 
     #[test]

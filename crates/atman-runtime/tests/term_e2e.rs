@@ -45,6 +45,7 @@ async fn term_spawn_emits_terminal_chunk_to_stream() {
         });
     ex.tool_ctx.flow_identity = Some(identity);
     ex.tool_ctx.stream_tx = Some(stream_tx);
+    ex.tool_ctx.call_intent = atman_runtime::message::ToolCallIntent::new("检查终端输出");
 
     let args = ToolArgs {
         positional: vec![],
@@ -74,12 +75,22 @@ async fn term_spawn_emits_terminal_chunk_to_stream() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Ok(StreamFrame::TerminalChunk { bytes, .. })) => {
+            Ok(Ok(StreamFrame::TerminalChunk {
+                bytes, call_intent, ..
+            })) => {
+                assert_eq!(
+                    call_intent.as_ref().map(|intent| intent.as_str()),
+                    Some("检查终端输出")
+                );
                 if String::from_utf8_lossy(&bytes).contains("hello_term_test") {
                     got_chunk = true;
                 }
             }
-            Ok(Ok(StreamFrame::TerminalExited { .. })) => {
+            Ok(Ok(StreamFrame::TerminalExited { call_intent, .. })) => {
+                assert_eq!(
+                    call_intent.as_ref().map(|intent| intent.as_str()),
+                    Some("检查终端输出")
+                );
                 got_exited = true;
                 if got_chunk {
                     break;

@@ -194,6 +194,7 @@ mod tests {
     fn bash_item(src: &str, output: &str, done: bool) -> crate::app::OutputItem {
         crate::app::OutputItem::Bash {
             handle: src.to_string(),
+            title: None,
             output: output.to_string(),
             done,
             expanded: false,

@@ -1102,6 +1102,7 @@ mod tests {
         ];
         let items = vec![crate::app::OutputItem::Terminal {
             handle: "term_0".into(),
+            title: None,
             screen: atman_runtime::tools::term::TerminalScreen {
                 rows: 3,
                 cols: 10,

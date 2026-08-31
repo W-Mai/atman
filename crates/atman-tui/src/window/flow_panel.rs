@@ -313,12 +313,21 @@ pub(crate) fn render_sub_agent_panel(
     // Section 3: Sub-document flow — use flatten_message for proper OutputItem
     // types (Bash/DiffPreview/Terminal with collapse support), identical to
     // the main transcript rendering.
-    let mut tool_map: HashMap<String, String> = HashMap::new();
+    let mut tool_map: HashMap<String, crate::history::ToolDisplayMeta> = HashMap::new();
     for msg in messages {
         if matches!(msg.role, atman_runtime::message::MessageRole::Assistant) {
             for part in &msg.parts {
-                if let atman_runtime::message::MessagePart::ToolUse { id, name, .. } = part {
-                    tool_map.insert(id.clone(), name.clone());
+                if let atman_runtime::message::MessagePart::ToolUse {
+                    id, name, intent, ..
+                } = part
+                {
+                    tool_map.insert(
+                        id.clone(),
+                        crate::history::ToolDisplayMeta {
+                            name: name.clone(),
+                            call_intent: intent.as_ref().map(|intent| intent.as_str().to_owned()),
+                        },
+                    );
                 }
             }
         }

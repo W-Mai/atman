@@ -377,6 +377,7 @@ impl TermRegistry {
         pty_result: crate::sandbox::PtySpawnResult,
         tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
         label: String,
+        call_intent: Option<crate::message::ToolCallIntent>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
         flow_run_id: Option<String>,
@@ -389,6 +390,7 @@ impl TermRegistry {
             pty_result,
             tui_stream_tx,
             label,
+            call_intent,
             cancel,
             events,
             flow_run_id,
@@ -406,6 +408,7 @@ impl TermRegistry {
         pty_result: crate::sandbox::PtySpawnResult,
         tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
         label: String,
+        call_intent: Option<crate::message::ToolCallIntent>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
         flow_run_id: Option<String>,
@@ -508,6 +511,7 @@ impl TermRegistry {
                 task_id,
                 events,
                 flow_run_id,
+                call_intent,
                 profile,
             );
         });
@@ -537,6 +541,7 @@ fn run_reader_loop(
     task_id: Option<crate::task_registry::TaskId>,
     events_sink: Option<crate::event::EventSink>,
     flow_run_id: Option<String>,
+    call_intent: Option<crate::message::ToolCallIntent>,
     profile: Arc<Mutex<Option<crate::sandbox::TempProfile>>>,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
@@ -571,6 +576,7 @@ fn run_reader_loop(
                         bytes: chunk.to_vec(),
                         screen: tui_screen,
                         state: st.to_snapshot(),
+                        call_intent: call_intent.clone(),
                         run_id: flow_run_id.clone(),
                     });
                 }
@@ -614,6 +620,7 @@ fn run_reader_loop(
         let _ = tx.send(crate::stream::StreamFrame::TerminalExited {
             handle,
             exit_code,
+            call_intent,
             run_id: flow_run_id,
         });
     }
@@ -801,6 +808,7 @@ async fn spawn_impl(
             .map(|intent| intent.as_str().to_owned())
             .or(cmd_str)
             .unwrap_or_else(|| "terminal".into()),
+        ctx.call_intent.clone(),
         {
             let tc = ctx.cancel.clone();
             tc.child_token()
@@ -2073,6 +2081,7 @@ mod tests {
                 pty_result,
                 None,
                 "success".into(),
+                None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,
@@ -2156,6 +2165,7 @@ mod tests {
                 pty_result,
                 None,
                 "terminal".into(),
+                None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,
@@ -2193,6 +2203,7 @@ mod tests {
                 pty_result,
                 None,
                 "terminal".into(),
+                None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,

@@ -51,6 +51,7 @@ pub enum OutputItem {
     },
     Terminal {
         handle: String,
+        title: Option<String>,
         screen: TerminalScreen,
         accumulated_bytes: Vec<u8>,
         mode: TerminalViewMode,
@@ -60,6 +61,7 @@ pub enum OutputItem {
     },
     Bash {
         handle: String,
+        title: Option<String>,
         output: String,
         done: bool,
         expanded: bool,
@@ -501,6 +503,7 @@ impl AppState {
             .join("\n");
         Some(OutputItem::Bash {
             handle: snap.source_handle.clone(),
+            title: (!snap.label.trim().is_empty()).then(|| snap.label.clone()),
             output,
             done: snap.status.is_terminal(),
             expanded: false,
@@ -1609,6 +1612,7 @@ impl AppState {
                 bytes,
                 screen,
                 state: _,
+                call_intent,
                 run_id,
             } => {
                 if let Some(rid) = &run_id
@@ -1628,11 +1632,15 @@ impl AppState {
                     })
                     .and_then(|idx| self.items.get_mut(idx));
                 if let Some(OutputItem::Terminal {
+                    title,
                     screen: s,
                     accumulated_bytes: ab,
                     ..
                 }) = existing
                 {
+                    if title.is_none() {
+                        *title = call_intent.map(|intent| intent.as_str().to_owned());
+                    }
                     if let Some(new_screen) = screen {
                         *s = new_screen;
                     }
@@ -1642,6 +1650,7 @@ impl AppState {
                 } else {
                     self.push_item(OutputItem::Terminal {
                         handle,
+                        title: call_intent.map(|intent| intent.as_str().to_owned()),
                         screen: screen.unwrap_or_else(|| {
                             atman_runtime::tools::term::TerminalScreen {
                                 rows: 0,
@@ -1661,23 +1670,50 @@ impl AppState {
                     self.reset_lag_state();
                 }
             }
-            StreamFrame::TerminalExited { handle, run_id, .. } => {
+            StreamFrame::TerminalExited {
+                handle,
+                call_intent,
+                run_id,
+                ..
+            } => {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
                     return;
                 }
                 if let Some(idx) = self.find_item_by_handle(&handle) {
-                    if let Some(OutputItem::Terminal { done, .. }) = self.items.get_mut(idx) {
+                    if let Some(OutputItem::Terminal { title, done, .. }) = self.items.get_mut(idx)
+                    {
+                        if title.is_none() {
+                            *title = call_intent.map(|intent| intent.as_str().to_owned());
+                        }
                         *done = true;
                         self.items_version = self.items_version.wrapping_add(1);
                     }
+                } else {
+                    self.push_item(OutputItem::Terminal {
+                        handle,
+                        title: call_intent.map(|intent| intent.as_str().to_owned()),
+                        screen: TerminalScreen {
+                            rows: 0,
+                            cols: 0,
+                            cells: Vec::new(),
+                            cursor: None,
+                            alt_screen: false,
+                        },
+                        accumulated_bytes: Vec::new(),
+                        mode: TerminalViewMode::Capture,
+                        done: true,
+                        expanded: false,
+                        scroll_offset: None,
+                    });
                 }
             }
             StreamFrame::BashChunk {
                 handle,
                 kind,
                 line,
+                call_intent,
                 run_id,
             } => {
                 if let Some(rid) = &run_id
@@ -1697,7 +1733,10 @@ impl AppState {
                     })
                     .and_then(|idx| self.items.get_mut(idx));
                 let prefix = if kind == "stderr" { "[err] " } else { "" };
-                if let Some(OutputItem::Bash { output, .. }) = existing {
+                if let Some(OutputItem::Bash { title, output, .. }) = existing {
+                    if title.is_none() {
+                        *title = call_intent.map(|intent| intent.as_str().to_owned());
+                    }
                     output.push_str(prefix);
                     output.push_str(&line);
                     self.items_version = self.items_version.wrapping_add(1);
@@ -1708,6 +1747,7 @@ impl AppState {
                     output.push_str(&line);
                     self.push_item(OutputItem::Bash {
                         handle,
+                        title: call_intent.map(|intent| intent.as_str().to_owned()),
                         output,
                         done: false,
                         expanded: false,
@@ -1716,17 +1756,33 @@ impl AppState {
                     self.reset_lag_state();
                 }
             }
-            StreamFrame::BashExited { handle, run_id, .. } => {
+            StreamFrame::BashExited {
+                handle,
+                call_intent,
+                run_id,
+                ..
+            } => {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
                     return;
                 }
                 if let Some(idx) = self.find_item_by_handle(&handle) {
-                    if let Some(OutputItem::Bash { done, .. }) = self.items.get_mut(idx) {
+                    if let Some(OutputItem::Bash { title, done, .. }) = self.items.get_mut(idx) {
+                        if title.is_none() {
+                            *title = call_intent.map(|intent| intent.as_str().to_owned());
+                        }
                         *done = true;
                         self.items_version = self.items_version.wrapping_add(1);
                     }
+                } else {
+                    self.push_item(OutputItem::Bash {
+                        handle,
+                        title: call_intent.map(|intent| intent.as_str().to_owned()),
+                        output: String::new(),
+                        done: true,
+                        expanded: false,
+                    });
                 }
             }
             StreamFrame::DiffPreview {
@@ -2609,6 +2665,7 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.push_item(OutputItem::Bash {
             handle: "h".into(),
+            title: None,
             output: "done".into(),
             done: true,
             expanded: false,
@@ -3441,14 +3498,20 @@ mod terminal_stream_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            call_intent: atman_runtime::message::ToolCallIntent::new("检查终端状态"),
             run_id: None,
         });
         assert_eq!(app.items.len(), 1);
         match &app.items[0] {
             OutputItem::Terminal {
-                handle, mode, done, ..
+                handle,
+                title,
+                mode,
+                done,
+                ..
             } => {
                 assert_eq!(handle, "term_s_0");
+                assert_eq!(title.as_deref(), Some("检查终端状态"));
                 assert_eq!(*mode, TerminalViewMode::Capture);
                 assert!(!*done);
             }
@@ -3465,6 +3528,7 @@ mod terminal_stream_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            call_intent: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalChunk {
@@ -3472,6 +3536,7 @@ mod terminal_stream_tests {
             bytes: b" world".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            call_intent: None,
             run_id: None,
         });
         assert_eq!(app.items.len(), 1, "should update existing, not create new");
@@ -3494,17 +3559,41 @@ mod terminal_stream_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen),
             state: TermStateSnapshot::Running,
+            call_intent: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalExited {
             handle: "term_s_0".into(),
             exit_code: Some(0),
+            call_intent: None,
             run_id: None,
         });
         match &app.items[0] {
             OutputItem::Terminal { done, .. } => assert!(*done),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn bash_exit_without_output_keeps_intent_title() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::BashExited {
+            handle: "bg_s_0".into(),
+            exit_code: Some(0),
+            error: None,
+            call_intent: atman_runtime::message::ToolCallIntent::new("检查构建结果"),
+            run_id: None,
+        });
+
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::Bash {
+                title: Some(title),
+                output,
+                done: true,
+                ..
+            } if title == "检查构建结果" && output.is_empty()
+        ));
     }
 
     #[test]
@@ -3522,12 +3611,14 @@ mod terminal_stream_tests {
             bytes: b"main".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            call_intent: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: "main\n".into(),
+            call_intent: None,
             run_id: None,
         });
 
@@ -3537,23 +3628,27 @@ mod terminal_stream_tests {
             bytes: b"sub".to_vec(),
             screen: Some(screen),
             state: TermStateSnapshot::Running,
+            call_intent: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::TerminalExited {
             handle: "term_s_0".into(),
             exit_code: Some(0),
+            call_intent: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: "sub\n".into(),
+            call_intent: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::BashExited {
             handle: "bg_s_0".into(),
             exit_code: Some(0),
             error: None,
+            call_intent: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::DiffPreview {
@@ -3592,6 +3687,7 @@ mod terminal_stream_tests {
         app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
         app.items.push(OutputItem::Terminal {
             handle: "term_s_0".into(),
+            title: None,
             screen: TerminalScreen {
                 rows: 2,
                 cols: 5,
@@ -3607,6 +3703,7 @@ mod terminal_stream_tests {
         });
         app.items.push(OutputItem::Terminal {
             handle: "term_s_1".into(),
+            title: None,
             screen: TerminalScreen {
                 rows: 3,
                 cols: 7,
@@ -3635,6 +3732,7 @@ mod terminal_stream_tests {
         app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
         app.items.push(OutputItem::Terminal {
             handle: "term_s_0".into(),
+            title: None,
             screen: TerminalScreen {
                 rows: 2,
                 cols: 5,
@@ -3650,6 +3748,7 @@ mod terminal_stream_tests {
         });
         app.items.push(OutputItem::Terminal {
             handle: "term_s_1".into(),
+            title: None,
             screen: TerminalScreen {
                 rows: 3,
                 cols: 7,
@@ -3709,6 +3808,7 @@ mod terminal_e2e_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            call_intent: None,
             run_id: None,
         });
 
@@ -3755,12 +3855,14 @@ mod terminal_e2e_tests {
             handle: "bg_s_0".into(),
             kind: "stdout".into(),
             line: "hello from bash\n".into(),
+            call_intent: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::BashExited {
             handle: "bg_s_0".into(),
             exit_code: Some(0),
             error: None,
+            call_intent: None,
             run_id: None,
         });
         app.apply_task_event(atman_runtime::TaskEvent::Registered(

@@ -8,8 +8,14 @@ use atman_runtime::workflow::{WorkflowGraph, WorkflowPermissionIdentity, Workflo
 
 use crate::app::{NoteLevel, OutputItem};
 
+#[derive(Debug, Clone)]
+pub(crate) struct ToolDisplayMeta {
+    pub(crate) name: String,
+    pub(crate) call_intent: Option<String>,
+}
+
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
-    let mut tool_map: HashMap<String, String> = HashMap::new();
+    let mut tool_map: HashMap<String, ToolDisplayMeta> = HashMap::new();
     // First pass: build tool_map + collect FlowStart parent links + FlowDone status
     // for transitive closure of spawned flows.
     let mut flow_parents: HashMap<String, Option<String>> = HashMap::new();
@@ -21,8 +27,19 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
         match entry {
             TranscriptEntry::Message { message, .. } => {
                 for part in &message.parts {
-                    if let MessagePart::ToolUse { id, name, .. } = part {
-                        tool_map.insert(id.clone(), name.clone());
+                    if let MessagePart::ToolUse {
+                        id, name, intent, ..
+                    } = part
+                    {
+                        tool_map.insert(
+                            id.clone(),
+                            ToolDisplayMeta {
+                                name: name.clone(),
+                                call_intent: intent
+                                    .as_ref()
+                                    .map(|intent| intent.as_str().to_owned()),
+                            },
+                        );
                     }
                 }
             }
@@ -859,10 +876,10 @@ fn apply_message_to_workflow(graph: &mut WorkflowGraph, msg: &Message, flow_run_
     }
 }
 
-pub fn flatten_message(
+pub(crate) fn flatten_message(
     msg: &Message,
     out: &mut Vec<OutputItem>,
-    tool_map: &HashMap<String, String>,
+    tool_map: &HashMap<String, ToolDisplayMeta>,
 ) {
     match msg.role {
         MessageRole::User => {
@@ -903,8 +920,9 @@ pub fn flatten_message(
                     is_error,
                 } = part
                 {
-                    let tool_name = tool_map.get(tool_use_id).map(|s| s.as_str()).unwrap_or("");
-                    if let Some(item) = restore_tool_item(tool_name, content, *is_error) {
+                    if let Some(item) =
+                        restore_tool_item(tool_map.get(tool_use_id), content, *is_error)
+                    {
                         out.push(item);
                     }
                 }
@@ -933,7 +951,13 @@ fn strip_log_prefixes(raw: &str) -> String {
         .join("\n")
 }
 
-fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<OutputItem> {
+fn restore_tool_item(
+    tool_meta: Option<&ToolDisplayMeta>,
+    content: &str,
+    is_error: bool,
+) -> Option<OutputItem> {
+    let tool_name = tool_meta.map(|meta| meta.name.as_str()).unwrap_or("");
+    let title = tool_meta.and_then(|meta| meta.call_intent.clone());
     let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
     if tool_name.starts_with("bash.") {
         let handle = parsed
@@ -957,6 +981,7 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
             .unwrap_or_default();
         Some(OutputItem::Bash {
             handle,
+            title,
             output,
             done: true,
             expanded: false,
@@ -1002,6 +1027,7 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
 
         Some(OutputItem::Terminal {
             handle,
+            title,
             screen: TerminalScreen {
                 rows,
                 cols,
@@ -1062,7 +1088,7 @@ fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
 }
 
 pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
-    let tool_map: HashMap<String, String> = HashMap::new();
+    let tool_map: HashMap<String, ToolDisplayMeta> = HashMap::new();
     let mut out: Vec<OutputItem> = Vec::new();
     for msg in messages {
         flatten_message(msg, &mut out, &tool_map);
@@ -1516,7 +1542,7 @@ mod tests {
                         id: tool_use_id.into(),
                         name: "bash.spawn".into(),
                         input: serde_json::json!({}),
-                        intent: None,
+                        intent: atman_runtime::message::ToolCallIntent::new("运行项目测试"),
                     }],
                     turn_id: TurnId::now(),
                     origin: atman_runtime::message::MessageOrigin::User,
@@ -1539,10 +1565,13 @@ mod tests {
         ];
         let out = flatten_transcript(&entries);
         let bash = out.iter().find_map(|it| match it {
-            OutputItem::Bash { output, .. } => Some(output.clone()),
+            OutputItem::Bash { title, output, .. } => Some((title.clone(), output.clone())),
             _ => None,
         });
-        assert_eq!(bash.as_deref(), Some("hello\nworld"));
+        assert_eq!(
+            bash,
+            Some((Some("运行项目测试".into()), "hello\nworld".into()))
+        );
     }
 
     #[test]

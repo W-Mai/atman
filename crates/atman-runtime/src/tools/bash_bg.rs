@@ -386,6 +386,7 @@ impl BgRegistry {
         let task_registry = self.task_registry.clone();
         let task_id_for_spawn = task_id.clone();
         let flow_run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
+        let call_intent = ctx.call_intent.clone();
         tokio::spawn(async move {
             run_bg_process(
                 child,
@@ -402,6 +403,7 @@ impl BgRegistry {
                 task_registry,
                 task_id_for_spawn,
                 flow_run_id,
+                call_intent,
             )
             .await;
         });
@@ -736,6 +738,7 @@ async fn run_bg_process(
     task_registry: Option<TaskRegistry>,
     task_id: Option<crate::task_registry::TaskId>,
     flow_run_id: Option<String>,
+    call_intent: Option<crate::message::ToolCallIntent>,
 ) {
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
@@ -751,6 +754,7 @@ async fn run_bg_process(
             stream_tx: stream_tx.clone(),
             handle: handle_for_stream.clone(),
             flow_run_id: flow_run_id.clone(),
+            call_intent: call_intent.clone(),
         };
         tokio::spawn(read_stream(BufReader::new(s), ctx))
     });
@@ -763,6 +767,7 @@ async fn run_bg_process(
             stream_tx: stream_tx.clone(),
             handle: handle_for_stream.clone(),
             flow_run_id: flow_run_id.clone(),
+            call_intent: call_intent.clone(),
         };
         tokio::spawn(read_stream(BufReader::new(s), ctx))
     });
@@ -884,6 +889,7 @@ async fn run_bg_process(
             handle: handle_for_stream,
             exit_code,
             error: final_status.error().map(str::to_owned),
+            call_intent,
             run_id: flow_run_id,
         });
     }
@@ -925,6 +931,7 @@ struct ReadStreamCtx {
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     handle: String,
     flow_run_id: Option<String>,
+    call_intent: Option<crate::message::ToolCallIntent>,
 }
 
 async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
@@ -949,6 +956,7 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: Rea
                         handle: ctx.handle.clone(),
                         kind: kind_str.to_string(),
                         line: buf.clone(),
+                        call_intent: ctx.call_intent.clone(),
                         run_id: ctx.flow_run_id.clone(),
                     });
                 }
@@ -2400,6 +2408,7 @@ mod tests {
     async fn read_stream_keeps_complete_log_after_memory_budget_is_exhausted() {
         let output = Arc::new(Mutex::new(BgOutput::default()));
         let (log_tx, mut log_rx) = mpsc::unbounded_channel();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(4);
         let (mut writer, reader) = tokio::io::duplex(1024);
         let input = b"first line\nsecond line\n";
         let write_task = tokio::spawn(async move {
@@ -2414,9 +2423,10 @@ mod tests {
                 log_tx,
                 kind: StreamKind::Stdout,
                 max_output_bytes: 5,
-                stream_tx: None,
+                stream_tx: Some(stream_tx),
                 handle: "test".into(),
                 flow_run_id: None,
+                call_intent: crate::message::ToolCallIntent::new("检查命令输出"),
             },
         )
         .await;
@@ -2425,5 +2435,15 @@ mod tests {
         let frames: Vec<Vec<u8>> = std::iter::from_fn(|| log_rx.try_recv().ok()).collect();
         assert_eq!(frames.concat(), b"[out] first line\n[out] second line\n");
         assert!(output.lock().unwrap().truncated);
+        for _ in 0..2 {
+            let frame = stream_rx.try_recv().expect("streamed bash line");
+            assert!(matches!(
+                frame,
+                crate::stream::StreamFrame::BashChunk {
+                    call_intent: Some(intent),
+                    ..
+                } if intent.as_str() == "检查命令输出"
+            ));
+        }
     }
 }
