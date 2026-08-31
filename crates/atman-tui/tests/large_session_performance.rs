@@ -4,6 +4,7 @@
 //! `cargo test -p atman-tui --release --test large_session_performance -- --ignored --nocapture`
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use atman_runtime::event::{FlowRunId, TurnId};
@@ -214,5 +215,77 @@ fn baseline_fifty_thousand_nodes_and_one_hundred_thousand_permissions() {
         baseline.cold.as_millis(),
         baseline.warm.as_millis(),
         baseline.animated.as_millis()
+    );
+}
+
+#[test]
+#[ignore = "release-mode incident session baseline; requires ATMAN_INCIDENT_SESSION"]
+fn incident_session_animation_stays_within_frame_budget() {
+    let path = PathBuf::from(
+        std::env::var_os("ATMAN_INCIDENT_SESSION")
+            .expect("ATMAN_INCIDENT_SESSION must point to an events.jsonl file"),
+    );
+    let started = Instant::now();
+    let entries = atman_runtime::replay_transcript_from(&path).expect("replay incident session");
+    let replay = started.elapsed();
+    assert!(!entries.is_empty());
+
+    let started = Instant::now();
+    let output = atman_tui::history::flatten_transcript(&entries);
+    let flatten = started.elapsed();
+    let item_count = output.len();
+    assert!(item_count > 0);
+
+    let items = OutputStore::from(output);
+    let expanded_tools = HashSet::new();
+    let mut cache = LayoutCache::default();
+    let mut ctx = RenderCtx {
+        expanded_tools: &expanded_tools,
+        messages: &[],
+        animation_frame: 0,
+        panel_width: 120,
+        hovered_thinking_idx: None,
+    };
+    let key = LayoutKey {
+        width: 120,
+        theme: atman_tui::theme::current_mode(),
+    };
+    let request = LayoutRequest {
+        scroll_offset: 0,
+        viewport_rows: 40,
+        follow_tail_rows: Some(40),
+    };
+    let started = Instant::now();
+    let metrics = cache.update_dirty(key, &items, &ctx, request);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
+    let cold_layout = started.elapsed();
+
+    const TICKS: u32 = 600;
+    let started = Instant::now();
+    for frame in 1..=TICKS {
+        ctx.animation_frame = frame;
+        let metrics = cache.update_dirty(key, &items, &ctx, request);
+        let _ = cache.visible_slice(
+            metrics.scroll_offset,
+            request.viewport_rows,
+            ctx.animation_frame,
+        );
+    }
+    let animation = started.elapsed();
+    assert!(
+        animation < Duration::from_millis(25).saturating_mul(TICKS),
+        "animation exceeded the 25 ms per-frame CPU budget: {animation:?} for {TICKS} frames"
+    );
+    eprintln!(
+        "incident session: entries={} items={} rows={} replay_ms={} flatten_ms={} cold_layout_ms={} animation_frames={} animation_ms={} animation_us_per_frame={}",
+        entries.len(),
+        item_count,
+        metrics.total_rows,
+        replay.as_millis(),
+        flatten.as_millis(),
+        cold_layout.as_millis(),
+        TICKS,
+        animation.as_millis(),
+        animation.as_micros() / u128::from(TICKS),
     );
 }
