@@ -615,7 +615,11 @@ impl Provider for OpenAiProvider {
                         .and_then(|d| d.reasoning_tokens)
                         .unwrap_or(0);
                     TokenUsage {
-                        input: u.prompt_tokens.unwrap_or(0).saturating_sub(cache_read),
+                        input: crate::provider::regular_input_tokens(
+                            u.prompt_tokens.unwrap_or(0),
+                            cache_read,
+                            cache_write,
+                        ),
                         cached_input: cache_read,
                         output: u.completion_tokens.unwrap_or(0),
                         cache_write,
@@ -818,7 +822,11 @@ fn response_to_assistant(
             .and_then(|d| d.reasoning_tokens)
             .unwrap_or(0);
         TokenUsage {
-            input: u.prompt_tokens.unwrap_or(0).saturating_sub(cache_read),
+            input: crate::provider::regular_input_tokens(
+                u.prompt_tokens.unwrap_or(0),
+                cache_read,
+                cache_write,
+            ),
             cached_input: cache_read,
             output: u.completion_tokens.unwrap_or(0),
             cache_write,

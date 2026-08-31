@@ -55,6 +55,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         &TokenUsage {
             input: 40,
             cached_input: 60,
+            cache_write: 20,
             ..Default::default()
         },
         None,
@@ -74,8 +75,24 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         None,
     );
 
-    assert_eq!(session.last_input_tokens(), 100);
+    assert_eq!(session.last_input_tokens(), 120);
     assert_eq!(session.last_model(), "root-model");
+    let snap = session.subscribe_context().borrow().clone();
+    assert_eq!(snap.provider, "root-provider");
+    assert_eq!(snap.usage_buckets.len(), 2);
+    let primary = snap.primary_usage().expect("root usage bucket");
+    assert_eq!(primary.tokens_in, 120);
+    assert_eq!(primary.cache_read, 60);
+    assert_eq!(primary.cache_write, 20);
+    assert_eq!(primary.calls, 1);
+    assert_eq!(
+        snap.usage_buckets
+            .iter()
+            .find(|bucket| bucket.call_scope == ContextCallScope::Child)
+            .expect("child usage bucket")
+            .tokens_in,
+        1_000
+    );
     assert_eq!(
         session.last_context_usage(&root_key).unwrap().plan_id,
         root_plan

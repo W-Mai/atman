@@ -52,6 +52,12 @@ pub enum StreamFrame {
     LlmRetry,
     LlmCallStats {
         model: String,
+        #[serde(default)]
+        provider: String,
+        #[serde(default)]
+        context_call_purpose: crate::context_plan::ContextCallPurpose,
+        #[serde(default)]
+        context_call_scope: crate::context_plan::ContextCallScope,
         input_tokens: u64,
         output_tokens: u64,
         cache_read: u64,
@@ -342,6 +348,22 @@ mod tests {
         let json = serde_json::to_string(&f).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, StreamFrame::ToolNode { .. }));
+    }
+
+    #[test]
+    fn legacy_llm_stats_default_route_metadata() {
+        let json = r#"{"LlmCallStats":{"model":"m","input_tokens":1,"output_tokens":2,"cache_read":3,"cache_write":4,"ttft_ms":5,"tokens_per_second":6.0,"wallclock_ms":7,"run_id":null,"node_id":null}}"#;
+        let frame: StreamFrame = serde_json::from_str(json).unwrap();
+
+        assert!(matches!(
+            frame,
+            StreamFrame::LlmCallStats {
+                provider,
+                context_call_purpose: crate::context_plan::ContextCallPurpose::General,
+                context_call_scope: crate::context_plan::ContextCallScope::Detached,
+                ..
+            } if provider.is_empty()
+        ));
     }
 
     #[test]

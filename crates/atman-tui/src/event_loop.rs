@@ -1606,6 +1606,7 @@ fn apply_context_snapshot(
 ) -> bool {
     if model_switch_pending {
         context.model.clone_from(&app.context.model);
+        context.provider.clone_from(&app.context.provider);
         app.context = context;
         false
     } else {
@@ -1750,6 +1751,7 @@ mod tests {
     fn pending_model_switch_defers_context_model_and_reasoning_changes() {
         let mut app = AppState::new("session".into(), None);
         app.context.model = "old-model".into();
+        app.context.provider = "old-provider".into();
         app.context.tokens_in = 4;
         app.input_reasoning = Some(atman_runtime::provider::ReasoningSelection::Disabled);
         let incoming = atman_runtime::ContextSnapshot {
@@ -1760,6 +1762,7 @@ mod tests {
 
         assert!(!apply_context_snapshot(&mut app, incoming, true));
         assert_eq!(app.context.model, "old-model");
+        assert_eq!(app.context.provider, "old-provider");
         assert_eq!(app.context.tokens_in, 9);
         assert_eq!(
             app.input_reasoning,

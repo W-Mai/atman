@@ -15,6 +15,8 @@ use anyhow::Context;
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const CODEX_MODELS_URL: &str = "https://chatgpt.com/backend-api/wham/models";
+const X_CODEX_TURN_STATE: &str = "x-codex-turn-state";
+const MAX_RETAINED_TURN_STATES: usize = 256;
 
 #[derive(Clone)]
 enum CodexCredentialSource {
@@ -71,6 +73,7 @@ pub struct CodexProvider {
     client: reqwest::Client,
     responses_url: String,
     models_url: String,
+    turn_states: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl CodexProvider {
@@ -88,6 +91,7 @@ impl CodexProvider {
             client: reqwest::Client::new(),
             responses_url: format!("{CODEX_BASE}/responses"),
             models_url: CODEX_MODELS_URL.into(),
+            turn_states: Default::default(),
         }
     }
 
@@ -103,6 +107,7 @@ impl CodexProvider {
             client: reqwest::Client::new(),
             responses_url: format!("{CODEX_BASE}/responses"),
             models_url: CODEX_MODELS_URL.into(),
+            turn_states: Default::default(),
         }
     }
 
@@ -527,6 +532,16 @@ impl Provider for CodexProvider {
         let credentials = self.credentials.clone();
         let client = self.client.clone();
         let responses_url = self.responses_url.clone();
+        let turn_states = self.turn_states.clone();
+        let routing_turn_id = req
+            .messages
+            .last()
+            .map(|message| message.turn_id.to_string())
+            .unwrap_or_else(|| turn_id.to_string());
+        let turn_state_key = req
+            .prompt_cache_key
+            .as_ref()
+            .map(|routing_key| format!("{routing_key}:{routing_turn_id}"));
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -534,6 +549,7 @@ impl Provider for CodexProvider {
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
             async move {
                 let body = preflight?;
+                let routing_key = body.prompt_cache_key.clone();
                 let credentials = tokio::select! {
                     biased;
                     _ = cancel_for_task.cancelled() => {
@@ -551,6 +567,21 @@ impl Provider for CodexProvider {
                 if !credentials.account_id.is_empty() {
                     request = request.header("chatgpt-account-id", credentials.account_id);
                 }
+                if let Some(routing_key) = routing_key.as_deref() {
+                    request = request
+                        .header("session-id", routing_key)
+                        .header("thread-id", routing_key)
+                        .header("x-client-request-id", routing_key);
+                }
+                if let Some(turn_state_key) = turn_state_key.as_deref()
+                    && let Some(turn_state) = turn_states
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(turn_state_key)
+                        .cloned()
+                {
+                    request = request.header(X_CODEX_TURN_STATE, turn_state);
+                }
                 use eventsource_stream::Eventsource;
                 use futures::StreamExt;
 
@@ -562,6 +593,11 @@ impl Provider for CodexProvider {
                     r = request.send() => r.map_err(net_err)?,
                 };
                 let status = resp.status();
+                let response_turn_state = resp
+                    .headers()
+                    .get(X_CODEX_TURN_STATE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
                 if !status.is_success() {
                     let body_text = resp.text().await.unwrap_or_default();
                     if let Some(reason) =
@@ -572,6 +608,20 @@ impl Provider for CodexProvider {
                     return Err(RuntimeError::ToolFailed(format!(
                         "codex http {status}: {body_text}"
                     )));
+                }
+
+                if let (Some(turn_state_key), Some(turn_state)) =
+                    (turn_state_key, response_turn_state)
+                {
+                    let mut states = turn_states
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !states.contains_key(&turn_state_key)
+                        && states.len() >= MAX_RETAINED_TURN_STATES
+                    {
+                        states.clear();
+                    }
+                    states.entry(turn_state_key).or_insert(turn_state);
                 }
 
                 let mut stream = resp.bytes_stream().eventsource();
@@ -723,19 +773,23 @@ impl Provider for CodexProvider {
                         .as_ref()
                         .and_then(|d| d.cached_tokens)
                         .unwrap_or(0);
+                    let cache_write = u
+                        .input_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cache_write_tokens)
+                        .unwrap_or(0);
                     TokenUsage {
                         // Responses API reports input_tokens as the total input,
-                        // including cached tokens. TokenUsage.input is the
-                        // uncached portion so the shared window accounting can
-                        // add cached_input exactly once.
-                        input: normalize_input_tokens(input_tokens, cached_input),
+                        // including cache reads and writes. TokenUsage stores
+                        // the three prompt lanes independently.
+                        input: crate::provider::regular_input_tokens(
+                            input_tokens,
+                            cached_input,
+                            cache_write,
+                        ),
                         cached_input,
                         output: u.output_tokens.unwrap_or(0),
-                        cache_write: u
-                            .input_tokens_details
-                            .as_ref()
-                            .and_then(|d| d.cache_write_tokens)
-                            .unwrap_or(0),
+                        cache_write,
                         reasoning_tokens: u
                             .output_tokens_details
                             .as_ref()
@@ -1012,10 +1066,6 @@ fn credential_err(error: crate::oauth::OAuthCredentialError) -> RuntimeError {
     RuntimeError::ToolFailed(format!("codex credentials: {error}"))
 }
 
-fn normalize_input_tokens(total_input: u64, cached_input: u64) -> u64 {
-    total_input.saturating_sub(cached_input)
-}
-
 #[derive(Serialize)]
 struct ResponsesRequest {
     model: String,
@@ -1128,7 +1178,7 @@ struct OutputTokensDetails {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodexCredentialSource, CodexProvider, normalize_input_tokens, oauth_account_id,
+        CodexCredentialSource, CodexProvider, X_CODEX_TURN_STATE, oauth_account_id,
         parse_codex_models, split_assistant_parts,
     };
     use crate::message::MessagePart;
@@ -1283,6 +1333,7 @@ mod tests {
             client: reqwest::Client::new(),
             responses_url: String::new(),
             models_url: String::new(),
+            turn_states: Default::default(),
         }
         .with_endpoints(responses_url, models_url);
         (dir, hub, provider, access_token)
@@ -1306,7 +1357,10 @@ mod tests {
 
     #[test]
     fn input_tokens_exclude_cached_tokens_for_window_accounting() {
-        assert_eq!(normalize_input_tokens(100_000, 60_000), 40_000);
+        assert_eq!(
+            crate::provider::regular_input_tokens(100_000, 60_000, 10_000),
+            30_000
+        );
     }
 
     #[test]
@@ -1323,7 +1377,7 @@ mod tests {
 
     #[test]
     fn cached_tokens_cannot_underflow_input_tokens() {
-        assert_eq!(normalize_input_tokens(10, 20), 0);
+        assert_eq!(crate::provider::regular_input_tokens(10, 20, 5), 0);
     }
 
     #[test]
@@ -1651,6 +1705,80 @@ mod tests {
         let observable = provider.call_streaming(request());
         let message = observable.output.await.unwrap();
         assert_eq!(message.response_id.as_deref(), Some("response-1"));
+    }
+
+    #[tokio::test]
+    async fn streaming_call_reuses_codex_routing_state_within_a_turn() {
+        let server = MockServer::start().await;
+        let provider = CodexProvider::new("codex", "token", "account").with_endpoints(
+            format!("{}/responses", server.uri()),
+            format!("{}/models", server.uri()),
+        );
+        let mut request = request();
+        request.cache_prompt = true;
+        request.prompt_cache_key = Some("stable-route".into());
+        request.messages.push(crate::message::Message::user_text(
+            crate::event::TurnId::now(),
+            "hello",
+        ));
+        let response = || {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header(X_CODEX_TURN_STATE, "sticky-turn")
+                .set_body_string(
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+                )
+        };
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("session-id", "stable-route"))
+            .and(header("thread-id", "stable-route"))
+            .and(header("x-client-request-id", "stable-route"))
+            .respond_with(response())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        provider
+            .call_streaming(request.clone())
+            .output
+            .await
+            .unwrap();
+        server.reset().await;
+
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("session-id", "stable-route"))
+            .and(header("thread-id", "stable-route"))
+            .and(header("x-client-request-id", "stable-route"))
+            .and(header(X_CODEX_TURN_STATE, "sticky-turn"))
+            .respond_with(response())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        provider
+            .call_streaming(request.clone())
+            .output
+            .await
+            .unwrap();
+        server.reset().await;
+
+        request.messages.push(crate::message::Message::user_text(
+            crate::event::TurnId::now(),
+            "next turn",
+        ));
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(response())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        provider.call_streaming(request).output.await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get(X_CODEX_TURN_STATE).is_none());
     }
 
     #[tokio::test]

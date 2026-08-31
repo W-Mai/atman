@@ -452,6 +452,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             if let Some(tx) = stream_tx.as_ref() {
                 let _ = tx.send(crate::stream::StreamFrame::LlmCallStats {
                     model: model.clone(),
+                    provider: provider.name().to_string(),
+                    context_call_purpose,
+                    context_call_scope: context_call_identity.scope,
                     input_tokens: usage.input,
                     output_tokens: usage.output,
                     cache_read: usage.cached_input,

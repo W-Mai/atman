@@ -910,6 +910,31 @@ mod tests {
     }
 
     #[test]
+    fn response_usage_keeps_cache_creation_in_its_own_lane() {
+        let assistant = response_to_assistant(
+            MessagesResponse {
+                content: Vec::new(),
+                stop_reason: Some("end_turn".into()),
+                usage: Some(AnthropicUsage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(10),
+                    cache_read_input_tokens: Some(80),
+                    cache_creation_input_tokens: Some(50),
+                }),
+                model: Some("model".into()),
+                id: Some("message".into()),
+            },
+            crate::event::TurnId::now(),
+            &[],
+        );
+
+        assert_eq!(assistant.token_usage.input, 20);
+        assert_eq!(assistant.token_usage.cached_input, 80);
+        assert_eq!(assistant.token_usage.cache_write, 50);
+        assert_eq!(assistant.token_usage.prompt_input(), 150);
+    }
+
+    #[test]
     fn context_prefix_uses_messages_projection_and_preserves_appended_messages() {
         let provider = AnthropicProvider::new("anthropic", "test-key");
         let mut request = LlmRequest {

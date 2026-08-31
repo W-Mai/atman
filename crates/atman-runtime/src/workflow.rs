@@ -75,6 +75,12 @@ pub struct WorkflowNode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LlmStats {
     pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub context_call_purpose: crate::context_plan::ContextCallPurpose,
+    #[serde(default)]
+    pub context_call_scope: crate::context_plan::ContextCallScope,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read: u64,
@@ -286,6 +292,9 @@ impl WorkflowGraph {
                 run_id,
                 node_id,
                 model,
+                provider,
+                context_call_purpose,
+                context_call_identity,
                 usage,
                 wallclock_ms,
                 ttft_ms,
@@ -297,6 +306,18 @@ impl WorkflowGraph {
                     if let Some(n) = find_node_mut(&mut self.root, &scoped) {
                         n.llm_stats = Some(LlmStats {
                             model: model.clone(),
+                            provider: provider.clone(),
+                            context_call_purpose: context_call_purpose.unwrap_or_default(),
+                            context_call_scope: context_call_identity
+                                .as_ref()
+                                .map(|identity| identity.scope)
+                                .unwrap_or_else(|| {
+                                    if run_id.is_some() {
+                                        crate::context_plan::ContextCallScope::Root
+                                    } else {
+                                        crate::context_plan::ContextCallScope::Detached
+                                    }
+                                }),
                             input_tokens: usage.input,
                             output_tokens: usage.output,
                             cache_read: usage.cached_input,
@@ -729,6 +750,9 @@ impl WorkflowGraph {
             }
             StreamFrame::LlmCallStats {
                 model,
+                provider,
+                context_call_purpose,
+                context_call_scope,
                 input_tokens,
                 output_tokens,
                 cache_read,
@@ -744,6 +768,9 @@ impl WorkflowGraph {
                     if let Some(n) = find_node_mut(&mut self.root, &scoped) {
                         n.llm_stats = Some(LlmStats {
                             model: model.clone(),
+                            provider: provider.clone(),
+                            context_call_purpose: *context_call_purpose,
+                            context_call_scope: *context_call_scope,
                             input_tokens: *input_tokens,
                             output_tokens: *output_tokens,
                             cache_read: *cache_read,
@@ -1323,6 +1350,46 @@ mod tests {
                 .children
                 .iter()
                 .all(|node| !matches!(node.kind, WorkflowNodeKind::ToolCall { .. }))
+        );
+    }
+
+    #[test]
+    fn llm_stream_stats_preserve_route_metadata() {
+        use crate::stream::StreamFrame;
+
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        let run_id = FlowRunId::now();
+        let run = run_id.0.to_string();
+        graph.apply_event(&flow_start(run_id.clone(), "agent_loop"));
+        graph.apply_event(&stmt_start(run_id, "llm", None));
+        graph.apply_stream_frame(&StreamFrame::LlmCallStats {
+            model: "helper-model".into(),
+            provider: "helper-provider".into(),
+            context_call_purpose: crate::context_plan::ContextCallPurpose::Extraction,
+            context_call_scope: crate::context_plan::ContextCallScope::Child,
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read: 20,
+            cache_write: 30,
+            ttft_ms: 40,
+            tokens_per_second: 50.0,
+            wallclock_ms: 60,
+            run_id: Some(run.clone()),
+            node_id: Some("llm".into()),
+        });
+
+        let stats = graph
+            .find_node(&scope_id(&run, "llm"))
+            .and_then(|node| node.llm_stats.as_ref())
+            .expect("llm stats");
+        assert_eq!(stats.provider, "helper-provider");
+        assert_eq!(
+            stats.context_call_purpose,
+            crate::context_plan::ContextCallPurpose::Extraction
+        );
+        assert_eq!(
+            stats.context_call_scope,
+            crate::context_plan::ContextCallScope::Child
         );
     }
 

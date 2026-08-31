@@ -114,7 +114,7 @@ pub use provider_lifecycle::{
 };
 pub use session::{
     CompactReviewDecision, CompactReviewMode, CompactReviewRegistry, ContextSnapshot,
-    PendingCompactReview, Session, SessionId,
+    ContextUsageBucket, PendingCompactReview, Session, SessionId,
 };
 pub use task_registry::{
     TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,

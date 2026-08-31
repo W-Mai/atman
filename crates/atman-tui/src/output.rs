@@ -2516,59 +2516,95 @@ fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, style: Style
     }
 }
 
-fn aggregate_llm_stats(
-    nodes: &[atman_runtime::workflow::WorkflowNode],
-) -> Option<(usize, u64, u64, u64, u64, u64, f64)> {
-    let mut calls = 0usize;
-    let mut total_in = 0u64;
-    let mut total_out = 0u64;
-    let mut total_cache_read = 0u64;
-    let mut total_cache_write = 0u64;
-    let mut total_ttft_ms = 0u64;
-    let mut speed_sum = 0.0f64;
-    let mut speed_count = 0usize;
-    for n in nodes {
-        if let Some(s) = &n.llm_stats {
-            calls += 1;
-            total_in += s.input_tokens + s.cache_read + s.cache_write;
-            total_out += s.output_tokens;
-            total_cache_read += s.cache_read;
-            total_cache_write += s.cache_write;
-            total_ttft_ms += s.ttft_ms;
-            if s.tokens_per_second > 0.0 {
-                speed_sum += s.tokens_per_second;
-                speed_count += 1;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LlmStatsRoute {
+    provider: String,
+    model: String,
+    purpose: atman_runtime::ContextCallPurpose,
+    scope: atman_runtime::ContextCallScope,
+}
+
+impl LlmStatsRoute {
+    fn is_primary(&self) -> bool {
+        self.purpose == atman_runtime::ContextCallPurpose::General
+            && self.scope == atman_runtime::ContextCallScope::Root
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct LlmStatsAggregate {
+    calls: usize,
+    total_in: u64,
+    total_out: u64,
+    cache_read: u64,
+    cache_write: u64,
+    total_ttft_ms: u64,
+    speed_sum: f64,
+    speed_count: usize,
+}
+
+impl LlmStatsAggregate {
+    fn record(&mut self, stats: &atman_runtime::workflow::LlmStats) {
+        self.calls += 1;
+        self.total_in = self
+            .total_in
+            .saturating_add(stats.input_tokens)
+            .saturating_add(stats.cache_read)
+            .saturating_add(stats.cache_write);
+        self.total_out = self.total_out.saturating_add(stats.output_tokens);
+        self.cache_read = self.cache_read.saturating_add(stats.cache_read);
+        self.cache_write = self.cache_write.saturating_add(stats.cache_write);
+        self.total_ttft_ms = self.total_ttft_ms.saturating_add(stats.ttft_ms);
+        if stats.tokens_per_second > 0.0 {
+            self.speed_sum += stats.tokens_per_second;
+            self.speed_count += 1;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.calls += other.calls;
+        self.total_in = self.total_in.saturating_add(other.total_in);
+        self.total_out = self.total_out.saturating_add(other.total_out);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.total_ttft_ms = self.total_ttft_ms.saturating_add(other.total_ttft_ms);
+        self.speed_sum += other.speed_sum;
+        self.speed_count += other.speed_count;
+    }
+
+    fn average_speed(self) -> f64 {
+        if self.speed_count > 0 {
+            self.speed_sum / self.speed_count as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LlmStatsSummary {
+    routes: std::collections::HashMap<LlmStatsRoute, LlmStatsAggregate>,
+}
+
+fn aggregate_llm_stats(nodes: &[atman_runtime::workflow::WorkflowNode]) -> Option<LlmStatsSummary> {
+    fn visit(nodes: &[atman_runtime::workflow::WorkflowNode], summary: &mut LlmStatsSummary) {
+        for node in nodes {
+            if let Some(stats) = &node.llm_stats {
+                let route = LlmStatsRoute {
+                    provider: stats.provider.clone(),
+                    model: stats.model.clone(),
+                    purpose: stats.context_call_purpose,
+                    scope: stats.context_call_scope,
+                };
+                summary.routes.entry(route).or_default().record(stats);
             }
-        }
-        let child = aggregate_llm_stats(&n.children);
-        if let Some((c, i, o, cr, cw, ttft, sp)) = child {
-            calls += c;
-            total_in += i;
-            total_out += o;
-            total_cache_read += cr;
-            total_cache_write += cw;
-            total_ttft_ms += ttft;
-            speed_sum += sp;
-            speed_count += 1;
+            visit(&node.children, summary);
         }
     }
-    if calls == 0 {
-        return None;
-    }
-    let avg_speed = if speed_count > 0 {
-        speed_sum / speed_count as f64
-    } else {
-        0.0
-    };
-    Some((
-        calls,
-        total_in,
-        total_out,
-        total_cache_read,
-        total_cache_write,
-        total_ttft_ms,
-        avg_speed,
-    ))
+
+    let mut summary = LlmStatsSummary::default();
+    visit(nodes, &mut summary);
+    (!summary.routes.is_empty()).then_some(summary)
 }
 
 fn format_workflow_stats_footer(
@@ -2579,40 +2615,77 @@ fn format_workflow_stats_footer(
     use atman_runtime::humanize::format_count;
     let stats = aggregate_llm_stats(&graph.root);
     let inner_w = (outer_width as usize).saturating_sub(2);
-    let bottom_text =
-        if let Some((calls, total_in, total_out, cache_read, _cache_write, _ttft, speed)) = stats {
-            let mut parts = Vec::new();
-            parts.push(format!("{calls} calls"));
-            parts.push(format!("↑{}", format_count(total_in)));
-            parts.push(format!("↓{}", format_count(total_out)));
-            if cache_read > 0 {
-                let hit_rate = if total_in > 0 {
-                    (cache_read as f64 / total_in as f64 * 100.0) as u64
-                } else {
-                    0
-                };
-                parts.push(format!(
-                    "cache {} ({}%)",
-                    format_count(cache_read),
-                    hit_rate
-                ));
+    let bottom_text = if let Some(stats) = stats {
+        let primary_routes = stats
+            .routes
+            .iter()
+            .filter(|(route, _)| route.is_primary())
+            .collect::<Vec<_>>();
+        let mut primary = LlmStatsAggregate::default();
+        for (_, aggregate) in &primary_routes {
+            primary.merge(**aggregate);
+        }
+        let auxiliary_calls = stats
+            .routes
+            .iter()
+            .filter(|(route, _)| !route.is_primary())
+            .map(|(_, aggregate)| aggregate.calls)
+            .sum::<usize>();
+        let display = if primary_routes.is_empty() {
+            let mut all = LlmStatsAggregate::default();
+            for aggregate in stats.routes.values() {
+                all.merge(*aggregate);
             }
-            if speed > 0.0 {
-                parts.push(format!("{:.0} tok/s", speed));
-            }
-            let body = parts.join(" · ");
-            let body_w = crate::width::width(body.as_str());
-            let inner_w = (outer_width as usize).saturating_sub(2);
-            let prefix_w = crate::width::width("╰─ ");
-            let suffix_w = 1; // ╯
-            let dash_w = inner_w
-                .saturating_sub(prefix_w)
-                .saturating_sub(body_w)
-                .saturating_sub(suffix_w);
-            format!("╰─ {body}{}╯", "─".repeat(dash_w))
+            all
         } else {
-            format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)))
+            primary
         };
+        let speed = display.average_speed();
+        let route_count = if primary_routes.is_empty() {
+            stats.routes.len()
+        } else {
+            primary_routes.len()
+        };
+        let calls_label = if primary_routes.is_empty() {
+            format!("{} aux calls", display.calls)
+        } else {
+            format!("{} calls", display.calls)
+        };
+        let mut parts = Vec::new();
+        parts.push(calls_label);
+        if route_count > 1 {
+            parts.push(format!("{route_count} routes"));
+        }
+        parts.push(format!("↑{}", format_count(display.total_in)));
+        parts.push(format!("↓{}", format_count(display.total_out)));
+        if display.cache_read > 0 {
+            let cache = if route_count == 1 && display.total_in > 0 {
+                let hit_rate = (display.cache_read as f64 / display.total_in as f64 * 100.0) as u64;
+                format!("cache {} ({}%)", format_count(display.cache_read), hit_rate)
+            } else {
+                format!("cache {}", format_count(display.cache_read))
+            };
+            parts.push(cache);
+        }
+        if speed > 0.0 {
+            parts.push(format!("{:.0} tok/s", speed));
+        }
+        if !primary_routes.is_empty() && auxiliary_calls > 0 {
+            parts.push(format!("+{auxiliary_calls} aux"));
+        }
+        let body = parts.join(" · ");
+        let body_w = crate::width::width(body.as_str());
+        let inner_w = (outer_width as usize).saturating_sub(2);
+        let prefix_w = crate::width::width("╰─ ");
+        let suffix_w = 1; // ╯
+        let dash_w = inner_w
+            .saturating_sub(prefix_w)
+            .saturating_sub(body_w)
+            .saturating_sub(suffix_w);
+        format!("╰─ {body}{}╯", "─".repeat(dash_w))
+    } else {
+        format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)))
+    };
     let fill = inner_w.saturating_sub(crate::width::width(bottom_text.as_str()));
     let _ = fill;
     Line::from(Span::styled(bottom_text, border_style))
@@ -4189,8 +4262,20 @@ fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, 
 fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
     use atman_runtime::humanize::format_count;
     let mut parts = Vec::new();
+    if stats.context_call_purpose != atman_runtime::ContextCallPurpose::General
+        || stats.context_call_scope != atman_runtime::ContextCallScope::Root
+    {
+        parts.push(format!(
+            "{} {}",
+            stats.context_call_scope.as_str(),
+            stats.context_call_purpose.as_str()
+        ));
+    }
     if stats.cache_read > 0 {
-        let total_in = stats.input_tokens + stats.cache_read + stats.cache_write;
+        let total_in = stats
+            .input_tokens
+            .saturating_add(stats.cache_read)
+            .saturating_add(stats.cache_write);
         let hit_rate = if total_in > 0 {
             (stats.cache_read as f64 / total_in as f64 * 100.0) as u64
         } else {
@@ -5560,6 +5645,107 @@ mod tests {
             approval: None,
             llm_stats: None,
         }
+    }
+
+    fn make_llm_stats_node(
+        id: &str,
+        model: &str,
+        purpose: atman_runtime::ContextCallPurpose,
+        scope: atman_runtime::ContextCallScope,
+        input_tokens: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) -> atman_runtime::workflow::WorkflowNode {
+        let mut node = make_tool_node(id, id, None);
+        node.llm_stats = Some(atman_runtime::workflow::LlmStats {
+            model: model.into(),
+            provider: format!("provider-{model}"),
+            context_call_purpose: purpose,
+            context_call_scope: scope,
+            input_tokens,
+            output_tokens: 10,
+            cache_read,
+            cache_write,
+            ttft_ms: 100,
+            tokens_per_second: 20.0,
+            wallclock_ms: 200,
+        });
+        node
+    }
+
+    #[test]
+    fn workflow_footer_separates_auxiliary_calls_and_cache_write() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![
+                make_llm_stats_node(
+                    "main",
+                    "primary-model",
+                    atman_runtime::ContextCallPurpose::General,
+                    atman_runtime::ContextCallScope::Root,
+                    20,
+                    80,
+                    50,
+                ),
+                make_llm_stats_node(
+                    "extract",
+                    "helper-model",
+                    atman_runtime::ContextCallPurpose::Extraction,
+                    atman_runtime::ContextCallScope::Detached,
+                    1_000,
+                    0,
+                    0,
+                ),
+            ],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+
+        let line = format_workflow_stats_footer(&graph, 120, Style::default());
+        let text = plain_line(&line);
+        assert!(text.contains("↑150"), "{text}");
+        assert!(text.contains("cache 80 (53%)"), "{text}");
+        assert!(text.contains("+1 aux"), "{text}");
+        assert!(!text.contains("↑1.1k"), "{text}");
+    }
+
+    #[test]
+    fn workflow_footer_does_not_blend_cache_rates_across_routes() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![
+                make_llm_stats_node(
+                    "a",
+                    "model-a",
+                    atman_runtime::ContextCallPurpose::General,
+                    atman_runtime::ContextCallScope::Root,
+                    20,
+                    80,
+                    0,
+                ),
+                make_llm_stats_node(
+                    "b",
+                    "model-b",
+                    atman_runtime::ContextCallPurpose::General,
+                    atman_runtime::ContextCallScope::Root,
+                    100,
+                    20,
+                    0,
+                ),
+            ],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+
+        let line = format_workflow_stats_footer(&graph, 120, Style::default());
+        let text = plain_line(&line);
+        assert!(text.contains("2 routes"), "{text}");
+        assert!(text.contains("cache 100"), "{text}");
+        assert!(!text.contains("cache 100 ("), "{text}");
     }
 
     #[test]

@@ -9,7 +9,7 @@ All notable changes to atman are documented in this file.
 ### ⚠️ Breaking Changes
 
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
-- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, context epoch, token lanes, usage source, call purpose, root/child identity, provider-projected cache-prefix observation, and assistant tool-batch width for the plan compiled for the dispatch attempt. `Event::ToolResultMetrics` records raw and model-visible result sizes.
+- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, context epoch, token lanes, usage source, call purpose, root/child identity, provider-projected cache-prefix observation, and assistant tool-batch width for the plan compiled for the dispatch attempt. `StreamFrame::LlmCallStats`, workflow LLM statistics, and `ContextSnapshot` retain provider, model, purpose, and scope metadata. `Event::ToolResultMetrics` records raw and model-visible result sizes.
 - **Context record message parts** — `MessagePart` includes a structured `ContextRecord` variant with authority, retention, revision, and content digest metadata.
 - **Scoped compaction events** — `Event::CompactionSummary`, `Event::ContextCompact`, and `Event::Checkpoint` include an optional child flow owner.
 - **MCP tool snapshots** — `McpClient::tools` is replaced by `McpClient::tool_snapshot()`, which returns a canonical, fingerprinted snapshot suitable for atomic publication.
@@ -40,13 +40,13 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
-- **Stable prompt-cache routing** — default-endpoint OpenAI and Codex calls use opaque per-context cache keys that remain stable across append-only turns and output-setting changes, then rotate after stable instructions, tools, compaction checkpoints, or isolated child-history rewrites change. Custom OpenAI base URLs and compatible gateways require explicit opt-in.
+- **Stable prompt-cache routing** — default-endpoint OpenAI and Codex calls use opaque per-context cache keys that remain stable across append-only turns and output-setting changes, then rotate after stable instructions, tools, compaction checkpoints, or isolated child-history rewrites change. Codex requests carry matching session and thread routing headers and replay the backend's sticky routing token within a turn. Custom OpenAI base URLs and compatible gateways require explicit opt-in.
 - **Persistent compaction floor** — extreme budget fallback retains the structured anchor, each context key's highest revision including tombstones, and original user inputs while discarding oversized generated output.
 - **Transaction-aligned compaction** — compaction cutoffs retreat before an assistant tool-call batch when any matching result remains in the recent raw tail.
 - **Scoped compaction events** — child flow compaction summaries, range replacements, and checkpoints retain their flow owner and cannot rewrite the root model window or transcript projection.
 
-- **Scoped context usage** — provider/model/purpose/root-or-child buckets retain their latest plan usage independently, so child and helper calls cannot replace the root session's active-window reading.
-- **Context usage fallback** — provider token counts remain authoritative when present; missing input and output usage is estimated from the complete compiled request without adding cached input twice.
+- **Scoped context usage** — provider/model/purpose/root-or-child buckets retain latest plan usage and cumulative cache statistics independently; the sidebar and workflow footer report the active root model without blending helper models or child flows, while cache-read, cache-write, and regular input remain disjoint accounting lanes.
+- **Context usage fallback** — provider token counts remain authoritative when present; missing input and output usage is estimated from the complete compiled request without adding cache-read or cache-write lanes twice.
 - **Request tool exposure** — model-generated tool calls are bound to the exact tool name exposed by their originating LLM request and can be dispatched only once within the producing flow.
 - **Tool-pair projection** — model requests normalize parallel tool results in call order, preserve non-tool content from mixed messages, and remove orphan results without duplicating valid parts.
 - **Tool-result budgets** — direct Session appends, runtime dispatch, `session.push`, and spawned flows use the same configured output budget and continuation store.

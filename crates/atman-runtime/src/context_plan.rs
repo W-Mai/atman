@@ -874,6 +874,19 @@ pub enum ContextCallPurpose {
     InterjectionClassification,
 }
 
+impl ContextCallPurpose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Classification => "classification",
+            Self::Extraction => "extraction",
+            Self::BranchGeneration => "branch_generation",
+            Self::Compaction => "compaction",
+            Self::InterjectionClassification => "interjection_classification",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCallScope {
@@ -881,6 +894,16 @@ pub enum ContextCallScope {
     Child,
     #[default]
     Detached,
+}
+
+impl ContextCallScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Child => "child",
+            Self::Detached => "detached",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -936,7 +959,7 @@ pub struct ContextUsageRecord {
 
 impl ContextUsageRecord {
     pub fn window_input_tokens(&self) -> u64 {
-        self.usage.input.saturating_add(self.usage.cached_input)
+        self.usage.prompt_input()
     }
 }
 
@@ -1026,7 +1049,7 @@ pub fn reconcile_token_usage(
         || provider.reasoning_tokens > 0;
     let mut estimated = false;
 
-    if usage.input.saturating_add(usage.cached_input) == 0 && estimated_input > 0 {
+    if usage.prompt_input() == 0 && estimated_input > 0 {
         usage.input = estimated_input;
         estimated = true;
     }
@@ -1451,15 +1474,18 @@ mod tests {
     #[test]
     fn provider_cache_usage_is_not_inflated_by_plan_estimate() {
         let provider = crate::provider::TokenUsage {
-            input: 40,
+            input: 20,
             cached_input: 60,
+            cache_write: 20,
             output: 10,
-            ..Default::default()
+            reasoning_tokens: 0,
         };
 
         let (usage, source) = reconcile_token_usage(&provider, 100, 10);
-        assert_eq!(usage.input, 40);
+        assert_eq!(usage.input, 20);
         assert_eq!(usage.cached_input, 60);
+        assert_eq!(usage.cache_write, 20);
+        assert_eq!(usage.prompt_input(), 100);
         assert_eq!(source, TokenUsageSource::Provider);
     }
 

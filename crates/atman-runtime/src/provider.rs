@@ -444,20 +444,32 @@ pub struct LlmRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
+    /// Regular input tokens that were neither read from nor written to cache.
     pub input: u64,
+    /// Input tokens read from cache.
     pub cached_input: u64,
     pub output: u64,
+    /// Input tokens written to cache. This lane is disjoint from `input`.
     pub cache_write: u64,
     pub reasoning_tokens: u64,
 }
 
 impl TokenUsage {
-    pub fn total(&self) -> u64 {
+    pub fn prompt_input(&self) -> u64 {
         self.input
             .saturating_add(self.cached_input)
-            .saturating_add(self.output)
             .saturating_add(self.cache_write)
     }
+
+    pub fn total(&self) -> u64 {
+        self.prompt_input().saturating_add(self.output)
+    }
+}
+
+pub(crate) fn regular_input_tokens(total_input: u64, cached_input: u64, cache_write: u64) -> u64 {
+    total_input
+        .saturating_sub(cached_input)
+        .saturating_sub(cache_write)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -896,6 +908,21 @@ mod tests {
         let prefix = bounded_utf8_prefix(&value, 200);
         assert!(prefix.len() <= 200);
         assert_eq!(prefix, "界".repeat(66));
+    }
+
+    #[test]
+    fn token_usage_prompt_lanes_are_disjoint() {
+        let usage = TokenUsage {
+            input: 20,
+            cached_input: 80,
+            output: 10,
+            cache_write: 50,
+            reasoning_tokens: 0,
+        };
+
+        assert_eq!(usage.prompt_input(), 150);
+        assert_eq!(usage.total(), 160);
+        assert_eq!(regular_input_tokens(150, 80, 50), 20);
     }
 
     struct OwnerLockProbeProvider {

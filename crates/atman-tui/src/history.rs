@@ -486,6 +486,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             }
             TranscriptEntry::LlmCall {
                 model,
+                provider,
+                context_call_purpose,
+                context_call_scope,
                 usage,
                 wallclock_ms,
                 ttft_ms,
@@ -506,6 +509,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     panel_idx,
                     &StreamFrame::LlmCallStats {
                         model: model.clone(),
+                        provider: provider.clone(),
+                        context_call_purpose: *context_call_purpose,
+                        context_call_scope: *context_call_scope,
                         input_tokens: usage.input,
                         output_tokens: usage.output,
                         cache_read: usage.cached_input,
@@ -710,6 +716,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     ),
                     TranscriptEntry::LlmCall {
                         model,
+                        provider,
+                        context_call_purpose,
+                        context_call_scope,
                         usage,
                         wallclock_ms,
                         ttft_ms,
@@ -720,6 +729,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     } => (
                         StreamFrame::LlmCallStats {
                             model: model.clone(),
+                            provider: provider.clone(),
+                            context_call_purpose: *context_call_purpose,
+                            context_call_scope: *context_call_scope,
                             input_tokens: usage.input,
                             output_tokens: usage.output,
                             cache_read: usage.cached_input,

@@ -1048,35 +1048,61 @@ fn render_lower_content(
             )
         };
         let kv_w = content_w.saturating_sub(2);
+        let primary = ctx.primary_usage();
+        let primary_tokens_in = primary.map_or(ctx.tokens_in, |usage| usage.tokens_in);
+        let primary_tokens_out = primary.map_or(ctx.tokens_out, |usage| usage.tokens_out);
+        let primary_cache_read = primary.map_or(ctx.cache_read, |usage| usage.cache_read);
+        let primary_cache_write = primary.map_or(ctx.cache_write, |usage| usage.cache_write);
         lines.push(kv_line_bg("model", &model, plain, kv_w, content_bg));
         lines.push(kv_line_bg("window", &window, plain, kv_w, content_bg));
         lines.push(kv_line_bg(
-            "total",
+            "main",
             &format!(
                 "↑{} · ↓{}",
-                format_count(ctx.tokens_in),
-                format_count(ctx.tokens_out)
+                format_count(primary_tokens_in),
+                format_count(primary_tokens_out)
             ),
             plain,
             kv_w,
             content_bg,
         ));
-        let cache_val = if ctx.cache_read > 0 || ctx.cache_write > 0 {
-            let hit_rate = if ctx.tokens_in > 0 {
-                (ctx.cache_read as f64 / ctx.tokens_in as f64 * 100.0) as u64
+        let cache_val = if primary_cache_read > 0 || primary_cache_write > 0 {
+            let hit_rate = if primary_tokens_in > 0 {
+                (primary_cache_read as f64 / primary_tokens_in as f64 * 100.0) as u64
             } else {
                 0
             };
             format!(
                 "read {} · write {} · {}%",
-                format_count(ctx.cache_read),
-                format_count(ctx.cache_write),
+                format_count(primary_cache_read),
+                format_count(primary_cache_write),
                 hit_rate,
             )
         } else {
             "—".to_string()
         };
         lines.push(kv_line_bg("cache", &cache_val, plain, kv_w, content_bg));
+        let auxiliary_calls = ctx
+            .usage_buckets
+            .iter()
+            .filter(|usage| usage.call_purpose != atman_runtime::ContextCallPurpose::General)
+            .map(|usage| usage.calls)
+            .sum::<u64>();
+        let child_calls = ctx
+            .usage_buckets
+            .iter()
+            .filter(|usage| usage.call_scope == atman_runtime::ContextCallScope::Child)
+            .map(|usage| usage.calls)
+            .sum::<u64>();
+        if auxiliary_calls > 0 || child_calls > 0 {
+            lines.push(kv_line_bg(
+                "other",
+                &format!("aux {auxiliary_calls} · child {child_calls}"),
+                plain,
+                kv_w,
+                content_bg,
+            ));
+        }
         lines.push(kv_line_bg(
             "last",
             &format!(

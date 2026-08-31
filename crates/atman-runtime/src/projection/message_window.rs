@@ -76,6 +76,9 @@ pub enum TranscriptEntry {
     },
     LlmCall {
         model: String,
+        provider: String,
+        context_call_purpose: crate::context_plan::ContextCallPurpose,
+        context_call_scope: crate::context_plan::ContextCallScope,
         usage: provider::TokenUsage,
         wallclock_ms: u64,
         ttft_ms: Option<u64>,
@@ -541,6 +544,22 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             }
             "llm_call" => {
                 let model = v["model"].as_str().unwrap_or("").to_string();
+                let provider = v["provider"].as_str().unwrap_or("").to_string();
+                let context_call_purpose = v
+                    .get("context_call_purpose")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default();
+                let context_call_scope = v
+                    .get("context_call_identity")
+                    .and_then(|identity| identity.get("scope"))
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_else(|| {
+                        if v["run_id"].is_null() {
+                            crate::context_plan::ContextCallScope::Detached
+                        } else {
+                            crate::context_plan::ContextCallScope::Root
+                        }
+                    });
                 let usage: provider::TokenUsage = v
                     .get("usage")
                     .and_then(|u| serde_json::from_value(u.clone()).ok())
@@ -556,6 +575,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let ts = parse_ts(v);
                 out.push(TranscriptEntry::LlmCall {
                     model,
+                    provider,
+                    context_call_purpose,
+                    context_call_scope,
                     usage,
                     wallclock_ms,
                     ttft_ms,

@@ -696,8 +696,30 @@ pub struct CompactResult {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContextUsageBucket {
+    pub provider: String,
+    pub model: String,
+    pub call_purpose: crate::context_plan::ContextCallPurpose,
+    pub call_scope: crate::context_plan::ContextCallScope,
+    pub calls: u64,
+    /// Total prompt input, including cache hits.
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl ContextUsageBucket {
+    pub fn is_primary(&self) -> bool {
+        self.call_purpose == crate::context_plan::ContextCallPurpose::General
+            && self.call_scope == crate::context_plan::ContextCallScope::Root
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContextSnapshot {
     pub model: String,
+    pub provider: String,
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub cost_usd: f64,
@@ -709,6 +731,17 @@ pub struct ContextSnapshot {
     pub cache_write: u64,
     pub last_ttft_ms: u64,
     pub last_tokens_per_sec: f64,
+    pub usage_buckets: Vec<ContextUsageBucket>,
+}
+
+impl ContextSnapshot {
+    pub fn primary_usage(&self) -> Option<&ContextUsageBucket> {
+        self.usage_buckets.iter().find(|bucket| {
+            bucket.is_primary()
+                && bucket.model == self.model
+                && (self.provider.is_empty() || bucket.provider == self.provider)
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1421,6 +1454,7 @@ impl Session {
         tokens_per_sec: Option<f64>,
     ) {
         self.record_llm_usage(
+            None,
             model,
             tokens_in,
             tokens_out,
@@ -1460,6 +1494,35 @@ impl Session {
             .expect("context usage lock poisoned")
             .insert(key, record);
 
+        let total_input = usage.prompt_input();
+        self.watch.context.send_modify(|snap| {
+            let bucket_idx = snap
+                .usage_buckets
+                .iter()
+                .position(|bucket| {
+                    bucket.provider == provider
+                        && bucket.model == model
+                        && bucket.call_purpose == call_purpose
+                        && bucket.call_scope == call_identity.scope
+                })
+                .unwrap_or_else(|| {
+                    snap.usage_buckets.push(ContextUsageBucket {
+                        provider: provider.to_string(),
+                        model: model.to_string(),
+                        call_purpose,
+                        call_scope: call_identity.scope,
+                        ..Default::default()
+                    });
+                    snap.usage_buckets.len() - 1
+                });
+            let bucket = &mut snap.usage_buckets[bucket_idx];
+            bucket.calls = bucket.calls.saturating_add(1);
+            bucket.tokens_in = bucket.tokens_in.saturating_add(total_input);
+            bucket.tokens_out = bucket.tokens_out.saturating_add(usage.output);
+            bucket.cache_read = bucket.cache_read.saturating_add(usage.cached_input);
+            bucket.cache_write = bucket.cache_write.saturating_add(usage.cache_write);
+        });
+
         let updates_model_window = matches!(
             (call_identity.scope, call_purpose),
             (
@@ -1468,8 +1531,9 @@ impl Session {
             )
         );
         self.record_llm_usage(
+            Some(provider),
             model,
-            usage.input.saturating_add(usage.cached_input),
+            total_input,
             usage.output,
             usage.cached_input,
             usage.cache_write,
@@ -1520,6 +1584,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn record_llm_usage(
         &self,
+        provider: Option<&str>,
         model: &str,
         tokens_in: u64,
         tokens_out: u64,
@@ -1541,6 +1606,9 @@ impl Session {
             snap.cache_write = snap.cache_write.saturating_add(cache_write);
             if updates_model_window {
                 snap.model = model.to_string();
+                if let Some(provider) = provider {
+                    snap.provider = provider.to_string();
+                }
                 snap.last_ttft_ms = ttft_ms.unwrap_or(0);
                 snap.last_tokens_per_sec = tokens_per_sec.unwrap_or(0.0);
             }
@@ -1611,6 +1679,9 @@ impl Session {
         let model = model.into();
         let budget = crate::model_registry::model_info(&model).context_budget;
         self.watch.context.send_modify(|snap| {
+            if snap.model != model {
+                snap.provider.clear();
+            }
             snap.model = model.clone();
             if budget > 0 {
                 snap.window_budget = budget;
@@ -3272,8 +3343,11 @@ mod tests {
         write_events(dir.path(), &events);
         let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
         assert_eq!(snap.model, "anthropic/claude-4");
+        assert_eq!(snap.provider, "anthropic");
         assert_eq!(snap.tokens_in, 310);
         assert_eq!(snap.tokens_out, 130);
+        assert_eq!(snap.cache_read, 10);
+        assert_eq!(snap.primary_usage().unwrap().tokens_in, 310);
     }
 
     #[test]
@@ -3288,6 +3362,27 @@ mod tests {
         assert_eq!(snap.model, "zhipuai/glm-5.2");
         assert_eq!(snap.tokens_in, 100);
         assert_eq!(snap.tokens_out, 50);
+        assert_eq!(snap.usage_buckets.len(), 1);
+    }
+
+    #[test]
+    fn replay_context_snapshot_separates_explicit_helper_usage() {
+        let dir = TempDir::new().unwrap();
+        let events = [
+            r#"{"type":"llm_call","seq":1,"model":"primary-model","provider":"primary-provider","context_call_purpose":"general","context_call_identity":{"scope":"root","session_id":"session"},"usage":{"input":20,"cached_input":80,"output":10,"cache_write":50},"wallclock_ms":1000,"ttft_ms":120,"tokens_per_second":20.0,"status":{"kind":"ok"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:00Z"}"#,
+            r#"{"type":"llm_call","seq":2,"model":"helper-model","provider":"helper-provider","context_call_purpose":"extraction","context_call_identity":{"scope":"detached"},"usage":{"input":1000,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":null,"ts":"2026-07-08T00:00:01Z"}"#,
+        ];
+        write_events(dir.path(), &events);
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+
+        assert_eq!(snap.model, "primary-model");
+        assert_eq!(snap.provider, "primary-provider");
+        assert_eq!(snap.tokens_in, 1_150);
+        assert_eq!(snap.usage_buckets.len(), 2);
+        let primary = snap.primary_usage().unwrap();
+        assert_eq!(primary.tokens_in, 150);
+        assert_eq!(primary.cache_read, 80);
+        assert_eq!(snap.last_ttft_ms, 120);
     }
 
     #[test]
