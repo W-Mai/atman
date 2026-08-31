@@ -95,22 +95,53 @@ impl WindowComponent for FlowPanelContent {
         }) && let Some(OutputItem::WorkflowPanel {
             graph,
             expanded_nodes,
+            ended_at,
             ..
         }) = ctx.items.get(panel_idx)
         {
-            let render_width = area.width.max(300);
-            let (lines, regions) = crate::output::render_workflow_panel_with_regions(
-                graph,
-                expanded_nodes,
-                true,
-                false,
-                ctx.animation_frame,
-                render_width,
-                crate::output::MAX_COLLAPSED_BODY_ROWS,
-            );
-            let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+            let cache_hit = self.render_cache.as_ref().is_some_and(|cache| {
+                cache.items_version == ctx.items_version
+                    && cache.expanded_version == ctx.expanded_version
+                    && cache.width == area.width
+                    && cache.messages_len == 0
+                    && cache.workflow_expanded
+                    && cache.expanded_tools_len == 0
+            });
+            if !cache_hit {
+                let render_width = area.width.max(300);
+                let render_frame = if ended_at.is_none() {
+                    crate::output::LAYOUT_ANIMATION_FRAME
+                } else {
+                    ctx.animation_frame
+                };
+                let (lines, regions) = crate::output::render_workflow_panel_with_regions(
+                    graph,
+                    expanded_nodes,
+                    true,
+                    false,
+                    render_frame,
+                    render_width,
+                    crate::output::MAX_COLLAPSED_BODY_ROWS,
+                );
+                let dynamic_paint = crate::output::workflow_dynamic_paint(graph, true, &lines, 0);
+                self.render_cache = Some(PanelRenderCache {
+                    items_version: ctx.items_version,
+                    expanded_version: ctx.expanded_version,
+                    width: area.width,
+                    messages_len: 0,
+                    workflow_expanded: true,
+                    expanded_tools_len: 0,
+                    lines,
+                    dynamic_paint,
+                    regions,
+                    tool_headers: Vec::new(),
+                    wf_offset: 0,
+                });
+            }
+            let cache = self.render_cache.as_ref().unwrap();
+            let max_scroll = (cache.lines.len() as u16).saturating_sub(area.height);
             self.scroll = self.scroll.min(max_scroll);
-            for r in &regions {
+            for r in &cache.regions {
                 let row0 = area.y as u32 + r.start_row.saturating_sub(self.scroll as u32);
                 let row1 = area.y as u32 + r.end_row.saturating_sub(self.scroll as u32);
                 let col0 = area.x + r.col_start;
@@ -127,20 +158,18 @@ impl WindowComponent for FlowPanelContent {
                     });
                 }
             }
-            self.render_cache = Some(PanelRenderCache {
-                items_version: ctx.items_version,
-                expanded_version: ctx.expanded_version,
-                width: area.width,
-                animation_frame: None,
-                messages_len: 0,
-                workflow_expanded: true,
-                expanded_tools_len: 0,
-                lines: lines.clone(),
-                regions: regions.clone(),
-                tool_headers: Vec::new(),
-                wf_offset: 0,
-            });
-            frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), area);
+            let start = self.scroll as usize;
+            let end = start
+                .saturating_add(area.height as usize)
+                .min(cache.lines.len());
+            let mut lines = cache.lines[start.min(end)..end].to_vec();
+            crate::output::patch_animation_lines(
+                &mut lines,
+                &cache.dynamic_paint,
+                ctx.animation_frame,
+                start,
+            );
+            frame.render_widget(Paragraph::new(lines), area);
         } else if let Some(snap) = ctx
             .snapshots
             .iter()
@@ -209,13 +238,10 @@ pub(crate) fn render_sub_agent_panel(
     expanded_version: u64,
     render_cache: &mut Option<PanelRenderCache>,
 ) {
-    let cache_af = if done { None } else { Some(animation_frame) };
-
     if render_cache.as_ref().is_some_and(|cache| {
         cache.items_version == items_version
             && cache.expanded_version == expanded_version
             && cache.width == area.width
-            && cache.animation_frame == cache_af
             && cache.messages_len == messages.len()
             && cache.workflow_expanded == workflow_expanded
             && cache.expanded_tools_len == expanded_tools.len()
@@ -256,10 +282,18 @@ pub(crate) fn render_sub_agent_panel(
                 },
             });
         }
-        f.render_widget(
-            Paragraph::new(cache.lines.clone()).scroll((*scroll, 0)),
-            area,
+        let start = *scroll as usize;
+        let end = start
+            .saturating_add(area.height as usize)
+            .min(cache.lines.len());
+        let mut lines = cache.lines[start.min(end)..end].to_vec();
+        crate::output::patch_animation_lines(
+            &mut lines,
+            &cache.dynamic_paint,
+            animation_frame,
+            start,
         );
+        f.render_widget(Paragraph::new(lines), area);
         return;
     }
 
@@ -304,12 +338,17 @@ pub(crate) fn render_sub_agent_panel(
 
     // Section 2: Workflow graph — reuse the same renderer as the main transcript
     let wf_offset = lines.len() as u32;
+    let render_frame = if done {
+        animation_frame
+    } else {
+        crate::output::LAYOUT_ANIMATION_FRAME
+    };
     let (wf_lines, regions) = crate::output::render_workflow_panel_with_regions(
         workflow_graph,
         expanded_nodes,
         workflow_expanded,
         status == "killed",
-        animation_frame,
+        render_frame,
         area.width.max(300),
         crate::output::MAX_COLLAPSED_BODY_ROWS,
     );
@@ -351,13 +390,23 @@ pub(crate) fn render_sub_agent_panel(
     let render_ctx = crate::output::RenderCtx {
         expanded_tools,
         messages,
-        animation_frame,
+        animation_frame: render_frame,
         panel_width: area.width,
         hovered_thinking_idx: None,
     };
     let (doc_lines, tool_headers) =
         crate::output::build_lines_with_tool_headers(&items, &render_ctx);
     lines.extend(doc_lines);
+    let dynamic_paint = if done {
+        Default::default()
+    } else {
+        crate::output::workflow_dynamic_paint(
+            workflow_graph,
+            workflow_expanded,
+            &lines,
+            wf_offset as usize,
+        )
+    };
 
     let max_scroll = (lines.len() as u16).saturating_sub(area.height);
     *scroll = (*scroll).min(max_scroll);
@@ -398,21 +447,30 @@ pub(crate) fn render_sub_agent_panel(
         });
     }
 
+    let start = *scroll as usize;
+    let end = start.saturating_add(area.height as usize).min(lines.len());
+    let mut visible_lines = lines[start.min(end)..end].to_vec();
+    crate::output::patch_animation_lines(
+        &mut visible_lines,
+        &dynamic_paint,
+        animation_frame,
+        start,
+    );
     *render_cache = Some(PanelRenderCache {
         items_version,
         expanded_version,
         width: area.width,
-        animation_frame: cache_af,
         messages_len: messages.len(),
         workflow_expanded,
         expanded_tools_len: expanded_tools.len(),
-        lines: lines.clone(),
-        regions: regions.clone(),
+        lines,
+        dynamic_paint,
+        regions,
         tool_headers,
         wf_offset,
     });
 
-    f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
+    f.render_widget(Paragraph::new(visible_lines), area);
 }
 
 fn subagent_status_label(status: &str, done: bool) -> String {
@@ -430,12 +488,131 @@ fn subagent_status_label(status: &str, done: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::subagent_status_label;
+    use std::collections::HashSet;
+
+    use atman_runtime::workflow::{
+        NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
+    };
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::{render_sub_agent_panel, subagent_status_label};
 
     #[test]
     fn subagent_status_uses_task_style_labels() {
         assert_eq!(subagent_status_label("ok", true), "completed");
         assert_eq!(subagent_status_label("err", true), "failed");
         assert_eq!(subagent_status_label("killed", true), "stopped");
+    }
+
+    #[test]
+    fn animation_ticks_reuse_subagent_panel_projection() {
+        let run_id = atman_runtime::event::FlowRunId::now();
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![WorkflowNode {
+                id: run_id.to_string(),
+                kind: WorkflowNodeKind::Flow {
+                    run_id: run_id.to_string(),
+                    flow_name: "child".into(),
+                },
+                label: "child".into(),
+                status: NodeStatus::Running,
+                started_at: Some(chrono::Utc::now()),
+                ended_at: None,
+                output_preview: None,
+                children: Vec::new(),
+                parallelism: Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let expanded = HashSet::new();
+        let mut scroll = 0;
+        let mut hitmap = Vec::new();
+        let mut cache = None;
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_sub_agent_panel(
+                    frame,
+                    frame.area(),
+                    "child",
+                    "inspect",
+                    "model",
+                    "running",
+                    "",
+                    1,
+                    false,
+                    &[],
+                    &graph,
+                    &expanded,
+                    true,
+                    &expanded,
+                    &mut scroll,
+                    0,
+                    &mut hitmap,
+                    0,
+                    1,
+                    1,
+                    &mut cache,
+                );
+            })
+            .unwrap();
+        let first_screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let cached_lines = cache.as_ref().unwrap().lines.as_ptr();
+        assert!(cache.as_ref().unwrap().lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains('\u{e000}'))
+        }));
+
+        hitmap.clear();
+        terminal
+            .draw(|frame| {
+                render_sub_agent_panel(
+                    frame,
+                    frame.area(),
+                    "child",
+                    "inspect",
+                    "model",
+                    "running",
+                    "",
+                    1,
+                    false,
+                    &[],
+                    &graph,
+                    &expanded,
+                    true,
+                    &expanded,
+                    &mut scroll,
+                    1,
+                    &mut hitmap,
+                    0,
+                    1,
+                    1,
+                    &mut cache,
+                );
+            })
+            .unwrap();
+        let second_screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(cache.as_ref().unwrap().lines.as_ptr(), cached_lines);
+        assert_ne!(first_screen, second_screen);
+        assert!(!second_screen.contains('\u{e000}'));
     }
 }

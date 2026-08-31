@@ -75,14 +75,12 @@ pub struct PanelRenderCache {
     pub(crate) items_version: u64,
     pub(crate) expanded_version: u64,
     pub(crate) width: u16,
-    /// None when the panel is done/idle → cache survives across frames.
-    /// Some(frame) when running → invalidated every animation tick.
-    pub(crate) animation_frame: Option<u32>,
     pub(crate) messages_len: usize,
     pub(crate) workflow_expanded: bool,
     pub(crate) expanded_tools_len: usize,
 
     pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) dynamic_paint: crate::output::DynamicPaint,
     pub(crate) regions: Vec<crate::output::NodeRegion>,
     pub(crate) tool_headers: Vec<crate::output::ToolHeaderSpot>,
     pub(crate) wf_offset: u32,

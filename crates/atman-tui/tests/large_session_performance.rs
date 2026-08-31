@@ -39,7 +39,6 @@ fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
     let cold_key = LayoutKey {
         width: 120,
         theme: atman_tui::theme::current_mode(),
-        animation_frame: Some(0),
     };
     let request = LayoutRequest {
         scroll_offset: 0,
@@ -48,22 +47,18 @@ fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
     };
     let started = Instant::now();
     let metrics = cache.update_dirty(cold_key, &items, &ctx, request);
-    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
     let cold = started.elapsed();
 
     let started = Instant::now();
     let metrics = cache.update_dirty(cold_key, &items, &ctx, request);
-    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
     let warm = started.elapsed();
 
     ctx.animation_frame = 1;
-    let animated_key = LayoutKey {
-        animation_frame: Some(1),
-        ..cold_key
-    };
     let started = Instant::now();
-    let metrics = cache.update_dirty(animated_key, &items, &ctx, request);
-    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+    let metrics = cache.update_dirty(cold_key, &items, &ctx, request);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 1);
     let animated = started.elapsed();
     LayoutBaseline {
         cold,

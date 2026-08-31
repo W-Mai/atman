@@ -314,7 +314,6 @@ fn layout_cache_still_composes_valid_regions() {
     let key = LayoutKey {
         width: 200,
         theme: atman_tui::theme::current_mode(),
-        animation_frame: None,
     };
     let items = OutputStore::from(vec![item]);
     let metrics = cache.update_dirty(
@@ -327,7 +326,7 @@ fn layout_cache_still_composes_valid_regions() {
             follow_tail_rows: None,
         },
     );
-    let (_lines, ranges, _regions) = cache.visible_slice(0, 50);
+    let (_lines, ranges, _regions) = cache.visible_slice(0, 50, 0);
     assert_eq!(ranges.len(), 1);
     assert!(metrics.total_rows > 0);
     // regions collection TBD with virtual scroll

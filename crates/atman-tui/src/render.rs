@@ -307,15 +307,9 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             panel_width: transcript_area.width,
             hovered_thinking_idx: app.hovered_thinking_idx,
         };
-        let animation_key = if app.has_active_animation() {
-            Some(app.animation_frame)
-        } else {
-            None
-        };
         let cache_key = output::LayoutKey {
             width: transcript_area.width,
             theme: crate::theme::current_mode(),
-            animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
         let follow_tail_rows = app.follow_tail.then(|| {
@@ -334,8 +328,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 follow_tail_rows,
             },
         );
-        let (lines, ranges, node_regions) =
-            cache.visible_slice(metrics.scroll_offset, effective_viewport);
+        let (lines, ranges, node_regions) = cache.visible_slice(
+            metrics.scroll_offset,
+            effective_viewport,
+            app.animation_frame,
+        );
         let total_rows = metrics.total_rows;
         app.last_item_ranges = ranges;
         app.last_node_regions = node_regions;

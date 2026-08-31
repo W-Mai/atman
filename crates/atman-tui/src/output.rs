@@ -15,6 +15,7 @@ const RESET: Style = Style::new();
 struct PerfCounters {
     semantic_item_visits: u64,
     item_renders: u64,
+    animation_item_visits: u64,
     permission_table_entries: u64,
     panel_projection_builds: u64,
 }
@@ -25,6 +26,7 @@ thread_local! {
         std::cell::Cell::new(PerfCounters {
             semantic_item_visits: 0,
             item_renders: 0,
+            animation_item_visits: 0,
             permission_table_entries: 0,
             panel_projection_builds: 0,
         })
@@ -73,9 +75,78 @@ impl<'a> RenderCtx<'a> {
 }
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const DYNAMIC_SPINNER_MARKER: &str = "\u{e000}";
+pub(crate) const LAYOUT_ANIMATION_FRAME: u32 = u32::MAX;
 
 fn spinner_char(frame: u32) -> &'static str {
-    SPINNER[(frame as usize) % SPINNER.len()]
+    if frame == LAYOUT_ANIMATION_FRAME {
+        DYNAMIC_SPINNER_MARKER
+    } else {
+        SPINNER[(frame as usize) % SPINNER.len()]
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DynamicPaint {
+    active: bool,
+    elapsed: Option<ElapsedPaint>,
+}
+
+#[derive(Clone, Debug)]
+struct ElapsedPaint {
+    line: usize,
+    span: usize,
+    prefix: String,
+    suffix: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub(crate) fn patch_animation_lines(
+    lines: &mut [Line<'static>],
+    paint: &DynamicPaint,
+    animation_frame: u32,
+    line_offset: usize,
+) {
+    if !paint.active {
+        return;
+    }
+    for (line_index, line) in lines.iter_mut().enumerate() {
+        patch_animation_line(
+            line,
+            line_offset.saturating_add(line_index),
+            paint,
+            animation_frame,
+        );
+    }
+}
+
+fn patch_animation_line(
+    line: &mut Line<'static>,
+    line_index: usize,
+    paint: &DynamicPaint,
+    animation_frame: u32,
+) {
+    let spinner = spinner_char(animation_frame);
+    for span in &mut line.spans {
+        if span.content.contains(DYNAMIC_SPINNER_MARKER) {
+            span.content =
+                std::borrow::Cow::Owned(span.content.replace(DYNAMIC_SPINNER_MARKER, spinner));
+        }
+    }
+    if let Some(elapsed) = &paint.elapsed
+        && elapsed.line == line_index
+        && let Some(span) = line.spans.get_mut(elapsed.span)
+    {
+        let seconds = (chrono::Utc::now() - elapsed.started_at)
+            .num_seconds()
+            .max(0);
+        span.content = std::borrow::Cow::Owned(format!(
+            "{}{}{}",
+            elapsed.prefix,
+            atman_runtime::humanize::format_secs(seconds),
+            elapsed.suffix
+        ));
+    }
 }
 
 pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
@@ -483,7 +554,6 @@ pub fn render_item_with_regions(
 pub struct LayoutKey {
     pub width: u16,
     pub theme: crate::theme::ThemeMode,
-    pub animation_frame: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,6 +589,7 @@ struct ItemCacheEntry {
     rows: u32,
     lines: Option<Arc<[Line<'static>]>>,
     regions: Arc<[NodeRegion]>,
+    dynamic: DynamicPaint,
     last_used: u64,
 }
 
@@ -567,10 +638,6 @@ impl LayoutCache {
         let full_invalidation = self
             .key
             .is_none_or(|previous| previous.width != key.width || previous.theme != key.theme);
-        let animation_changed = self
-            .key
-            .is_some_and(|previous| previous.animation_frame != key.animation_frame);
-
         if full_invalidation {
             self.entries.clear();
             self.row_ends.clear();
@@ -620,14 +687,6 @@ impl LayoutCache {
                 if cached.layout != revision.layout {
                     self.pending_layout.insert(idx);
                 } else if cached.paint != revision.paint {
-                    self.pending_paint.insert(idx);
-                }
-            }
-        }
-
-        if animation_changed {
-            for (idx, item) in items.iter().enumerate() {
-                if item_has_active_animation(item) {
                     self.pending_paint.insert(idx);
                 }
             }
@@ -699,6 +758,7 @@ impl LayoutCache {
         &self,
         scroll_offset: u32,
         viewport_rows: u32,
+        animation_frame: u32,
     ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>) {
         let (start_idx, end_idx) = self.item_window(scroll_offset, viewport_rows);
         let vis_bottom = scroll_offset.saturating_add(viewport_rows);
@@ -717,7 +777,23 @@ impl LayoutCache {
             let take = end.min(vis_bottom).saturating_sub(start.max(scroll_offset)) as usize;
             let lo = skip.min(item_lines.len());
             let hi = skip.saturating_add(take).min(item_lines.len());
-            lines.extend(item_lines[lo..hi].iter().cloned());
+            if entry.dynamic.active {
+                #[cfg(test)]
+                update_perf_counters(|counters| {
+                    counters.animation_item_visits =
+                        counters.animation_item_visits.saturating_add(1);
+                });
+            }
+            for (line_index, item_line) in item_lines[lo..hi].iter().enumerate() {
+                let mut line = item_line.clone();
+                patch_animation_line(
+                    &mut line,
+                    lo.saturating_add(line_index),
+                    &entry.dynamic,
+                    animation_frame,
+                );
+                lines.push(line);
+            }
             ranges.push(ItemRange {
                 item_index: idx,
                 start_row: start,
@@ -747,13 +823,18 @@ impl LayoutCache {
         let item_ctx = RenderCtx {
             expanded_tools: ctx.expanded_tools,
             messages: ctx.messages,
-            animation_frame: ctx.animation_frame,
+            animation_frame: if item.has_dynamic_paint() {
+                LAYOUT_ANIMATION_FRAME
+            } else {
+                ctx.animation_frame
+            },
             panel_width: ctx.panel_width,
             hovered_thinking_idx: (hovered && matches!(item, OutputItem::Thinking { .. }))
                 .then_some(idx),
         };
         let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
         let rows = lines.len().min(u32::MAX as usize) as u32;
+        let dynamic = dynamic_paint_for_item(item, &lines);
         self.access_clock = self.access_clock.wrapping_add(1);
         self.entries[idx] = ItemCacheEntry {
             revision,
@@ -764,6 +845,7 @@ impl LayoutCache {
             } else {
                 Arc::from([])
             },
+            dynamic,
             last_used: self.access_clock,
         };
     }
@@ -834,20 +916,6 @@ impl LayoutCache {
             .iter()
             .filter(|entry| entry.lines.is_some())
             .count()
-    }
-}
-
-fn item_has_active_animation(item: &OutputItem) -> bool {
-    match item {
-        OutputItem::Thinking { done, .. }
-        | OutputItem::Terminal { done, .. }
-        | OutputItem::Bash { done, .. }
-        | OutputItem::SubAgentActivity { done, .. } => !done,
-        OutputItem::WorkflowPanel { ended_at, .. } => ended_at.is_none(),
-        OutputItem::CompactionSummary { phase, .. } => {
-            matches!(phase, CompactionPhase::Running)
-        }
-        _ => false,
     }
 }
 
@@ -2857,6 +2925,67 @@ fn compute_elapsed_secs(nodes: &[atman_runtime::workflow::WorkflowNode], running
         max.unwrap_or(start)
     };
     (end - start).num_seconds().max(0)
+}
+
+fn dynamic_paint_for_item(item: &OutputItem, lines: &[Line<'static>]) -> DynamicPaint {
+    if !item.has_dynamic_paint() {
+        return DynamicPaint::default();
+    }
+    match item {
+        OutputItem::WorkflowPanel {
+            graph,
+            panel_expanded,
+            ..
+        } => workflow_dynamic_paint(graph, *panel_expanded, lines, 0),
+        _ => DynamicPaint {
+            active: true,
+            elapsed: None,
+        },
+    }
+}
+
+pub(crate) fn workflow_dynamic_paint(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+    expanded: bool,
+    lines: &[Line<'static>],
+    line_offset: usize,
+) -> DynamicPaint {
+    let has_spinner = lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.contains(DYNAMIC_SPINNER_MARKER))
+    });
+    if !has_spinner {
+        return DynamicPaint::default();
+    }
+    let elapsed = expanded
+        .then(|| {
+            let started_at = graph.root.iter().filter_map(|node| node.started_at).min()?;
+            let line = lines.get(line_offset)?;
+            let (span, span_value) = line
+                .spans
+                .iter()
+                .enumerate()
+                .find(|(_, span)| span.content.contains(" nodes · "))?;
+            let content = span_value.content.as_ref();
+            let marker = " nodes · ";
+            let duration_start = content.find(marker)?.saturating_add(marker.len());
+            let duration_end = content[duration_start..]
+                .rfind(" · ")?
+                .saturating_add(duration_start);
+            Some(ElapsedPaint {
+                line: line_offset,
+                span,
+                prefix: content[..duration_start].to_string(),
+                suffix: content[duration_end..].to_string(),
+                started_at,
+            })
+        })
+        .flatten();
+    DynamicPaint {
+        active: true,
+        elapsed,
+    }
 }
 
 fn count_workflow_nodes(nodes: &[atman_runtime::workflow::WorkflowNode]) -> usize {
@@ -5007,7 +5136,6 @@ mod tests {
         let key = LayoutKey {
             width: 120,
             theme: crate::theme::current_mode(),
-            animation_frame: Some(0),
         };
         let mut cache = LayoutCache::default();
         let request = LayoutRequest {
@@ -5017,13 +5145,114 @@ mod tests {
         };
         let metrics = cache.update_dirty(key, &items, &ctx, request);
         reset_perf_counters();
-        let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
-        let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+        let first = cache
+            .visible_slice(metrics.scroll_offset, request.viewport_rows, 0)
+            .0;
+        let mut last = Vec::new();
+        for frame in 1..100 {
+            last = cache
+                .visible_slice(metrics.scroll_offset, request.viewport_rows, frame)
+                .0;
+        }
         let counters = perf_counters();
         assert_eq!(counters.semantic_item_visits, 0);
         assert_eq!(counters.item_renders, 0);
         assert_eq!(counters.panel_projection_builds, 0);
         assert_eq!(counters.permission_table_entries, 0);
+        assert_eq!(counters.animation_item_visits, 100);
+        assert_ne!(
+            first.iter().map(plain_line).collect::<Vec<_>>(),
+            last.iter().map(plain_line).collect::<Vec<_>>()
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|line| plain_line(line).contains(DYNAMIC_SPINNER_MARKER))
+        );
+        assert!(
+            !last
+                .iter()
+                .any(|line| plain_line(line).contains(DYNAMIC_SPINNER_MARKER))
+        );
+    }
+
+    #[test]
+    fn offscreen_animation_ticks_do_not_visit_or_render_the_entry() {
+        let mut values = (0..10_000)
+            .map(|idx| OutputItem::SystemNote {
+                text: format!("note-{idx}"),
+                level: NoteLevel::Info,
+            })
+            .collect::<Vec<_>>();
+        values.push(OutputItem::Thinking {
+            text: "offscreen".into(),
+            done: false,
+            expanded: false,
+            retried: false,
+        });
+        let items = OutputStore::from(values);
+        let mut cache = LayoutCache::default();
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 20,
+            follow_tail_rows: None,
+        };
+        cache.update_dirty(
+            LayoutKey {
+                width: 80,
+                theme: crate::theme::current_mode(),
+            },
+            &items,
+            &RenderCtx::empty(),
+            request,
+        );
+
+        reset_perf_counters();
+        for frame in 0..100 {
+            let _ = cache.visible_slice(0, request.viewport_rows, frame);
+        }
+        let counters = perf_counters();
+        assert_eq!(counters.semantic_item_visits, 0);
+        assert_eq!(counters.item_renders, 0);
+        assert_eq!(counters.animation_item_visits, 0);
+        assert_eq!(counters.permission_table_entries, 0);
+    }
+
+    #[test]
+    fn visible_animation_patch_refreshes_workflow_elapsed_time() {
+        let mut item = workflow_with_permissions(0);
+        let OutputItem::WorkflowPanel {
+            graph,
+            panel_expanded,
+            ..
+        } = &mut item
+        else {
+            unreachable!();
+        };
+        *panel_expanded = true;
+        graph.root[0].started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(65));
+        let items = OutputStore::from(vec![item]);
+        let mut cache = LayoutCache::default();
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 20,
+            follow_tail_rows: None,
+        };
+        let metrics = cache.update_dirty(
+            LayoutKey {
+                width: 120,
+                theme: crate::theme::current_mode(),
+            },
+            &items,
+            &RenderCtx::empty(),
+            request,
+        );
+        let lines = cache
+            .visible_slice(metrics.scroll_offset, request.viewport_rows, 0)
+            .0;
+        let text = lines.iter().map(plain_line).collect::<String>();
+        assert!(text.contains("1m"));
+        assert!(!text.contains(DYNAMIC_SPINNER_MARKER));
     }
 
     #[test]
@@ -5078,20 +5307,12 @@ mod tests {
         let key = LayoutKey {
             width: 120,
             theme: crate::theme::current_mode(),
-            animation_frame: Some(0),
         };
         cache.update_dirty(key, &items, &ctx, request);
         reset_perf_counters();
         ctx.animation_frame = 1;
-        cache.update_dirty(
-            LayoutKey {
-                animation_frame: Some(1),
-                ..key
-            },
-            &items,
-            &ctx,
-            request,
-        );
+        cache.update_dirty(key, &items, &ctx, request);
+        let _ = cache.visible_slice(0, request.viewport_rows, ctx.animation_frame);
         assert_eq!(perf_counters().item_renders, 0);
     }
 
@@ -5111,7 +5332,6 @@ mod tests {
         let key = LayoutKey {
             width: 80,
             theme: crate::theme::current_mode(),
-            animation_frame: None,
         };
         let request = LayoutRequest {
             scroll_offset: 0,
@@ -5122,7 +5342,7 @@ mod tests {
         cache.update_dirty(key, &items, &ctx, request);
         reset_perf_counters();
         cache.update_dirty(key, &items, &ctx, request);
-        let _ = cache.visible_slice(0, 20);
+        let _ = cache.visible_slice(0, 20, 0);
         assert_eq!(perf_counters().item_renders, 0);
     }
 
@@ -5139,7 +5359,6 @@ mod tests {
         let key = LayoutKey {
             width: 80,
             theme: crate::theme::current_mode(),
-            animation_frame: None,
         };
         let request = LayoutRequest {
             scroll_offset: 0,
@@ -5182,7 +5401,6 @@ mod tests {
         let key = LayoutKey {
             width: 80,
             theme: crate::theme::current_mode(),
-            animation_frame: None,
         };
         let request = LayoutRequest {
             scroll_offset: 0,
@@ -5202,7 +5420,7 @@ mod tests {
 
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
-        let (lines, _, _) = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+        let (lines, _, _) = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
         let text = lines
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -5226,7 +5444,6 @@ mod tests {
             LayoutKey {
                 width: 80,
                 theme: crate::theme::current_mode(),
-                animation_frame: None,
             },
             &items,
             &RenderCtx::empty(),
@@ -5259,28 +5476,10 @@ mod tests {
         };
         let theme = crate::theme::current_mode();
         let mut cache = LayoutCache::default();
-        cache.update_dirty(
-            LayoutKey {
-                width: 80,
-                theme,
-                animation_frame: None,
-            },
-            &items,
-            &ctx,
-            request,
-        );
+        cache.update_dirty(LayoutKey { width: 80, theme }, &items, &ctx, request);
 
         reset_perf_counters();
-        cache.update_dirty(
-            LayoutKey {
-                width: 79,
-                theme,
-                animation_frame: None,
-            },
-            &items,
-            &ctx,
-            request,
-        );
+        cache.update_dirty(LayoutKey { width: 79, theme }, &items, &ctx, request);
         assert_eq!(perf_counters().item_renders, 2);
 
         reset_perf_counters();
@@ -5291,7 +5490,6 @@ mod tests {
                     crate::theme::ThemeMode::Dark => crate::theme::ThemeMode::Light,
                     crate::theme::ThemeMode::Light => crate::theme::ThemeMode::Dark,
                 },
-                animation_frame: None,
             },
             &items,
             &ctx,

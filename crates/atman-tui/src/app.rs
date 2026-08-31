@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use atman_runtime::message::Message;
@@ -114,6 +114,20 @@ impl OutputItem {
             _ => None,
         }
     }
+
+    pub(crate) fn has_dynamic_paint(&self) -> bool {
+        match self {
+            Self::Thinking { done, .. }
+            | Self::Terminal { done, .. }
+            | Self::Bash { done, .. }
+            | Self::SubAgentActivity { done, .. } => !done,
+            Self::WorkflowPanel { ended_at, .. } => ended_at.is_none(),
+            Self::CompactionSummary { phase, .. } => {
+                matches!(phase, CompactionPhase::Running)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -136,6 +150,7 @@ enum OutputMutation {
 pub struct OutputStore {
     values: Vec<OutputItem>,
     revisions: Vec<OutputRevision>,
+    animated_ids: BTreeSet<u64>,
     next_id: u64,
     revision_clock: u64,
     structure_revision: u64,
@@ -161,10 +176,14 @@ impl OutputStore {
     fn replace(&mut self, values: Vec<OutputItem>) {
         self.values = values;
         self.revisions.clear();
+        self.animated_ids.clear();
         self.revisions.reserve(self.values.len());
-        for _ in 0..self.values.len() {
+        for value in &self.values {
             self.next_id = self.next_id.wrapping_add(1);
             self.revision_clock = self.revision_clock.wrapping_add(1);
+            if value.has_dynamic_paint() {
+                self.animated_ids.insert(self.next_id);
+            }
             self.revisions.push(OutputRevision {
                 id: self.next_id,
                 semantic: self.revision_clock,
@@ -185,6 +204,13 @@ impl OutputStore {
             layout: self.revision_clock,
             ..OutputRevision::default()
         });
+        if self
+            .values
+            .last()
+            .is_some_and(OutputItem::has_dynamic_paint)
+        {
+            self.animated_ids.insert(self.next_id);
+        }
         self.structure_revision = self.structure_revision.wrapping_add(1);
     }
 
@@ -192,7 +218,8 @@ impl OutputStore {
         if index >= self.values.len() {
             return None;
         }
-        self.revisions.remove(index);
+        let revision = self.revisions.remove(index);
+        self.animated_ids.remove(&revision.id);
         self.structure_revision = self.structure_revision.wrapping_add(1);
         Some(self.values.remove(index))
     }
@@ -206,11 +233,20 @@ impl OutputStore {
         let Some(value) = self.values.get_mut(index) else {
             return false;
         };
+        let was_animated = value.has_dynamic_paint();
         if !mutation(value) {
             return false;
         }
+        let is_animated = value.has_dynamic_paint();
         self.revision_clock = self.revision_clock.wrapping_add(1);
         let revision = &mut self.revisions[index];
+        if is_animated != was_animated {
+            if is_animated {
+                self.animated_ids.insert(revision.id);
+            } else {
+                self.animated_ids.remove(&revision.id);
+            }
+        }
         match impact {
             OutputMutation::Semantic => {
                 revision.semantic = self.revision_clock;
@@ -242,6 +278,15 @@ impl OutputStore {
 
     pub(crate) fn revision_clock(&self) -> u64 {
         self.revision_clock
+    }
+
+    fn has_active_animation(&self) -> bool {
+        !self.animated_ids.is_empty()
+    }
+
+    #[cfg(test)]
+    fn animated_ids(&self) -> &BTreeSet<u64> {
+        &self.animated_ids
     }
 }
 
@@ -1086,19 +1131,7 @@ impl AppState {
     }
 
     pub fn has_active_animation(&self) -> bool {
-        self.has_running_workflow()
-            || self.items.iter().any(|item| {
-                matches!(
-                    item,
-                    OutputItem::Terminal { done: false, .. }
-                        | OutputItem::Bash { done: false, .. }
-                        | OutputItem::SubAgentActivity { done: false, .. }
-                        | OutputItem::CompactionSummary {
-                            phase: CompactionPhase::Running,
-                            ..
-                        }
-                )
-            })
+        self.items.has_active_animation()
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -3759,6 +3792,47 @@ mod tests {
     }
 
     #[test]
+    fn output_store_tracks_animated_ids_across_lifecycle_changes() {
+        let mut store = OutputStore::default();
+        store.push(OutputItem::Thinking {
+            text: "working".into(),
+            done: false,
+            expanded: false,
+            retried: false,
+        });
+        let thinking_id = store.revisions()[0].id;
+        assert_eq!(
+            store.animated_ids().iter().copied().collect::<Vec<_>>(),
+            [thinking_id]
+        );
+
+        assert!(store.mutate(0, OutputMutation::Semantic, |item| {
+            let OutputItem::Thinking { done, .. } = item else {
+                return false;
+            };
+            *done = true;
+            true
+        }));
+        assert!(store.animated_ids().is_empty());
+
+        store.push(OutputItem::Bash {
+            handle: "bash-1".into(),
+            title: None,
+            command: None,
+            output: String::new(),
+            done: false,
+            expanded: false,
+        });
+        let bash_id = store.revisions()[1].id;
+        assert_eq!(
+            store.animated_ids().iter().copied().collect::<Vec<_>>(),
+            [bash_id]
+        );
+        store.remove(1);
+        assert!(store.animated_ids().is_empty());
+    }
+
+    #[test]
     fn task_hover_does_not_invalidate_output_structure() {
         let mut app = AppState::new("s".into(), None);
         app.push_note("stable", NoteLevel::Info);
@@ -4615,7 +4689,6 @@ mod terminal_e2e_tests {
         let cache_key = LayoutKey {
             width: 80,
             theme: crate::theme::current_mode(),
-            animation_frame: None,
         };
         let empty_set = std::collections::HashSet::new();
         let ctx = RenderCtx {
@@ -4636,7 +4709,8 @@ mod terminal_e2e_tests {
                 follow_tail_rows: None,
             },
         );
-        let (lines, _ranges, _regions) = cache.visible_slice(0, metrics.total_rows.min(50));
+        let (lines, _ranges, _regions) =
+            cache.visible_slice(0, metrics.total_rows.min(50), ctx.animation_frame);
         assert!(
             lines.len() > 2,
             "should render header + blank + screen rows"
