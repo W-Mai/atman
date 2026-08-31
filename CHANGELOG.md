@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Single-pass session replay** — session resume streams each persisted event once into message, context, ownership, sequence, and optional TUI transcript projections; TUI startup consumes the replay handoff plus in-memory startup events without reopening the event log.
 - **Incremental workflow summaries** — workflow panels consume indexed counts, status, elapsed time, LLM usage, and bounded recent leaves instead of cloning, sorting, and recursively scanning the full graph during live rendering.
 - **Incremental permission projection** — permission transitions update indexed per-tool winners, pending counts, and group progress without rescanning the complete permission table or workflow tree; out-of-order tools, canonical and legacy requests, repeated tool IDs across runs, and resumed graph state retain their existing semantics.
 - **Indexed workflow projection** — live and restored workflow updates use append-stable node and tool paths, preserve exact flow-scoped tool completion, ignore duplicate structural frames, and report precise projection changes without recursively searching the complete workflow tree.

@@ -1442,6 +1442,7 @@ fn split_quoted_args(input: &str) -> Vec<String> {
 
 struct PrebuiltSession {
     session: std::sync::Arc<atman_runtime::Session>,
+    initial_transcript: Vec<atman_runtime::TranscriptEntry>,
     executor: Executor,
     is_fresh: bool,
     root: PathBuf,
@@ -1477,17 +1478,32 @@ async fn prebuild_session(
     let is_fresh = resume_sid.is_none();
     let project_index = open_current_project_index()?;
     let global_trust = load_global_trust_config()?;
+    let mut initial_transcript = Vec::new();
     let session = std::sync::Arc::new(match resume_sid {
         Some(sid) => {
             let resolved_sid = resolve_session_prefix(&root, &sid)?;
-            Session::open_existing_with_context_and_trust(
-                &root,
-                &resolved_sid,
-                redactor.clone(),
-                project_index.clone(),
-                global_trust.clone(),
-            )
-            .with_context(|| format!("resuming session {resolved_sid} under {}", root.display()))?
+            let session = if tui_mode_requested() {
+                let mut observer = |entry| initial_transcript.push(entry);
+                Session::open_existing_with_replay_observer(
+                    &root,
+                    &resolved_sid,
+                    redactor.clone(),
+                    project_index.clone(),
+                    global_trust.clone(),
+                    &mut observer,
+                )
+            } else {
+                Session::open_existing_with_context_and_trust(
+                    &root,
+                    &resolved_sid,
+                    redactor.clone(),
+                    project_index.clone(),
+                    global_trust.clone(),
+                )
+            };
+            session.with_context(|| {
+                format!("resuming session {resolved_sid} under {}", root.display())
+            })?
         }
         None => Session::open_with_context_and_trust(
             &root,
@@ -1534,6 +1550,7 @@ async fn prebuild_session(
 
     Ok(PrebuiltSession {
         session,
+        initial_transcript,
         executor,
         is_fresh,
         root,
@@ -1635,6 +1652,7 @@ async fn cmd_repl_once(
 
     let PrebuiltSession {
         session,
+        mut initial_transcript,
         mut executor,
         is_fresh: is_fresh_session,
         root,
@@ -1694,8 +1712,8 @@ async fn cmd_repl_once(
         > = std::sync::Arc::new(std::sync::Mutex::new(Some(sh_tx)));
         let sh_tx_for_ctrl = sh_tx_shared.clone();
         session.flush_writer().await;
-        let mut initial_items =
-            atman_tui::history::flatten_transcript(&session.transcript_replay());
+        initial_transcript.extend(session.transcript_since_open());
+        let mut initial_items = atman_tui::history::flatten_transcript(&initial_transcript);
         if is_fresh_session {
             let recent = build_startup_recent(&root, &session.id().to_string(), 5);
             initial_items.insert(

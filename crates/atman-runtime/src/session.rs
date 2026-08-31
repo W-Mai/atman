@@ -7,13 +7,16 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::event::{Event, EventSink, FlowRunId, TurnId};
-use crate::event_log::reader::{find_last_seq, replay_context_snapshot_from};
+#[cfg(test)]
+use crate::event_log::reader::replay_context_snapshot_from;
+use crate::event_log::replay::{SessionReplay, TranscriptReplayObserver};
 use crate::event_writer::EventWriter;
 use crate::injection::{Injection, InjectionId, InjectionState};
 use crate::message::{Message, MessageRole};
+use crate::projection::message_window::replay_transcript_from;
+#[cfg(test)]
 use crate::projection::message_window::{
-    TranscriptEntry, replay_all_messages_with_seq, replay_messages_from, replay_messages_with_seq,
-    replay_transcript_from,
+    TranscriptEntry, replay_all_messages_with_seq, replay_messages_from,
 };
 use crate::stream::StreamFrame;
 
@@ -1045,7 +1048,44 @@ impl Session {
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         global_trust: crate::trust::TrustConfig,
     ) -> Result<Self, SessionOpenError> {
-        let session = Self::open_existing_with_context_inner(root, sid, redactor, project_index)?;
+        Self::open_existing_with_context_trust_and_observer(
+            root,
+            sid,
+            redactor,
+            project_index,
+            global_trust,
+            None,
+        )
+    }
+
+    pub fn open_existing_with_replay_observer(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+        global_trust: crate::trust::TrustConfig,
+        observer: &mut dyn TranscriptReplayObserver,
+    ) -> Result<Self, SessionOpenError> {
+        Self::open_existing_with_context_trust_and_observer(
+            root,
+            sid,
+            redactor,
+            project_index,
+            global_trust,
+            Some(observer),
+        )
+    }
+
+    fn open_existing_with_context_trust_and_observer(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+        global_trust: crate::trust::TrustConfig,
+        observer: Option<&mut dyn TranscriptReplayObserver>,
+    ) -> Result<Self, SessionOpenError> {
+        let session =
+            Self::open_existing_with_context_inner(root, sid, redactor, project_index, observer)?;
         let path = trust_path(&session.dir);
         let trust = if path.exists() {
             read_trust(&session.dir).map_err(|source| SessionOpenError::Trust {
@@ -1083,6 +1123,7 @@ impl Session {
         sid: &str,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+        observer: Option<&mut dyn TranscriptReplayObserver>,
     ) -> Result<Self, SessionOpenError> {
         let id = SessionId::parse(sid).map_err(|_| SessionOpenError::InvalidId {
             sid: sid.to_string(),
@@ -1109,14 +1150,18 @@ impl Session {
             sink = sink.with_redactor(r);
         }
         let events_path = dir.join("events.jsonl");
-        let messages = replay_messages_from(&events_path)?;
-        let initial_msgs = replay_messages_with_seq(&events_path)?;
+        let replay = SessionReplay::from_path(&events_path, observer)?;
+        let initial_msgs = replay.compacted_messages;
+        let messages = initial_msgs
+            .iter()
+            .map(|(_, message)| message.clone())
+            .collect();
         let checkpoint_epoch = replayed_checkpoint_epoch(&initial_msgs);
-        let all_msgs = replay_all_messages_with_seq(&events_path)?;
-        if let Some(last_seq) = find_last_seq(&events_path)? {
+        let all_msgs = replay.all_messages;
+        if let Some(last_seq) = replay.last_seq {
             sink.restore_seq(last_seq);
         }
-        let mut initial_context = replay_context_snapshot_from(&events_path);
+        let mut initial_context = replay.context;
         let persisted = PersistedContextState::load(&dir);
         if !persisted.model.is_empty() {
             initial_context.model = persisted.model;
@@ -1370,7 +1415,11 @@ impl Session {
         &self.dir
     }
 
-    pub fn transcript_replay(&self) -> Vec<TranscriptEntry> {
+    pub fn transcript_since_open(&self) -> Vec<crate::projection::message_window::TranscriptEntry> {
+        crate::event_log::replay::transcript_from_envelopes(&self.sink.snapshot_envelopes())
+    }
+
+    pub fn transcript_replay(&self) -> Vec<crate::projection::message_window::TranscriptEntry> {
         let Some(path) = self.events_path() else {
             return Vec::new();
         };
@@ -2740,9 +2789,57 @@ mod tests {
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
     }
 
+    #[tokio::test]
+    async fn resumed_session_parses_each_event_once_and_hands_off_transcript() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        let turn_id = crate::event::TurnId::now();
+        created.sink().emit(crate::event::Event::UserMsg {
+            turn_id: turn_id.clone(),
+            flow_run_id: None,
+            message: crate::message::Message::user_text(turn_id, "once"),
+        });
+        created.flush_writer().await;
+        created.shutdown().await;
+        drop(created);
+        crate::event_log::reader::reset_parse_attempts();
+        let mut transcript = Vec::new();
+        let mut observer = |entry| transcript.push(entry);
+
+        let reopened = Session::open_existing_with_replay_observer(
+            root.path(),
+            &sid,
+            None,
+            None,
+            crate::trust::TrustConfig::default(),
+            &mut observer,
+        )
+        .unwrap();
+
+        assert_eq!(crate::event_log::reader::parse_attempts(), 1);
+        assert!(matches!(
+            transcript.as_slice(),
+            [TranscriptEntry::Message { message, .. }] if message.text_concat() == "once"
+        ));
+        assert_eq!(reopened.messages_full().len(), 1);
+        let turn_id = crate::event::TurnId::now();
+        reopened.sink().emit(crate::event::Event::AssistantMsg {
+            turn_id: turn_id.clone(),
+            flow_run_id: None,
+            message: crate::message::Message::assistant_text(turn_id, "after open"),
+        });
+        let suffix = reopened.transcript_since_open();
+        assert!(matches!(
+            suffix.as_slice(),
+            [TranscriptEntry::Message { message, .. }] if message.text_concat() == "after open"
+        ));
+        reopened.shutdown().await;
+    }
+
     #[test]
-    #[ignore = "large synthetic baseline for the pre-streaming resume path"]
-    fn baseline_resume_parses_five_hundred_thousand_lines_six_times() {
+    #[ignore = "large synthetic verification for the streaming resume path"]
+    fn resume_parses_five_hundred_thousand_lines_once() {
         use std::io::Write;
 
         const EVENT_COUNT: usize = 500_000;
@@ -2766,15 +2863,13 @@ mod tests {
 
         crate::event_log::reader::reset_parse_attempts();
         let started = std::time::Instant::now();
-        let _ = replay_messages_from(&path).unwrap();
-        let _ = replay_messages_with_seq(&path).unwrap();
-        let _ = replay_all_messages_with_seq(&path).unwrap();
-        let _ = find_last_seq(&path).unwrap();
-        let _ = replay_context_snapshot_from(&path);
-        let _ = replay_transcript_from(&path).unwrap();
+        let mut transcript = Vec::new();
+        let mut observer = |entry| transcript.push(entry);
+        let _ =
+            crate::event_log::replay::SessionReplay::from_path(&path, Some(&mut observer)).unwrap();
         let elapsed = started.elapsed();
         let attempts = crate::event_log::reader::parse_attempts();
-        assert_eq!(attempts, (EVENT_COUNT * 6) as u64);
+        assert_eq!(attempts, EVENT_COUNT as u64);
         eprintln!(
             "baseline resume: events={EVENT_COUNT} file_bytes={file_bytes} parses={attempts} elapsed_ms={}",
             elapsed.as_millis()

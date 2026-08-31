@@ -443,6 +443,7 @@ pub struct LlmRequest {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TokenUsage {
     /// Regular input tokens that were neither read from nor written to cache.
     pub input: u64,

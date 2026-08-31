@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::event;
-use crate::event_log::reader::{parse_json_lines, read_event_envelopes};
+#[cfg(test)]
+use crate::event_log::reader::parse_json_lines;
+use crate::event_log::reader::read_event_envelopes;
 use crate::message::{Message, MessagePart};
 use crate::nodegraph;
 use crate::provider;
 use crate::session::SessionOpenError;
-use serde_json;
 
 #[derive(Debug, Clone)]
 pub enum TranscriptEntry {
@@ -159,6 +160,7 @@ pub struct AttachmentPatch {
     reason: String,
 }
 
+#[cfg(test)]
 pub fn parse_ts(v: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
     v.get("ts")?
         .as_str()
@@ -166,6 +168,7 @@ pub fn parse_ts(v: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> 
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+#[cfg(test)]
 pub fn parse_context_compact_event(v: &serde_json::Value) -> Option<CompactReplayEvent> {
     if v["type"].as_str() != Some("context_compact") {
         return None;
@@ -177,6 +180,7 @@ pub fn parse_context_compact_event(v: &serde_json::Value) -> Option<CompactRepla
     })
 }
 
+#[cfg(test)]
 fn raw_event_belongs_to_root(
     value: &serde_json::Value,
     spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
@@ -188,6 +192,7 @@ fn raw_event_belongs_to_root(
         .is_none_or(|run_id| !spawned_flow_ids.contains(&run_id))
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct CompactReplayEvent {
     range_start: usize,
@@ -195,6 +200,7 @@ pub struct CompactReplayEvent {
     replacement_msg_seq: Option<u64>,
 }
 
+#[cfg(test)]
 pub fn collect_attachment_patches(
     values: &[serde_json::Value],
 ) -> HashMap<u64, Vec<AttachmentPatch>> {
@@ -233,9 +239,10 @@ pub fn apply_attachment_patches(msg: &mut Message, patches: &[AttachmentPatch]) 
 }
 
 fn legacy_permission_payload(
-    value: &serde_json::Value,
     run_id: event::FlowRunId,
     tool_use_id: String,
+    tool_name: &str,
+    reason: Option<&str>,
     actor_label: &str,
     at: chrono::DateTime<chrono::Utc>,
 ) -> crate::permission_audit::PermissionRequestAudit {
@@ -252,10 +259,11 @@ fn legacy_permission_payload(
         parent_run_id: None,
         root_run_id: run_id,
         tool_use_id,
-        tool: value["tool_name"]
-            .as_str()
-            .unwrap_or("unknown legacy tool")
-            .into(),
+        tool: if tool_name.is_empty() {
+            "unknown legacy tool".into()
+        } else {
+            tool_name.into()
+        },
         call_intent: None,
         tier: crate::tool::Tier::Zero,
         execution_boundary: Default::default(),
@@ -282,12 +290,20 @@ fn legacy_permission_payload(
             label: actor_label.into(),
         }),
         scope: None,
-        reason: value["reason"].as_str().map(String::from),
+        reason: reason.map(String::from),
         at,
     }
 }
 
 pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, SessionOpenError> {
+    let mut entries = Vec::new();
+    let mut observer = |entry| entries.push(entry);
+    crate::event_log::replay::SessionReplay::from_path(path, Some(&mut observer))?;
+    Ok(entries)
+}
+
+#[cfg(test)]
+fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, SessionOpenError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -639,7 +655,14 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 };
                 let at = parse_ts(v).unwrap_or_else(chrono::Utc::now);
                 let payload = if state.is_pending() {
-                    legacy_permission_payload(v, run_id, tool_use_id, actor_label, at)
+                    legacy_permission_payload(
+                        run_id,
+                        tool_use_id,
+                        v["tool_name"].as_str().unwrap_or_default(),
+                        v["reason"].as_str(),
+                        actor_label,
+                        at,
+                    )
                 } else if let Some(pending) = pending_permissions.get(&identity) {
                     let mut payload = pending.clone();
                     payload.actor = Some(
@@ -651,7 +674,14 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     payload.at = at;
                     payload
                 } else {
-                    legacy_permission_payload(v, run_id, tool_use_id, actor_label, at)
+                    legacy_permission_payload(
+                        run_id,
+                        tool_use_id,
+                        v["tool_name"].as_str().unwrap_or_default(),
+                        v["reason"].as_str(),
+                        actor_label,
+                        at,
+                    )
                 };
                 if state.is_pending() {
                     pending_permissions.insert(identity.clone(), payload.clone());
@@ -764,6 +794,466 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             }),
     );
     Ok(out)
+}
+
+pub(crate) fn project_transcript_records(
+    records: &[crate::event_log::reader::ReplayRecord],
+    ownership: &crate::event_log::replay::FlowOwnership,
+) -> Vec<TranscriptEntry> {
+    let mut patches: HashMap<u64, Vec<AttachmentPatch>> = HashMap::new();
+    for record in records {
+        if let crate::event::Event::AttachmentDegraded {
+            message_seq,
+            part_index,
+            file_basename,
+            reason,
+            ..
+        } = &record.envelope.event
+        {
+            patches
+                .entry(*message_seq)
+                .or_default()
+                .push(AttachmentPatch {
+                    part_index: *part_index,
+                    file_basename: file_basename.clone(),
+                    reason: reason.clone(),
+                });
+        }
+    }
+    let mut out = Vec::new();
+    let mut msg_indices: Vec<usize> = Vec::new();
+    let mut msg_seqs: Vec<u64> = Vec::new();
+    let mut pending_permissions = std::collections::BTreeMap::<
+        crate::workflow::WorkflowPermissionIdentity,
+        crate::permission_audit::PermissionRequestAudit,
+    >::new();
+    let mut legacy_pending = std::collections::HashMap::<
+        (String, String),
+        Vec<crate::workflow::WorkflowPermissionIdentity>,
+    >::new();
+    let mut canonical_permissions = std::collections::HashSet::new();
+    for record in records {
+        let seq = record.envelope.seq;
+        let ts = record.persisted_ts;
+        match &record.envelope.event {
+            crate::event::Event::UserMsg {
+                message,
+                flow_run_id,
+                ..
+            }
+            | crate::event::Event::AssistantMsg {
+                message,
+                flow_run_id,
+                ..
+            }
+            | crate::event::Event::ToolResultMsg {
+                message,
+                flow_run_id,
+                ..
+            }
+            | crate::event::Event::SystemMsg {
+                message,
+                flow_run_id,
+                ..
+            } => {
+                let mut message = message.clone();
+                if let Some(patches) = patches.get(&seq) {
+                    apply_attachment_patches(&mut message, patches);
+                }
+                let flow_run_id = flow_run_id.as_ref().and_then(|run_id| {
+                    if ownership.known.contains(run_id) && !ownership.spawned.contains(run_id) {
+                        None
+                    } else {
+                        Some(run_id.0.to_string())
+                    }
+                });
+                msg_indices.push(out.len());
+                msg_seqs.push(seq);
+                out.push(TranscriptEntry::Message {
+                    message,
+                    flow_run_id,
+                });
+            }
+            crate::event::Event::ContextCompact {
+                flow_run_id,
+                compacted_range_start,
+                compacted_range_end,
+                replacement_msg_seq,
+                ..
+            } => {
+                if !message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned) {
+                    continue;
+                }
+                let range_start = *compacted_range_start as usize;
+                let range_end = *compacted_range_end as usize;
+                if range_start > range_end || range_end >= msg_indices.len() {
+                    continue;
+                }
+                let Some(replacement_seq) = replacement_msg_seq else {
+                    continue;
+                };
+                let Some(replacement_pos) = msg_seqs.iter().position(|seq| seq == replacement_seq)
+                else {
+                    continue;
+                };
+                let replacement_out_idx = msg_indices[replacement_pos];
+                let replacement_entry = out.remove(replacement_out_idx);
+                let removed_out_start = msg_indices[range_start];
+                let removed_count = range_end - range_start + 1;
+                for _ in 0..removed_count {
+                    out.remove(removed_out_start);
+                }
+                msg_indices.drain(range_start..=range_end);
+                msg_seqs.drain(range_start..=range_end);
+                out.insert(removed_out_start, replacement_entry);
+                msg_indices.insert(range_start, removed_out_start);
+                msg_seqs.insert(range_start, *replacement_seq);
+                for (index, ordinal_out_idx) in msg_indices.iter_mut().enumerate() {
+                    if index > range_start {
+                        *ordinal_out_idx =
+                            ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
+                    }
+                }
+            }
+            crate::event::Event::CompactionSummary {
+                flow_run_id,
+                range_start,
+                range_end,
+                compacted_count,
+                before_tokens,
+                after_tokens,
+                summary,
+                ..
+            } => {
+                if !message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned) {
+                    continue;
+                }
+                out.push(TranscriptEntry::CompactionSummary {
+                    range_start: *range_start as usize,
+                    range_end: *range_end as usize,
+                    compacted_count: *compacted_count,
+                    before_tokens: *before_tokens,
+                    after_tokens: *after_tokens,
+                    summary: summary.clone(),
+                    ts,
+                });
+            }
+            crate::event::Event::DiffPreview {
+                title,
+                old_content,
+                new_content,
+                unified_diff,
+                ..
+            } => out.push(TranscriptEntry::DiffPreview {
+                title: title.clone(),
+                old_content: old_content.clone(),
+                new_content: new_content.clone(),
+                unified_diff: unified_diff.clone(),
+            }),
+            crate::event::Event::FlowGraph { run_id, graph } => {
+                out.push(TranscriptEntry::FlowGraph {
+                    run_id: run_id.0.to_string(),
+                    flow_name: graph.flow_name.clone(),
+                    graph: graph.clone(),
+                    ts,
+                });
+            }
+            crate::event::Event::FlowStart {
+                run_id,
+                flow_name,
+                parent_run_id,
+                parent_node_id,
+                spawned,
+            } => out.push(TranscriptEntry::FlowStart {
+                run_id: run_id.0.to_string(),
+                flow_name: flow_name.clone(),
+                parent_run_id: parent_run_id.as_ref().map(|run_id| run_id.0.to_string()),
+                parent_node_id: parent_node_id.clone(),
+                spawned: *spawned,
+                ts,
+            }),
+            crate::event::Event::FlowNodeStart {
+                run_id,
+                node_id,
+                kind,
+                label,
+                parent_node_id,
+            } => out.push(TranscriptEntry::FlowNodeStart {
+                run_id: run_id.0.to_string(),
+                node_id: node_id.clone(),
+                kind: kind.clone(),
+                label: if label.is_empty() {
+                    node_id.clone()
+                } else {
+                    label.clone()
+                },
+                parent_node_id: parent_node_id.clone(),
+                ts,
+            }),
+            crate::event::Event::FlowNodeEnd {
+                run_id,
+                node_id,
+                status,
+                output_preview,
+            } => out.push(TranscriptEntry::FlowNodeEnd {
+                run_id: run_id.0.to_string(),
+                node_id: node_id.clone(),
+                status: status.clone(),
+                output_preview: output_preview.clone(),
+                ts,
+            }),
+            crate::event::Event::ToolNode {
+                run_id,
+                parent_node_id,
+                tool_use_id,
+                tool_name,
+                args_preview,
+                call_intent,
+            } => out.push(TranscriptEntry::ToolNode {
+                run_id: run_id.0.to_string(),
+                parent_node_id: parent_node_id.clone(),
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                args_preview: args_preview.clone(),
+                call_intent: call_intent.clone(),
+                ts,
+            }),
+            crate::event::Event::FlowEnd { run_id, status, .. } => {
+                out.push(TranscriptEntry::FlowDone {
+                    run_id: run_id.0.to_string(),
+                    ok: matches!(status, crate::event::FlowStatus::Ok),
+                    cancelled: matches!(status, crate::event::FlowStatus::Cancelled),
+                    ts,
+                });
+            }
+            crate::event::Event::LlmCall {
+                model,
+                provider,
+                context_call_purpose,
+                context_call_identity,
+                usage,
+                wallclock_ms,
+                ttft_ms,
+                tokens_per_second,
+                run_id,
+                node_id,
+                ..
+            } => {
+                let context_call_scope = context_call_identity.as_ref().map_or_else(
+                    || {
+                        if run_id.is_none() {
+                            crate::context_plan::ContextCallScope::Detached
+                        } else {
+                            crate::context_plan::ContextCallScope::Root
+                        }
+                    },
+                    |identity| identity.scope,
+                );
+                out.push(TranscriptEntry::LlmCall {
+                    model: model.clone(),
+                    provider: provider.clone(),
+                    context_call_purpose: context_call_purpose.unwrap_or_default(),
+                    context_call_scope,
+                    usage: usage.clone(),
+                    wallclock_ms: *wallclock_ms,
+                    ttft_ms: *ttft_ms,
+                    tokens_per_second: *tokens_per_second,
+                    run_id: run_id.clone(),
+                    node_id: node_id.clone(),
+                    ts,
+                });
+            }
+            crate::event::Event::ToolPendingApproval {
+                run_id,
+                tool_use_id,
+                ..
+            }
+            | crate::event::Event::ToolApproved {
+                run_id,
+                tool_use_id,
+                ..
+            }
+            | crate::event::Event::ToolDenied {
+                run_id,
+                tool_use_id,
+                ..
+            } => {
+                if tool_use_id.is_empty() {
+                    continue;
+                }
+                let correlation = (run_id.0.to_string(), tool_use_id.clone());
+                if canonical_permissions.contains(&correlation) {
+                    continue;
+                }
+                let (state, actor_label, tool_name, reason) = match &record.envelope.event {
+                    crate::event::Event::ToolPendingApproval { tool_name, .. } => (
+                        crate::workflow::WorkflowPermissionState::Pending,
+                        "legacy approval actor unavailable",
+                        tool_name.as_str(),
+                        None,
+                    ),
+                    crate::event::Event::ToolApproved { .. } => (
+                        crate::workflow::WorkflowPermissionState::Approved,
+                        "legacy approver unavailable",
+                        "",
+                        None,
+                    ),
+                    crate::event::Event::ToolDenied { reason, .. } => (
+                        crate::workflow::WorkflowPermissionState::Denied,
+                        "legacy denier unavailable",
+                        "",
+                        Some(reason.as_str()),
+                    ),
+                    _ => unreachable!(),
+                };
+                let pending = state.is_pending();
+                let identity = if pending {
+                    let identity = crate::workflow::WorkflowPermissionIdentity::Legacy {
+                        seq,
+                        run_id: run_id.0.to_string(),
+                        tool_use_id: tool_use_id.clone(),
+                    };
+                    legacy_pending
+                        .entry(correlation.clone())
+                        .or_default()
+                        .push(identity.clone());
+                    identity
+                } else {
+                    legacy_pending
+                        .get_mut(&correlation)
+                        .and_then(Vec::pop)
+                        .unwrap_or_else(|| crate::workflow::WorkflowPermissionIdentity::Legacy {
+                            seq,
+                            run_id: run_id.0.to_string(),
+                            tool_use_id: tool_use_id.clone(),
+                        })
+                };
+                let at = ts.unwrap_or_else(chrono::Utc::now);
+                let payload = if state.is_pending() {
+                    legacy_permission_payload(
+                        run_id.clone(),
+                        tool_use_id.clone(),
+                        tool_name,
+                        reason,
+                        actor_label,
+                        at,
+                    )
+                } else if let Some(pending) = pending_permissions.get(&identity) {
+                    let mut payload = pending.clone();
+                    payload.actor = Some(
+                        crate::permission_audit::PermissionProjectionActor::UnknownLegacy {
+                            label: actor_label.into(),
+                        },
+                    );
+                    payload.reason = reason.map(String::from);
+                    payload.at = at;
+                    payload
+                } else {
+                    legacy_permission_payload(
+                        run_id.clone(),
+                        tool_use_id.clone(),
+                        tool_name,
+                        reason,
+                        actor_label,
+                        at,
+                    )
+                };
+                if state.is_pending() {
+                    pending_permissions.insert(identity.clone(), payload.clone());
+                } else {
+                    pending_permissions.remove(&identity);
+                }
+                out.push(TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload: Box::new(payload),
+                    state,
+                });
+            }
+            crate::event::Event::PermissionRequestCreated { payload }
+            | crate::event::Event::PermissionRequestTargeted { payload }
+            | crate::event::Event::PermissionRequestDeferred { payload }
+            | crate::event::Event::PermissionRequestApproved { payload }
+            | crate::event::Event::PermissionRequestDenied { payload }
+            | crate::event::Event::PermissionRequestCancelled { payload }
+            | crate::event::Event::UnrestrictedExecution { payload } => {
+                let state = match &record.envelope.event {
+                    crate::event::Event::PermissionRequestCreated { .. }
+                    | crate::event::Event::PermissionRequestTargeted { .. }
+                    | crate::event::Event::PermissionRequestDeferred { .. } => {
+                        crate::workflow::WorkflowPermissionState::Pending
+                    }
+                    crate::event::Event::PermissionRequestApproved { .. } => {
+                        crate::workflow::WorkflowPermissionState::Approved
+                    }
+                    crate::event::Event::PermissionRequestDenied { .. } => {
+                        crate::workflow::WorkflowPermissionState::Denied
+                    }
+                    crate::event::Event::PermissionRequestCancelled { .. } => {
+                        crate::workflow::WorkflowPermissionState::Cancelled
+                    }
+                    crate::event::Event::UnrestrictedExecution { .. } => {
+                        crate::workflow::WorkflowPermissionState::Unrestricted
+                    }
+                    _ => unreachable!(),
+                };
+                let Some(request_id) = payload.request_id.clone() else {
+                    continue;
+                };
+                canonical_permissions.insert((
+                    payload.requesting_run_id.0.to_string(),
+                    payload.tool_use_id.clone(),
+                ));
+                let identity =
+                    crate::workflow::WorkflowPermissionIdentity::Canonical { request_id };
+                if state.is_pending() {
+                    pending_permissions.insert(identity.clone(), payload.clone());
+                } else {
+                    pending_permissions.remove(&identity);
+                }
+                out.push(TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload: Box::new(payload.clone()),
+                    state,
+                });
+            }
+            crate::event::Event::PermissionGroupCreated { payload }
+            | crate::event::Event::PermissionGroupUpdated { payload }
+            | crate::event::Event::PermissionGroupResolved { payload } => {
+                out.push(TranscriptEntry::PermissionGroup {
+                    payload: payload.clone(),
+                    resolved: matches!(
+                        &record.envelope.event,
+                        crate::event::Event::PermissionGroupResolved { .. }
+                    ),
+                });
+            }
+            crate::event::Event::TerminalFinalState { handle, screen, .. } => {
+                out.push(TranscriptEntry::TerminalFinalState {
+                    handle: handle.clone(),
+                    screen: screen.clone(),
+                });
+            }
+            crate::event::Event::MermaidDiagram { source } => {
+                out.push(TranscriptEntry::MermaidDiagram {
+                    source: source.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    out.extend(
+        pending_permissions
+            .into_iter()
+            .map(|(identity, mut payload)| {
+                payload.reason = Some("interrupted at end of persisted history".into());
+                TranscriptEntry::PermissionRequest {
+                    identity,
+                    payload: Box::new(payload),
+                    state: crate::workflow::WorkflowPermissionState::Interrupted,
+                }
+            }),
+    );
+    out
 }
 
 pub trait MessageProjection {
@@ -1088,7 +1578,9 @@ mod tests {
             .join("\n");
         std::fs::write(&path, jsonl).unwrap();
 
+        let raw_entries = super::replay_transcript_from_raw(&path).unwrap();
         let entries = super::replay_transcript_from(&path).unwrap();
+        assert_eq!(format!("{raw_entries:#?}"), format!("{entries:#?}"));
         assert!(entries.iter().any(|entry| matches!(
             entry,
             super::TranscriptEntry::Message { message, flow_run_id: None }
@@ -1103,6 +1595,47 @@ mod tests {
                 .iter()
                 .any(|entry| matches!(entry, super::TranscriptEntry::CompactionSummary { .. }))
         );
+    }
+
+    #[test]
+    fn streaming_transcript_preserves_missing_legacy_optional_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let run_id = Uuid::now_v7();
+        let turn_id = TurnId::now();
+        let lines = [
+            serde_json::json!({
+                "type": "flow_start",
+                "seq": 1,
+                "run_id": run_id,
+            }),
+            serde_json::json!({
+                "type": "flow_node_start",
+                "seq": 2,
+                "run_id": run_id,
+                "node_id": "legacy-node",
+            }),
+            serde_json::json!({
+                "type": "assistant_msg",
+                "seq": 3,
+                "turn_id": turn_id,
+                "message": message(MessageRole::Assistant, "legacy"),
+            }),
+        ];
+        std::fs::write(
+            &path,
+            lines
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let raw_entries = super::replay_transcript_from_raw(&path).unwrap();
+        let entries = super::replay_transcript_from(&path).unwrap();
+
+        assert_eq!(format!("{raw_entries:#?}"), format!("{entries:#?}"));
     }
 
     #[test]
@@ -1229,7 +1762,9 @@ mod tests {
         }
         std::fs::write(&path, lines.join("\n")).unwrap();
 
+        let raw_entries = super::replay_transcript_from_raw(&path).unwrap();
         let entries = super::replay_transcript_from(&path).unwrap();
+        assert_eq!(format!("{raw_entries:#?}"), format!("{entries:#?}"));
         let permissions = entries
             .iter()
             .filter_map(|entry| match entry {

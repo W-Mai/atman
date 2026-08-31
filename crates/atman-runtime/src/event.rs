@@ -52,6 +52,18 @@ impl EventEnvelope {
         let ts = chrono::Utc::now();
         Self { seq, ts, event }
     }
+
+    pub(crate) fn from_json_value(value: serde_json::Value) -> serde_json::Result<Self> {
+        let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ts = value
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+        let event = serde_json::from_value(value)?;
+        Ok(Self { seq, ts, event })
+    }
 }
 
 impl serde::Serialize for EventEnvelope {
@@ -68,17 +80,7 @@ impl serde::Serialize for EventEnvelope {
 impl<'de> serde::Deserialize<'de> for EventEnvelope {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        // seq: required for new events, default 0 for legacy backward compat
-        let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
-        // ts: parse when present; fall back to now for legacy events
-        let ts = value
-            .get("ts")
-            .and_then(|v| v.as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(chrono::Utc::now);
-        let event = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(EventEnvelope { seq, ts, event })
+        Self::from_json_value(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -87,8 +89,11 @@ impl<'de> serde::Deserialize<'de> for EventEnvelope {
 pub enum Event {
     FlowStart {
         run_id: FlowRunId,
+        #[serde(default)]
         flow_name: String,
+        #[serde(default)]
         parent_run_id: Option<FlowRunId>,
+        #[serde(default)]
         parent_node_id: Option<String>,
         #[serde(default)]
         spawned: bool,
@@ -125,10 +130,15 @@ pub enum Event {
         context_cache: Option<crate::context_plan::ContextCacheObservation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_tool_batch_width: Option<u64>,
+        #[serde(default)]
         usage: crate::provider::TokenUsage,
+        #[serde(default)]
         wallclock_ms: u64,
+        #[serde(default)]
         ttft_ms: Option<u64>,
+        #[serde(default)]
         tokens_per_second: Option<f64>,
+        #[serde(default)]
         status: LlmCallStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<crate::event::FlowRunId>,
@@ -149,11 +159,13 @@ pub enum Event {
     },
     AssistantMsg {
         turn_id: TurnId,
+        #[serde(default)]
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
     },
     ToolResultMsg {
         turn_id: TurnId,
+        #[serde(default)]
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
     },
@@ -167,11 +179,16 @@ pub enum Event {
         truncated: bool,
     },
     DiffPreview {
+        #[serde(default)]
         turn_id: Option<TurnId>,
+        #[serde(default)]
         flow_run_id: Option<FlowRunId>,
         title: String,
+        #[serde(default)]
         old_content: Option<String>,
+        #[serde(default)]
         new_content: Option<String>,
+        #[serde(default)]
         unified_diff: Option<String>,
     },
     CompactionSummary {
@@ -262,14 +279,19 @@ pub enum Event {
     FlowNodeStart {
         run_id: FlowRunId,
         node_id: String,
+        #[serde(default = "default_replay_node_kind")]
         kind: crate::nodegraph::NodeKind,
+        #[serde(default)]
         label: String,
+        #[serde(default)]
         parent_node_id: Option<String>,
     },
     FlowNodeEnd {
         run_id: FlowRunId,
         node_id: String,
+        #[serde(default)]
         status: FlowNodeStatus,
+        #[serde(default)]
         output_preview: Option<String>,
     },
     ToolNode {
@@ -357,9 +379,10 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowNodeStatus {
+    #[default]
     Ok,
     Err,
     Cancelled,
@@ -381,11 +404,18 @@ impl FlowStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmCallStatus {
+    #[default]
     Ok,
-    Errored { message: String },
+    Errored {
+        message: String,
+    },
+}
+
+fn default_replay_node_kind() -> crate::nodegraph::NodeKind {
+    crate::nodegraph::NodeKind::UserConfirm
 }
 
 impl LlmCallStatus {
