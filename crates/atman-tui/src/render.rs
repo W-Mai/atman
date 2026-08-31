@@ -140,7 +140,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.sidebar_upper_runtime_collapsed = responsive_narrow;
         app.sidebar_lower_runtime_collapsed = responsive_narrow;
         app.task_panel_runtime_collapsed = responsive_narrow;
-        app.items_version = app.items_version.wrapping_add(1);
         app.last_full_rect = Some(area);
     }
     if area.width < 40 || area.height < 8 {

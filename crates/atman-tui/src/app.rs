@@ -116,6 +116,123 @@ impl OutputItem {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct OutputRevision {
+    pub id: u64,
+    pub semantic: u64,
+    pub interaction: u64,
+    pub layout: u64,
+    pub paint: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputMutation {
+    Semantic,
+    Interaction,
+    Paint,
+}
+
+#[derive(Default)]
+pub struct OutputStore {
+    values: Vec<OutputItem>,
+    revisions: Vec<OutputRevision>,
+    next_id: u64,
+    revision_clock: u64,
+    structure_revision: u64,
+}
+
+impl std::ops::Deref for OutputStore {
+    type Target = [OutputItem];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl OutputStore {
+    fn replace(&mut self, values: Vec<OutputItem>) {
+        self.values = values;
+        self.revisions.clear();
+        self.revisions.reserve(self.values.len());
+        for _ in 0..self.values.len() {
+            self.next_id = self.next_id.wrapping_add(1);
+            self.revision_clock = self.revision_clock.wrapping_add(1);
+            self.revisions.push(OutputRevision {
+                id: self.next_id,
+                semantic: self.revision_clock,
+                layout: self.revision_clock,
+                ..OutputRevision::default()
+            });
+        }
+        self.structure_revision = self.structure_revision.wrapping_add(1);
+    }
+
+    fn push(&mut self, value: OutputItem) {
+        self.next_id = self.next_id.wrapping_add(1);
+        self.revision_clock = self.revision_clock.wrapping_add(1);
+        self.values.push(value);
+        self.revisions.push(OutputRevision {
+            id: self.next_id,
+            semantic: self.revision_clock,
+            layout: self.revision_clock,
+            ..OutputRevision::default()
+        });
+        self.structure_revision = self.structure_revision.wrapping_add(1);
+    }
+
+    fn remove(&mut self, index: usize) -> Option<OutputItem> {
+        if index >= self.values.len() {
+            return None;
+        }
+        self.revisions.remove(index);
+        self.structure_revision = self.structure_revision.wrapping_add(1);
+        Some(self.values.remove(index))
+    }
+
+    fn mutate(
+        &mut self,
+        index: usize,
+        impact: OutputMutation,
+        mutation: impl FnOnce(&mut OutputItem) -> bool,
+    ) -> bool {
+        let Some(value) = self.values.get_mut(index) else {
+            return false;
+        };
+        if !mutation(value) {
+            return false;
+        }
+        self.revision_clock = self.revision_clock.wrapping_add(1);
+        let revision = &mut self.revisions[index];
+        match impact {
+            OutputMutation::Semantic => {
+                revision.semantic = self.revision_clock;
+                revision.layout = self.revision_clock;
+            }
+            OutputMutation::Interaction => {
+                revision.interaction = self.revision_clock;
+                revision.layout = self.revision_clock;
+            }
+            OutputMutation::Paint => {
+                revision.interaction = self.revision_clock;
+                revision.paint = self.revision_clock;
+            }
+        }
+        true
+    }
+
+    fn touch(&mut self, index: usize, impact: OutputMutation) -> bool {
+        self.mutate(index, impact, |_| true)
+    }
+
+    pub(crate) fn revisions(&self) -> &[OutputRevision] {
+        &self.revisions
+    }
+
+    pub(crate) fn structure_revision(&self) -> u64 {
+        self.structure_revision
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StartupIntro {
     pub started_at: Instant,
@@ -188,7 +305,7 @@ pub struct PendingPermissionGroup {
 
 #[derive(Default)]
 pub struct AppState {
-    pub items: Vec<OutputItem>,
+    pub items: OutputStore,
     pub input: String,
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
     pub scroll_offset: u32,
@@ -456,7 +573,7 @@ impl AppState {
 
     pub fn toggle_mouse_capture(&mut self) -> bool {
         self.mouse_captured = !self.mouse_captured;
-        self.mark_items_dirty();
+        self.mark_visual_dirty();
         self.mouse_captured
     }
 
@@ -514,7 +631,9 @@ impl AppState {
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
-        self.items = items;
+        let structure_revision = self.items.structure_revision();
+        self.items.replace(items);
+        debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.inline_note_indices.clear();
         self.items_version = self.items_version.wrapping_add(1);
         self
@@ -563,7 +682,13 @@ impl AppState {
         if !self.expanded_tools.remove(id) {
             self.expanded_tools.insert(id.to_string());
         }
-        self.expanded_version = self.expanded_version.wrapping_add(1);
+        if let Some(index) = self.items.iter().position(|item| match item {
+            OutputItem::Terminal { handle, .. } | OutputItem::Bash { handle, .. } => handle == id,
+            OutputItem::DiffPreview { title, .. } => title == id,
+            _ => false,
+        }) {
+            self.touch_item(index, OutputMutation::Interaction);
+        }
     }
 
     pub fn toggle_last_tool_expansion(&mut self) -> bool {
@@ -801,86 +926,87 @@ impl AppState {
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
-        if let Some(item) = self.items.get_mut(panel_index) {
+        self.mutate_item(panel_index, OutputMutation::Interaction, |item| {
             let expanded_nodes = match item {
                 OutputItem::WorkflowPanel { expanded_nodes, .. } => expanded_nodes,
                 OutputItem::SubAgentActivity { expanded_nodes, .. } => expanded_nodes,
-                _ => return,
+                _ => return false,
             };
             if !expanded_nodes.remove(node_id) {
                 expanded_nodes.insert(node_id.to_string());
             }
-            self.expanded_version = self.expanded_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn toggle_thinking_expanded(&mut self, item_idx: usize) {
-        if let Some(OutputItem::Thinking { expanded, .. }) = self.items.get_mut(item_idx) {
+        self.mutate_item(item_idx, OutputMutation::Interaction, |item| {
+            let OutputItem::Thinking { expanded, .. } = item else {
+                return false;
+            };
             *expanded = !*expanded;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn set_hovered_thinking(&mut self, idx: Option<usize>) {
         if self.hovered_thinking_idx != idx {
+            let previous = self.hovered_thinking_idx;
             self.hovered_thinking_idx = idx;
-            self.items_version = self.items_version.wrapping_add(1);
+            if let Some(previous) = previous {
+                self.touch_item(previous, OutputMutation::Paint);
+            }
+            if let Some(idx) = idx {
+                self.touch_item(idx, OutputMutation::Paint);
+            }
         }
     }
 
     pub fn set_hovered_task(&mut self, id: Option<atman_runtime::TaskId>) {
         if self.hovered_task_id != id {
             self.hovered_task_id = id;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
     pub fn set_hovered_kill(&mut self, id: Option<atman_runtime::TaskId>) {
         if self.hovered_kill_id != id {
             self.hovered_kill_id = id;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
     pub fn set_hovered_insert(&mut self, handle: Option<String>) {
         if self.hovered_insert_handle != handle {
             self.hovered_insert_handle = handle;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
     pub fn set_hovered_activity(&mut self, key: Option<(String, String)>) {
         if self.hovered_activity != key {
             self.hovered_activity = key;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
     pub fn set_hovered_history_btn(&mut self, hovered: bool) {
         if self.hovered_history_btn != hovered {
             self.hovered_history_btn = hovered;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
     pub fn set_hovered_hamburger(&mut self, hovered: bool) {
         if self.hovered_hamburger != hovered {
             self.hovered_hamburger = hovered;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
     pub fn arm_kill(&mut self, id: atman_runtime::TaskId) {
         self.kill_armed_id = Some(id);
         self.kill_armed_at = Some(Instant::now());
-        self.items_version = self.items_version.wrapping_add(1);
     }
 
     pub fn clear_kill_arm(&mut self) {
         if self.kill_armed_id.is_some() {
             self.kill_armed_id = None;
             self.kill_armed_at = None;
-            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
@@ -924,7 +1050,7 @@ impl AppState {
     }
 
     pub fn toggle_workflow_panel_expansion(&mut self, panel_index: usize) {
-        if let Some(item) = self.items.get_mut(panel_index) {
+        self.mutate_item(panel_index, OutputMutation::Interaction, |item| {
             match item {
                 OutputItem::WorkflowPanel { panel_expanded, .. } => {
                     *panel_expanded = !*panel_expanded;
@@ -934,10 +1060,10 @@ impl AppState {
                 } => {
                     *workflow_expanded = !*workflow_expanded;
                 }
-                _ => return,
+                _ => return false,
             }
-            self.expanded_version = self.expanded_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn has_running_workflow(&self) -> bool {
@@ -979,12 +1105,15 @@ impl AppState {
     }
 
     pub fn scroll_terminal(&mut self, item_index: usize, up: bool, amount: u16) {
-        if let Some(OutputItem::Terminal {
-            screen,
-            scroll_offset,
-            ..
-        }) = self.items.get_mut(item_index)
-        {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::Terminal {
+                screen,
+                scroll_offset,
+                ..
+            } = item
+            else {
+                return false;
+            };
             let max_row = screen.rows;
             let current_row = scroll_offset.map(|(r, _)| r).unwrap_or(0);
             let new_row = if up {
@@ -992,60 +1121,80 @@ impl AppState {
             } else {
                 (current_row + amount).min(max_row.saturating_sub(1))
             };
-            if new_row == 0 && !up {
-                *scroll_offset = None;
+            let next = if new_row == 0 && !up {
+                None
             } else {
-                *scroll_offset = Some((new_row, 0));
+                Some((new_row, 0))
+            };
+            if *scroll_offset == next {
+                return false;
             }
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            *scroll_offset = next;
+            true
+        });
     }
 
     pub fn toggle_terminal_mode(&mut self, item_index: usize) {
-        if let Some(OutputItem::Terminal { mode, .. }) = self.items.get_mut(item_index) {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::Terminal { mode, .. } = item else {
+                return false;
+            };
             *mode = match *mode {
                 TerminalViewMode::Capture => TerminalViewMode::Stream,
                 TerminalViewMode::Stream => TerminalViewMode::Capture,
             };
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn toggle_terminal_expand(&mut self, item_index: usize) {
-        if let Some(OutputItem::Terminal { expanded, .. }) = self.items.get_mut(item_index) {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::Terminal { expanded, .. } = item else {
+                return false;
+            };
             *expanded = !*expanded;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn toggle_bash_expand(&mut self, item_index: usize) {
-        if let Some(OutputItem::Bash { expanded, .. }) = self.items.get_mut(item_index) {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::Bash { expanded, .. } = item else {
+                return false;
+            };
             *expanded = !*expanded;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn toggle_sub_agent_expand(&mut self, item_index: usize) {
-        if let Some(OutputItem::SubAgentActivity { expanded, .. }) = self.items.get_mut(item_index)
-        {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::SubAgentActivity { expanded, .. } = item else {
+                return false;
+            };
             *expanded = !*expanded;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn toggle_diff_preview_expand(&mut self, item_index: usize) {
-        if let Some(OutputItem::DiffPreview { expanded, .. }) = self.items.get_mut(item_index) {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::DiffPreview { expanded, .. } = item else {
+                return false;
+            };
             *expanded = !*expanded;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn toggle_compaction_summary_expand(&mut self, item_index: usize) {
-        if let Some(OutputItem::CompactionSummary { expanded, .. }) = self.items.get_mut(item_index)
-        {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::CompactionSummary { expanded, .. } = item else {
+                return false;
+            };
             *expanded = !*expanded;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     pub fn hit_test_node(&self, col: u16, row: u16) -> Option<(usize, String)> {
@@ -1172,17 +1321,114 @@ impl AppState {
             }
             _ => {}
         }
+        let structure_revision = self.items.structure_revision();
         self.items.push(item);
+        debug_assert_eq!(self.items.revisions().len(), self.items.len());
+        debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.items_version = self.items_version.wrapping_add(1);
         self.reset_lag_state();
     }
 
-    pub fn mark_items_dirty(&mut self) {
+    pub fn remove_item(&mut self, index: usize) -> Option<OutputItem> {
+        let structure_revision = self.items.structure_revision();
+        let removed = self.items.remove(index)?;
+        debug_assert_eq!(self.items.revisions().len(), self.items.len());
+        debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.items_version = self.items_version.wrapping_add(1);
+        self.handle_index.retain(|_, item_index| {
+            if *item_index == index {
+                false
+            } else {
+                if *item_index > index {
+                    *item_index -= 1;
+                }
+                true
+            }
+        });
+        self.inline_note_indices.retain(|_, item_index| {
+            if *item_index == index {
+                false
+            } else {
+                if *item_index > index {
+                    *item_index -= 1;
+                }
+                true
+            }
+        });
+        let removed_run_ids = self
+            .workflow_run_to_panel
+            .iter()
+            .filter(|(_, item_index)| **item_index == index)
+            .map(|(run_id, _)| run_id.clone())
+            .collect::<Vec<_>>();
+        self.workflow_run_to_panel.retain(|_, item_index| {
+            if *item_index == index {
+                false
+            } else {
+                if *item_index > index {
+                    *item_index -= 1;
+                }
+                true
+            }
+        });
+        for run_id in removed_run_ids {
+            self.top_level_run_ids.remove(&run_id);
+        }
+        self.sub_agent_run_ids.retain(|_, item_index| {
+            if *item_index == index {
+                false
+            } else {
+                if *item_index > index {
+                    *item_index -= 1;
+                }
+                true
+            }
+        });
+        self.last_lag_note_idx = self.last_lag_note_idx.and_then(|item_index| {
+            if item_index == index {
+                None
+            } else {
+                Some(item_index - usize::from(item_index > index))
+            }
+        });
+        self.last_workflow_panel_idx = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, OutputItem::WorkflowPanel { ended_at: None, .. }));
+        Some(removed)
     }
 
-    pub fn mark_expanded_dirty(&mut self) {
-        self.expanded_version = self.expanded_version.wrapping_add(1);
+    fn mutate_item(
+        &mut self,
+        index: usize,
+        impact: OutputMutation,
+        mutation: impl FnOnce(&mut OutputItem) -> bool,
+    ) -> bool {
+        let changed = self.items.mutate(index, impact, mutation);
+        if changed {
+            match impact {
+                OutputMutation::Semantic => {
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
+                OutputMutation::Interaction => {
+                    self.expanded_version = self.expanded_version.wrapping_add(1);
+                }
+                OutputMutation::Paint => {}
+            }
+        }
+        changed
+    }
+
+    fn touch_item(&mut self, index: usize, impact: OutputMutation) -> bool {
+        let changed = self.items.touch(index, impact);
+        if changed && matches!(impact, OutputMutation::Interaction) {
+            self.expanded_version = self.expanded_version.wrapping_add(1);
+        }
+        changed
+    }
+
+    pub fn mark_visual_dirty(&mut self) {
+        self.wm_visual_version = self.wm_visual_version.wrapping_add(1);
     }
 
     pub fn push_note(&mut self, text: impl Into<String>, level: NoteLevel) {
@@ -1246,7 +1492,7 @@ impl AppState {
         match event {
             atman_runtime::TaskEvent::Registered(snap) => {
                 self.task_snapshots.push(snap);
-                self.items_version = self.items_version.wrapping_add(1);
+                self.mark_visual_dirty();
             }
             atman_runtime::TaskEvent::StatusChanged {
                 id,
@@ -1258,12 +1504,12 @@ impl AppState {
                     s.status = new;
                     s.termination = termination;
                     s.ended_at = Some(std::time::Instant::now());
-                    self.items_version = self.items_version.wrapping_add(1);
+                    self.mark_visual_dirty();
                 }
             }
             atman_runtime::TaskEvent::Reaped { id } => {
                 self.task_snapshots.retain(|s| s.id != id);
-                self.items_version = self.items_version.wrapping_add(1);
+                self.mark_visual_dirty();
             }
         }
     }
@@ -1372,9 +1618,20 @@ impl AppState {
                     return;
                 }
                 self.waiting_for_llm = false;
-                if let Some(OutputItem::Thinking { text: t, .. }) = self.items.last_mut() {
-                    t.push_str(&text);
-                    self.items_version = self.items_version.wrapping_add(1);
+                let last_index = self.items.len().checked_sub(1);
+                let continues_thinking = last_index
+                    .is_some_and(|index| matches!(self.items[index], OutputItem::Thinking { .. }));
+                if let Some(index) = last_index.filter(|_| continues_thinking) {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::Thinking { text: current, .. } = item else {
+                            return false;
+                        };
+                        if text.is_empty() {
+                            return false;
+                        }
+                        current.push_str(&text);
+                        true
+                    });
                     self.streaming = true;
                     self.reset_lag_state();
                 } else {
@@ -1391,28 +1648,54 @@ impl AppState {
                 if let Some(rid) = &run_id
                     && let Some(&idx) = self.sub_agent_run_ids.get(rid)
                 {
-                    if let Some(OutputItem::SubAgentActivity { output, .. }) =
-                        self.items.get_mut(idx)
-                    {
+                    self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                        let OutputItem::SubAgentActivity { output, .. } = item else {
+                            return false;
+                        };
+                        if text.is_empty() {
+                            return false;
+                        }
                         output.push_str(&text);
-                        self.items_version = self.items_version.wrapping_add(1);
-                    }
+                        true
+                    });
                     self.streaming = true;
                     self.reset_lag_state();
                     return;
                 }
                 self.waiting_for_llm = false;
-                if let Some(OutputItem::Thinking { done, .. }) = self.items.last_mut()
-                    && !*done
-                {
-                    *done = true;
-                    self.items_version = self.items_version.wrapping_add(1);
+                if let Some(index) = self.items.len().checked_sub(1) {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::Thinking { done, .. } = item else {
+                            return false;
+                        };
+                        if *done {
+                            return false;
+                        }
+                        *done = true;
+                        true
+                    });
                 }
-                if let Some(OutputItem::AssistantMd { md, streaming, .. }) = self.items.last_mut()
-                    && *streaming
-                {
-                    md.push_str(&text);
-                    self.items_version = self.items_version.wrapping_add(1);
+                let last_index = self.items.len().checked_sub(1);
+                let continues_assistant = last_index.is_some_and(|index| {
+                    matches!(
+                        self.items[index],
+                        OutputItem::AssistantMd {
+                            streaming: true,
+                            ..
+                        }
+                    )
+                });
+                if let Some(index) = last_index.filter(|_| continues_assistant) {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::AssistantMd { md, streaming, .. } = item else {
+                            return false;
+                        };
+                        if !*streaming || text.is_empty() {
+                            return false;
+                        }
+                        md.push_str(&text);
+                        true
+                    });
                     self.streaming = true;
                     self.reset_lag_state();
                 } else {
@@ -1423,26 +1706,38 @@ impl AppState {
                     });
                     self.streaming = true;
                     self.terminal_throttle = Some(Instant::now());
-                    self.items_version = self.items_version.wrapping_add(1);
                 }
             }
             StreamFrame::LlmRetry => {
-                for item in self.items.iter_mut().rev() {
-                    match item {
+                let indices = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .take_while(|(_, item)| {
+                        matches!(item, OutputItem::Thinking { .. } | OutputItem::AssistantMd { .. })
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                for index in indices {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| match item {
                         OutputItem::Thinking { done, retried, .. } => {
+                            let changed = !*done || !*retried;
                             *done = true;
                             *retried = true;
+                            changed
                         }
                         OutputItem::AssistantMd {
                             streaming, retried, ..
                         } => {
+                            let changed = *streaming || !*retried;
                             *streaming = false;
                             *retried = true;
+                            changed
                         }
-                        _ => break,
-                    }
+                        _ => false,
+                    });
                 }
-                self.items_version = self.items_version.wrapping_add(1);
                 self.waiting_for_llm = true;
             }
             StreamFrame::LlmDone { run_id, .. } => {
@@ -1451,9 +1746,25 @@ impl AppState {
                 {
                     return;
                 }
-                let mut changed = false;
-                for item in self.items.iter_mut().rev() {
-                    let touched = match item {
+                let indices = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .take_while(|(_, item)| {
+                        matches!(
+                            item,
+                            OutputItem::Thinking { done: false, .. }
+                                | OutputItem::AssistantMd {
+                                    streaming: true,
+                                    ..
+                                }
+                        )
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                for index in indices {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| match item {
                         OutputItem::Thinking { done, .. } if !*done => {
                             *done = true;
                             true
@@ -1463,15 +1774,7 @@ impl AppState {
                             true
                         }
                         _ => false,
-                    };
-                    if touched {
-                        changed = true;
-                    } else {
-                        break;
-                    }
-                }
-                if changed {
-                    self.items_version = self.items_version.wrapping_add(1);
+                    });
                 }
                 self.streaming = false;
                 self.reset_lag_state();
@@ -1533,14 +1836,27 @@ impl AppState {
                             && matches!(level, NoteLevel::Error | NoteLevel::Success);
                         if let Some(key) = replace_key.as_ref()
                             && let Some(index) = self.inline_note_indices.get(key).copied()
-                            && let Some(OutputItem::SystemNote {
-                                text: current_text,
-                                level: current_level,
-                            }) = self.items.get_mut(index)
+                            && matches!(self.items.get(index), Some(OutputItem::SystemNote { .. }))
                         {
-                            *current_text = text;
-                            *current_level = level;
-                            self.items_version = self.items_version.wrapping_add(1);
+                            self.mutate_item(
+                                index,
+                                OutputMutation::Semantic,
+                                |item| {
+                                    let OutputItem::SystemNote {
+                                        text: current_text,
+                                        level: current_level,
+                                    } = item
+                                    else {
+                                        return false;
+                                    };
+                                    if *current_text == text && *current_level == level {
+                                        return false;
+                                    }
+                                    *current_text = text;
+                                    *current_level = level;
+                                    true
+                                },
+                            );
                             self.reset_lag_state();
                         } else {
                             let index = self.items.len();
@@ -1729,32 +2045,46 @@ impl AppState {
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
                 }
-                let existing = self
+                let existing_index = self
                     .find_item_by_handle(&handle)
                     .and_then(|idx| match &self.items[idx] {
                         OutputItem::Terminal { done: false, .. } => Some(idx),
                         _ => None,
-                    })
-                    .and_then(|idx| self.items.get_mut(idx));
-                if let Some(OutputItem::Terminal {
-                    title,
-                    command,
-                    screen: s,
-                    accumulated_bytes: ab,
-                    ..
-                }) = existing
-                {
-                    if title.is_none() {
-                        *title = call_intent.map(|intent| intent.as_str().to_owned());
-                    }
-                    if command.is_none() {
-                        *command = task_command;
-                    }
-                    if let Some(new_screen) = screen {
-                        *s = new_screen;
-                    }
-                    ab.extend_from_slice(&bytes);
-                    self.items_version = self.items_version.wrapping_add(1);
+                    });
+                if let Some(index) = existing_index {
+                    let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::Terminal {
+                            title,
+                            command,
+                            screen: current_screen,
+                            accumulated_bytes,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        let mut changed = false;
+                        if title.is_none() && proposed_title.is_some() {
+                            *title = proposed_title;
+                            changed = true;
+                        }
+                        if command.is_none() && task_command.is_some() {
+                            *command = task_command;
+                            changed = true;
+                        }
+                        if let Some(new_screen) = screen
+                            && *current_screen != new_screen
+                        {
+                            *current_screen = new_screen;
+                            changed = true;
+                        }
+                        if !bytes.is_empty() {
+                            accumulated_bytes.extend_from_slice(&bytes);
+                            changed = true;
+                        }
+                        changed
+                    });
                     self.reset_lag_state();
                 } else {
                     self.push_item(OutputItem::Terminal {
@@ -1776,7 +2106,6 @@ impl AppState {
                         expanded: false,
                         scroll_offset: None,
                     });
-                    self.items_version = self.items_version.wrapping_add(1);
                     self.reset_lag_state();
                 }
             }
@@ -1793,22 +2122,32 @@ impl AppState {
                 }
                 let task_command = self.task_command(&handle);
                 if let Some(idx) = self.find_item_by_handle(&handle) {
-                    if let Some(OutputItem::Terminal {
-                        title,
-                        command,
-                        done,
-                        ..
-                    }) = self.items.get_mut(idx)
-                    {
-                        if title.is_none() {
-                            *title = call_intent.map(|intent| intent.as_str().to_owned());
+                    let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
+                    self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                        let OutputItem::Terminal {
+                            title,
+                            command,
+                            done,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        let mut changed = false;
+                        if title.is_none() && proposed_title.is_some() {
+                            *title = proposed_title;
+                            changed = true;
                         }
-                        if command.is_none() {
+                        if command.is_none() && task_command.is_some() {
                             *command = task_command;
+                            changed = true;
                         }
-                        *done = true;
-                        self.items_version = self.items_version.wrapping_add(1);
-                    }
+                        if !*done {
+                            *done = true;
+                            changed = true;
+                        }
+                        changed
+                    });
                 } else {
                     self.push_item(OutputItem::Terminal {
                         handle,
@@ -1846,30 +2185,41 @@ impl AppState {
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
                 }
-                let existing = self
+                let existing_index = self
                     .find_item_by_handle(&handle)
                     .and_then(|idx| match &self.items[idx] {
                         OutputItem::Bash { done: false, .. } => Some(idx),
                         _ => None,
-                    })
-                    .and_then(|idx| self.items.get_mut(idx));
+                    });
                 let prefix = if kind == "stderr" { "[err] " } else { "" };
-                if let Some(OutputItem::Bash {
-                    title,
-                    command,
-                    output,
-                    ..
-                }) = existing
-                {
-                    if title.is_none() {
-                        *title = call_intent.map(|intent| intent.as_str().to_owned());
-                    }
-                    if command.is_none() {
-                        *command = task_command;
-                    }
-                    output.push_str(prefix);
-                    output.push_str(&line);
-                    self.items_version = self.items_version.wrapping_add(1);
+                if let Some(index) = existing_index {
+                    let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::Bash {
+                            title,
+                            command,
+                            output,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        let mut changed = false;
+                        if title.is_none() && proposed_title.is_some() {
+                            *title = proposed_title;
+                            changed = true;
+                        }
+                        if command.is_none() && task_command.is_some() {
+                            *command = task_command;
+                            changed = true;
+                        }
+                        if !prefix.is_empty() || !line.is_empty() {
+                            output.push_str(prefix);
+                            output.push_str(&line);
+                            changed = true;
+                        }
+                        changed
+                    });
                     self.reset_lag_state();
                 } else {
                     let mut output = String::new();
@@ -1883,7 +2233,6 @@ impl AppState {
                         done: false,
                         expanded: false,
                     });
-                    self.items_version = self.items_version.wrapping_add(1);
                     self.reset_lag_state();
                 }
             }
@@ -1900,22 +2249,32 @@ impl AppState {
                 }
                 let task_command = self.task_command(&handle);
                 if let Some(idx) = self.find_item_by_handle(&handle) {
-                    if let Some(OutputItem::Bash {
-                        title,
-                        command,
-                        done,
-                        ..
-                    }) = self.items.get_mut(idx)
-                    {
-                        if title.is_none() {
-                            *title = call_intent.map(|intent| intent.as_str().to_owned());
+                    let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
+                    self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                        let OutputItem::Bash {
+                            title,
+                            command,
+                            done,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        let mut changed = false;
+                        if title.is_none() && proposed_title.is_some() {
+                            *title = proposed_title;
+                            changed = true;
                         }
-                        if command.is_none() {
+                        if command.is_none() && task_command.is_some() {
                             *command = task_command;
+                            changed = true;
                         }
-                        *done = true;
-                        self.items_version = self.items_version.wrapping_add(1);
-                    }
+                        if !*done {
+                            *done = true;
+                            changed = true;
+                        }
+                        changed
+                    });
                 } else {
                     self.push_item(OutputItem::Bash {
                         handle,
@@ -1956,28 +2315,52 @@ impl AppState {
                 after_tokens,
                 compacted_count,
             } => {
-                if let Some(OutputItem::CompactionSummary {
-                    phase: current_phase,
-                    range_start: current_start,
-                    range_end: current_end,
-                    summary: current_summary,
-                    before_tokens: current_before,
-                    after_tokens: current_after,
-                    compacted_count: current_count,
-                    expanded,
-                }) = self.items.last_mut()
-                    && *current_start == range_start
-                    && *current_end == range_end
-                {
-                    *current_phase = phase;
-                    *current_summary = summary;
-                    *current_before = before_tokens;
-                    *current_after = after_tokens;
-                    *current_count = compacted_count;
-                    if matches!(phase, CompactionPhase::Finished) {
-                        *expanded = false;
-                    }
-                    self.items_version = self.items_version.wrapping_add(1);
+                let existing_index = self.items.len().checked_sub(1).filter(|index| {
+                    matches!(
+                        &self.items[*index],
+                        OutputItem::CompactionSummary {
+                            range_start: current_start,
+                            range_end: current_end,
+                            ..
+                        } if *current_start == range_start && *current_end == range_end
+                    )
+                });
+                if let Some(index) = existing_index {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::CompactionSummary {
+                            phase: current_phase,
+                            summary: current_summary,
+                            before_tokens: current_before,
+                            after_tokens: current_after,
+                            compacted_count: current_count,
+                            expanded,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        let next_expanded = if matches!(phase, CompactionPhase::Finished) {
+                            false
+                        } else {
+                            *expanded
+                        };
+                        if *current_phase == phase
+                            && *current_summary == summary
+                            && *current_before == before_tokens
+                            && *current_after == after_tokens
+                            && *current_count == compacted_count
+                            && *expanded == next_expanded
+                        {
+                            return false;
+                        }
+                        *current_phase = phase;
+                        *current_summary = summary;
+                        *current_before = before_tokens;
+                        *current_after = after_tokens;
+                        *current_count = compacted_count;
+                        *expanded = next_expanded;
+                        true
+                    });
                 } else {
                     self.push_item(OutputItem::CompactionSummary {
                         phase,
@@ -2024,25 +2407,32 @@ impl AppState {
                 status,
                 final_text,
             } => {
-                for item in self.items.iter_mut() {
-                    if let OutputItem::SubAgentActivity {
-                        handle: h,
-                        status: s,
-                        output,
-                        done,
-                        ..
-                    } = item
-                        && h == &handle
-                    {
-                        *s = status.clone();
-                        if !final_text.is_empty() {
-                            *output = final_text.clone();
+                if let Some(index) = self.items.iter().position(|item| {
+                    matches!(item, OutputItem::SubAgentActivity { handle: current, .. } if current == &handle)
+                }) {
+                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                        let OutputItem::SubAgentActivity {
+                            status: current_status,
+                            output,
+                            done,
+                            ..
+                        } = item
+                        else {
+                            return false;
+                        };
+                        let output_changed = !final_text.is_empty() && *output != final_text;
+                        let changed = *current_status != status || output_changed || !*done;
+                        if !changed {
+                            return false;
+                        }
+                        *current_status = status;
+                        if output_changed {
+                            *output = final_text;
                         }
                         *done = true;
-                        break;
-                    }
+                        true
+                    });
                 }
-                self.items_version = self.items_version.wrapping_add(1);
             }
             StreamFrame::Unknown => {}
         }
@@ -2059,10 +2449,13 @@ impl AppState {
         let Some(idx) = target_idx else {
             return;
         };
-        if let Some(OutputItem::WorkflowPanel { graph, .. }) = self.items.get_mut(idx) {
+        self.mutate_item(idx, OutputMutation::Semantic, |item| {
+            let OutputItem::WorkflowPanel { graph, .. } = item else {
+                return false;
+            };
             graph.apply_stream_frame(frame);
-            self.items_version = self.items_version.wrapping_add(1);
-        }
+            true
+        });
     }
 
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
@@ -2084,24 +2477,31 @@ impl AppState {
         }
         if let Some(rid) = frame_run_id(frame)
             && let Some(&idx) = self.sub_agent_run_ids.get(rid)
-            && let Some(OutputItem::SubAgentActivity {
-                workflow_graph,
-                messages,
-                ..
-            }) = self.items.get_mut(idx)
         {
-            workflow_graph.apply_stream_frame(frame);
-            if let StreamFrame::AssistantMsg { message, .. }
-            | StreamFrame::ToolResultMsg { message, .. } = frame
-            {
-                messages.push(message.clone());
-                if messages.len() > 100 {
-                    let start = messages.len() - 100;
-                    messages.drain(..start);
+            let routed = self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                let OutputItem::SubAgentActivity {
+                    workflow_graph,
+                    messages,
+                    ..
+                } = item
+                else {
+                    return false;
+                };
+                workflow_graph.apply_stream_frame(frame);
+                if let StreamFrame::AssistantMsg { message, .. }
+                | StreamFrame::ToolResultMsg { message, .. } = frame
+                {
+                    messages.push(message.clone());
+                    if messages.len() > 100 {
+                        let start = messages.len() - 100;
+                        messages.drain(..start);
+                    }
                 }
+                true
+            });
+            if routed {
+                return;
             }
-            self.items_version = self.items_version.wrapping_add(1);
-            return;
         }
         let is_panel_creator = matches!(
             frame,
@@ -2116,29 +2516,36 @@ impl AppState {
         } = frame
         {
             if let Some(&parent_idx) = self.workflow_run_to_panel.get(parent_rid) {
-                if let Some(OutputItem::WorkflowPanel {
-                    ended_at,
-                    cancelled,
-                    ..
-                }) = self.items.get_mut(parent_idx)
-                {
+                self.mutate_item(parent_idx, OutputMutation::Semantic, |item| {
+                    let OutputItem::WorkflowPanel {
+                        ended_at,
+                        cancelled,
+                        ..
+                    } = item
+                    else {
+                        return false;
+                    };
                     // Don't reopen a cancelled panel — late subflow events
                     // after a hard stop must not resurrect the spinner.
                     if ended_at.is_some() && !*cancelled {
                         *ended_at = None;
+                        true
+                    } else {
+                        false
                     }
-                }
+                });
                 // Insert subflow run_id so nested subflows (e.g. flow.spawn)
                 // can find the parent panel. The top_level_run_ids guard in
                 // apply_stream_frame prevents subflow FlowDone from closing it.
                 self.workflow_run_to_panel
                     .insert(run_id.clone(), parent_idx);
-                if let Some(OutputItem::WorkflowPanel { graph, .. }) =
-                    self.items.get_mut(parent_idx)
-                {
+                self.mutate_item(parent_idx, OutputMutation::Semantic, |item| {
+                    let OutputItem::WorkflowPanel { graph, .. } = item else {
+                        return false;
+                    };
                     graph.apply_stream_frame(frame);
-                    self.items_version = self.items_version.wrapping_add(1);
-                }
+                    true
+                });
                 return;
             }
             // Parent not in HashMap (e.g. after session resume).
@@ -2200,15 +2607,20 @@ impl AppState {
             }
         }
         if let Some(idx) = reopen_idx {
-            if let Some(OutputItem::WorkflowPanel {
-                ended_at,
-                cancelled,
-                ..
-            }) = self.items.get_mut(idx)
-            {
+            self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                let OutputItem::WorkflowPanel {
+                    ended_at,
+                    cancelled,
+                    ..
+                } = item
+                else {
+                    return false;
+                };
+                let changed = ended_at.is_some() || *cancelled;
                 *ended_at = None;
                 *cancelled = false;
-            }
+                changed
+            });
             if let StreamFrame::FlowStart { run_id, .. } = frame {
                 self.workflow_run_to_panel.insert(run_id.clone(), idx);
                 self.top_level_run_ids.insert(run_id.clone());
@@ -2241,19 +2653,23 @@ impl AppState {
     pub fn close_current_workflow_panel(&mut self, cancelled: bool, panel_idx: Option<usize>) {
         let idx = panel_idx.or(self.last_workflow_panel_idx);
         if let Some(idx) = idx {
-            if let Some(OutputItem::WorkflowPanel {
-                ended_at,
-                cancelled: cancelled_flag,
-                ..
-            }) = self.items.get_mut(idx)
-            {
+            self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                let OutputItem::WorkflowPanel {
+                    ended_at,
+                    cancelled: cancelled_flag,
+                    ..
+                } = item
+                else {
+                    return false;
+                };
                 let was_open = ended_at.is_none();
                 if was_open {
                     *ended_at = Some(Instant::now());
                 }
+                let changed = was_open || *cancelled_flag != cancelled;
                 *cancelled_flag = cancelled;
-                self.items_version = self.items_version.wrapping_add(1);
-            }
+                changed
+            });
         }
     }
 
@@ -2277,20 +2693,28 @@ impl AppState {
             .unwrap_or(false);
         if within_cooldown
             && let Some(idx) = self.last_lag_note_idx
-            && let Some(OutputItem::SystemNote { text, .. }) = self.items.get_mut(idx)
+            && matches!(self.items.get(idx), Some(OutputItem::SystemNote { .. }))
         {
             self.last_lag_count = self.last_lag_count.saturating_add(dropped);
-            *text = format!("dropped {} stream frames", self.last_lag_count);
+            let text = format!("dropped {} stream frames", self.last_lag_count);
             self.last_lag_at = Some(now);
-            self.items_version = self.items_version.wrapping_add(1);
+            self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                let OutputItem::SystemNote { text: current, .. } = item else {
+                    return false;
+                };
+                if *current == text {
+                    return false;
+                }
+                *current = text;
+                true
+            });
             return;
         }
-        self.last_lag_count = dropped;
-        self.items.push(OutputItem::SystemNote {
+        self.push_item(OutputItem::SystemNote {
             text: format!("dropped {dropped} stream frames"),
             level: NoteLevel::Warn,
         });
-        self.items_version = self.items_version.wrapping_add(1);
+        self.last_lag_count = dropped;
         self.last_lag_note_idx = Some(self.items.len() - 1);
         self.last_lag_at = Some(now);
     }
@@ -3252,6 +3676,109 @@ mod tests {
         if let OutputItem::WorkflowPanel { expanded_nodes, .. } = &app.items[idx] {
             assert!(!expanded_nodes.contains("node_x"));
         }
+    }
+
+    #[test]
+    fn output_store_revisions_track_exact_mutation_domains() {
+        let mut store = OutputStore::default();
+        store.push(OutputItem::SystemNote {
+            text: "abcdef".into(),
+            level: NoteLevel::Info,
+        });
+        let initial = store.revisions()[0];
+
+        assert!(store.mutate(0, OutputMutation::Semantic, |item| {
+            let OutputItem::SystemNote { text, .. } = item else {
+                return false;
+            };
+            text.replace_range(2..4, "ZZ");
+            true
+        }));
+        let semantic = store.revisions()[0];
+        assert_eq!(semantic.id, initial.id);
+        assert_ne!(semantic.semantic, initial.semantic);
+        assert_ne!(semantic.layout, initial.layout);
+        assert_eq!(semantic.interaction, initial.interaction);
+        assert_eq!(semantic.paint, initial.paint);
+
+        assert!(store.mutate(0, OutputMutation::Paint, |_| true));
+        let paint = store.revisions()[0];
+        assert_ne!(paint.interaction, semantic.interaction);
+        assert_ne!(paint.paint, semantic.paint);
+        assert_eq!(paint.layout, semantic.layout);
+
+        assert!(!store.mutate(0, OutputMutation::Semantic, |_| false));
+        assert_eq!(store.revisions()[0], paint);
+    }
+
+    #[test]
+    fn output_store_detects_same_cardinality_interaction_change() {
+        let mut store = OutputStore::default();
+        store.push(OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+            expanded_nodes: HashSet::from(["old".into()]),
+            panel_expanded: true,
+            started_at: Instant::now(),
+            ended_at: None,
+            cancelled: false,
+        });
+        let before = store.revisions()[0];
+        assert!(store.mutate(0, OutputMutation::Interaction, |item| {
+            let OutputItem::WorkflowPanel { expanded_nodes, .. } = item else {
+                return false;
+            };
+            expanded_nodes.remove("old");
+            expanded_nodes.insert("new".into());
+            true
+        }));
+        let after = store.revisions()[0];
+        assert_ne!(after.interaction, before.interaction);
+        assert_ne!(after.layout, before.layout);
+        assert_eq!(after.semantic, before.semantic);
+    }
+
+    #[test]
+    fn task_hover_does_not_invalidate_output_structure() {
+        let mut app = AppState::new("s".into(), None);
+        app.push_note("stable", NoteLevel::Info);
+        let items_version = app.items_version;
+        let structure_revision = app.items.structure_revision();
+        app.set_hovered_task(Some(atman_runtime::TaskId::now()));
+        assert_eq!(app.items_version, items_version);
+        assert_eq!(app.items.structure_revision(), structure_revision);
+    }
+
+    #[test]
+    fn duplicate_terminal_exit_preserves_item_revision() {
+        let mut app = AppState::new("s".into(), None);
+        app.push_item(OutputItem::Terminal {
+            handle: "term_s_0".into(),
+            title: None,
+            command: None,
+            screen: TerminalScreen {
+                rows: 0,
+                cols: 0,
+                cells: Vec::new(),
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: Vec::new(),
+            mode: TerminalViewMode::Capture,
+            done: false,
+            expanded: false,
+            scroll_offset: None,
+        });
+        let frame = StreamFrame::TerminalExited {
+            handle: "term_s_0".into(),
+            exit_code: Some(0),
+            call_intent: None,
+            run_id: None,
+        };
+        app.apply_stream_frame(frame.clone());
+        let after_first = app.items.revisions()[0];
+        app.apply_stream_frame(frame);
+        assert_eq!(app.items.revisions()[0], after_first);
     }
 
     #[test]

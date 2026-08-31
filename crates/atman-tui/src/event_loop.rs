@@ -498,11 +498,7 @@ pub(crate) async fn run_frames(
                                         })
                                         .cloned()
                                     {
-                                        if !app.app.expanded_tools.remove(&tool_id) {
-                                            app.app.expanded_tools.insert(tool_id);
-                                        }
-                                        app.app.expanded_version =
-                                            app.app.expanded_version.wrapping_add(1);
+                                        app.app.toggle_tool_expansion(&tool_id);
                                     } else {
                                         app.wm.focus(panel_id);
                                     }
@@ -515,8 +511,6 @@ pub(crate) async fn run_frames(
                                 {
                                     if app.app.sidebar_upper_runtime_collapsed {
                                         app.app.sidebar_upper_runtime_collapsed = false;
-                                        app.app.items_version =
-                                            app.app.items_version.wrapping_add(1);
                                     } else {
                                         app.app.sidebar_upper_collapsed =
                                             !app.app.sidebar_upper_collapsed;
@@ -526,8 +520,6 @@ pub(crate) async fn run_frames(
                                 {
                                     if app.app.sidebar_lower_runtime_collapsed {
                                         app.app.sidebar_lower_runtime_collapsed = false;
-                                        app.app.items_version =
-                                            app.app.items_version.wrapping_add(1);
                                     } else {
                                         app.app.sidebar_lower_collapsed =
                                             !app.app.sidebar_lower_collapsed;
@@ -610,14 +602,12 @@ pub(crate) async fn run_frames(
                                 {
                                     app.app.sidebar_collapsed = true;
                                     app.app.sidebar_upper_runtime_collapsed = false;
-                                    app.app.items_version = app.app.items_version.wrapping_add(1);
                                     app.app.save_ui_state();
                                 } else if let Some(r) = app.app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.app.sidebar_collapsed = false;
                                     app.app.sidebar_upper_runtime_collapsed = false;
-                                    app.app.items_version = app.app.items_version.wrapping_add(1);
                                     app.app.save_ui_state();
                                 } else if let Some(r) = app.app.last_task_panel_rect
                                     && me.column >= r.x
@@ -632,7 +622,6 @@ pub(crate) async fn run_frames(
                                         app.app.task_panel_runtime_collapsed = false;
                                         app.app.save_ui_state();
                                     }
-                                    app.app.items_version = app.app.items_version.wrapping_add(1);
                                 } else if let Some(r) = app.app.last_task_panel_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -980,7 +969,7 @@ pub(crate) async fn run_frames(
                                         .map(|(_, h, _)| h.clone());
                                     if app.wm.interaction.hovered_history_row != history_hover {
                                         app.wm.interaction.hovered_history_row = history_hover;
-                                        app.app.items_version = app.app.items_version.wrapping_add(1);
+                                        app.app.mark_visual_dirty();
                                     }
 
                                     let mcp_hover = app.wm.interaction.last_hitmap
@@ -1016,7 +1005,7 @@ pub(crate) async fn run_frames(
                                     }
                                     if app.wm.interaction.hovered_history_row.is_some() {
                                         app.wm.interaction.hovered_history_row = None;
-                                        app.app.items_version = app.app.items_version.wrapping_add(1);
+                                        app.app.mark_visual_dirty();
                                     }
                                     if app.wm.interaction.hovered_mcp_row.is_some() {
                                         app.wm.interaction.hovered_mcp_row = None;
@@ -1300,7 +1289,7 @@ pub(crate) async fn run_frames(
                     let theme = app.app.trust.theme;
                     app.app.trust = rx.borrow().clone();
                     app.app.trust.theme = theme;
-                    app.app.mark_items_dirty();
+                    app.app.mark_visual_dirty();
                 }
             }
             inj = recv_injection(handle.injection_rx.as_mut()) => {
@@ -1313,7 +1302,7 @@ pub(crate) async fn run_frames(
                     } else {
                         app.app.pending_injections.retain(|i| i.id != inj.id);
                     }
-                    app.app.mark_items_dirty();
+                    app.app.mark_visual_dirty();
                 }
             }
             _ = wait_compact_review_change(handle.compact_review_rx.as_mut()) => {
@@ -1972,7 +1961,7 @@ mod tests {
 
         assert!(app.app.toasts.is_empty());
         assert!(matches!(
-            app.app.items.as_slice(),
+            &*app.app.items,
             [app::OutputItem::SystemNote { text, level }]
                 if text.contains("provider-id")
                     && text.contains("discovery unavailable")

@@ -673,7 +673,7 @@ pub(crate) fn handle_key(
             && matches!(panel.content_kind, crate::wm::WindowContent::Mermaid { .. })
         {
             panel.split = !panel.split;
-            app.mark_items_dirty();
+            app.mark_visual_dirty();
             return;
         }
     }
@@ -914,9 +914,8 @@ pub(crate) fn handle_key(
                 }
                 _ => (String::new(), Vec::new()),
             };
-            app.items.remove(0);
+            let _ = app.remove_item(0);
             app.inline_note_indices.clear();
-            app.items_version = app.items_version.wrapping_add(1);
             app.startup_intro = Some(crate::app::StartupIntro {
                 started_at: std::time::Instant::now(),
                 version,
@@ -1265,7 +1264,6 @@ pub(crate) fn handle_key(
             app.sidebar_collapsed = !app.sidebar_collapsed;
             app.sidebar_upper_runtime_collapsed = false;
             app.sidebar_lower_runtime_collapsed = false;
-            app.items_version = app.items_version.wrapping_add(1);
             app.save_ui_state();
             *interrupt_prompt = None;
         }
