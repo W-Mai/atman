@@ -121,9 +121,10 @@ pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, Sess
 pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
     let spawned_flow_ids = spawned_flow_ids(&envelopes);
-    Ok(envelopes
-        .iter()
-        .filter_map(|env| match &env.event {
+    let mut messages = Vec::new();
+    let mut positions = HashMap::new();
+    for env in &envelopes {
+        match &env.event {
             crate::event::Event::UserMsg {
                 message,
                 flow_run_id,
@@ -139,18 +140,37 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
                 flow_run_id,
                 ..
             } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
-                Some((env.seq, message.clone()))
+                positions.insert(env.seq, messages.len());
+                messages.push((env.seq, message.clone()));
             }
             crate::event::Event::SystemMsg {
                 message,
                 flow_run_id,
                 ..
             } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
-                Some((env.seq, message.clone()))
+                positions.insert(env.seq, messages.len());
+                messages.push((env.seq, message.clone()));
             }
-            _ => None,
-        })
-        .collect())
+            crate::event::Event::AttachmentDegraded {
+                message_seq,
+                part_index,
+                file_basename,
+                reason,
+                ..
+            } => {
+                apply_attachment_degradation(
+                    &mut messages,
+                    &positions,
+                    *message_seq,
+                    *part_index,
+                    file_basename,
+                    reason,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(messages)
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +218,113 @@ pub struct CompactReplayEvent {
     range_start: usize,
     range_end: usize,
     replacement_msg_seq: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct TranscriptMessageSlot {
+    seq: u64,
+    output_index: usize,
+}
+
+fn push_transcript_message(
+    out: &mut Vec<TranscriptEntry>,
+    messages: &mut Vec<TranscriptMessageSlot>,
+    positions: &mut HashMap<u64, usize>,
+    seq: u64,
+    entry: TranscriptEntry,
+) {
+    positions.insert(seq, messages.len());
+    messages.push(TranscriptMessageSlot {
+        seq,
+        output_index: out.len(),
+    });
+    out.push(entry);
+}
+
+fn compact_transcript_messages(
+    out: &mut Vec<TranscriptEntry>,
+    messages: &mut Vec<TranscriptMessageSlot>,
+    positions: &mut HashMap<u64, usize>,
+    range_start: usize,
+    range_end: usize,
+    replacement_seq: u64,
+) -> bool {
+    if range_start > range_end || range_end >= messages.len() {
+        return false;
+    }
+    let Some(replacement_position) = positions.get(&replacement_seq).copied() else {
+        return false;
+    };
+    let replacement_output_index = messages[replacement_position].output_index;
+    let mut replacement_entry = Some(out[replacement_output_index].clone());
+    let insertion_output_index = messages[range_start].output_index;
+    let removed_output_indices = messages[range_start..=range_end]
+        .iter()
+        .map(|slot| slot.output_index)
+        .chain(std::iter::once(replacement_output_index))
+        .collect::<std::collections::HashSet<_>>();
+
+    let old_len = out.len();
+    let mut old_to_new = vec![None; old_len];
+    let mut replacement_new_index = None;
+    let mut compacted = Vec::with_capacity(
+        old_len
+            .saturating_sub(removed_output_indices.len())
+            .saturating_add(1),
+    );
+    for (old_index, entry) in out.drain(..).enumerate() {
+        if old_index == insertion_output_index {
+            replacement_new_index = Some(compacted.len());
+            compacted.push(
+                replacement_entry
+                    .take()
+                    .expect("replacement inserted exactly once"),
+            );
+        }
+        if removed_output_indices.contains(&old_index) {
+            continue;
+        }
+        old_to_new[old_index] = Some(compacted.len());
+        compacted.push(entry);
+    }
+    let replacement_new_index = replacement_new_index.expect("message slot belongs to output");
+    *out = compacted;
+
+    let mut compacted_messages = Vec::with_capacity(
+        messages
+            .len()
+            .saturating_sub(range_end - range_start)
+            .saturating_sub(usize::from(
+                replacement_position < range_start || replacement_position > range_end,
+            )),
+    );
+    for (message_index, slot) in messages.iter().copied().enumerate() {
+        if message_index == range_start {
+            compacted_messages.push(TranscriptMessageSlot {
+                seq: replacement_seq,
+                output_index: replacement_new_index,
+            });
+        }
+        if (range_start..=range_end).contains(&message_index)
+            || message_index == replacement_position
+        {
+            continue;
+        }
+        compacted_messages.push(TranscriptMessageSlot {
+            seq: slot.seq,
+            output_index: old_to_new[slot.output_index]
+                .expect("retained message has a retained output entry"),
+        });
+    }
+    *messages = compacted_messages;
+    positions.clear();
+    positions.extend(
+        messages
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| (slot.seq, index)),
+    );
+    true
 }
 
 #[cfg(test)]
@@ -315,7 +442,9 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
         }
     };
     let values = parse_json_lines(&text);
-    let mut flow_parents = std::collections::HashMap::new();
+    let mut known_flow_ids = std::collections::HashSet::new();
+    let mut flow_children =
+        std::collections::HashMap::<crate::event::FlowRunId, Vec<crate::event::FlowRunId>>::new();
     let mut spawned_flow_ids = std::collections::HashSet::new();
     for value in &values {
         if value["type"].as_str() != Some("flow_start") {
@@ -332,34 +461,31 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             .as_str()
             .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
             .map(crate::event::FlowRunId);
-        flow_parents.insert(run_id.clone(), parent);
+        known_flow_ids.insert(run_id.clone());
+        if let Some(parent) = parent {
+            flow_children
+                .entry(parent)
+                .or_default()
+                .push(run_id.clone());
+        }
         if value["spawned"].as_bool().unwrap_or(false) {
             spawned_flow_ids.insert(run_id);
         }
     }
-    loop {
-        let descendants: Vec<_> = flow_parents
-            .iter()
-            .filter_map(|(run_id, parent)| {
-                (!spawned_flow_ids.contains(run_id)
-                    && parent
-                        .as_ref()
-                        .is_some_and(|parent| spawned_flow_ids.contains(parent)))
-                .then_some(run_id.clone())
-            })
-            .collect();
-        if descendants.is_empty() {
-            break;
+    let mut queue = std::collections::VecDeque::from_iter(spawned_flow_ids.iter().cloned());
+    while let Some(parent) = queue.pop_front() {
+        if let Some(descendants) = flow_children.get(&parent) {
+            for descendant in descendants {
+                if spawned_flow_ids.insert(descendant.clone()) {
+                    queue.push_back(descendant.clone());
+                }
+            }
         }
-        spawned_flow_ids.extend(descendants);
     }
-    let known_flow_ids = flow_parents
-        .into_keys()
-        .collect::<std::collections::HashSet<_>>();
     let patches = collect_attachment_patches(&values);
     let mut out = Vec::new();
-    let mut msg_indices: Vec<usize> = Vec::new();
-    let mut msg_seqs: Vec<u64> = Vec::new();
+    let mut messages = Vec::new();
+    let mut message_positions = HashMap::new();
     let mut pending_permissions: std::collections::BTreeMap<
         crate::workflow::WorkflowPermissionIdentity,
         crate::permission_audit::PermissionRequestAudit,
@@ -377,6 +503,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     && let Ok(mut msg) = serde_json::from_value::<Message>(m.clone())
                 {
                     let seq = v["seq"].as_u64().unwrap_or(0);
+                    let belongs_to_root = raw_event_belongs_to_root(v, &spawned_flow_ids);
                     if let Some(ps) = patches.get(&seq) {
                         apply_attachment_patches(&mut msg, ps);
                     }
@@ -389,12 +516,21 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                             Some(raw.to_string())
                         }
                     });
-                    msg_indices.push(out.len());
-                    msg_seqs.push(seq);
-                    out.push(TranscriptEntry::Message {
+                    let entry = TranscriptEntry::Message {
                         message: msg,
                         flow_run_id,
-                    });
+                    };
+                    if belongs_to_root {
+                        push_transcript_message(
+                            &mut out,
+                            &mut messages,
+                            &mut message_positions,
+                            seq,
+                            entry,
+                        );
+                    } else {
+                        out.push(entry);
+                    }
                 }
             }
             "context_compact" => {
@@ -404,34 +540,17 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let Some(event) = parse_context_compact_event(v) else {
                     continue;
                 };
-                if event.range_start > event.range_end || event.range_end >= msg_indices.len() {
-                    continue;
-                }
                 let Some(replacement_seq) = event.replacement_msg_seq else {
                     continue;
                 };
-                let Some(replacement_pos) = msg_seqs.iter().position(|seq| *seq == replacement_seq)
-                else {
-                    continue;
-                };
-                let replacement_out_idx = msg_indices[replacement_pos];
-                let replacement_entry = out.remove(replacement_out_idx);
-                let removed_out_start = msg_indices[event.range_start];
-                let removed_count = event.range_end - event.range_start + 1;
-                for _ in 0..removed_count {
-                    out.remove(removed_out_start);
-                }
-                msg_indices.drain(event.range_start..=event.range_end);
-                msg_seqs.drain(event.range_start..=event.range_end);
-                out.insert(removed_out_start, replacement_entry);
-                msg_indices.insert(event.range_start, removed_out_start);
-                msg_seqs.insert(event.range_start, replacement_seq);
-                for (i, ordinal_out_idx) in msg_indices.iter_mut().enumerate() {
-                    if i > event.range_start {
-                        *ordinal_out_idx =
-                            ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
-                    }
-                }
+                compact_transcript_messages(
+                    &mut out,
+                    &mut messages,
+                    &mut message_positions,
+                    event.range_start,
+                    event.range_end,
+                    replacement_seq,
+                );
             }
             "compaction_summary" => {
                 if !raw_event_belongs_to_root(v, &spawned_flow_ids) {
@@ -821,8 +940,8 @@ pub(crate) fn project_transcript_records(
         }
     }
     let mut out = Vec::new();
-    let mut msg_indices: Vec<usize> = Vec::new();
-    let mut msg_seqs: Vec<u64> = Vec::new();
+    let mut messages = Vec::new();
+    let mut message_positions = HashMap::new();
     let mut pending_permissions = std::collections::BTreeMap::<
         crate::workflow::WorkflowPermissionIdentity,
         crate::permission_audit::PermissionRequestAudit,
@@ -857,6 +976,8 @@ pub(crate) fn project_transcript_records(
                 ..
             } => {
                 let mut message = message.clone();
+                let belongs_to_root =
+                    message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned);
                 if let Some(patches) = patches.get(&seq) {
                     apply_attachment_patches(&mut message, patches);
                 }
@@ -867,12 +988,21 @@ pub(crate) fn project_transcript_records(
                         Some(run_id.0.to_string())
                     }
                 });
-                msg_indices.push(out.len());
-                msg_seqs.push(seq);
-                out.push(TranscriptEntry::Message {
+                let entry = TranscriptEntry::Message {
                     message,
                     flow_run_id,
-                });
+                };
+                if belongs_to_root {
+                    push_transcript_message(
+                        &mut out,
+                        &mut messages,
+                        &mut message_positions,
+                        seq,
+                        entry,
+                    );
+                } else {
+                    out.push(entry);
+                }
             }
             crate::event::Event::ContextCompact {
                 flow_run_id,
@@ -886,34 +1016,17 @@ pub(crate) fn project_transcript_records(
                 }
                 let range_start = *compacted_range_start as usize;
                 let range_end = *compacted_range_end as usize;
-                if range_start > range_end || range_end >= msg_indices.len() {
-                    continue;
-                }
                 let Some(replacement_seq) = replacement_msg_seq else {
                     continue;
                 };
-                let Some(replacement_pos) = msg_seqs.iter().position(|seq| seq == replacement_seq)
-                else {
-                    continue;
-                };
-                let replacement_out_idx = msg_indices[replacement_pos];
-                let replacement_entry = out.remove(replacement_out_idx);
-                let removed_out_start = msg_indices[range_start];
-                let removed_count = range_end - range_start + 1;
-                for _ in 0..removed_count {
-                    out.remove(removed_out_start);
-                }
-                msg_indices.drain(range_start..=range_end);
-                msg_seqs.drain(range_start..=range_end);
-                out.insert(removed_out_start, replacement_entry);
-                msg_indices.insert(range_start, removed_out_start);
-                msg_seqs.insert(range_start, *replacement_seq);
-                for (index, ordinal_out_idx) in msg_indices.iter_mut().enumerate() {
-                    if index > range_start {
-                        *ordinal_out_idx =
-                            ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
-                    }
-                }
+                compact_transcript_messages(
+                    &mut out,
+                    &mut messages,
+                    &mut message_positions,
+                    range_start,
+                    range_end,
+                    *replacement_seq,
+                );
             }
             crate::event::Event::CompactionSummary {
                 flow_run_id,
@@ -1272,8 +1385,9 @@ impl MessageProjection for [crate::event::EventEnvelope] {
     fn to_messages_with_seq(&self) -> Vec<(u64, Message)> {
         let spawned_flow_ids = spawned_flow_ids(self);
         let mut acc: Vec<(u64, Message)> = Vec::new();
+        let mut positions = HashMap::new();
         for env in self {
-            apply_envelope_to_messages(env, &spawned_flow_ids, &mut acc);
+            apply_envelope_to_messages(env, &spawned_flow_ids, &mut acc, &mut positions);
         }
         acc
     }
@@ -1282,7 +1396,8 @@ impl MessageProjection for [crate::event::EventEnvelope] {
 pub(crate) fn spawned_flow_ids(
     envelopes: &[crate::event::EventEnvelope],
 ) -> std::collections::HashSet<crate::event::FlowRunId> {
-    let mut parents = std::collections::HashMap::new();
+    let mut children =
+        std::collections::HashMap::<crate::event::FlowRunId, Vec<crate::event::FlowRunId>>::new();
     let mut spawned = std::collections::HashSet::new();
     for env in envelopes {
         if let crate::event::Event::FlowStart {
@@ -1292,29 +1407,71 @@ pub(crate) fn spawned_flow_ids(
             ..
         } = &env.event
         {
-            parents.insert(run_id.clone(), parent_run_id.clone());
+            if let Some(parent_run_id) = parent_run_id {
+                children
+                    .entry(parent_run_id.clone())
+                    .or_default()
+                    .push(run_id.clone());
+            }
             if *is_spawned {
                 spawned.insert(run_id.clone());
             }
         }
     }
-    loop {
-        let descendants: Vec<_> = parents
-            .iter()
-            .filter_map(|(run_id, parent)| {
-                (!spawned.contains(run_id)
-                    && parent
-                        .as_ref()
-                        .is_some_and(|parent| spawned.contains(parent)))
-                .then_some(run_id.clone())
-            })
-            .collect();
-        if descendants.is_empty() {
-            break;
+    let mut queue = std::collections::VecDeque::from_iter(spawned.iter().cloned());
+    while let Some(parent) = queue.pop_front() {
+        if let Some(descendants) = children.get(&parent) {
+            for descendant in descendants {
+                if spawned.insert(descendant.clone()) {
+                    queue.push_back(descendant.clone());
+                }
+            }
         }
-        spawned.extend(descendants);
     }
     spawned
+}
+
+pub(crate) fn message_positions(acc: &[(u64, Message)]) -> HashMap<u64, usize> {
+    acc.iter()
+        .enumerate()
+        .map(|(index, (seq, _))| (*seq, index))
+        .collect()
+}
+
+fn rebuild_message_positions(acc: &[(u64, Message)], positions: &mut HashMap<u64, usize>) {
+    positions.clear();
+    positions.extend(
+        acc.iter()
+            .enumerate()
+            .map(|(index, (seq, _))| (*seq, index)),
+    );
+}
+
+pub(crate) fn apply_attachment_degradation(
+    acc: &mut [(u64, Message)],
+    positions: &HashMap<u64, usize>,
+    message_seq: u64,
+    part_index: usize,
+    file_basename: &str,
+    reason: &str,
+) -> bool {
+    let Some(message_index) = positions.get(&message_seq).copied() else {
+        return false;
+    };
+    let Some(part) = acc
+        .get_mut(message_index)
+        .and_then(|(_, message)| message.parts.get_mut(part_index))
+    else {
+        return false;
+    };
+    let replacement = MessagePart::Text {
+        text: format!("[attachment unavailable: {} — {}]", file_basename, reason),
+    };
+    if *part == replacement {
+        return false;
+    }
+    *part = replacement;
+    true
 }
 
 pub(crate) fn message_belongs_to_root(
@@ -1328,6 +1485,7 @@ pub(crate) fn apply_envelope_to_messages(
     env: &crate::event::EventEnvelope,
     spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
     acc: &mut Vec<(u64, Message)>,
+    positions: &mut HashMap<u64, usize>,
 ) -> bool {
     match &env.event {
         crate::event::Event::UserMsg {
@@ -1345,6 +1503,7 @@ pub(crate) fn apply_envelope_to_messages(
             flow_run_id,
             ..
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
+            positions.insert(env.seq, acc.len());
             acc.push((env.seq, message.clone()));
             true
         }
@@ -1353,6 +1512,7 @@ pub(crate) fn apply_envelope_to_messages(
             flow_run_id,
             ..
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
+            positions.insert(env.seq, acc.len());
             acc.push((env.seq, message.clone()));
             true
         }
@@ -1374,35 +1534,38 @@ pub(crate) fn apply_envelope_to_messages(
             let Some(rep_seq) = replacement_msg_seq else {
                 return false;
             };
-            let Some(rep_idx) = acc.iter().position(|(s, _)| *s == *rep_seq) else {
+            let Some(rep_idx) = positions.get(rep_seq).copied() else {
                 return false;
             };
             if *after_tokens >= *before_tokens {
                 return false;
             }
-            let replacement = acc.remove(rep_idx);
             let removed_count = range_end - range_start + 1;
-            for _ in 0..removed_count {
-                acc.remove(range_start);
-            }
-            let insertion_idx = range_start.min(acc.len());
-            if let Some(summary) = summary_text {
-                acc.insert(
-                    insertion_idx,
-                    (
-                        *rep_seq,
-                        Message::system_compact_summary(
-                            crate::event::TurnId::now(),
-                            summary.clone(),
-                            range_start as u64,
-                            range_end as u64,
-                            removed_count,
-                        ),
+            let replacement = if let Some(summary) = summary_text {
+                (
+                    *rep_seq,
+                    Message::system_compact_summary(
+                        crate::event::TurnId::now(),
+                        summary.clone(),
+                        range_start as u64,
+                        range_end as u64,
+                        removed_count,
                     ),
-                );
+                )
             } else {
-                acc.insert(insertion_idx, replacement);
-            }
+                acc[rep_idx].clone()
+            };
+            let (adjusted_start, adjusted_end) = if rep_idx < range_start {
+                acc.remove(rep_idx);
+                (range_start - 1, range_end - 1)
+            } else if rep_idx > range_end {
+                acc.remove(rep_idx);
+                (range_start, range_end)
+            } else {
+                (range_start, range_end)
+            };
+            acc.splice(adjusted_start..=adjusted_end, [replacement]);
+            rebuild_message_positions(acc, positions);
             true
         }
         crate::event::Event::Checkpoint {
@@ -1420,6 +1583,7 @@ pub(crate) fn apply_envelope_to_messages(
                 false
             } else {
                 *acc = checkpoint;
+                rebuild_message_positions(acc, positions);
                 true
             }
         }
@@ -1429,20 +1593,14 @@ pub(crate) fn apply_envelope_to_messages(
             file_basename,
             reason,
             ..
-        } => {
-            if let Some((_, message)) = acc.iter_mut().find(|(seq, _)| *seq == *message_seq)
-                && let Some(part) = message.parts.get_mut(*part_index)
-            {
-                let replacement = MessagePart::Text {
-                    text: format!("[attachment unavailable: {} — {}]", file_basename, reason),
-                };
-                if *part != replacement {
-                    *part = replacement;
-                    return true;
-                }
-            }
-            false
-        }
+        } => apply_attachment_degradation(
+            acc,
+            positions,
+            *message_seq,
+            *part_index,
+            file_basename,
+            reason,
+        ),
         _ => false,
     }
 }
@@ -1607,6 +1765,161 @@ mod tests {
                 .iter()
                 .any(|entry| matches!(entry, super::TranscriptEntry::CompactionSummary { .. }))
         );
+    }
+
+    #[test]
+    fn transcript_compaction_preserves_interleaved_non_message_entries() {
+        let spawned = FlowRunId::now();
+        let events = [
+            EventEnvelope::new(
+                1,
+                Event::UserMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: None,
+                    message: message(MessageRole::User, "old user"),
+                },
+            ),
+            EventEnvelope::new(2, flow_start(spawned.clone(), None, true)),
+            EventEnvelope::new(
+                3,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(spawned.clone()),
+                    message: message(MessageRole::Assistant, "spawned assistant"),
+                },
+            ),
+            EventEnvelope::new(
+                4,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: None,
+                    message: message(MessageRole::Assistant, "old assistant"),
+                },
+            ),
+            EventEnvelope::new(
+                5,
+                Event::SystemMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: None,
+                    message: Message::system_compact_summary(TurnId::now(), "summary", 0, 1, 2),
+                },
+            ),
+            EventEnvelope::new(
+                6,
+                Event::ContextCompact {
+                    session_id: "session".into(),
+                    flow_run_id: None,
+                    before_tokens: 100,
+                    after_tokens: 10,
+                    compacted_range_start: 0,
+                    compacted_range_end: 1,
+                    summary_text: Some("summary".into()),
+                    replacement_msg_seq: Some(5),
+                },
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(
+            &path,
+            events
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n"),
+        )
+        .unwrap();
+        let raw_entries = super::replay_transcript_from_raw(&path).unwrap();
+        let entries = super::replay_transcript_from(&path).unwrap();
+        assert_eq!(format!("{raw_entries:#?}"), format!("{entries:#?}"));
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(
+            &entries[0],
+            super::TranscriptEntry::Message { message, .. }
+                if message.text_concat() == "summary"
+        ));
+        assert!(matches!(
+            &entries[1],
+            super::TranscriptEntry::FlowStart { run_id, .. } if run_id == &spawned.0.to_string()
+        ));
+        assert!(matches!(
+            &entries[2],
+            super::TranscriptEntry::Message { message, flow_run_id: Some(run_id) }
+                if message.text_concat() == "spawned assistant"
+                    && run_id == &spawned.0.to_string()
+        ));
+    }
+
+    #[test]
+    fn late_attachment_degradation_updates_all_replay_views() {
+        use crate::message::{ImageData, ImageSource};
+        use crate::provider::ImageDetail;
+
+        let image = Message {
+            role: MessageRole::User,
+            parts: vec![MessagePart::Image {
+                source: ImageSource {
+                    media_type: "image/png".into(),
+                    data: ImageData::Path {
+                        path: "/tmp/missing.png".into(),
+                    },
+                    detail: ImageDetail::Auto,
+                },
+            }],
+            turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
+        };
+        let events = vec![
+            EventEnvelope::new(
+                1,
+                Event::UserMsg {
+                    turn_id: image.turn_id.clone(),
+                    flow_run_id: None,
+                    message: image,
+                },
+            ),
+            EventEnvelope::new(
+                2,
+                Event::AttachmentDegraded {
+                    turn_id: None,
+                    flow_run_id: None,
+                    message_seq: 1,
+                    part_index: 0,
+                    file_basename: "missing.png".into(),
+                    reason: "unreadable".into(),
+                },
+            ),
+        ];
+        let jsonl = events
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        let replay =
+            crate::event_log::replay::SessionReplay::from_reader(std::io::Cursor::new(jsonl), None)
+                .unwrap();
+
+        assert!(
+            replay.compacted_messages[0]
+                .1
+                .text_concat()
+                .contains("missing.png")
+        );
+        assert!(
+            replay.all_messages[0]
+                .1
+                .text_concat()
+                .contains("missing.png")
+        );
+        let transcript = crate::event_log::replay::transcript_from_envelopes(&events);
+        assert!(matches!(
+            &transcript[0],
+            super::TranscriptEntry::Message { message, .. }
+                if message.text_concat().contains("missing.png")
+        ));
     }
 
     #[test]

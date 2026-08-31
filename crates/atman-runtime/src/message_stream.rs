@@ -36,7 +36,9 @@ impl Deref for MessageWindow {
 
 struct Acc {
     compacted: Vec<(u64, Message)>,
+    compacted_positions: HashMap<u64, usize>,
     full_raw: Vec<(u64, Message)>,
+    full_positions: HashMap<u64, usize>,
     replayed: usize,
     projection_revision: u64,
     ownership: FlowOwnership,
@@ -98,7 +100,9 @@ impl MessageStream {
             events,
             acc: Mutex::new(Acc {
                 compacted: Vec::new(),
+                compacted_positions: HashMap::new(),
                 full_raw: Vec::new(),
+                full_positions: HashMap::new(),
                 replayed: 0,
                 projection_revision: 0,
                 ownership: FlowOwnership::default(),
@@ -128,11 +132,15 @@ impl MessageStream {
             start,
         };
         let projection_revision = u64::from(!compacted.is_empty() || !raw.is_empty());
+        let compacted_positions = crate::projection::message_window::message_positions(&compacted);
+        let full_positions = crate::projection::message_window::message_positions(&raw);
         Self {
             events,
             acc: Mutex::new(Acc {
                 compacted,
+                compacted_positions,
                 full_raw: raw,
+                full_positions,
                 replayed: 0,
                 projection_revision,
                 ownership: FlowOwnership::default(),
@@ -170,6 +178,7 @@ impl MessageStream {
                 ev,
                 &acc.ownership.spawned,
                 &mut acc.compacted,
+                &mut acc.compacted_positions,
             );
             match &ev.event {
                 crate::event::Event::UserMsg {
@@ -196,6 +205,7 @@ impl MessageStream {
                     &acc.ownership.spawned,
                 ) =>
                 {
+                    acc.full_positions.insert(ev.seq, acc.full_raw.len());
                     acc.full_raw.push((ev.seq, message.clone()));
                     full_changed = true;
                 }
@@ -204,6 +214,7 @@ impl MessageStream {
                         ev,
                         &acc.ownership.spawned,
                         &mut acc.full_raw,
+                        &mut acc.full_positions,
                     );
                 }
                 _ => {}
@@ -585,7 +596,7 @@ mod tests {
             make_msg_event("user_msg", &user("c"), 4),
             make_msg_event("assistant_msg", &assistant("d"), 5),
             make_msg_event("system_msg", &compact_summary("s2"), 6),
-            make_context_compact(1, 2, 150, 80, "second summary", 6),
+            make_context_compact(1, 2, 150, 80, "second summary", 7),
             make_msg_event("user_msg", &user("e"), 7),
         ];
         let ms = MessageStream::new(event_envelopes(events));

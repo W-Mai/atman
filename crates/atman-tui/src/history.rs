@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use atman_runtime::TranscriptEntry;
@@ -41,7 +41,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut tool_map: HashMap<String, ToolDisplayMeta> = HashMap::new();
     // First pass: build tool_map + collect FlowStart parent links + FlowDone status
     // for transitive closure of spawned flows.
-    let mut flow_parents: HashMap<String, Option<String>> = HashMap::new();
+    let mut flow_children: HashMap<String, Vec<String>> = HashMap::new();
     let mut spawned_roots: HashSet<String> = HashSet::new();
     let mut flow_dones: HashMap<String, (bool, bool)> = HashMap::new();
     let mut llm_models: HashMap<String, String> = HashMap::new();
@@ -70,7 +70,12 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 spawned,
                 ..
             } => {
-                flow_parents.insert(run_id.clone(), parent_run_id.clone());
+                if let Some(parent_run_id) = parent_run_id {
+                    flow_children
+                        .entry(parent_run_id.clone())
+                        .or_default()
+                        .push(run_id.clone());
+                }
                 if *spawned {
                     spawned_roots.insert(run_id.clone());
                 }
@@ -109,43 +114,29 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             _ => {}
         }
     }
-    // Transitive closure: any flow whose parent is in the spawned set is also
-    // part of a spawned sub-agent (covers recursive subflow calls like
-    // research_loop → research_loop).
-    let mut spawned_set = spawned_roots.clone();
-    loop {
-        let mut changed = false;
-        for (rid, parent) in &flow_parents {
-            if !spawned_set.contains(rid.as_str())
-                && parent
-                    .as_ref()
-                    .is_some_and(|p| spawned_set.contains(p.as_str()))
-            {
-                spawned_set.insert(rid.clone());
-                changed = true;
+    let mut spawned_root_by_run = spawned_roots
+        .iter()
+        .map(|root| (root.clone(), root.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut queue = VecDeque::from_iter(spawned_roots.iter().cloned());
+    while let Some(parent) = queue.pop_front() {
+        let root = spawned_root_by_run[&parent].clone();
+        let Some(children) = flow_children.get(&parent) else {
+            continue;
+        };
+        for child in children {
+            if spawned_roots.contains(child) {
+                continue;
             }
-        }
-        if !changed {
-            break;
+            if spawned_root_by_run
+                .insert(child.clone(), root.clone())
+                .is_none()
+            {
+                queue.push_back(child.clone());
+            }
         }
     }
-    // For a given flow_run_id, find the nearest spawned ancestor (the sub-agent
-    // root). This groups all messages from a sub-agent's recursive subflows
-    // (e.g. research_loop → research_loop) under one SubAgentActivity item.
-    let resolve_spawned_root = |rid: &str| -> Option<String> {
-        let mut current = Some(rid.to_string());
-        while let Some(cur) = current {
-            if spawned_roots.contains(&cur) {
-                return Some(cur);
-            }
-            current = flow_parents.get(&cur).cloned().flatten();
-        }
-        None
-    };
-    let spawned_root_by_run: HashMap<String, String> = spawned_set
-        .iter()
-        .filter_map(|run_id| resolve_spawned_root(run_id).map(|root_id| (run_id.clone(), root_id)))
-        .collect();
+    let spawned_set = spawned_root_by_run.keys().cloned().collect::<HashSet<_>>();
     let find_spawned_root = |rid: &str| spawned_root_by_run.get(rid).cloned();
 
     let mut out: Vec<OutputItem> = Vec::new();
@@ -153,6 +144,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut sub_agent_indices: HashMap<String, usize> = HashMap::new();
     let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
     let mut sub_agent_entries: HashMap<String, Vec<&TranscriptEntry>> = HashMap::new();
+    let mut terminal_indices: HashMap<String, Vec<usize>> = HashMap::new();
     let mut workflow_permission_batches: HashMap<
         usize,
         Vec<(
@@ -330,7 +322,16 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         .or_default()
                         .push(msg.clone());
                 } else {
+                    let first_new_item = out.len();
                     flatten_message(msg, &mut out, &tool_map);
+                    for (item_index, item) in out.iter().enumerate().skip(first_new_item) {
+                        if let OutputItem::Terminal { handle, .. } = item {
+                            terminal_indices
+                                .entry(handle.clone())
+                                .or_default()
+                                .push(item_index);
+                        }
+                    }
                 }
             }
             TranscriptEntry::DiffPreview {
@@ -599,16 +600,12 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 }
             }
             TranscriptEntry::TerminalFinalState { handle, screen } => {
-                for item in out.iter_mut() {
-                    if let OutputItem::Terminal {
-                        handle: h,
-                        screen: s,
-                        ..
-                    } = item
+                for item_index in terminal_indices.get(handle).into_iter().flatten() {
+                    if let Some(OutputItem::Terminal {
+                        screen: current, ..
+                    }) = out.get_mut(*item_index)
                     {
-                        if h == handle {
-                            *s = screen.clone();
-                        }
+                        *current = screen.clone();
                     }
                 }
             }
@@ -844,37 +841,33 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
 /// (last call was bash.spawn with no output, but a prior bash.output had
 /// the real result), keep the one with content.
 pub(crate) fn dedup_by_handle(out: &mut Vec<OutputItem>) {
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    let mut i = 0;
-    while i < out.len() {
-        if let Some(h) = out[i].handle().map(|s| s.to_string()) {
-            if let Some(&prev) = seen.get(&h) {
-                let prev_has_content = bash_has_content(&out[prev]);
-                let cur_has_content = bash_has_content(&out[i]);
-                if prev_has_content && !cur_has_content {
-                    let current_metadata = execution_metadata(&out[i]);
-                    inherit_execution_metadata(&mut out[prev], current_metadata);
-                    // Keep the earlier item with content, skip current.
-                    i += 1;
+    let mut winners: HashMap<String, usize> = HashMap::new();
+    for current in 0..out.len() {
+        if let Some(handle) = out[current].handle().map(str::to_owned) {
+            if let Some(&previous) = winners.get(&handle) {
+                let previous_has_content = bash_has_content(&out[previous]);
+                let current_has_content = bash_has_content(&out[current]);
+                if previous_has_content && !current_has_content {
+                    let current_metadata = execution_metadata(&out[current]);
+                    inherit_execution_metadata(&mut out[previous], current_metadata);
                     continue;
                 }
-                let previous_metadata = execution_metadata(&out[prev]);
-                inherit_execution_metadata(&mut out[i], previous_metadata);
-                out.remove(prev);
-                seen.iter_mut().for_each(|(_, idx)| {
-                    if *idx > prev {
-                        *idx -= 1;
-                    }
-                });
-                seen.insert(h, i);
+                let previous_metadata = execution_metadata(&out[previous]);
+                inherit_execution_metadata(&mut out[current], previous_metadata);
             } else {
-                seen.insert(h, i);
-                i += 1;
+                winners.insert(handle, current);
+                continue;
             }
-        } else {
-            i += 1;
+            winners.insert(handle, current);
         }
     }
+    let winner_indices = winners.into_values().collect::<HashSet<_>>();
+    let mut original_index = 0;
+    out.retain(|item| {
+        let keep = item.handle().is_none() || winner_indices.contains(&original_index);
+        original_index += 1;
+        keep
+    });
 }
 
 fn execution_metadata(item: &OutputItem) -> (Option<String>, Option<String>) {
@@ -1669,6 +1662,44 @@ mod tests {
         };
         assert_eq!(title.as_deref(), Some("运行测试"));
         assert_eq!(command.as_deref(), Some("cargo test --workspace"));
+    }
+
+    #[test]
+    fn dedup_removes_later_empty_item_and_keeps_its_metadata() {
+        let mut items = vec![
+            OutputItem::Bash {
+                handle: "bg_1".into(),
+                title: None,
+                command: None,
+                output: "completed".into(),
+                done: true,
+                expanded: false,
+            },
+            OutputItem::Bash {
+                handle: "bg_1".into(),
+                title: Some("运行测试".into()),
+                command: Some("cargo test --workspace".into()),
+                output: String::new(),
+                done: true,
+                expanded: false,
+            },
+        ];
+
+        dedup_by_handle(&mut items);
+
+        assert_eq!(items.len(), 1);
+        let OutputItem::Bash {
+            title,
+            command,
+            output,
+            ..
+        } = &items[0]
+        else {
+            panic!("expected bash item");
+        };
+        assert_eq!(title.as_deref(), Some("运行测试"));
+        assert_eq!(command.as_deref(), Some("cargo test --workspace"));
+        assert_eq!(output, "completed");
     }
 
     #[test]

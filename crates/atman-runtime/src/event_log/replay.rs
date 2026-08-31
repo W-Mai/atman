@@ -8,8 +8,8 @@ use crate::event_log::reader::{
 };
 use crate::message::Message;
 use crate::projection::message_window::{
-    TranscriptEntry, apply_envelope_to_messages, message_belongs_to_root,
-    project_transcript_records,
+    TranscriptEntry, apply_attachment_degradation, apply_envelope_to_messages,
+    message_belongs_to_root, project_transcript_records,
 };
 use crate::session::{ContextSnapshot, SessionOpenError};
 
@@ -105,12 +105,15 @@ impl SessionReplay {
     ) -> ReplayBundle {
         let ownership = FlowOwnership::from_records(&records);
         let mut compacted_messages = Vec::new();
+        let mut compacted_positions = HashMap::new();
         let mut all_messages = Vec::new();
+        let mut all_positions = HashMap::new();
         for record in &records {
             apply_envelope_to_messages(
                 &record.envelope,
                 &ownership.spawned,
                 &mut compacted_messages,
+                &mut compacted_positions,
             );
             match &record.envelope.event {
                 Event::UserMsg {
@@ -133,7 +136,24 @@ impl SessionReplay {
                     flow_run_id,
                     ..
                 } if message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned) => {
+                    all_positions.insert(record.envelope.seq, all_messages.len());
                     all_messages.push((record.envelope.seq, message.clone()));
+                }
+                Event::AttachmentDegraded {
+                    message_seq,
+                    part_index,
+                    file_basename,
+                    reason,
+                    ..
+                } => {
+                    apply_attachment_degradation(
+                        &mut all_messages,
+                        &all_positions,
+                        *message_seq,
+                        *part_index,
+                        file_basename,
+                        reason,
+                    );
                 }
                 _ => {}
             }
