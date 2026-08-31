@@ -5105,7 +5105,7 @@ mod tests {
         }
         OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph,
+            graph: graph.into(),
             expanded_nodes: Default::default(),
             panel_expanded: false,
             started_at: std::time::Instant::now(),
@@ -5230,7 +5230,9 @@ mod tests {
             unreachable!();
         };
         *panel_expanded = true;
-        graph.root[0].started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(65));
+        let mut raw_graph = graph.clone().into_graph();
+        raw_graph.root[0].started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(65));
+        *graph = raw_graph.into();
         let items = OutputStore::from(vec![item]);
         let mut cache = LayoutCache::default();
         let request = LayoutRequest {
@@ -5283,7 +5285,7 @@ mod tests {
         };
         let items = OutputStore::from(vec![OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph,
+            graph: graph.into(),
             expanded_nodes: HashSet::new(),
             panel_expanded: false,
             started_at: Instant::now(),
@@ -6214,7 +6216,7 @@ mod tests {
         });
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph,
+            graph: graph.into(),
             expanded_nodes: std::collections::HashSet::new(),
             panel_expanded: true,
             started_at: std::time::Instant::now(),
@@ -6268,7 +6270,7 @@ mod tests {
         });
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph,
+            graph: graph.into(),
             expanded_nodes: std::collections::HashSet::new(),
             panel_expanded: false,
             started_at: std::time::Instant::now(),
@@ -6336,7 +6338,7 @@ mod tests {
         graph.root.push(subflow_layer(0, 4));
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph,
+            graph: graph.into(),
             expanded_nodes: std::collections::HashSet::new(),
             panel_expanded: true,
             started_at: std::time::Instant::now(),

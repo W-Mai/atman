@@ -2,10 +2,10 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use atman_runtime::message::Message;
+use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::CompactionPhase;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::tools::term::TerminalScreen;
-use atman_runtime::workflow::WorkflowGraph;
 
 const LAG_COOLDOWN: Duration = Duration::from_millis(300);
 
@@ -38,7 +38,7 @@ pub enum OutputItem {
     Divider,
     WorkflowPanel {
         turn_index: usize,
-        graph: WorkflowGraph,
+        graph: WorkflowProjection,
         expanded_nodes: HashSet<String>,
         panel_expanded: bool,
         started_at: Instant,
@@ -99,7 +99,7 @@ pub enum OutputItem {
         done: bool,
         expanded: bool,
         messages: Vec<Message>,
-        workflow_graph: WorkflowGraph,
+        workflow_graph: WorkflowProjection,
         expanded_nodes: HashSet<String>,
         workflow_expanded: bool,
     },
@@ -2449,7 +2449,7 @@ impl AppState {
                     done: false,
                     expanded: false,
                     messages: Vec::new(),
-                    workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                    workflow_graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: false,
                 });
@@ -2506,8 +2506,7 @@ impl AppState {
             let OutputItem::WorkflowPanel { graph, .. } = item else {
                 return false;
             };
-            graph.apply_stream_frame(frame);
-            true
+            graph.apply_stream_frame(frame).changed()
         });
     }
 
@@ -2531,7 +2530,11 @@ impl AppState {
         if let Some(rid) = frame_run_id(frame)
             && let Some(&idx) = self.sub_agent_run_ids.get(rid)
         {
-            let routed = self.mutate_item(idx, OutputMutation::Semantic, |item| {
+            let routed = matches!(
+                self.items.get(idx),
+                Some(OutputItem::SubAgentActivity { .. })
+            );
+            self.mutate_item(idx, OutputMutation::Semantic, |item| {
                 let OutputItem::SubAgentActivity {
                     workflow_graph,
                     messages,
@@ -2540,7 +2543,7 @@ impl AppState {
                 else {
                     return false;
                 };
-                workflow_graph.apply_stream_frame(frame);
+                let mut changed = workflow_graph.apply_stream_frame(frame).changed();
                 if let StreamFrame::AssistantMsg { message, .. }
                 | StreamFrame::ToolResultMsg { message, .. } = frame
                 {
@@ -2549,8 +2552,9 @@ impl AppState {
                         let start = messages.len() - 100;
                         messages.drain(..start);
                     }
+                    changed = true;
                 }
-                true
+                changed
             });
             if routed {
                 return;
@@ -2596,8 +2600,7 @@ impl AppState {
                     let OutputItem::WorkflowPanel { graph, .. } = item else {
                         return false;
                     };
-                    graph.apply_stream_frame(frame);
-                    true
+                    graph.apply_stream_frame(frame).changed()
                 });
                 return;
             }
@@ -2611,7 +2614,7 @@ impl AppState {
             let idx = self.items.len();
             self.push_item(OutputItem::WorkflowPanel {
                 turn_index,
-                graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
                 expanded_nodes: HashSet::new(),
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
@@ -2688,7 +2691,7 @@ impl AppState {
             let idx = self.items.len();
             self.push_item(OutputItem::WorkflowPanel {
                 turn_index,
-                graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
                 expanded_nodes: HashSet::new(),
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
@@ -3713,7 +3716,7 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.push_item(OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph: atman_runtime::workflow::WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+            graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
             expanded_nodes: HashSet::new(),
             panel_expanded: true,
             started_at: Instant::now(),
@@ -3769,7 +3772,7 @@ mod tests {
         let mut store = OutputStore::default();
         store.push(OutputItem::WorkflowPanel {
             turn_index: 0,
-            graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+            graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
             expanded_nodes: HashSet::from(["old".into()]),
             panel_expanded: true,
             started_at: Instant::now(),
@@ -3876,7 +3879,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_stream_mutations_bump_items_version() {
+    fn workflow_stream_versions_change_only_for_applied_mutations() {
         let mut app = AppState::new("s".into(), None);
         let baseline = app.items_version;
         app.apply_stream_frame(flow_start("f", "r1"));
@@ -3897,9 +3900,9 @@ mod tests {
             args_preview: "{}".into(),
             call_intent: None,
         });
-        assert_ne!(
+        assert_eq!(
             app.items_version, after_flow,
-            "ToolNode routed to graph should still bump version"
+            "a tool whose parent is absent does not mutate the projection"
         );
     }
 
@@ -4548,6 +4551,38 @@ mod terminal_stream_tests {
             }
             _ => panic!("expected Bash item"),
         }
+    }
+
+    #[test]
+    fn duplicate_sub_agent_workflow_frame_does_not_leak_to_main_workflow() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "agent_1".into(),
+            goal: "check".into(),
+            child_run_id: "child_run".into(),
+            model: "m".into(),
+        });
+        let frame = StreamFrame::FlowStart {
+            run_id: "child_run".into(),
+            flow_name: "child".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        };
+
+        app.apply_stream_frame(frame.clone());
+        app.apply_stream_frame(frame);
+
+        assert_eq!(
+            app.items
+                .iter()
+                .filter(|item| matches!(item, OutputItem::WorkflowPanel { .. }))
+                .count(),
+            0
+        );
+        let OutputItem::SubAgentActivity { workflow_graph, .. } = &app.items[0] else {
+            panic!("expected sub-agent activity");
+        };
+        assert_eq!(workflow_graph.root.len(), 1);
     }
 
     #[test]

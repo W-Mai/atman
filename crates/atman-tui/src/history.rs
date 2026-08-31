@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use atman_runtime::TranscriptEntry;
 use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::StreamFrame;
-use atman_runtime::workflow::{WorkflowGraph, WorkflowPermissionIdentity, WorkflowPermissionState};
+use atman_runtime::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
 
 use crate::app::{NoteLevel, OutputItem};
 
@@ -172,7 +173,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             .count();
         out.push(OutputItem::WorkflowPanel {
             turn_index,
-            graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+            graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
             expanded_nodes: HashSet::new(),
             panel_expanded: false,
             started_at: Instant::now(),
@@ -316,7 +317,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                             done: flow_dones.contains_key(&root_id),
                             expanded: false,
                             messages: Vec::new(),
-                            workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                            workflow_graph: WorkflowProjection::new(
+                                atman_runtime::event::TurnId::now(),
+                            ),
                             expanded_nodes: HashSet::new(),
                             workflow_expanded: false,
                         });
@@ -908,7 +911,11 @@ fn bash_has_content(item: &OutputItem) -> bool {
     }
 }
 
-fn apply_message_to_workflow(graph: &mut WorkflowGraph, msg: &Message, flow_run_id: Option<&str>) {
+fn apply_message_to_workflow(
+    graph: &mut WorkflowProjection,
+    msg: &Message,
+    flow_run_id: Option<&str>,
+) {
     match msg.role {
         MessageRole::Assistant => {
             graph.apply_stream_frame(&StreamFrame::AssistantMsg {

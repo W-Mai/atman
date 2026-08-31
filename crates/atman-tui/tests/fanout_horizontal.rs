@@ -76,7 +76,7 @@ fn build_panel(
     let expanded_nodes: HashSet<String> = HashSet::new();
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes,
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -114,7 +114,7 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
     let expanded_nodes: HashSet<String> = HashSet::new();
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes,
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -165,7 +165,7 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
     graph.root.push(root);
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),
@@ -296,7 +296,7 @@ fn layout_cache_still_composes_valid_regions() {
     graph.root.push(root);
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),

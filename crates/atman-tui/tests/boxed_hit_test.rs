@@ -53,7 +53,7 @@ fn build_boxed(root: WorkflowNode, width: u16) -> Vec<NodeRegion> {
     graph.root.push(root);
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),

@@ -595,7 +595,10 @@ impl WorkflowGraph {
         }
     }
 
-    fn refresh_permission_tool_approvals(&mut self) {
+    pub(crate) fn refresh_permission_tool_approvals(&mut self) {
+        if self.permission_requests.is_empty() {
+            return;
+        }
         let mut exact: BTreeMap<(String, String), &WorkflowPermissionRequest> = BTreeMap::new();
         for request in self.permission_requests.values() {
             #[cfg(test)]

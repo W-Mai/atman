@@ -61,7 +61,7 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
     graph.root.push(root);
     let item = OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),

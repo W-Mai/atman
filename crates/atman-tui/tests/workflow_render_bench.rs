@@ -117,7 +117,7 @@ fn run_bench(node_count: usize, iterations: u32) -> (f64, usize) {
     let graph = build_workflow_of_size(node_count);
     let items = vec![OutputItem::WorkflowPanel {
         turn_index: 0,
-        graph,
+        graph: graph.into(),
         expanded_nodes: HashSet::new(),
         panel_expanded: true,
         started_at: std::time::Instant::now(),

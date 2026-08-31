@@ -171,7 +171,8 @@ fn large_workflow(node_count: usize, permission_count: usize) -> OutputItem {
             permission_requests,
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
-        },
+        }
+        .into(),
         expanded_nodes: HashSet::new(),
         panel_expanded: false,
         started_at: Instant::now(),
