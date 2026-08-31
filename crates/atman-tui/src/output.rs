@@ -10,6 +10,46 @@ use crate::app::{NoteLevel, OutputItem};
 
 const RESET: Style = Style::new();
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PerfCounters {
+    semantic_item_visits: u64,
+    item_renders: u64,
+    permission_table_entries: u64,
+    panel_projection_builds: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PERF_COUNTERS: std::cell::Cell<PerfCounters> = const {
+        std::cell::Cell::new(PerfCounters {
+            semantic_item_visits: 0,
+            item_renders: 0,
+            permission_table_entries: 0,
+            panel_projection_builds: 0,
+        })
+    };
+}
+
+#[cfg(test)]
+fn reset_perf_counters() {
+    PERF_COUNTERS.with(|counters| counters.set(PerfCounters::default()));
+}
+
+#[cfg(test)]
+fn perf_counters() -> PerfCounters {
+    PERF_COUNTERS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn update_perf_counters(update: impl FnOnce(&mut PerfCounters)) {
+    PERF_COUNTERS.with(|counters| {
+        let mut value = counters.get();
+        update(&mut value);
+        counters.set(value);
+    });
+}
+
 pub struct RenderCtx<'a> {
     pub expanded_tools: &'a std::collections::HashSet<String>,
     pub messages: &'a [Message],
@@ -332,6 +372,10 @@ fn item_content_hash(
     _expanded_tools: &std::collections::HashSet<String>,
     animation_frame: Option<u32>,
 ) -> u64 {
+    #[cfg(test)]
+    update_perf_counters(|counters| {
+        counters.semantic_item_visits = counters.semantic_item_visits.saturating_add(1);
+    });
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let _buf = String::new();
@@ -381,6 +425,13 @@ fn item_content_hash(
             ended_at,
             ..
         } => {
+            #[cfg(test)]
+            update_perf_counters(|counters| {
+                counters.permission_table_entries = counters
+                    .permission_table_entries
+                    .saturating_add(graph.permission_requests.len() as u64)
+                    .saturating_add(graph.permission_groups.len() as u64);
+            });
             5u8.hash(&mut h);
             turn_index.hash(&mut h);
             graph.root.len().hash(&mut h);
@@ -588,6 +639,16 @@ pub fn render_item_with_regions(
     ctx: &RenderCtx<'_>,
     item_index: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    #[cfg(test)]
+    update_perf_counters(|counters| {
+        counters.item_renders = counters.item_renders.saturating_add(1);
+        if matches!(
+            item,
+            OutputItem::WorkflowPanel { .. } | OutputItem::SubAgentActivity { .. }
+        ) {
+            counters.panel_projection_builds = counters.panel_projection_builds.saturating_add(1);
+        }
+    });
     if let OutputItem::WorkflowPanel {
         graph,
         expanded_nodes,
@@ -4917,11 +4978,125 @@ line2
 mod tests {
     use super::*;
 
+    fn permission_request(
+        request_id: atman_runtime::permission::PermissionRequestId,
+        run_id: &atman_runtime::event::FlowRunId,
+        tool_use_id: String,
+    ) -> atman_runtime::permission_audit::PermissionRequestAudit {
+        atman_runtime::permission_audit::PermissionRequestAudit {
+            request_id: Some(request_id),
+            revision: 1,
+            session_id: "large-session-baseline".into(),
+            requesting_run_id: run_id.clone(),
+            parent_run_id: None,
+            root_run_id: run_id.clone(),
+            tool_use_id,
+            tool: "fs.read".into(),
+            call_intent: None,
+            tier: atman_runtime::Tier::Two,
+            execution_boundary: None,
+            provenance: Default::default(),
+            target: atman_runtime::permission_audit::PermissionAuditTarget::User,
+            group_ids: Vec::new(),
+            policy: atman_runtime::permission_audit::PermissionPolicyReference {
+                snapshot_id: "baseline".into(),
+                rule_id: "baseline".into(),
+            },
+            escalation_path: Vec::new(),
+            decision_id: None,
+            actor: None,
+            scope: None,
+            reason: None,
+            at: chrono::Utc::now(),
+        }
+    }
+
+    fn workflow_with_permissions(permission_count: usize) -> OutputItem {
+        use atman_runtime::workflow::{
+            NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
+            WorkflowPermissionIdentity, WorkflowPermissionRequest, WorkflowPermissionState,
+        };
+        let run_id = atman_runtime::event::FlowRunId::now();
+        let mut graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![WorkflowNode {
+                id: run_id.to_string(),
+                kind: WorkflowNodeKind::Flow {
+                    run_id: run_id.to_string(),
+                    flow_name: "baseline".into(),
+                },
+                label: "baseline".into(),
+                status: NodeStatus::Running,
+                started_at: Some(chrono::Utc::now()),
+                ended_at: None,
+                output_preview: None,
+                children: Vec::new(),
+                parallelism: Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        for idx in 0..permission_count {
+            let request_id = atman_runtime::permission::PermissionRequestId::now();
+            graph.permission_requests.insert(
+                WorkflowPermissionIdentity::Canonical {
+                    request_id: request_id.clone(),
+                },
+                WorkflowPermissionRequest {
+                    payload: permission_request(request_id, &run_id, format!("tool-{idx}")),
+                    state: WorkflowPermissionState::Pending,
+                },
+            );
+        }
+        OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph,
+            expanded_nodes: Default::default(),
+            panel_expanded: false,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+            cancelled: false,
+        }
+    }
+
     fn plain_line(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    #[ignore = "captures the pre-redesign full permission fingerprint traversal"]
+    fn baseline_layout_cache_revisits_every_permission_on_both_frame_calls() {
+        const PERMISSIONS: usize = 4_096;
+        let items = vec![workflow_with_permissions(PERMISSIONS)];
+        let expanded_tools = std::collections::HashSet::new();
+        let ctx = RenderCtx {
+            expanded_tools: &expanded_tools,
+            messages: &[],
+            animation_frame: 0,
+            panel_width: 120,
+            hovered_thinking_idx: None,
+        };
+        let key = LayoutKey {
+            items_version: 0,
+            expanded_version: 0,
+            width: 120,
+            animation_frame: Some(0),
+        };
+        let mut cache = LayoutCache::default();
+        reset_perf_counters();
+        let _ = cache.get_or_build(key, &items, &ctx, 0, 0);
+        let _ = cache.get_or_build(key, &items, &ctx, 0, 40);
+        let counters = perf_counters();
+        assert_eq!(counters.semantic_item_visits, 2);
+        assert_eq!(counters.item_renders, 1);
+        assert_eq!(counters.panel_projection_builds, 1);
+        assert_eq!(counters.permission_table_entries, (PERMISSIONS * 2) as u64);
     }
 
     #[test]

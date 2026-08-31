@@ -7,6 +7,42 @@ use crate::event::{Event, FlowNodeStatus, FlowStatus, TurnId};
 use crate::permission::{PermissionGroupId, PermissionRequestId};
 use crate::permission_audit::{PermissionGroupAudit, PermissionRequestAudit};
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PerfCounters {
+    workflow_node_visits: u64,
+    permission_table_visits: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PERF_COUNTERS: std::cell::Cell<PerfCounters> = const {
+        std::cell::Cell::new(PerfCounters {
+            workflow_node_visits: 0,
+            permission_table_visits: 0,
+        })
+    };
+}
+
+#[cfg(test)]
+fn reset_perf_counters() {
+    PERF_COUNTERS.with(|counters| counters.set(PerfCounters::default()));
+}
+
+#[cfg(test)]
+fn perf_counters() -> PerfCounters {
+    PERF_COUNTERS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn update_perf_counters(update: impl FnOnce(&mut PerfCounters)) {
+    PERF_COUNTERS.with(|counters| {
+        let mut value = counters.get();
+        update(&mut value);
+        counters.set(value);
+    });
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowGraph {
     pub turn_id: TurnId,
@@ -562,6 +598,11 @@ impl WorkflowGraph {
     fn refresh_permission_tool_approvals(&mut self) {
         let mut exact: BTreeMap<(String, String), &WorkflowPermissionRequest> = BTreeMap::new();
         for request in self.permission_requests.values() {
+            #[cfg(test)]
+            update_perf_counters(|counters| {
+                counters.permission_table_visits =
+                    counters.permission_table_visits.saturating_add(1);
+            });
             let key = (
                 request.payload.requesting_run_id.0.to_string(),
                 request.payload.tool_use_id.clone(),
@@ -955,6 +996,10 @@ fn apply_permission_approvals(
     approvals: &BTreeMap<String, ApprovalState>,
 ) {
     for node in nodes {
+        #[cfg(test)]
+        update_perf_counters(|counters| {
+            counters.workflow_node_visits = counters.workflow_node_visits.saturating_add(1);
+        });
         if let Some(approval) = approvals.get(&node.id) {
             node.approval = Some(approval.clone());
         }
@@ -964,6 +1009,10 @@ fn apply_permission_approvals(
 
 fn find_node<'a>(nodes: &'a [WorkflowNode], id: &str) -> Option<&'a WorkflowNode> {
     for n in nodes {
+        #[cfg(test)]
+        update_perf_counters(|counters| {
+            counters.workflow_node_visits = counters.workflow_node_visits.saturating_add(1);
+        });
         if n.id == id {
             return Some(n);
         }
@@ -976,6 +1025,10 @@ fn find_node<'a>(nodes: &'a [WorkflowNode], id: &str) -> Option<&'a WorkflowNode
 
 fn find_node_mut<'a>(nodes: &'a mut [WorkflowNode], id: &str) -> Option<&'a mut WorkflowNode> {
     for n in nodes.iter_mut() {
+        #[cfg(test)]
+        update_perf_counters(|counters| {
+            counters.workflow_node_visits = counters.workflow_node_visits.saturating_add(1);
+        });
         if n.id == id {
             return Some(n);
         }
@@ -1212,6 +1265,88 @@ mod tests {
             args_preview: String::new(),
             call_intent: None,
         });
+    }
+
+    #[test]
+    #[ignore = "captures the pre-index permission refresh traversal"]
+    fn baseline_permission_transition_visits_the_full_table_and_tree() {
+        const ENTRIES: usize = 10_000;
+        let run_id = FlowRunId::now();
+        let at = chrono::Utc::now();
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        graph.root.push(WorkflowNode {
+            id: run_id.to_string(),
+            kind: WorkflowNodeKind::Flow {
+                run_id: run_id.to_string(),
+                flow_name: "baseline".into(),
+            },
+            label: "baseline".into(),
+            status: NodeStatus::Running,
+            started_at: Some(at),
+            ended_at: None,
+            output_preview: None,
+            children: (0..ENTRIES)
+                .map(|idx| WorkflowNode {
+                    id: tool_node_id(&run_id.to_string(), &format!("tool-{idx}")),
+                    kind: WorkflowNodeKind::ToolCall {
+                        tool_use_id: format!("tool-{idx}"),
+                        tool: "fs.read".into(),
+                        args_preview: String::new(),
+                        call_intent: None,
+                        result_preview: None,
+                    },
+                    label: "fs.read".into(),
+                    status: NodeStatus::Running,
+                    started_at: Some(at),
+                    ended_at: None,
+                    output_preview: None,
+                    children: Vec::new(),
+                    parallelism: Parallelism::Serial,
+                    approval: None,
+                    llm_stats: None,
+                })
+                .collect(),
+            parallelism: Parallelism::Serial,
+            approval: None,
+            llm_stats: None,
+        });
+        for idx in 0..ENTRIES {
+            let id = request_id();
+            graph.permission_requests.insert(
+                WorkflowPermissionIdentity::Canonical {
+                    request_id: id.clone(),
+                },
+                WorkflowPermissionRequest {
+                    payload: permission_payload(
+                        id,
+                        run_id.clone(),
+                        run_id.clone(),
+                        &format!("tool-{idx}"),
+                        at,
+                    ),
+                    state: WorkflowPermissionState::Pending,
+                },
+            );
+        }
+
+        reset_perf_counters();
+        let new_id = request_id();
+        graph.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical {
+                request_id: new_id.clone(),
+            },
+            &permission_payload(
+                new_id,
+                run_id.clone(),
+                run_id,
+                "tool-0",
+                at + chrono::Duration::seconds(1),
+            ),
+            WorkflowPermissionState::Approved,
+        );
+        let counters = perf_counters();
+        assert_eq!(counters.permission_table_visits, (ENTRIES + 1) as u64);
+        assert_eq!(counters.workflow_node_visits, (ENTRIES + 1) as u64);
     }
 
     #[test]

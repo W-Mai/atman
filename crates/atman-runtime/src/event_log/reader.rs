@@ -4,6 +4,26 @@ use crate::context_plan::{ContextCallPurpose, ContextCallScope};
 use crate::session::{ContextSnapshot, ContextUsageBucket, SessionOpenError};
 use serde_json;
 
+#[cfg(test)]
+thread_local! {
+    static PARSE_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_parse_attempts() {
+    PARSE_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn parse_attempts() -> u64 {
+    PARSE_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_parse_attempt() {
+    PARSE_ATTEMPTS.with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+}
+
 pub fn read_event_envelopes(
     path: &Path,
 ) -> Result<Vec<crate::event::EventEnvelope>, SessionOpenError> {
@@ -22,6 +42,8 @@ pub fn read_event_envelopes(
         if line.trim().is_empty() {
             continue;
         }
+        #[cfg(test)]
+        record_parse_attempt();
         if let Ok(env) = serde_json::from_str::<crate::event::EventEnvelope>(line) {
             out.push(env);
         }
@@ -36,6 +58,8 @@ pub fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
             if t.is_empty() {
                 None
             } else {
+                #[cfg(test)]
+                record_parse_attempt();
                 serde_json::from_str::<serde_json::Value>(t).ok()
             }
         })

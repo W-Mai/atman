@@ -2741,6 +2741,47 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "large synthetic baseline for the pre-streaming resume path"]
+    fn baseline_resume_parses_five_hundred_thousand_lines_six_times() {
+        use std::io::Write;
+
+        const EVENT_COUNT: usize = 500_000;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let envelope = crate::event::EventEnvelope::new(
+            1,
+            crate::event::Event::TurnStart {
+                turn_id: crate::event::TurnId::now(),
+            },
+        );
+        let mut line = serde_json::to_vec(&envelope).unwrap();
+        line.push(b'\n');
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        for _ in 0..EVENT_COUNT {
+            writer.write_all(&line).unwrap();
+        }
+        writer.flush().unwrap();
+        let file_bytes = std::fs::metadata(&path).unwrap().len();
+
+        crate::event_log::reader::reset_parse_attempts();
+        let started = std::time::Instant::now();
+        let _ = replay_messages_from(&path).unwrap();
+        let _ = replay_messages_with_seq(&path).unwrap();
+        let _ = replay_all_messages_with_seq(&path).unwrap();
+        let _ = find_last_seq(&path).unwrap();
+        let _ = replay_context_snapshot_from(&path);
+        let _ = replay_transcript_from(&path).unwrap();
+        let elapsed = started.elapsed();
+        let attempts = crate::event_log::reader::parse_attempts();
+        assert_eq!(attempts, (EVENT_COUNT * 6) as u64);
+        eprintln!(
+            "baseline resume: events={EVENT_COUNT} file_bytes={file_bytes} parses={attempts} elapsed_ms={}",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
     fn new_session_constructor_persists_supplied_trust() {
         let root = TempDir::new().unwrap();
         let trust = crate::trust::TrustConfig {
