@@ -88,6 +88,7 @@ pub struct CompactionState {
     pub lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_context_usage: Mutex<LastContextUsageStore>,
     last_context_prefix: Mutex<LastContextPrefixStore>,
+    context_epoch: Mutex<Option<String>>,
 }
 
 impl CompactionState {
@@ -99,8 +100,41 @@ impl CompactionState {
             lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_context_usage: Mutex::new(LastContextUsageStore::default()),
             last_context_prefix: Mutex::new(LastContextPrefixStore::default()),
+            context_epoch: Mutex::new(None),
         }
     }
+
+    fn restore_context_epoch(&self, epoch: Option<String>) {
+        *self
+            .context_epoch
+            .lock()
+            .expect("context epoch lock poisoned") = epoch;
+    }
+
+    fn update_context_epoch(&self, messages: &[Message]) {
+        self.restore_context_epoch(Some(checkpoint_epoch_digest(messages)));
+    }
+
+    fn context_epoch(&self) -> Option<String> {
+        self.context_epoch
+            .lock()
+            .expect("context epoch lock poisoned")
+            .clone()
+    }
+}
+
+fn checkpoint_epoch_digest(messages: &[Message]) -> String {
+    let bytes = serde_json::to_vec(messages).expect("checkpoint messages must serialize");
+    format!("blake3:{}", blake3::hash(&bytes).to_hex())
+}
+
+fn replayed_checkpoint_epoch(messages: &[(u64, Message)]) -> Option<String> {
+    let checkpoint = messages
+        .iter()
+        .filter(|(seq, _)| *seq > u64::MAX / 2)
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
+    (!checkpoint.is_empty()).then(|| checkpoint_epoch_digest(&checkpoint))
 }
 
 const MAX_LAST_CONTEXT_USAGES: usize = 256;
@@ -1044,6 +1078,7 @@ impl Session {
         let events_path = dir.join("events.jsonl");
         let messages = replay_messages_from(&events_path)?;
         let initial_msgs = replay_messages_with_seq(&events_path)?;
+        let checkpoint_epoch = replayed_checkpoint_epoch(&initial_msgs);
         let all_msgs = replay_all_messages_with_seq(&events_path)?;
         if let Some(last_seq) = find_last_seq(&events_path)? {
             sink.restore_seq(last_seq);
@@ -1098,6 +1133,7 @@ impl Session {
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: {
                 let c = CompactionState::new();
+                c.restore_context_epoch(checkpoint_epoch);
                 if persisted.window_tokens > 0 {
                     c.model_window_tokens.store(
                         persisted.window_tokens,
@@ -1475,6 +1511,10 @@ impl Session {
                 model,
                 snapshot,
             )
+    }
+
+    pub(crate) fn context_epoch(&self) -> Option<String> {
+        self.compaction.context_epoch()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1991,6 +2031,7 @@ impl Session {
         if let Ok(mut messages) = self.messages.lock() {
             *messages = replacement.clone();
         }
+        self.compaction.update_context_epoch(&replacement);
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
             flow_run_id: None,
@@ -2061,6 +2102,7 @@ impl Session {
         if let Ok(mut messages) = self.messages.lock() {
             *messages = replacement.clone();
         }
+        self.compaction.update_context_epoch(&replacement);
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
             flow_run_id: None,
@@ -2150,6 +2192,8 @@ impl Session {
         self.compaction
             .model_window_tokens
             .store(window_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.compaction
+            .update_context_epoch(checkpoint_messages.as_ref());
         // Sync the messages Vec (root's messages_handle) with the compacted
         // windowed view so root's llm context via messages_handle respects
         // compaction (branch2 retired → unified on messages_handle).
@@ -2532,6 +2576,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -2958,6 +3003,7 @@ mod tests {
     #[test]
     fn commit_rewritten_window_uses_checkpoint_without_legacy_range_replay() {
         let session = Session::open_ephemeral();
+        assert_eq!(session.context_epoch(), None);
         let original = vec![
             Message::user_text(TurnId::now(), "first user"),
             Message::assistant_text(TurnId::now(), "large output".repeat(2_000)),
@@ -2977,6 +3023,10 @@ mod tests {
             .commit_rewritten_window(replacement.clone(), before_tokens, before_tokens, 1)
             .expect("rewrite commit");
 
+        assert_eq!(
+            session.context_epoch(),
+            Some(checkpoint_epoch_digest(&replacement))
+        );
         assert_eq!(session.messages().as_ref(), replacement.as_slice());
         let events = session.sink().snapshot();
         assert!(events.iter().any(|event| matches!(
@@ -2999,6 +3049,22 @@ mod tests {
             std::sync::Mutex::new(vec![crate::event::EventEnvelope::new(1, checkpoint)]),
         ));
         assert_eq!(&*replay.window(), replacement.as_slice());
+    }
+
+    #[test]
+    fn replayed_context_epoch_ignores_messages_appended_after_checkpoint() {
+        let checkpoint = vec![Message::assistant_text(TurnId::now(), "rewritten")];
+        let mut replay = checkpoint
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, message)| (u64::MAX - index as u64, message))
+            .collect::<Vec<_>>();
+        let expected = replayed_checkpoint_epoch(&replay);
+        replay.push((42, Message::user_text(TurnId::now(), "later")));
+
+        assert_eq!(replayed_checkpoint_epoch(&replay), expected);
+        assert_eq!(expected, Some(checkpoint_epoch_digest(&checkpoint)));
     }
 
     #[test]

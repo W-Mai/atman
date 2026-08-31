@@ -141,6 +141,7 @@ impl CodexProvider {
                 verbosity: "medium".into(),
             }),
             include: Some(vec!["reasoning.encrypted_content".into()]),
+            prompt_cache_key: req.prompt_cache_key.clone(),
         })
     }
 
@@ -470,6 +471,13 @@ fn discovery_error_body(body: &str) -> String {
 impl Provider for CodexProvider {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+        crate::provider::ProviderCapabilities {
+            prompt_cache_key: true,
+            context_prefix_profile: crate::context_plan::ContextPrefixProfile::CodexResponses,
+        }
     }
 
     fn context_prefix(
@@ -1024,6 +1032,8 @@ struct ResponsesRequest {
     text: Option<TextConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1196,6 +1206,18 @@ mod tests {
         assert_eq!(observation.common_prefix_bytes, first_bytes);
     }
 
+    #[test]
+    fn responses_request_serializes_prompt_cache_key() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let mut request = request();
+        request.cache_prompt = true;
+        request.prompt_cache_key = Some("atman-route".into());
+
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
+        assert_eq!(body["prompt_cache_key"], "atman-route");
+        assert!(provider.capabilities().prompt_cache_key);
+    }
+
     fn request() -> crate::provider::LlmRequest {
         crate::provider::LlmRequest {
             model: "codex/gpt-test".into(),
@@ -1204,6 +1226,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: false,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -1400,6 +1423,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: false,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::Effort {
                 effort: crate::provider::ReasoningEffort::XHigh,
@@ -1450,6 +1474,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: false,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -1478,6 +1503,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -1502,6 +1528,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -1575,6 +1602,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: vec![crate::tool::ToolSpec {
                 name: "fs.read".into(),
                 description: Some("read a file".into()),

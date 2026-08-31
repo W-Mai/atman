@@ -110,6 +110,7 @@ pub struct ToolCtx {
         Option<std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>>,
     pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
     pub compact_lock_handle: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
+    pub(crate) context_epoch_handle: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     pub read_files:
@@ -315,6 +316,21 @@ impl ToolCtx {
     ) -> Self {
         self.compact_lock_handle = Some(handle);
         self
+    }
+
+    pub(crate) fn context_epoch_seed(&self) -> Option<String> {
+        self.context_epoch_handle.as_ref().map(|epoch| {
+            format!(
+                "generation:{}",
+                epoch.load(std::sync::atomic::Ordering::Relaxed)
+            )
+        })
+    }
+
+    pub(crate) fn advance_context_epoch(&self) {
+        if let Some(epoch) = self.context_epoch_handle.as_ref() {
+            epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub fn with_current_node(mut self, node_id: Option<String>) -> Self {

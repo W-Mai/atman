@@ -286,6 +286,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         model: model.clone(),
                         provider: provider.name().to_string(),
                         context_plan_id: None,
+                        context_epoch: None,
                         context_tokens: None,
                         usage_source: None,
                         context_call_purpose: Some(args.call_purpose),
@@ -334,16 +335,26 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 input: input.clone(),
                 schema: None,
                 cache_prompt,
+                prompt_cache_key: None,
                 tools: tool_specs.clone(),
                 reasoning: reasoning.clone(),
                 stall_timeout_secs,
             };
-            let context_plan = crate::context_plan::ModelContextPlan::for_call(
+            let context_epoch = ctx
+                .session_runtime
+                .as_ref()
+                .and_then(|session| session.context_epoch())
+                .or_else(|| ctx.context_epoch_seed());
+            let context_plan = crate::context_plan::ModelContextPlan::for_provider_call(
                 req,
                 args.call_purpose,
                 crate::context_plan::ContextCallIdentity::from_tool_context(ctx),
+                provider.name(),
+                provider.capabilities(),
+                context_epoch.as_deref(),
             );
             let context_plan_id = context_plan.id().clone();
+            let context_epoch = context_plan.cache_plan().epoch.clone();
             let context_tokens = context_plan.token_lanes().clone();
             let context_call_purpose = context_plan.call_purpose();
             let context_call_identity = context_plan.call_identity().clone();
@@ -422,6 +433,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     model: model.clone(),
                     provider: provider.name().to_string(),
                     context_plan_id: Some(context_plan_id.clone()),
+                    context_epoch: Some(context_epoch),
                     context_tokens: Some(context_tokens),
                     usage_source: Some(usage_source),
                     context_call_purpose: Some(context_call_purpose),
@@ -719,6 +731,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
 }
 
 fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAutoCompactResult) {
+    ctx.advance_context_epoch();
     let Some(flow_run_id) = ctx.message_flow_run_id() else {
         return;
     };
@@ -913,10 +926,11 @@ mod tests {
             1,
             2,
         )];
-        let ctx = ToolCtx::new()
+        let mut ctx = ToolCtx::new()
             .with_history_segment(crate::tool::HistorySegment::Spawned)
             .with_anchors(None, Some(expected_run_id.clone()), None)
             .with_events(sink.clone());
+        ctx.context_epoch_handle = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
         let result = crate::compaction::HandleAutoCompactResult {
             before_tokens: 100,
             after_tokens: 10,
@@ -943,6 +957,7 @@ mod tests {
             &events[2],
             crate::event::Event::Checkpoint { messages, .. } if messages == &checkpoint
         ));
+        assert_eq!(ctx.context_epoch_seed().as_deref(), Some("generation:1"));
     }
 
     #[tokio::test]

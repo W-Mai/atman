@@ -279,6 +279,7 @@ mod tests {
                 model: "m".into(),
                 provider: "p".into(),
                 context_plan_id: None,
+                context_epoch: None,
                 context_tokens: None,
                 usage_source: None,
                 context_call_purpose: None,

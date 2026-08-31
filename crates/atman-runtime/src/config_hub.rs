@@ -107,6 +107,7 @@ pub struct ProviderConfigUpdate<'a> {
     pub base_url: Option<&'a str>,
     pub max_tokens: Option<u32>,
     pub reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
+    pub prompt_cache_key: Option<bool>,
     pub enabled: bool,
 }
 
@@ -1419,6 +1420,13 @@ impl ConfigHub {
                         .transpose()
                         .map_err(ConfigError::Invalid)?,
                 };
+                let prompt_cache_key = update.prompt_cache_key.or_else(|| {
+                    providers
+                        .get(update.name)
+                        .and_then(toml_edit::Item::as_table)
+                        .and_then(|entry| entry.get("prompt_cache_key"))
+                        .and_then(toml_edit::Item::as_bool)
+                });
                 let mut entry = toml_edit::Table::new();
                 entry.insert("kind", toml_edit::value(update.kind));
                 insert_nonempty(&mut entry, "api_key", update.api_key);
@@ -1429,6 +1437,9 @@ impl ConfigHub {
                 }
                 if let Some(value) = reasoning_format {
                     entry.insert("reasoning_format", toml_edit::value(value.to_string()));
+                }
+                if let Some(value) = prompt_cache_key {
+                    entry.insert("prompt_cache_key", toml_edit::value(value));
                 }
                 entry.insert("enabled", toml_edit::value(update.enabled));
                 providers.insert(update.name, toml_edit::Item::Table(entry));
@@ -1449,6 +1460,7 @@ impl ConfigHub {
                         .map(str::to_string),
                     max_tokens: update.max_tokens,
                     reasoning_format,
+                    prompt_cache_key,
                     enabled: Some(update.enabled),
                 })
             },
@@ -2014,11 +2026,13 @@ mod tests {
             base_url: Some("https://gateway.example/v1"),
             max_tokens: None,
             reasoning_format: Some(crate::providers::openai::OpenAiReasoningFormat::Official),
+            prompt_cache_key: Some(true),
             enabled: true,
         };
         hub.upsert_provider(base).unwrap();
         hub.upsert_provider(ProviderConfigUpdate {
             reasoning_format: None,
+            prompt_cache_key: None,
             enabled: false,
             ..base
         })
@@ -2026,7 +2040,12 @@ mod tests {
 
         let config = std::fs::read_to_string(hub.config_toml_path()).unwrap();
         assert!(config.contains("reasoning_format = \"reasoning-effort\""));
+        assert!(config.contains("prompt_cache_key = true"));
         assert!(config.contains("enabled = false"));
+        assert_eq!(
+            hub.model_config().unwrap().unwrap().providers["gateway"].prompt_cache_key,
+            Some(true)
+        );
     }
 
     #[test]
@@ -2046,6 +2065,7 @@ mod tests {
                 base_url: Some("https://gateway.example/v1"),
                 max_tokens: Some(16_384),
                 reasoning_format: Some(crate::providers::openai::OpenAiReasoningFormat::Official),
+                prompt_cache_key: None,
                 enabled: false,
             })
             .unwrap();
@@ -2091,6 +2111,7 @@ mod tests {
             base_url: Some("https://first.example/v1"),
             max_tokens: Some(8_192),
             reasoning_format: None,
+            prompt_cache_key: None,
             enabled: true,
         };
         hub.create_provider(initial).unwrap();
@@ -2140,6 +2161,7 @@ mod tests {
                 base_url: Some("https://gateway.example/v1"),
                 max_tokens: None,
                 reasoning_format: None,
+                prompt_cache_key: None,
                 enabled: true,
             })
             .unwrap_err();

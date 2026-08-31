@@ -1963,6 +1963,7 @@ mod tests {
                 base_url: Some("https://gateway.example/v1"),
                 max_tokens: Some(8_192),
                 reasoning_format: None,
+                prompt_cache_key: None,
                 enabled: true,
             })
             .unwrap();
@@ -1987,6 +1988,7 @@ mod tests {
                             base_url: Some("https://gateway.example/v1"),
                             max_tokens: Some(8_192 + index as u32),
                             reasoning_format: None,
+                            prompt_cache_key: None,
                             enabled: index % 2 == 0,
                         })
                         .unwrap()
@@ -2035,6 +2037,7 @@ mod tests {
             base_url: Some("https://gateway.example/v1"),
             max_tokens: None,
             reasoning_format: None,
+            prompt_cache_key: None,
             enabled: true,
         };
         hub.upsert_provider(active).unwrap();
@@ -2110,6 +2113,7 @@ mod tests {
             base_url: Some("https://gateway.example/v1"),
             max_tokens: None,
             reasoning_format: None,
+            prompt_cache_key: None,
             enabled: true,
         };
         hub_a.upsert_provider(active).unwrap();

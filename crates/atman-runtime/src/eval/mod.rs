@@ -3229,6 +3229,7 @@ mod sanitize_tests {
             input: crate::value::Value::Unit,
             schema: None,
             cache_prompt: false,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: stall_secs,

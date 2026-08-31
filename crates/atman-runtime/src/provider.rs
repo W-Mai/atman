@@ -416,6 +416,16 @@ pub struct ModelCapabilities {
     pub input_modalities: Vec<InputModality>,
 }
 
+/// Wire capabilities of a provider endpoint.
+///
+/// Defaults are deliberately conservative because OpenAI-compatible endpoints
+/// do not necessarily implement optional fields from the official API.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub prompt_cache_key: bool,
+    pub context_prefix_profile: crate::context_plan::ContextPrefixProfile,
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
     pub model: String,
@@ -424,6 +434,7 @@ pub struct LlmRequest {
     pub input: Value,
     pub schema: Option<String>,
     pub cache_prompt: bool,
+    pub prompt_cache_key: Option<String>,
     pub tools: Vec<crate::tool::ToolSpec>,
     pub reasoning: ReasoningSelection,
     /// Seconds without a streaming chunk before the call is cancelled and
@@ -513,6 +524,9 @@ pub(crate) fn bounded_utf8_prefix(value: &str, max_bytes: usize) -> &str {
 
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
 

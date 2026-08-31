@@ -77,11 +77,15 @@ fn build_config_provider_with(
             Ok(Arc::new(provider))
         }
         "openai" | "openai-compat" => {
-            let mut provider = OpenAiProvider::new(registry_key, api_key).with_reasoning_format(
-                entry.reasoning_format.unwrap_or_else(|| {
+            let prompt_cache_key = entry.prompt_cache_key.unwrap_or_else(|| {
+                entry.kind == "openai"
+                    && base_url.as_deref().is_none_or(is_official_openai_base_url)
+            });
+            let mut provider = OpenAiProvider::new(registry_key, api_key)
+                .with_reasoning_format(entry.reasoning_format.unwrap_or_else(|| {
                     crate::providers::openai::OpenAiReasoningFormat::for_provider_kind(&entry.kind)
-                }),
-            );
+                }))
+                .with_prompt_cache_key(prompt_cache_key);
             if let Some(base_url) = base_url {
                 provider = provider.with_base_url(&base_url);
             }
@@ -92,6 +96,10 @@ fn build_config_provider_with(
         }
         _ => unreachable!("supported provider kind was checked above"),
     }
+}
+
+fn is_official_openai_base_url(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == "https://api.openai.com/v1"
 }
 
 fn resolve_provider_credential(
@@ -192,6 +200,61 @@ mod tests {
             resolve_api_key(&entry, &read_from(&[("OPENAI_API_KEY", "fallback")])).as_deref(),
             Some("fallback")
         );
+    }
+
+    #[test]
+    fn prompt_cache_key_capability_is_conservative_for_custom_endpoints() {
+        let official = ProviderEntry {
+            name: "official".into(),
+            kind: "openai".into(),
+            api_key: Some("test-key".into()),
+            ..Default::default()
+        };
+        let official_provider = build_config_provider("official", &official).unwrap();
+        assert!(official_provider.capabilities().prompt_cache_key);
+        let disabled = ProviderEntry {
+            prompt_cache_key: Some(false),
+            ..official.clone()
+        };
+        assert!(
+            !build_config_provider("official", &disabled)
+                .unwrap()
+                .capabilities()
+                .prompt_cache_key
+        );
+        let env_routed = build_config_provider_with(
+            "official",
+            &official,
+            read_from(&[("OPENAI_BASE_URL", "https://gateway.example/v1")]),
+        )
+        .unwrap();
+        assert!(!env_routed.capabilities().prompt_cache_key);
+
+        let compatible = ProviderEntry {
+            name: "compatible".into(),
+            kind: "openai-compat".into(),
+            api_key: Some("test-key".into()),
+            ..Default::default()
+        };
+        let compatible_provider = build_config_provider("compatible", &compatible).unwrap();
+        assert!(!compatible_provider.capabilities().prompt_cache_key);
+
+        let custom_official_shape = ProviderEntry {
+            name: "gateway".into(),
+            kind: "openai".into(),
+            api_key: Some("test-key".into()),
+            base_url: Some("https://gateway.example/v1".into()),
+            ..Default::default()
+        };
+        let custom_provider = build_config_provider("gateway", &custom_official_shape).unwrap();
+        assert!(!custom_provider.capabilities().prompt_cache_key);
+
+        let opted_in = ProviderEntry {
+            prompt_cache_key: Some(true),
+            ..custom_official_shape
+        };
+        let opted_in_provider = build_config_provider("gateway", &opted_in).unwrap();
+        assert!(opted_in_provider.capabilities().prompt_cache_key);
     }
 
     #[test]

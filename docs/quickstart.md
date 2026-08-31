@@ -85,7 +85,13 @@ wire format independently of the endpoint type:
 kind = "openai-compat"
 base_url = "https://gateway.example/v1"
 reasoning_format = "reasoning-effort"
+# Enable only when the gateway accepts OpenAI's prompt_cache_key field.
+# prompt_cache_key = true
 ```
+
+The default OpenAI API endpoint and Codex enable stable prompt-cache routing by
+default. Custom OpenAI base URLs and OpenAI-compatible gateways leave it disabled unless
+`prompt_cache_key = true` is configured explicitly.
 
 Model reasoning and image defaults can be configured per model:
 

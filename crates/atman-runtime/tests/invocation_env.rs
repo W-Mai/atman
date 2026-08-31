@@ -48,6 +48,13 @@ impl Provider for ReasoningCaptureProvider {
         "reasoning-capture"
     }
 
+    fn capabilities(&self) -> atman_runtime::ProviderCapabilities {
+        atman_runtime::ProviderCapabilities {
+            prompt_cache_key: true,
+            context_prefix_profile: atman_runtime::ContextPrefixProfile::OpenAiChat,
+        }
+    }
+
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         self.captured.lock().unwrap().push(req);
         Box::pin(async { Ok(Self::response()) })
@@ -69,6 +76,99 @@ impl Provider for ReasoningCaptureProvider {
             cancel: CancellationToken::new(),
         }
     }
+}
+
+#[tokio::test]
+async fn managed_calls_keep_one_cache_route_across_append_only_turns() {
+    let (_registry, executor, provider) = reasoning_capture_executor("off").await;
+    let file = parse_file(
+        r#"
+flow cached() -> string {
+    return llm.call(
+        model: "reasoning-test",
+        prompt: "hello",
+        context: "session",
+        cache: true,
+    )
+}"#,
+    )
+    .unwrap();
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+
+    for prompt in ["first", "second"] {
+        let turn_id = TurnId::now();
+        session.begin_turn(Message::user_text(turn_id.clone(), prompt));
+        executor
+            .run_in_turn(
+                &file,
+                "cached",
+                vec![],
+                Some(turn_id),
+                Some(Arc::clone(&session)),
+            )
+            .await
+            .unwrap();
+    }
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].prompt_cache_key.as_deref().unwrap();
+    assert_eq!(requests[1].prompt_cache_key.as_deref(), Some(first));
+    assert!(first.starts_with("atman-"));
+    assert!(!first.contains(&session.id().to_string()));
+}
+
+#[tokio::test]
+async fn managed_calls_rotate_the_cache_route_after_checkpoint_rewrite() {
+    let (_registry, executor, provider) = reasoning_capture_executor("off").await;
+    let file = parse_file(
+        r#"
+flow cached() -> string {
+    return llm.call(
+        model: "reasoning-test",
+        prompt: "hello",
+        context: "session",
+        cache: true,
+    )
+}"#,
+    )
+    .unwrap();
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+
+    let first_turn = TurnId::now();
+    session.begin_turn(Message::user_text(first_turn.clone(), "first"));
+    executor
+        .run_in_turn(
+            &file,
+            "cached",
+            vec![],
+            Some(first_turn),
+            Some(Arc::clone(&session)),
+        )
+        .await
+        .unwrap();
+
+    session.append_message(
+        Message::assistant_text(TurnId::now(), "large output".repeat(2_000)),
+        None,
+    );
+    let before = session.messages();
+    let before_tokens = atman_runtime::compaction::estimate_tokens_for_messages(&before);
+    let replacement = vec![Message::assistant_text(TurnId::now(), "persisted omission")];
+    session
+        .commit_rewritten_window(replacement, before_tokens, before_tokens, before.len())
+        .expect("checkpoint rewrite");
+
+    let second_turn = TurnId::now();
+    session.begin_turn(Message::user_text(second_turn.clone(), "second"));
+    executor
+        .run_in_turn(&file, "cached", vec![], Some(second_turn), Some(session))
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_ne!(requests[0].prompt_cache_key, requests[1].prompt_cache_key);
 }
 
 async fn reasoning_capture_executor(

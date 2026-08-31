@@ -45,6 +45,7 @@ pub struct ProviderEntry {
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
     pub reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
+    pub prompt_cache_key: Option<bool>,
     pub enabled: Option<bool>,
 }
 
@@ -2051,6 +2052,8 @@ fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error
         #[serde(default)]
         reasoning_format: Option<crate::providers::openai::OpenAiReasoningFormat>,
         #[serde(default)]
+        prompt_cache_key: Option<bool>,
+        #[serde(default)]
         enabled: Option<bool>,
     }
 
@@ -2122,6 +2125,7 @@ fn parse_config_layer(text: &str) -> Result<Option<ConfigLayer>, toml::de::Error
                 base_url: p.base_url,
                 max_tokens: p.max_tokens,
                 reasoning_format: p.reasoning_format,
+                prompt_cache_key: p.prompt_cache_key,
                 enabled: p.enabled,
             },
         );
@@ -2197,6 +2201,7 @@ pub fn upsert_provider_config(
             base_url,
             max_tokens,
             reasoning_format: None,
+            prompt_cache_key: None,
             enabled,
         })
         .map_err(Into::into)

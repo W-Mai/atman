@@ -19,6 +19,7 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     max_tokens: Option<u32>,
     reasoning_format: OpenAiReasoningFormat,
+    prompt_cache_key: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -76,6 +77,7 @@ impl OpenAiProvider {
             client: reqwest::Client::new(),
             max_tokens: None,
             reasoning_format: OpenAiReasoningFormat::default(),
+            prompt_cache_key: true,
         }
     }
 
@@ -91,6 +93,11 @@ impl OpenAiProvider {
 
     pub fn with_reasoning_format(mut self, format: OpenAiReasoningFormat) -> Self {
         self.reasoning_format = format;
+        self
+    }
+
+    pub fn with_prompt_cache_key(mut self, enabled: bool) -> Self {
+        self.prompt_cache_key = enabled;
         self
     }
 
@@ -159,6 +166,7 @@ impl OpenAiProvider {
             },
             reasoning_effort,
             thinking,
+            prompt_cache_key: req.prompt_cache_key.clone(),
         })
     }
 
@@ -353,6 +361,13 @@ fn split_assistant_parts(
 impl Provider for OpenAiProvider {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+        crate::provider::ProviderCapabilities {
+            prompt_cache_key: self.prompt_cache_key,
+            context_prefix_profile: crate::context_plan::ContextPrefixProfile::OpenAiChat,
+        }
     }
 
     fn context_prefix(
@@ -861,6 +876,8 @@ struct ChatCompletionsRequest {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1087,6 +1104,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -1109,6 +1127,26 @@ mod tests {
     }
 
     #[test]
+    fn official_chat_request_serializes_prompt_cache_key() {
+        let provider = OpenAiProvider::new("openai", "test-key");
+        let request = LlmRequest {
+            model: "gpt-test".into(),
+            messages: vec![Message::user_text(crate::event::TurnId::now(), "first")],
+            system: Some("stable".into()),
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            prompt_cache_key: Some("atman-route".into()),
+            tools: Vec::new(),
+            reasoning: ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+
+        let body = serde_json::to_value(provider.build_body(&request, true).unwrap()).unwrap();
+        assert_eq!(body["prompt_cache_key"], "atman-route");
+    }
+
+    #[test]
     fn internal_context_record_projects_as_mid_conversation_system_message() {
         let provider = OpenAiProvider::new("openai", "test-key");
         let mut request = LlmRequest {
@@ -1118,6 +1156,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,

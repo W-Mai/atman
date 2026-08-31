@@ -88,11 +88,11 @@ pub mod workflow;
 
 pub use attachment_store::AttachmentStore;
 pub use context_plan::{
-    ContentDigest, ContextCacheObservation, ContextCacheResetReason, ContextCallIdentity,
-    ContextCallPurpose, ContextCallScope, ContextPlanId, ContextPrefixLane, ContextPrefixProfile,
-    ContextPrefixSnapshot, ContextRecord, ContextRecordAuthority, ContextRecordBody,
-    ContextRecordRetention, ContextRecordSpec, ContextTokenLanes, ContextUsageKey,
-    ContextUsageRecord, ModelContextPlan, TokenUsageSource,
+    ContentDigest, ContextCacheObservation, ContextCachePlan, ContextCacheResetReason,
+    ContextCallIdentity, ContextCallPurpose, ContextCallScope, ContextEpoch, ContextPlanId,
+    ContextPrefixLane, ContextPrefixProfile, ContextPrefixSnapshot, ContextRecord,
+    ContextRecordAuthority, ContextRecordBody, ContextRecordRetention, ContextRecordSpec,
+    ContextTokenLanes, ContextUsageKey, ContextUsageRecord, ModelContextPlan, TokenUsageSource,
 };
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;
@@ -107,7 +107,7 @@ pub use injection::{Injection, InjectionId, InjectionSource, InjectionState};
 pub use invocation_env::InvocationEnv;
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use projection::message_window::{TranscriptEntry, replay_transcript_from};
-pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
+pub use provider::{LlmRequest, Provider, ProviderCapabilities, ProviderRegistry, TokenUsage};
 pub use provider_lifecycle::{
     ProviderCatalogRefreshOutcome, ProviderLifecycle, ProviderLifecycleError,
     ProviderLifecycleOutcome, ProviderReconcileOutcome, ProviderStateChange,

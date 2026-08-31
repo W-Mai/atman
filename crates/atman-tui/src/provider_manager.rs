@@ -731,6 +731,7 @@ impl ProviderManager {
             base_url: non_empty(self.base_url_editor.buf()),
             max_tokens: self.form_max_tokens,
             reasoning_format,
+            prompt_cache_key: None,
             enabled: Some(true),
         };
         self.dispatch_test(name, entry, control_tx);

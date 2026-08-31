@@ -112,6 +112,8 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_plan_id: Option<crate::context_plan::ContextPlanId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_epoch: Option<crate::context_plan::ContextEpoch>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         context_tokens: Option<crate::context_plan::ContextTokenLanes>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage_source: Option<crate::context_plan::TokenUsageSource>,
@@ -767,6 +769,7 @@ mod tests {
             event,
             Event::LlmCall {
                 context_plan_id: None,
+                context_epoch: None,
                 context_tokens: None,
                 usage_source: None,
                 context_call_purpose: None,

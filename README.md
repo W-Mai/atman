@@ -314,6 +314,8 @@ REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:att
 kind = "openai-compat"
 base_url = "https://gateway.example/v1"
 reasoning_format = "reasoning-effort"
+# Enable only when the gateway accepts OpenAI's prompt_cache_key field.
+# prompt_cache_key = true
 
 [models."deepseek/deepseek-v4-pro"]
 provider = "openai-compatible"

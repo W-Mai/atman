@@ -24,6 +24,7 @@ fn request_with_tools() -> LlmRequest {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        prompt_cache_key: None,
         tools: vec![
             atman_runtime::tool::ToolSpec {
                 name: "fs.list".into(),

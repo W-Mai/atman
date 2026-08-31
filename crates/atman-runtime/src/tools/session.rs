@@ -110,15 +110,18 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
     let mut messages = handle.lock().unwrap();
     messages.push(msg);
     // Cap ephemeral sub-agent segments; root persists via event sink.
-    if ctx.session_runtime.is_none() {
-        trim_ephemeral_context(&mut messages, EPHEMERAL_CONTEXT_MESSAGE_LIMIT);
+    if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
+        && ctx.session_runtime.is_none()
+        && trim_ephemeral_context(&mut messages, EPHEMERAL_CONTEXT_MESSAGE_LIMIT)
+    {
+        ctx.advance_context_epoch();
     }
     Ok(())
 }
 
-fn trim_ephemeral_context(messages: &mut Vec<Message>, limit: usize) {
+fn trim_ephemeral_context(messages: &mut Vec<Message>, limit: usize) -> bool {
     if messages.len() <= limit {
-        return;
+        return false;
     }
     let mut start = messages.len() - limit;
     loop {
@@ -153,6 +156,7 @@ fn trim_ephemeral_context(messages: &mut Vec<Message>, limit: usize) {
         start = transaction_start;
     }
     messages.drain(..start);
+    true
 }
 
 fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
@@ -279,6 +283,33 @@ mod tests {
                 .iter()
                 .any(|part| matches!(part, MessagePart::ToolUse { id, .. } if id == "active"))
         }));
+    }
+
+    #[test]
+    fn ephemeral_trim_advances_the_context_epoch() {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(
+            (0..EPHEMERAL_CONTEXT_MESSAGE_LIMIT)
+                .map(|index| {
+                    Message::assistant_text(crate::event::TurnId::now(), format!("old-{index}"))
+                })
+                .collect(),
+        ));
+        let mut ctx = ToolCtx::new()
+            .with_history_segment(crate::tool::HistorySegment::Spawned)
+            .with_session_messages_handle(std::sync::Arc::clone(&messages));
+        ctx.context_epoch_handle = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
+
+        append_message_to_context(
+            &ctx,
+            Message::assistant_text(crate::event::TurnId::now(), "new"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            EPHEMERAL_CONTEXT_MESSAGE_LIMIT
+        );
+        assert_eq!(ctx.context_epoch_seed().as_deref(), Some("generation:1"));
     }
 
     #[test]

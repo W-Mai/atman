@@ -2886,6 +2886,7 @@ async fn execute_provider_mutation(
                 base_url: (!base_url.is_empty()).then_some(base_url.as_str()),
                 max_tokens,
                 reasoning_format,
+                prompt_cache_key: None,
                 enabled,
             };
             if create {
@@ -7469,6 +7470,7 @@ mod tests {
             base_url: Some("http://localhost/v1"),
             max_tokens: None,
             reasoning_format: None,
+            prompt_cache_key: None,
             enabled: true,
         })
         .unwrap();

@@ -9,7 +9,7 @@ All notable changes to atman are documented in this file.
 ### ⚠️ Breaking Changes
 
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
-- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, token lanes, usage source, call purpose, root/child identity, provider-projected cache-prefix observation, and assistant tool-batch width for the plan compiled for the dispatch attempt. `Event::ToolResultMetrics` records raw and model-visible result sizes.
+- **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, context epoch, token lanes, usage source, call purpose, root/child identity, provider-projected cache-prefix observation, and assistant tool-batch width for the plan compiled for the dispatch attempt. `Event::ToolResultMetrics` records raw and model-visible result sizes.
 - **Context record message parts** — `MessagePart` includes a structured `ContextRecord` variant with authority, retention, revision, and content digest metadata.
 - **Scoped compaction events** — `Event::CompactionSummary`, `Event::ContextCompact`, and `Event::Checkpoint` include an optional child flow owner.
 - **MCP tool snapshots** — `McpClient::tools` is replaced by `McpClient::tool_snapshot()`, which returns a canonical, fingerprinted snapshot suitable for atomic publication.
@@ -40,6 +40,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Stable prompt-cache routing** — default-endpoint OpenAI and Codex calls use opaque per-context cache keys that remain stable across append-only turns and output-setting changes, then rotate after stable instructions, tools, compaction checkpoints, or isolated child-history rewrites change. Custom OpenAI base URLs and compatible gateways require explicit opt-in.
 - **Persistent compaction floor** — extreme budget fallback retains the structured anchor, each context key's highest revision including tombstones, and original user inputs while discarding oversized generated output.
 - **Transaction-aligned compaction** — compaction cutoffs retreat before an assistant tool-call batch when any matching result remains in the recent raw tail.
 - **Scoped compaction events** — child flow compaction summaries, range replacements, and checkpoints retain their flow owner and cannot rewrite the root model window or transcript projection.

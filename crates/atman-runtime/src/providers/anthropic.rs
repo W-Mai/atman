@@ -261,6 +261,13 @@ impl Provider for AnthropicProvider {
         &self.name
     }
 
+    fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+        crate::provider::ProviderCapabilities {
+            context_prefix_profile: crate::context_plan::ContextPrefixProfile::AnthropicMessages,
+            ..Default::default()
+        }
+    }
+
     fn context_prefix(
         &self,
         req: &LlmRequest,
@@ -912,6 +919,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,
@@ -942,6 +950,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 0,

@@ -232,6 +232,7 @@ pub fn spawn_mcp_boot(
                                             input: atman_runtime::Value::Unit,
                                             schema: None,
                                             cache_prompt: false,
+                                            prompt_cache_key: None,
                                             tools: Vec::new(),
                                             reasoning: atman_runtime::provider::ReasoningSelection::ProviderDefault,
                                             stall_timeout_secs: 0,

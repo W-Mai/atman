@@ -321,6 +321,143 @@ impl std::fmt::Display for ContextPlanId {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ContextEpoch(String);
+
+impl ContextEpoch {
+    fn for_request(
+        provider: &str,
+        request: &LlmRequest,
+        profile: ContextPrefixProfile,
+        context_epoch: Option<&str>,
+    ) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hash_epoch_field(&mut hasher, b"version", b"1");
+        hash_epoch_field(&mut hasher, b"provider", provider.as_bytes());
+        hash_epoch_field(&mut hasher, b"model", request.model.as_bytes());
+        hash_epoch_field(
+            &mut hasher,
+            b"projection",
+            &serde_json::to_vec(&profile)
+                .expect("context prefix profile must serialize for context epoch"),
+        );
+        hash_epoch_optional(&mut hasher, b"system", request.system.as_deref());
+        hash_epoch_optional(&mut hasher, b"context_epoch", context_epoch);
+        hash_epoch_field(
+            &mut hasher,
+            b"tools",
+            &serde_json::to_vec(&request.tools)
+                .expect("tool specifications must serialize for context epoch"),
+        );
+        for part in request.messages.iter().flat_map(|message| &message.parts) {
+            if let crate::message::MessagePart::CompactSummary {
+                summary,
+                seq_start,
+                seq_end,
+                count,
+            } = part
+            {
+                hash_epoch_field(&mut hasher, b"compact.summary", summary.as_bytes());
+                hash_epoch_field(&mut hasher, b"compact.seq_start", &seq_start.to_le_bytes());
+                hash_epoch_field(&mut hasher, b"compact.seq_end", &seq_end.to_le_bytes());
+                hash_epoch_field(
+                    &mut hasher,
+                    b"compact.count",
+                    &(*count as u64).to_le_bytes(),
+                );
+            }
+        }
+        Self(format!("blake3:{}", hasher.finalize().to_hex()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextCachePlan {
+    pub epoch: ContextEpoch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+}
+
+impl ContextCachePlan {
+    fn for_provider_call(
+        provider: &str,
+        request: &LlmRequest,
+        call_purpose: ContextCallPurpose,
+        call_identity: &ContextCallIdentity,
+        capabilities: crate::provider::ProviderCapabilities,
+        context_epoch: Option<&str>,
+    ) -> Self {
+        let epoch = ContextEpoch::for_request(
+            provider,
+            request,
+            capabilities.context_prefix_profile,
+            context_epoch,
+        );
+        let has_stable_identity =
+            call_identity.session_id.is_some() || call_identity.flow_run_id.is_some();
+        let prompt_cache_key = (request.cache_prompt
+            && capabilities.prompt_cache_key
+            && has_stable_identity)
+            .then(|| {
+                let mut hasher = blake3::Hasher::new();
+                hash_epoch_field(&mut hasher, b"version", b"1");
+                hash_epoch_field(&mut hasher, b"epoch", epoch.as_str().as_bytes());
+                hash_epoch_field(
+                    &mut hasher,
+                    b"purpose",
+                    &serde_json::to_vec(&call_purpose)
+                        .expect("context call purpose must serialize for cache routing"),
+                );
+                hash_epoch_field(
+                    &mut hasher,
+                    b"identity",
+                    &serde_json::to_vec(call_identity)
+                        .expect("context call identity must serialize for cache routing"),
+                );
+                let digest = hasher.finalize().to_hex().to_string();
+                format!("atman-{}", &digest[..48])
+            });
+        Self {
+            epoch,
+            prompt_cache_key,
+        }
+    }
+
+    fn from_request(request: &LlmRequest) -> Self {
+        Self {
+            epoch: ContextEpoch::for_request(
+                "",
+                request,
+                ContextPrefixProfile::ProviderNeutral,
+                None,
+            ),
+            prompt_cache_key: request.prompt_cache_key.clone(),
+        }
+    }
+}
+
+fn hash_epoch_field(hasher: &mut blake3::Hasher, name: &[u8], value: &[u8]) {
+    hasher.update(&(name.len() as u64).to_le_bytes());
+    hasher.update(name);
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn hash_epoch_optional(hasher: &mut blake3::Hasher, name: &[u8], value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash_epoch_field(hasher, name, b"some");
+            hash_epoch_field(hasher, name, value.as_bytes());
+        }
+        None => hash_epoch_field(hasher, name, b"none"),
+    }
+}
+
 /// Provider-neutral identity around one compiled model request.
 ///
 /// The wrapper does not alter the request. Later context compiler stages add
@@ -332,11 +469,13 @@ pub struct ModelContextPlan {
     token_lanes: ContextTokenLanes,
     call_purpose: ContextCallPurpose,
     call_identity: ContextCallIdentity,
+    cache_plan: ContextCachePlan,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextPrefixProfile {
+    #[default]
     ProviderNeutral,
     OpenAiChat,
     AnthropicMessages,
@@ -361,6 +500,7 @@ pub enum ContextCacheResetReason {
     ProviderChanged,
     ModelChanged,
     ProjectionChanged,
+    CacheKeyChanged,
     StableChanged,
     ToolsChanged,
     Compaction,
@@ -375,6 +515,8 @@ pub struct ContextCacheObservation {
     pub wire_prefix_tokens: u64,
     pub common_prefix_bytes: u64,
     pub common_prefix_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_reason: Option<ContextCacheResetReason>,
 }
@@ -399,6 +541,7 @@ pub struct ContextPrefixSnapshot {
     bytes: u64,
     tokens: u64,
     cache_enabled: bool,
+    prompt_cache_key_digest: Option<String>,
     compaction_digest: Option<[u8; 32]>,
 }
 
@@ -457,6 +600,7 @@ impl ContextPrefixSnapshot {
     ) -> ContextCacheObservation {
         let mut common_bytes = self.common_prefix(previous);
         let mut common_tokens = estimate_prefix_tokens(common_bytes);
+        let cache_key_changed = self.prompt_cache_key_digest != previous.prompt_cache_key_digest;
         let reset_reason = if !self.cache_enabled {
             Some(ContextCacheResetReason::CacheDisabled)
         } else if previous_provider != current_provider {
@@ -481,19 +625,21 @@ impl ContextPrefixSnapshot {
             != previous.lane_digest(ContextPrefixLane::Tools)
         {
             Some(ContextCacheResetReason::ToolsChanged)
+        } else if self.compaction_digest.is_some()
+            && self.compaction_digest != previous.compaction_digest
+        {
+            Some(ContextCacheResetReason::Compaction)
         } else if !previous.is_segment_prefix_of(self) {
-            Some(
-                if self.compaction_digest.is_some()
-                    && self.compaction_digest != previous.compaction_digest
-                {
-                    ContextCacheResetReason::Compaction
-                } else {
-                    ContextCacheResetReason::MessagePrefixChanged
-                },
-            )
+            Some(ContextCacheResetReason::MessagePrefixChanged)
+        } else if cache_key_changed {
+            Some(ContextCacheResetReason::CacheKeyChanged)
         } else {
             None
         };
+        if cache_key_changed {
+            common_bytes = 0;
+            common_tokens = 0;
+        }
         self.observation(common_bytes, common_tokens, reset_reason)
     }
 
@@ -538,6 +684,7 @@ impl ContextPrefixSnapshot {
             wire_prefix_tokens: self.tokens,
             common_prefix_bytes,
             common_prefix_tokens,
+            prompt_cache_key_digest: self.prompt_cache_key_digest.clone(),
             reset_reason,
         }
     }
@@ -547,6 +694,7 @@ pub(crate) struct ContextPrefixBuilder {
     profile: ContextPrefixProfile,
     segments: Vec<ContextPrefixSegment>,
     cache_enabled: bool,
+    prompt_cache_key_digest: Option<String>,
     compaction_digest: Option<[u8; 32]>,
 }
 
@@ -574,6 +722,10 @@ impl ContextPrefixBuilder {
             profile,
             segments: Vec::new(),
             cache_enabled: request.cache_prompt,
+            prompt_cache_key_digest: request
+                .prompt_cache_key
+                .as_deref()
+                .map(|key| format!("blake3:{}", blake3::hash(key.as_bytes()).to_hex())),
             compaction_digest: has_compaction.then(|| *compaction_hasher.finalize().as_bytes()),
         }
     }
@@ -613,6 +765,7 @@ impl ContextPrefixBuilder {
             bytes,
             tokens: estimate_prefix_tokens(bytes),
             cache_enabled: self.cache_enabled,
+            prompt_cache_key_digest: self.prompt_cache_key_digest,
             compaction_digest: self.compaction_digest,
         }
     }
@@ -636,6 +789,7 @@ impl ModelContextPlan {
         call_purpose: ContextCallPurpose,
         call_identity: ContextCallIdentity,
     ) -> Self {
+        let cache_plan = ContextCachePlan::from_request(&request);
         let token_lanes = ContextTokenLanes::for_request(&request);
         Self {
             id: ContextPlanId::now(),
@@ -643,6 +797,35 @@ impl ModelContextPlan {
             token_lanes,
             call_purpose,
             call_identity,
+            cache_plan,
+        }
+    }
+
+    pub fn for_provider_call(
+        mut request: LlmRequest,
+        call_purpose: ContextCallPurpose,
+        call_identity: ContextCallIdentity,
+        provider: &str,
+        capabilities: crate::provider::ProviderCapabilities,
+        context_epoch: Option<&str>,
+    ) -> Self {
+        let cache_plan = ContextCachePlan::for_provider_call(
+            provider,
+            &request,
+            call_purpose,
+            &call_identity,
+            capabilities,
+            context_epoch,
+        );
+        request.prompt_cache_key = cache_plan.prompt_cache_key.clone();
+        let token_lanes = ContextTokenLanes::for_request(&request);
+        Self {
+            id: ContextPlanId::now(),
+            request,
+            token_lanes,
+            call_purpose,
+            call_identity,
+            cache_plan,
         }
     }
 
@@ -668,6 +851,10 @@ impl ModelContextPlan {
 
     pub fn call_identity(&self) -> &ContextCallIdentity {
         &self.call_identity
+    }
+
+    pub fn cache_plan(&self) -> &ContextCachePlan {
+        &self.cache_plan
     }
 
     pub fn into_request(self) -> LlmRequest {
@@ -881,6 +1068,7 @@ mod tests {
             input: crate::Value::Unit,
             schema: None,
             cache_prompt: true,
+            prompt_cache_key: None,
             tools: Vec::new(),
             reasoning: crate::provider::ReasoningSelection::ProviderDefault,
             stall_timeout_secs: 120,
@@ -1050,6 +1238,170 @@ mod tests {
         assert!(first.request().cache_prompt);
         assert_eq!(first.call_purpose(), ContextCallPurpose::General);
         assert_eq!(first.call_identity().scope, ContextCallScope::Detached);
+    }
+
+    #[test]
+    fn provider_cache_key_is_stable_for_append_only_messages() {
+        let identity = ContextCallIdentity {
+            scope: ContextCallScope::Root,
+            session_id: Some("session-private-id".into()),
+            flow_run_id: None,
+        };
+        let capabilities = crate::provider::ProviderCapabilities {
+            prompt_cache_key: true,
+            context_prefix_profile: ContextPrefixProfile::CodexResponses,
+        };
+        let mut first_request = request();
+        first_request
+            .messages
+            .push(crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "first",
+            ));
+        let first = ModelContextPlan::for_provider_call(
+            first_request.clone(),
+            ContextCallPurpose::General,
+            identity.clone(),
+            "codex",
+            capabilities,
+            None,
+        );
+        first_request
+            .messages
+            .push(crate::message::Message::assistant_text(
+                crate::event::TurnId::now(),
+                "second",
+            ));
+        let second = ModelContextPlan::for_provider_call(
+            first_request,
+            ContextCallPurpose::General,
+            identity,
+            "codex",
+            capabilities,
+            None,
+        );
+
+        let first_key = first.request().prompt_cache_key.as_deref().unwrap();
+        assert_eq!(
+            Some(first_key),
+            second.request().prompt_cache_key.as_deref()
+        );
+        assert_eq!(first.cache_plan().epoch, second.cache_plan().epoch);
+        assert!(first_key.starts_with("atman-"));
+        assert!(first_key.len() <= 64);
+        assert!(!first_key.contains("session-private-id"));
+    }
+
+    #[test]
+    fn provider_cache_key_is_capability_scoped_and_epoch_sensitive() {
+        let identity = ContextCallIdentity {
+            scope: ContextCallScope::Root,
+            session_id: Some("session-id".into()),
+            flow_run_id: None,
+        };
+        let capabilities = crate::provider::ProviderCapabilities {
+            prompt_cache_key: true,
+            context_prefix_profile: ContextPrefixProfile::CodexResponses,
+        };
+        let first = ModelContextPlan::for_provider_call(
+            request(),
+            ContextCallPurpose::General,
+            identity.clone(),
+            "codex",
+            capabilities,
+            None,
+        );
+        let mut output_settings_changed = request();
+        output_settings_changed.reasoning = crate::provider::ReasoningSelection::Effort {
+            effort: crate::provider::ReasoningEffort::High,
+            execution_mode: None,
+        };
+        let output_settings_changed = ModelContextPlan::for_provider_call(
+            output_settings_changed,
+            ContextCallPurpose::General,
+            identity.clone(),
+            "codex",
+            capabilities,
+            None,
+        );
+        let unsupported = ModelContextPlan::for_provider_call(
+            request(),
+            ContextCallPurpose::General,
+            identity,
+            "compatible",
+            crate::provider::ProviderCapabilities::default(),
+            None,
+        );
+        let checkpoint_changed = ModelContextPlan::for_provider_call(
+            request(),
+            ContextCallPurpose::General,
+            ContextCallIdentity {
+                scope: ContextCallScope::Root,
+                session_id: Some("session-id".into()),
+                flow_run_id: None,
+            },
+            "codex",
+            capabilities,
+            Some("checkpoint-b"),
+        );
+        let projection_changed = ModelContextPlan::for_provider_call(
+            request(),
+            ContextCallPurpose::General,
+            ContextCallIdentity {
+                scope: ContextCallScope::Root,
+                session_id: Some("session-id".into()),
+                flow_run_id: None,
+            },
+            "codex",
+            crate::provider::ProviderCapabilities {
+                prompt_cache_key: true,
+                context_prefix_profile: ContextPrefixProfile::OpenAiChat,
+            },
+            None,
+        );
+
+        assert_eq!(
+            first.request().prompt_cache_key,
+            output_settings_changed.request().prompt_cache_key
+        );
+        assert_eq!(
+            first.cache_plan().epoch,
+            output_settings_changed.cache_plan().epoch
+        );
+        assert_ne!(
+            first.request().prompt_cache_key,
+            checkpoint_changed.request().prompt_cache_key
+        );
+        assert_ne!(
+            first.cache_plan().epoch,
+            checkpoint_changed.cache_plan().epoch
+        );
+        assert_ne!(
+            first.request().prompt_cache_key,
+            projection_changed.request().prompt_cache_key
+        );
+        assert_ne!(
+            first.cache_plan().epoch,
+            projection_changed.cache_plan().epoch
+        );
+        assert_eq!(unsupported.request().prompt_cache_key, None);
+    }
+
+    #[test]
+    fn cache_key_change_resets_the_observed_provider_route() {
+        let mut request = request();
+        request.prompt_cache_key = Some("route-a".into());
+        let first = ContextPrefixSnapshot::provider_neutral(&request).unwrap();
+        request.prompt_cache_key = Some("route-b".into());
+        let second = ContextPrefixSnapshot::provider_neutral(&request).unwrap();
+        let observation = second.compare("provider", "provider", "model", "model", &first);
+
+        assert_eq!(
+            observation.reset_reason,
+            Some(ContextCacheResetReason::CacheKeyChanged)
+        );
+        assert_eq!(observation.common_prefix_bytes, 0);
+        assert!(observation.prompt_cache_key_digest.is_some());
     }
 
     #[test]
