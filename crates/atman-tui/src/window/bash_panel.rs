@@ -70,7 +70,7 @@ fn render_bash_content(
     area: Rect,
     snap: &atman_runtime::TaskSnapshot,
     output: &str,
-    done: bool,
+    _done: bool,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -81,11 +81,11 @@ fn render_bash_content(
         Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(
-            if done {
-                "done".into()
-            } else {
+            format!(
+                "{} · {}",
+                snap.status.display_label(),
                 super::common::format_elapsed(snap.elapsed_ms())
-            },
+            ),
             Style::default().fg(t.subtle_fg.into()),
         ),
     ]);

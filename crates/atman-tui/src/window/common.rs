@@ -35,7 +35,7 @@ pub(crate) fn render_task_meta(
         Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(
-            format!("{:?}", snap.status),
+            snap.status.display_label(),
             Style::default().fg(t.subtle_fg.into()),
         ),
     ]);

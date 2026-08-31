@@ -90,7 +90,11 @@ fn render_terminal_content(
         Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(
-            format_elapsed(snap.elapsed_ms()),
+            format!(
+                "{} · {}",
+                snap.status.display_label(),
+                format_elapsed(snap.elapsed_ms())
+            ),
             Style::default().fg(t.subtle_fg.into()),
         ),
     ]);

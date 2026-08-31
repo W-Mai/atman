@@ -279,12 +279,12 @@ pub(crate) fn render_sub_agent_panel(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::styled(
-        format!(" {icon} {handle}{iter_str}"),
+        format!(" {icon} {goal}{iter_str}"),
         accent_style,
     ));
     lines.push(Line::from(vec![
-        Span::styled(" goal:   ", label_style),
-        Span::styled(goal.to_string(), value_style),
+        Span::styled(" flow:   ", label_style),
+        Span::styled(handle.to_string(), value_style),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" model:  ", label_style),
@@ -292,7 +292,7 @@ pub(crate) fn render_sub_agent_panel(
     ]));
     lines.push(Line::from(vec![
         Span::styled(" status: ", label_style),
-        Span::styled(status.to_string(), value_style),
+        Span::styled(subagent_status_label(status, done), value_style),
     ]));
     lines.push(Line::from(""));
 
@@ -402,4 +402,29 @@ pub(crate) fn render_sub_agent_panel(
     });
 
     f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
+}
+
+fn subagent_status_label(status: &str, done: bool) -> String {
+    match status {
+        "running" => "running",
+        "ok" => "completed",
+        "err" => "failed",
+        "killed" => "stopped",
+        "interrupted" => "interrupted",
+        _ if done => "completed",
+        _ => status,
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subagent_status_label;
+
+    #[test]
+    fn subagent_status_uses_task_style_labels() {
+        assert_eq!(subagent_status_label("ok", true), "completed");
+        assert_eq!(subagent_status_label("err", true), "failed");
+        assert_eq!(subagent_status_label("killed", true), "stopped");
+    }
 }

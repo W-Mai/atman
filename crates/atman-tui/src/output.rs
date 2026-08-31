@@ -1667,6 +1667,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         }
         OutputItem::SubAgentActivity {
             handle,
+            goal,
             status,
             output,
             iteration,
@@ -1675,6 +1676,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             ..
         } => render_sub_agent_activity(
             handle,
+            goal,
             status,
             output,
             *iteration,
@@ -1691,6 +1693,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
 #[allow(clippy::too_many_arguments)]
 fn render_sub_agent_activity(
     handle: &str,
+    goal: &str,
     status: &str,
     output: &str,
     iteration: u64,
@@ -1712,8 +1715,15 @@ fn render_sub_agent_activity(
     } else {
         format!(" iter {iteration}")
     };
-    let label = format!("flow[{handle}]{iter_str}");
-    render_output_block(&label, None, glyph, output, expanded, panel_width)
+    let metadata = format!("flow[{handle}]{iter_str}");
+    render_output_block(
+        goal,
+        Some(metadata.as_str()),
+        glyph,
+        output,
+        expanded,
+        panel_width,
+    )
 }
 
 fn render_mermaid_preview(
@@ -3538,18 +3548,7 @@ fn append_workflow_node_boxed(
             args_preview,
             call_intent,
             ..
-        } => {
-            if let Some(call_intent) = call_intent {
-                format!("{tool} · {}", call_intent.as_str())
-            } else {
-                let short_args = crate::width::truncate(args_preview, 30);
-                if short_args.is_empty() {
-                    tool.to_string()
-                } else {
-                    format!("{tool}({short_args})")
-                }
-            }
-        }
+        } => workflow_tool_label(tool, args_preview, call_intent.as_ref(), 30, false),
         WorkflowNodeKind::FanoutBranch { branch_index } => {
             format!("branch[{branch_index}]  {}", node.label)
         }
@@ -4084,8 +4083,11 @@ fn append_workflow_node(
     };
     let base_label = match &effective.kind {
         WorkflowNodeKind::ToolCall {
-            tool, args_preview, ..
-        } => format!("{tool}({})", crate::width::truncate(args_preview, 60)),
+            tool,
+            args_preview,
+            call_intent,
+            ..
+        } => workflow_tool_label(tool, args_preview, call_intent.as_ref(), 60, true),
         WorkflowNodeKind::Stmt {
             node_kind: atman_runtime::nodegraph::NodeKind::When { condition_preview },
         } if !condition_preview.is_empty() && condition_preview != "when" => {
@@ -4191,6 +4193,28 @@ fn append_workflow_node(
             pending_counter,
             panel_width,
         );
+    }
+}
+
+fn workflow_tool_label(
+    tool: &str,
+    args_preview: &str,
+    call_intent: Option<&atman_runtime::message::ToolCallIntent>,
+    args_width: usize,
+    show_empty_args: bool,
+) -> String {
+    if let Some(call_intent) = call_intent {
+        return format!("{} · {tool}", call_intent.as_str());
+    }
+    let short_args = crate::width::truncate(args_preview, args_width);
+    if short_args.is_empty() {
+        if show_empty_args {
+            format!("{tool}()")
+        } else {
+            tool.to_string()
+        }
+    } else {
+        format!("{tool}({short_args})")
     }
 }
 
@@ -5830,8 +5854,36 @@ mod tests {
         };
         let (lines, _) = render_collapsed_workflow_card(&graph, 0, 100, false, 10);
         let rendered = flatten_lines(&lines);
-        assert!(rendered.contains("bash.spawn · Inspect active processes"));
+        assert!(rendered.contains("Inspect active processes · bash.spawn"));
         assert!(!rendered.contains("secret command arguments"));
+    }
+
+    #[test]
+    fn workflow_tool_label_keeps_technical_name_after_localized_intent() {
+        let intent = atman_runtime::message::ToolCallIntent::new("检查活动进程").unwrap();
+        assert_eq!(
+            workflow_tool_label("bash.spawn", "secret args", Some(&intent), 30, false),
+            "检查活动进程 · bash.spawn"
+        );
+    }
+
+    #[test]
+    fn sub_agent_block_uses_goal_before_handle() {
+        let lines = render_sub_agent_activity(
+            "flow_s_1",
+            "审计上下文缓存",
+            "running",
+            "",
+            2,
+            false,
+            false,
+            80,
+            0,
+        );
+        let rendered = flatten_lines(&lines);
+        let goal = rendered.find("审计上下文缓存").unwrap();
+        let handle = rendered.find("flow[flow_s_1]").unwrap();
+        assert!(goal < handle, "{rendered}");
     }
 
     #[test]
