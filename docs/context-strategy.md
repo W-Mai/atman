@@ -78,13 +78,15 @@ message lists receive only the latest live runtime records, not conversational
 history. The managed agent selects relevant rules and past confessions as independently
 keyed retrieved records instead of rewriting its system prompt.
 
-The stable system template contains only authority, scope, execution, transaction,
-batching, interaction, safety, and completion rules. Detailed shell, terminal, flow,
-watcher, memory, and form manuals stay in tool descriptions or `help.show`. The
-template does not contain a working-directory placeholder. Root calls append one
-workspace record from session metadata; spawned flows append one to their local
-history from the effective tool workspace. This prevents duplicate root context and
-literal placeholders in child requests.
+The stable system template retains the agent identity, voice, durable work contract,
+and general tool-use workflow. Because this prefix is stable across calls, its length
+affects cold-start input and the context window but does not invalidate later cache
+prefixes. Session state, retrieved rules, confessions, and changing capabilities stay
+in append-only records instead of rewriting the template. The template does not
+contain a working-directory placeholder. Root calls append one workspace record from
+session metadata; spawned flows append one to their local history from the effective
+tool workspace. This prevents duplicate root context and literal placeholders in
+child requests.
 
 ## Message selection
 

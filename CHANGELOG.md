@@ -23,7 +23,7 @@ All notable changes to atman are documented in this file.
 - **Context record revisions** — Session record appends suppress unchanged per-key digests and assign the next revision atomically, including after session resume.
 - **Session state records** — Goal, workspace, active plan, and model context append as versioned records; clearing live state writes a tombstone, while isolated calls receive current records without conversational history.
 - **Retrieved context records** — Managed rule and confession selection appends per-item internal records with digest no-ops instead of rebuilding the system prompt each turn.
-- **Compact managed instructions** — The stable agent prompt retains authority, execution, transaction, batching, interaction, safety, and completion rules while detailed tool manuals remain available through tool descriptions and built-in help.
+- **Stable managed instructions** — The stable agent prompt retains its identity, voice, durable work contract, and tool workflow while changing session and retrieved context use append-only records.
 - **Canonical MCP tool snapshots** — paginated `tools/list` responses are validated, schema-canonicalized, sorted, fingerprinted, and published to each server namespace under one registry lock.
 - **Bounded flow discovery** — `flow.search` returns fingerprint-bound pages and `flow.describe` loads one parameter contract with optional stale-version rejection; the managed agent no longer loads the complete flow catalog for discovery.
 - **Bounded recent-history excerpts** — `memory.recent_turns` can return a character-limited recent-first excerpt while retaining its lossless `items` result.
