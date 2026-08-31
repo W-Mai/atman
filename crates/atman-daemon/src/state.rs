@@ -311,8 +311,9 @@ impl DaemonState {
                     continue;
                 };
                 let sid = SessionId(uuid);
-                let events_path = entry.path().join("events.jsonl");
-                let (event_count, first_ts) = summarize_events(&events_path);
+                let stats =
+                    atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
+                        .unwrap_or_default();
                 let status = if live_ids.contains_key(&sid) {
                     SessionStatus::Running
                 } else {
@@ -321,8 +322,8 @@ impl DaemonState {
                 let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
                 out.push(SessionSummary {
                     id: sid.clone(),
-                    event_count,
-                    first_ts,
+                    event_count: stats.event_count as usize,
+                    first_ts: stats.first_ts,
                     status,
                     title: meta
                         .as_ref()
@@ -368,26 +369,4 @@ impl DaemonState {
         out.sort_by_key(|s| std::cmp::Reverse(s.id.0));
         Ok(out)
     }
-}
-
-fn summarize_events(path: &Path) -> (usize, Option<chrono::DateTime<chrono::Utc>>) {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return (0, None);
-    };
-    let mut count = 0usize;
-    let mut first_ts = None;
-    for line in contents.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        count += 1;
-        if first_ts.is_none()
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
-            && let Some(ts) = v.get("ts").and_then(|t| t.as_str())
-            && let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts)
-        {
-            first_ts = Some(parsed.with_timezone(&chrono::Utc));
-        }
-    }
-    (count, first_ts)
 }

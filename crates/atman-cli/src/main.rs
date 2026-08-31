@@ -847,10 +847,12 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
             .map(short_project_path)
             .unwrap_or_else(|| "-".into());
         let events_path = entry.path().join("events.jsonl");
-        let (bytes, events) = match std::fs::metadata(&events_path) {
-            Ok(m) => (m.len(), count_lines(&events_path)),
-            Err(_) => (0, 0),
-        };
+        let bytes = std::fs::metadata(&events_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let events = atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
+            .map(|stats| stats.event_count as usize)
+            .unwrap_or(0);
         let modified = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -1226,13 +1228,6 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
     }
     println!("sanitize: wrote {} degrade event(s)", findings.len());
     Ok(())
-}
-
-fn count_lines(path: &std::path::Path) -> usize {
-    match std::fs::read_to_string(path) {
-        Ok(s) => s.lines().filter(|l| !l.trim().is_empty()).count(),
-        Err(_) => 0,
-    }
 }
 
 enum RouteOutcome {
@@ -3610,7 +3605,11 @@ fn build_startup_recent(
                 .duration_since(r.mtime)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let event_count = count_events_lines(root, &r.sid);
+            let event_count = atman_runtime::session_meta::SessionStats::load_or_rebuild(
+                &root.join("sessions").join(&r.sid),
+            )
+            .map(|stats| stats.event_count)
+            .unwrap_or(0);
             let short_id: String = r.sid.chars().take(8).collect();
             atman_tui::app::StartupSessionEntry {
                 session_id: r.sid,
@@ -3622,15 +3621,6 @@ fn build_startup_recent(
             }
         })
         .collect()
-}
-
-fn count_events_lines(root: &Path, sid: &str) -> u64 {
-    let path = root.join("sessions").join(sid).join("events.jsonl");
-    let Ok(file) = std::fs::File::open(&path) else {
-        return 0;
-    };
-    use std::io::BufRead;
-    std::io::BufReader::new(file).lines().count() as u64
 }
 
 fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
@@ -4644,40 +4634,19 @@ async fn list_sessions_summary(sessions_dir: &std::path::Path) -> Vec<serde_json
     let mut out: Vec<(String, serde_json::Value)> = Vec::new();
     for entry in entries.flatten() {
         let id = entry.file_name().to_string_lossy().to_string();
-        let events_path = entry.path().join("events.jsonl");
-        let (count, first_ts) = summarize_events_file(&events_path);
+        let stats = atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
+            .unwrap_or_default();
         out.push((
             id.clone(),
             serde_json::json!({
                 "id": id,
-                "event_count": count,
-                "first_ts": first_ts,
+                "event_count": stats.event_count,
+                "first_ts": stats.first_ts,
             }),
         ));
     }
     out.sort_by(|a, b| b.0.cmp(&a.0));
     out.into_iter().map(|(_, v)| v).collect()
-}
-
-fn summarize_events_file(path: &std::path::Path) -> (usize, Option<String>) {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return (0, None);
-    };
-    let mut count = 0usize;
-    let mut first_ts: Option<String> = None;
-    for line in contents.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        count += 1;
-        if first_ts.is_none()
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
-            && let Some(ts) = v.get("ts").and_then(|t| t.as_str())
-        {
-            first_ts = Some(ts.into());
-        }
-    }
-    (count, first_ts)
 }
 
 async fn read_session_events(sessions_dir: &std::path::Path, sid: &str) -> Vec<serde_json::Value> {

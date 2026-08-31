@@ -1,9 +1,14 @@
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 const META_FILENAME: &str = "meta.json";
+const STATS_FILENAME: &str = "stats.json";
+const STATS_LOCK_FILENAME: &str = ".stats.lock";
+const STATS_SCHEMA_VERSION: u8 = 1;
 
 fn is_auto_name(source: &NameSource) -> bool {
     matches!(source, NameSource::Auto)
@@ -118,6 +123,184 @@ pub struct SessionMeta {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionStats {
+    #[serde(default)]
+    schema_version: u8,
+    #[serde(default)]
+    pub event_bytes: u64,
+    #[serde(default)]
+    pub event_count: u64,
+    #[serde(default)]
+    pub message_count: u64,
+    #[serde(default)]
+    pub user_message_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_ts: Option<DateTime<Utc>>,
+}
+
+impl Default for SessionStats {
+    fn default() -> Self {
+        Self {
+            schema_version: STATS_SCHEMA_VERSION,
+            event_bytes: 0,
+            event_count: 0,
+            message_count: 0,
+            user_message_count: 0,
+            first_ts: None,
+        }
+    }
+}
+
+impl SessionStats {
+    pub fn load_or_rebuild(session_dir: &Path) -> std::io::Result<Self> {
+        let events_path = session_dir.join("events.jsonl");
+        let mut event_bytes = std::fs::metadata(&events_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if let Some(stats) = Self::load_unchecked(session_dir)
+            && stats.event_bytes == event_bytes
+        {
+            return Ok(stats);
+        }
+        let _lock = match lock_stats(session_dir) {
+            Ok(lock) => lock,
+            Err(_) => return Self::scan(&events_path),
+        };
+        event_bytes = std::fs::metadata(&events_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if let Some(stats) = Self::load_unchecked(session_dir)
+            && stats.event_bytes == event_bytes
+        {
+            return Ok(stats);
+        }
+        let stats = Self::scan(&events_path)?;
+        let _ = stats.save_unlocked(session_dir);
+        Ok(stats)
+    }
+
+    pub(crate) fn record_persisted_event(
+        session_dir: &Path,
+        start: u64,
+        end: u64,
+        envelope: &crate::event::EventEnvelope,
+    ) -> std::io::Result<()> {
+        let _lock = lock_stats(session_dir)?;
+        let mut stats = match Self::load_unchecked(session_dir) {
+            Some(stats) if stats.event_bytes == end => return Ok(()),
+            Some(stats) if stats.event_bytes == start => stats,
+            None if start == 0 => Self::default(),
+            _ => {
+                let stats = Self::scan(&session_dir.join("events.jsonl"))?;
+                stats.save_unlocked(session_dir)?;
+                return Ok(());
+            }
+        };
+        stats.event_bytes = end;
+        stats.event_count = stats.event_count.saturating_add(1);
+        if stats.first_ts.is_none() {
+            stats.first_ts = Some(envelope.ts);
+        }
+        match &envelope.event {
+            crate::event::Event::UserMsg { .. } => {
+                stats.user_message_count = stats.user_message_count.saturating_add(1);
+                stats.message_count = stats.message_count.saturating_add(1);
+            }
+            crate::event::Event::AssistantMsg { .. }
+            | crate::event::Event::ToolResultMsg { .. } => {
+                stats.message_count = stats.message_count.saturating_add(1);
+            }
+            _ => {}
+        }
+        stats.save_unlocked(session_dir)
+    }
+
+    fn load_unchecked(session_dir: &Path) -> Option<Self> {
+        let bytes = std::fs::read(session_dir.join(STATS_FILENAME)).ok()?;
+        let stats: Self = serde_json::from_slice(&bytes).ok()?;
+        (stats.schema_version == STATS_SCHEMA_VERSION).then_some(stats)
+    }
+
+    fn scan(events_path: &Path) -> std::io::Result<Self> {
+        #[cfg(test)]
+        STATS_SCANS.with(|count| count.set(count.get().saturating_add(1)));
+
+        let file = match std::fs::File::open(events_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut reader = std::io::BufReader::new(file);
+        let mut stats = Self::default();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            stats.event_bytes = stats.event_bytes.saturating_add(bytes as u64);
+            let text = line.trim();
+            if text.is_empty() {
+                continue;
+            }
+            stats.event_count = stats.event_count.saturating_add(1);
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+                continue;
+            };
+            if stats.first_ts.is_none() {
+                stats.first_ts = value
+                    .get("ts")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                    .map(|ts| ts.with_timezone(&Utc));
+            }
+            match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("user_msg") => {
+                    stats.user_message_count = stats.user_message_count.saturating_add(1);
+                    stats.message_count = stats.message_count.saturating_add(1);
+                }
+                Some("assistant_msg" | "tool_result_msg") => {
+                    stats.message_count = stats.message_count.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        Ok(stats)
+    }
+
+    fn save_unlocked(&self, session_dir: &Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let temp = session_dir.join(".stats.json.tmp");
+        std::fs::write(&temp, bytes)?;
+        if let Err(error) = std::fs::rename(&temp, session_dir.join(STATS_FILENAME)) {
+            let _ = std::fs::remove_file(temp);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+fn lock_stats(session_dir: &Path) -> std::io::Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(session_dir.join(STATS_LOCK_FILENAME))?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+#[cfg(test)]
+thread_local! {
+    static STATS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl SessionMeta {
     pub fn load(session_dir: &Path) -> Option<Self> {
         let path = session_dir.join(META_FILENAME);
@@ -192,8 +375,8 @@ impl SessionMeta {
             {
                 continue;
             }
-            let event_count = std::fs::read_to_string(path.join("events.jsonl"))
-                .map(|s| s.lines().filter(|line| !line.trim().is_empty()).count())
+            let event_count = SessionStats::load_or_rebuild(&path)
+                .map(|stats| stats.event_count as usize)
                 .unwrap_or(0);
             summaries.push(SessionSummary {
                 id: entry.file_name().to_string_lossy().into_owned(),
@@ -543,5 +726,43 @@ mod tests {
     fn load_returns_none_when_file_missing() {
         let tmp = TempDir::new().unwrap();
         assert!(SessionMeta::load(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn session_stats_backfill_is_reused_until_the_log_changes() {
+        let tmp = TempDir::new().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let first = concat!(
+            "{\"type\":\"user_msg\",\"ts\":\"2026-09-01T00:00:00Z\"}\n",
+            "not-json\n",
+            "{\"type\":\"assistant_msg\",\"ts\":\"2026-09-01T00:00:01Z\"}\n"
+        );
+        std::fs::write(&events, first).unwrap();
+        STATS_SCANS.with(|count| count.set(0));
+
+        let stats = SessionStats::load_or_rebuild(tmp.path()).unwrap();
+        assert_eq!(stats.event_bytes, first.len() as u64);
+        assert_eq!(stats.event_count, 3);
+        assert_eq!(stats.user_message_count, 1);
+        assert_eq!(stats.message_count, 2);
+        assert_eq!(
+            stats.first_ts,
+            Some("2026-09-01T00:00:00Z".parse().unwrap())
+        );
+        assert!(tmp.path().join(STATS_FILENAME).exists());
+
+        assert_eq!(SessionStats::load_or_rebuild(tmp.path()).unwrap(), stats);
+        assert_eq!(STATS_SCANS.with(std::cell::Cell::get), 1);
+
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events)
+            .unwrap();
+        writeln!(file, "{{\"type\":\"tool_result_msg\"}}").unwrap();
+        let updated = SessionStats::load_or_rebuild(tmp.path()).unwrap();
+        assert_eq!(updated.event_count, 4);
+        assert_eq!(updated.message_count, 3);
+        assert_eq!(STATS_SCANS.with(std::cell::Cell::get), 2);
     }
 }

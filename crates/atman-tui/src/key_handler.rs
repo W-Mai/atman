@@ -139,8 +139,9 @@ pub(crate) fn enumerate_session_rows(
                 ts.to_rfc3339()
             })
             .unwrap_or_default();
-        let (user_count, total_count) = count_message_events(&events_path);
-        if user_count == 0 {
+        let stats = atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
+            .unwrap_or_default();
+        if stats.user_message_count == 0 {
             continue;
         }
         let goal = atman_runtime::memory::goal::GoalStore::at(entry.path())
@@ -151,7 +152,7 @@ pub(crate) fn enumerate_session_rows(
             is_current,
             name: metadata.title.clone(),
             project,
-            message_count: total_count,
+            message_count: stats.message_count as usize,
             updated_at,
             goal,
         });
@@ -159,27 +160,6 @@ pub(crate) fn enumerate_session_rows(
     rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     rows.truncate(200);
     rows
-}
-
-pub(crate) fn count_message_events(path: &std::path::Path) -> (usize, usize) {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return (0, 0),
-    };
-    let mut user = 0usize;
-    let mut total = 0usize;
-    for l in contents.lines() {
-        let is_user = l.contains("\"type\":\"user_msg\"");
-        let is_assistant = l.contains("\"type\":\"assistant_msg\"");
-        let is_tool = l.contains("\"type\":\"tool_result_msg\"");
-        if is_user {
-            user += 1;
-        }
-        if is_user || is_assistant || is_tool {
-            total += 1;
-        }
-    }
-    (user, total)
 }
 
 pub(crate) fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {

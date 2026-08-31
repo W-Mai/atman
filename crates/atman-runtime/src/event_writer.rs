@@ -183,6 +183,7 @@ async fn writer_loop(
         .open(path)
         .await?;
     let mut offset = file.seek(SeekFrom::End(0)).await?;
+    let session_dir = path.parent().unwrap_or(path);
     let indexer = project_index.zip(session_id);
     let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
     let mut recovery_tick = tokio::time::interval(RECOVERY_INTERVAL);
@@ -199,6 +200,7 @@ async fn writer_loop(
                         &mut degraded,
                         indexer.as_ref(),
                         redactor.as_deref(),
+                        session_dir,
                     ).await;
                 }
                 while let Ok(waiter) = flush_rx.try_recv() {
@@ -213,6 +215,7 @@ async fn writer_loop(
                     &mut degraded,
                     indexer.as_ref(),
                     redactor.as_deref(),
+                    session_dir,
                 ).await;
             }
             maybe_event = rx.recv() => {
@@ -225,6 +228,7 @@ async fn writer_loop(
                             &mut degraded,
                             indexer.as_ref(),
                             redactor.as_deref(),
+                            session_dir,
                         ).await;
                     }
                     None => break,
@@ -241,6 +245,7 @@ async fn writer_loop(
                                 &mut degraded,
                                 indexer.as_ref(),
                                 redactor.as_deref(),
+                                session_dir,
                             ).await;
                         }
                         retry_buffered(
@@ -249,6 +254,7 @@ async fn writer_loop(
                             &mut degraded,
                             indexer.as_ref(),
                             redactor.as_deref(),
+                            session_dir,
                         ).await;
                         if let Err(e) = file.sync_data().await {
                             crate::notify!(error, "event writer flush failed: {e}");
@@ -266,6 +272,7 @@ async fn writer_loop(
         &mut degraded,
         indexer.as_ref(),
         redactor.as_deref(),
+        session_dir,
     )
     .await;
     if !degraded.events.is_empty() {
@@ -290,12 +297,13 @@ async fn handle_event(
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
+    session_dir: &Path,
 ) {
     if degraded.is_degraded() {
         degraded.buffer(event);
         return;
     }
-    if let Err(e) = write_event(file, offset, &event, indexer, redactor).await {
+    if let Err(e) = write_event(file, offset, &event, indexer, redactor, session_dir).await {
         crate::notify!(
             error,
             "event writer write failed (seq={}): {e}; buffering events in memory",
@@ -311,12 +319,13 @@ async fn retry_degraded_on_tick(
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
+    session_dir: &Path,
 ) {
     if !degraded.is_degraded() || degraded.events.is_empty() {
         return;
     }
 
-    retry_buffered(file, offset, degraded, indexer, redactor).await;
+    retry_buffered(file, offset, degraded, indexer, redactor, session_dir).await;
     if !degraded.is_degraded() {
         crate::notify!(info, location = Status, "事件写入已恢复");
     }
@@ -328,9 +337,10 @@ async fn retry_buffered(
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
+    session_dir: &Path,
 ) {
     while let Some(event) = degraded.events.pop_front() {
-        if let Err(e) = write_event(file, offset, &event, indexer, redactor).await {
+        if let Err(e) = write_event(file, offset, &event, indexer, redactor, session_dir).await {
             crate::notify!(
                 error,
                 "event writer retry failed (seq={}): {e}; {} event(s) remain buffered",
@@ -351,6 +361,7 @@ async fn write_event(
     envelope: &EventEnvelope,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
+    session_dir: &Path,
 ) -> std::io::Result<()> {
     let line = serialize_event(envelope, redactor);
     let start = *offset;
@@ -369,6 +380,17 @@ async fn write_event(
         return Err(e);
     }
     *offset = end;
+    if let Err(error) =
+        crate::session_meta::SessionStats::record_persisted_event(session_dir, start, end, envelope)
+    {
+        crate::notify!(
+            warn,
+            location = Log,
+            stack = merge_count("session_stats.persist_failed", 60_000),
+            "session stats update failed (seq={}): {error}",
+            envelope.seq
+        );
+    }
     if let Some((idx, sid)) = indexer
         && let Err(e) = insert_project_row(idx, sid, envelope, &line)
     {
@@ -761,6 +783,7 @@ mod tests {
             &mut degraded,
             None,
             None,
+            dir.path(),
         )
         .await;
 
@@ -776,7 +799,15 @@ mod tests {
             .await
             .unwrap();
         let mut offset = 0;
-        retry_degraded_on_tick(&mut file, &mut offset, &mut degraded, None, None).await;
+        retry_degraded_on_tick(
+            &mut file,
+            &mut offset,
+            &mut degraded,
+            None,
+            None,
+            dir.path(),
+        )
+        .await;
 
         assert!(!degraded.is_degraded());
         assert!(degraded.events.is_empty());
@@ -805,7 +836,7 @@ mod tests {
             .unwrap();
         let mut offset = 0;
 
-        write_event(&mut file, &mut offset, &event, None, None)
+        write_event(&mut file, &mut offset, &event, None, None, dir.path())
             .await
             .unwrap();
 
@@ -844,6 +875,10 @@ mod tests {
             assert!(v["run_id"].is_string());
             assert!(v["flow_name"].is_string());
         }
+        let stats = crate::session_meta::SessionStats::load_or_rebuild(dir.path()).unwrap();
+        assert_eq!(stats.event_count, 5);
+        assert_eq!(stats.message_count, 0);
+        assert_eq!(stats.event_bytes, std::fs::metadata(path).unwrap().len());
     }
 
     #[tokio::test]
@@ -928,6 +963,10 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, "sess-x");
         assert_eq!(hits[0].seq, 1);
+        let stats = crate::session_meta::SessionStats::load_or_rebuild(session_dir.path()).unwrap();
+        assert_eq!(stats.event_count, 1);
+        assert_eq!(stats.user_message_count, 1);
+        assert_eq!(stats.message_count, 1);
     }
 
     #[tokio::test]
