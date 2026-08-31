@@ -2,8 +2,10 @@ use atman_runtime::event::TurnId;
 use atman_runtime::workflow::{
     NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
 };
-use atman_tui::app::{AppState, OutputItem};
-use atman_tui::output::{LayoutCache, LayoutKey, RenderCtx, build_lines_with_ranges};
+use atman_tui::app::{AppState, OutputItem, OutputStore};
+use atman_tui::output::{
+    LayoutCache, LayoutKey, LayoutRequest, RenderCtx, build_lines_with_ranges,
+};
 use std::collections::HashSet;
 
 fn stmt_node(id: &str, label: &str) -> WorkflowNode {
@@ -90,8 +92,7 @@ fn build_panel(
     };
     // SAFETY: env-var mutation guarded by LEGACY_LOCK across parallel tests.
     unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
-    let (lines, _ranges, regions, _rows) =
-        build_lines_with_ranges(&[item], width, &ctx, &mut Vec::new(), None);
+    let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], width, &ctx);
     unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
     let flat: Vec<String> = lines
         .iter()
@@ -127,8 +128,7 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
         panel_width: 200,
         hovered_thinking_idx: None,
     };
-    let (lines, _ranges, regions, _rows) =
-        build_lines_with_ranges(&[item], 200, &ctx, &mut Vec::new(), None);
+    let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], 200, &ctx);
     let flat: Vec<String> = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -179,8 +179,7 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
         panel_width: 80,
         hovered_thinking_idx: None,
     };
-    let (lines, _ranges, _regions, _rows) =
-        build_lines_with_ranges(&[item], 80, &ctx, &mut Vec::new(), None);
+    let (lines, _ranges, _regions, _rows) = build_lines_with_ranges(&[item], 80, &ctx);
     let flat: Vec<String> = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -313,13 +312,23 @@ fn layout_cache_still_composes_valid_regions() {
     };
     let mut cache = LayoutCache::default();
     let key = LayoutKey {
-        items_version: 0,
-        expanded_version: 0,
         width: 200,
+        theme: atman_tui::theme::current_mode(),
         animation_frame: None,
     };
-    let (_lines, ranges, _regions, total) = cache.get_or_build(key, &[item], &ctx, 0, 50);
+    let items = OutputStore::from(vec![item]);
+    let metrics = cache.update_dirty(
+        key,
+        &items,
+        &ctx,
+        LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 50,
+            follow_tail_rows: None,
+        },
+    );
+    let (_lines, ranges, _regions) = cache.visible_slice(0, 50);
     assert_eq!(ranges.len(), 1);
-    assert!(total > 0);
+    assert!(metrics.total_rows > 0);
     // regions collection TBD with virtual scroll
 }

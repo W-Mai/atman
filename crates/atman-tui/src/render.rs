@@ -313,38 +313,30 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             None
         };
         let cache_key = output::LayoutKey {
-            items_version: app.items_version,
-            expanded_version: app.expanded_version,
             width: transcript_area.width,
+            theme: crate::theme::current_mode(),
             animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
-        // Two-phase: compute layout first (pass 1), then extract visible
-        // lines with the up-to-date total_rows (pass 2).  This eliminates
-        // the one-frame lag where scroll_before was based on stale
-        // cached_total_rows from the previous frame.
-        let (lines, ranges, node_regions, total_rows) = {
-            // Phase 1 – force layout refresh so cached_total_rows is current.
-            cache.get_or_build(cache_key, &app.items, &ctx, 0, 0);
-            let fresh_total = cache.cached_total_rows();
-            // Phase 2 – compute the correct scroll offset *after* layout.
-            let scroll_before = if app.follow_tail {
-                let visible_above = document_visible_rows
-                    .saturating_sub(input_overlay_rows)
-                    .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
-                    .max(1);
-                fresh_total.saturating_sub(visible_above)
-            } else {
-                app.scroll_offset
-            };
-            cache.get_or_build(
-                cache_key,
-                &app.items,
-                &ctx,
-                scroll_before,
-                effective_viewport,
-            )
-        };
+        let follow_tail_rows = app.follow_tail.then(|| {
+            document_visible_rows
+                .saturating_sub(input_overlay_rows)
+                .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
+                .max(1)
+        });
+        let metrics = cache.update_dirty(
+            cache_key,
+            &app.items,
+            &ctx,
+            output::LayoutRequest {
+                scroll_offset: app.scroll_offset,
+                viewport_rows: effective_viewport,
+                follow_tail_rows,
+            },
+        );
+        let (lines, ranges, node_regions) =
+            cache.visible_slice(metrics.scroll_offset, effective_viewport);
+        let total_rows = metrics.total_rows;
         app.last_item_ranges = ranges;
         app.last_node_regions = node_regions;
         app.layout_cache = cache;

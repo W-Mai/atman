@@ -149,6 +149,14 @@ impl std::ops::Deref for OutputStore {
     }
 }
 
+impl From<Vec<OutputItem>> for OutputStore {
+    fn from(values: Vec<OutputItem>) -> Self {
+        let mut store = Self::default();
+        store.replace(values);
+        store
+    }
+}
+
 impl OutputStore {
     fn replace(&mut self, values: Vec<OutputItem>) {
         self.values = values;
@@ -230,6 +238,10 @@ impl OutputStore {
 
     pub(crate) fn structure_revision(&self) -> u64 {
         self.structure_revision
+    }
+
+    pub(crate) fn revision_clock(&self) -> u64 {
+        self.revision_clock
     }
 }
 
@@ -636,6 +648,7 @@ impl AppState {
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.inline_note_indices.clear();
         self.items_version = self.items_version.wrapping_add(1);
+        self.layout_cache.invalidate();
         self
     }
 
@@ -1326,6 +1339,7 @@ impl AppState {
         debug_assert_eq!(self.items.revisions().len(), self.items.len());
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.items_version = self.items_version.wrapping_add(1);
+        self.layout_cache.mark_structure_dirty(idx);
         self.reset_lag_state();
     }
 
@@ -1335,6 +1349,7 @@ impl AppState {
         debug_assert_eq!(self.items.revisions().len(), self.items.len());
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.items_version = self.items_version.wrapping_add(1);
+        self.layout_cache.mark_structure_dirty(index);
         self.handle_index.retain(|_, item_index| {
             if *item_index == index {
                 false
@@ -1409,11 +1424,13 @@ impl AppState {
             match impact {
                 OutputMutation::Semantic => {
                     self.items_version = self.items_version.wrapping_add(1);
+                    self.layout_cache.mark_layout_dirty(index);
                 }
                 OutputMutation::Interaction => {
                     self.expanded_version = self.expanded_version.wrapping_add(1);
+                    self.layout_cache.mark_layout_dirty(index);
                 }
-                OutputMutation::Paint => {}
+                OutputMutation::Paint => self.layout_cache.mark_paint_dirty(index),
             }
         }
         changed
@@ -1423,6 +1440,9 @@ impl AppState {
         let changed = self.items.touch(index, impact);
         if changed && matches!(impact, OutputMutation::Interaction) {
             self.expanded_version = self.expanded_version.wrapping_add(1);
+            self.layout_cache.mark_layout_dirty(index);
+        } else if changed && matches!(impact, OutputMutation::Paint) {
+            self.layout_cache.mark_paint_dirty(index);
         }
         changed
     }
@@ -4565,7 +4585,7 @@ mod terminal_stream_tests {
 #[cfg(test)]
 mod terminal_e2e_tests {
     use super::*;
-    use crate::output::{LayoutCache, LayoutKey, RenderCtx};
+    use crate::output::{LayoutCache, LayoutKey, LayoutRequest, RenderCtx};
     use atman_runtime::tools::term::{TermStateSnapshot, TerminalCell, TerminalScreen};
 
     #[test]
@@ -4593,9 +4613,8 @@ mod terminal_e2e_tests {
         });
 
         let cache_key = LayoutKey {
-            items_version: app.items_version,
-            expanded_version: app.expanded_version,
             width: 80,
+            theme: crate::theme::current_mode(),
             animation_frame: None,
         };
         let empty_set = std::collections::HashSet::new();
@@ -4607,8 +4626,17 @@ mod terminal_e2e_tests {
             animation_frame: 0,
         };
         let mut cache = LayoutCache::default();
-        let (lines, _ranges, _regions, _total) =
-            cache.get_or_build(cache_key, &app.items, &ctx, 0, 50);
+        let metrics = cache.update_dirty(
+            cache_key,
+            &app.items,
+            &ctx,
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 50,
+                follow_tail_rows: None,
+            },
+        );
+        let (lines, _ranges, _regions) = cache.visible_slice(0, metrics.total_rows.min(50));
         assert!(
             lines.len() > 2,
             "should render header + blank + screen rows"

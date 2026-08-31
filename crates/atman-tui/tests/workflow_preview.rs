@@ -96,7 +96,7 @@ fn render_boxed_to_string(root: WorkflowNode, width: u16) -> String {
         panel_width: width,
         hovered_thinking_idx: None,
     };
-    let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx, &mut Vec::new(), None);
+    let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
     lines
         .iter()
         .map(|l| {
@@ -138,7 +138,7 @@ fn preview_collapsed_workflow_card() {
         hovered_thinking_idx: None,
     };
     let (lines, _ranges, _regions, _rows) =
-        atman_tui::output::build_lines_with_ranges(&[item], 100, &ctx, &mut Vec::new(), None);
+        atman_tui::output::build_lines_with_ranges(&[item], 100, &ctx);
     let output: String = lines
         .iter()
         .map(|l| {

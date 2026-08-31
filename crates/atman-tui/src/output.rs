@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::app::{NoteLevel, OutputItem};
+use crate::app::{NoteLevel, OutputItem, OutputStore};
 
 const RESET: Style = Style::new();
 
@@ -279,12 +279,7 @@ pub fn build_lines_with_ranges(
     items: &[OutputItem],
     width: u16,
     ctx: &RenderCtx<'_>,
-    item_cache: &mut Vec<Option<ItemCacheEntry>>,
-    animation_frame: Option<u32>,
 ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u32) {
-    if item_cache.len() < items.len() {
-        item_cache.resize(items.len(), None);
-    }
     let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
     let mut node_regions: Vec<NodeRegion> = Vec::new();
@@ -299,26 +294,18 @@ pub fn build_lines_with_ranges(
             cursor = cursor.saturating_add(1);
         }
         let is_hovered = ctx.hovered_thinking_idx == Some(idx);
-        let content_hash = item_content_hash(item, is_hovered, ctx.expanded_tools, animation_frame);
-        let cached = item_cache[idx].take();
-        let (item_lines, mut item_regions) = if let Some(entry) = cached.as_ref()
-            && entry.content_hash == content_hash
-        {
-            (entry.lines.iter().cloned().collect::<Vec<_>>(), Vec::new())
-        } else {
-            let item_ctx = RenderCtx {
-                expanded_tools: ctx.expanded_tools,
-                messages: ctx.messages,
-                animation_frame: ctx.animation_frame,
-                panel_width: ctx.panel_width,
-                hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
-                    Some(idx)
-                } else {
-                    None
-                },
-            };
-            render_item_with_regions(item, &item_ctx, idx)
+        let item_ctx = RenderCtx {
+            expanded_tools: ctx.expanded_tools,
+            messages: ctx.messages,
+            animation_frame: ctx.animation_frame,
+            panel_width: ctx.panel_width,
+            hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
+                Some(idx)
+            } else {
+                None
+            },
         };
+        let (item_lines, mut item_regions) = render_item_with_regions(item, &item_ctx, idx);
         let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
         ranges.push(ItemRange {
             item_index: idx,
@@ -336,239 +323,12 @@ pub fn build_lines_with_ranges(
         }
         node_regions.extend(item_regions.iter().cloned());
         cursor = cursor.saturating_add(rows);
-        all_lines.extend(item_lines.clone());
-        item_cache[idx] = Some(ItemCacheEntry {
-            content_hash,
-            lines: Arc::from(item_lines),
-            rows,
-            regions: item_regions,
-        });
+        all_lines.extend(item_lines);
         if !matches!(kind, ItemKind::StartupCard) {
             prev_kind = Some(kind);
         }
     }
     (all_lines, ranges, node_regions, cursor)
-}
-
-fn str_fp(s: &str) -> (usize, [u8; 8], [u8; 8]) {
-    let len = s.len();
-    let head: [u8; 8] = s
-        .as_bytes()
-        .get(..8)
-        .unwrap_or(&[])
-        .try_into()
-        .unwrap_or([0; 8]);
-    let tail: [u8; 8] = if len > 8 {
-        s.as_bytes()[len - 8..].try_into().unwrap_or([0; 8])
-    } else {
-        [0; 8]
-    };
-    (len, head, tail)
-}
-
-fn item_content_hash(
-    item: &OutputItem,
-    hovered: bool,
-    _expanded_tools: &std::collections::HashSet<String>,
-    animation_frame: Option<u32>,
-) -> u64 {
-    #[cfg(test)]
-    update_perf_counters(|counters| {
-        counters.semantic_item_visits = counters.semantic_item_visits.saturating_add(1);
-    });
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    let _buf = String::new();
-    match item {
-        OutputItem::UserTurn { text } => {
-            0u8.hash(&mut h);
-            str_fp(text).hash(&mut h);
-        }
-        OutputItem::Thinking {
-            text,
-            done,
-            expanded,
-            retried,
-        } => {
-            1u8.hash(&mut h);
-            str_fp(text).hash(&mut h);
-            done.hash(&mut h);
-            expanded.hash(&mut h);
-            retried.hash(&mut h);
-            hovered.hash(&mut h);
-            if !done {
-                animation_frame.hash(&mut h);
-            }
-        }
-        OutputItem::AssistantMd {
-            md,
-            streaming,
-            retried,
-        } => {
-            2u8.hash(&mut h);
-            str_fp(md).hash(&mut h);
-            streaming.hash(&mut h);
-            retried.hash(&mut h);
-        }
-        OutputItem::SystemNote { text, level } => {
-            3u8.hash(&mut h);
-            str_fp(text).hash(&mut h);
-            format!("{:?}", level).hash(&mut h);
-        }
-        OutputItem::Divider => 4u8.hash(&mut h),
-        OutputItem::WorkflowPanel {
-            turn_index,
-            graph,
-            expanded_nodes,
-            panel_expanded,
-            started_at,
-            ended_at,
-            ..
-        } => {
-            #[cfg(test)]
-            update_perf_counters(|counters| {
-                counters.permission_table_entries = counters
-                    .permission_table_entries
-                    .saturating_add(graph.permission_requests.len() as u64)
-                    .saturating_add(graph.permission_groups.len() as u64);
-            });
-            5u8.hash(&mut h);
-            turn_index.hash(&mut h);
-            graph.root.len().hash(&mut h);
-            format!("{:?}", graph.permission_requests).hash(&mut h);
-            format!("{:?}", graph.permission_groups).hash(&mut h);
-            expanded_nodes.len().hash(&mut h);
-            panel_expanded.hash(&mut h);
-            started_at.hash(&mut h);
-            ended_at.hash(&mut h);
-            if ended_at.is_none() {
-                animation_frame.hash(&mut h);
-            }
-        }
-        OutputItem::StartupCard { version, recent } => {
-            6u8.hash(&mut h);
-            version.hash(&mut h);
-            recent.len().hash(&mut h);
-        }
-        OutputItem::Terminal {
-            handle,
-            title,
-            command,
-            screen,
-            accumulated_bytes,
-            mode,
-            done,
-            expanded,
-            scroll_offset,
-        } => {
-            7u8.hash(&mut h);
-            handle.hash(&mut h);
-            title.hash(&mut h);
-            command.hash(&mut h);
-            screen.rows.hash(&mut h);
-            screen.cols.hash(&mut h);
-            screen.alt_screen.hash(&mut h);
-            accumulated_bytes.len().hash(&mut h);
-            format!("{:?}", mode).hash(&mut h);
-            done.hash(&mut h);
-            expanded.hash(&mut h);
-            scroll_offset.hash(&mut h);
-            if !done {
-                animation_frame.hash(&mut h);
-            }
-        }
-        OutputItem::Bash {
-            handle,
-            title,
-            command,
-            output,
-            done,
-            expanded,
-        } => {
-            8u8.hash(&mut h);
-            handle.hash(&mut h);
-            title.hash(&mut h);
-            command.hash(&mut h);
-            str_fp(output).hash(&mut h);
-            done.hash(&mut h);
-            expanded.hash(&mut h);
-            if !done {
-                animation_frame.hash(&mut h);
-            }
-        }
-        OutputItem::CompactionSummary {
-            phase,
-            range_start,
-            range_end,
-            summary,
-            before_tokens,
-            after_tokens,
-            compacted_count,
-            expanded,
-        } => {
-            9u8.hash(&mut h);
-            phase.hash(&mut h);
-            range_start.hash(&mut h);
-            range_end.hash(&mut h);
-            str_fp(summary).hash(&mut h);
-            before_tokens.hash(&mut h);
-            after_tokens.hash(&mut h);
-            compacted_count.hash(&mut h);
-            expanded.hash(&mut h);
-            if matches!(phase, CompactionPhase::Running) {
-                animation_frame.hash(&mut h);
-            }
-        }
-        OutputItem::DiffPreview {
-            title,
-            old_content,
-            new_content,
-            unified_diff,
-            expanded,
-        } => {
-            10u8.hash(&mut h);
-            title.hash(&mut h);
-            old_content.as_deref().map(str_fp).hash(&mut h);
-            new_content.as_deref().map(str_fp).hash(&mut h);
-            unified_diff.as_deref().map(str_fp).hash(&mut h);
-            expanded.hash(&mut h);
-        }
-        OutputItem::MermaidDiagram { source } => {
-            11u8.hash(&mut h);
-            str_fp(source).hash(&mut h);
-        }
-        OutputItem::SubAgentActivity {
-            handle,
-            goal,
-            child_run_id,
-            model,
-            status,
-            output,
-            iteration,
-            done,
-            expanded,
-            expanded_nodes,
-            workflow_expanded,
-            ..
-        } => {
-            12u8.hash(&mut h);
-            str_fp(handle).hash(&mut h);
-            str_fp(goal).hash(&mut h);
-            str_fp(child_run_id).hash(&mut h);
-            str_fp(model).hash(&mut h);
-            str_fp(status).hash(&mut h);
-            str_fp(output).hash(&mut h);
-            iteration.hash(&mut h);
-            done.hash(&mut h);
-            expanded.hash(&mut h);
-            expanded_nodes.len().hash(&mut h);
-            workflow_expanded.hash(&mut h);
-            if !done {
-                animation_frame.hash(&mut h);
-            }
-        }
-    }
-    h.finish()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -721,220 +481,373 @@ pub fn render_item_with_regions(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutKey {
-    pub items_version: u64,
-    pub expanded_version: u64,
     pub width: u16,
+    pub theme: crate::theme::ThemeMode,
     pub animation_frame: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutRequest {
+    pub scroll_offset: u32,
+    pub viewport_rows: u32,
+    pub follow_tail_rows: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutMetrics {
+    pub total_rows: u32,
+    pub scroll_offset: u32,
 }
 
 #[derive(Default)]
 pub struct LayoutCache {
     key: Option<LayoutKey>,
-    lines: Vec<Line<'static>>,
-    ranges: Vec<ItemRange>,
-    node_regions: Vec<NodeRegion>,
+    entries: Vec<ItemCacheEntry>,
+    row_ends: Vec<u32>,
     total_rows: u32,
-    item_cache: Vec<Option<ItemCacheEntry>>,
-    cached_total_rows: u32,
-    item_rows: Vec<u32>,
-    cached_items_len: usize,
+    store_revision: u64,
+    structure_revision: u64,
+    pending_layout: std::collections::BTreeSet<usize>,
+    pending_paint: std::collections::BTreeSet<usize>,
+    pending_structure_from: Option<usize>,
+    access_clock: u64,
 }
 
-#[derive(Clone)]
-pub struct ItemCacheEntry {
-    content_hash: u64,
-    lines: Arc<[Line<'static>]>,
+#[derive(Clone, Default)]
+struct ItemCacheEntry {
+    revision: crate::app::OutputRevision,
     rows: u32,
-    regions: Vec<NodeRegion>,
+    lines: Option<Arc<[Line<'static>]>>,
+    regions: Arc<[NodeRegion]>,
+    last_used: u64,
 }
 
 impl LayoutCache {
-    pub fn get_or_build(
+    const OVERSCAN_ITEMS: usize = 3;
+    const RECENT_ITEM_BUDGET: usize = 64;
+
+    pub(crate) fn mark_layout_dirty(&mut self, index: usize) {
+        self.pending_layout.insert(index);
+    }
+
+    pub(crate) fn mark_paint_dirty(&mut self, index: usize) {
+        self.pending_paint.insert(index);
+    }
+
+    pub(crate) fn mark_structure_dirty(&mut self, index: usize) {
+        self.pending_structure_from = Some(
+            self.pending_structure_from
+                .map_or(index, |current| current.min(index)),
+        );
+    }
+
+    pub fn update_dirty(
         &mut self,
         key: LayoutKey,
-        items: &[OutputItem],
+        items: &OutputStore,
         ctx: &RenderCtx<'_>,
+        request: LayoutRequest,
+    ) -> LayoutMetrics {
+        if items.is_empty() {
+            self.entries.clear();
+            self.row_ends.clear();
+            self.total_rows = 0;
+            self.store_revision = items.revision_clock();
+            self.structure_revision = items.structure_revision();
+            self.pending_layout.clear();
+            self.pending_paint.clear();
+            self.pending_structure_from = None;
+            self.key = Some(key);
+            return LayoutMetrics {
+                total_rows: 0,
+                scroll_offset: 0,
+            };
+        }
+
+        let full_invalidation = self
+            .key
+            .is_none_or(|previous| previous.width != key.width || previous.theme != key.theme);
+        let animation_changed = self
+            .key
+            .is_some_and(|previous| previous.animation_frame != key.animation_frame);
+
+        if full_invalidation {
+            self.entries.clear();
+            self.row_ends.clear();
+            self.pending_layout.clear();
+            self.pending_paint.clear();
+            self.pending_structure_from = Some(0);
+        }
+
+        let revisions = items.revisions();
+        let structure_changed = self.structure_revision != items.structure_revision()
+            || self.entries.len() != items.len();
+        if structure_changed {
+            let changed_from = self.pending_structure_from.unwrap_or(0).min(items.len());
+            if changed_from == self.entries.len() && self.entries.len() <= items.len() {
+                self.entries.resize(items.len(), ItemCacheEntry::default());
+                self.row_ends.resize(items.len(), self.total_rows);
+            } else {
+                let mut by_id = std::mem::take(&mut self.entries)
+                    .into_iter()
+                    .filter(|entry| entry.revision.id != 0)
+                    .map(|entry| (entry.revision.id, entry))
+                    .collect::<std::collections::HashMap<_, _>>();
+                self.entries = revisions
+                    .iter()
+                    .map(|revision| by_id.remove(&revision.id).unwrap_or_default())
+                    .collect();
+                self.row_ends.resize(items.len(), 0);
+            }
+            for (idx, revision) in revisions.iter().enumerate().skip(changed_from) {
+                let cached = self.entries[idx].revision;
+                if cached.id != revision.id || cached.layout != revision.layout {
+                    self.pending_layout.insert(idx);
+                } else if cached.paint != revision.paint {
+                    self.pending_paint.insert(idx);
+                }
+            }
+            self.pending_structure_from = Some(changed_from);
+        }
+
+        if self.store_revision != items.revision_clock()
+            && self.pending_layout.is_empty()
+            && self.pending_paint.is_empty()
+            && !structure_changed
+        {
+            for (idx, revision) in revisions.iter().enumerate() {
+                let cached = self.entries[idx].revision;
+                if cached.layout != revision.layout {
+                    self.pending_layout.insert(idx);
+                } else if cached.paint != revision.paint {
+                    self.pending_paint.insert(idx);
+                }
+            }
+        }
+
+        if animation_changed {
+            for (idx, item) in items.iter().enumerate() {
+                if item_has_active_animation(item) {
+                    self.pending_paint.insert(idx);
+                }
+            }
+        }
+
+        let mut offsets_dirty_from = self.pending_structure_from.take();
+        let layout_dirty = std::mem::take(&mut self.pending_layout);
+        for idx in layout_dirty {
+            if idx >= items.len() {
+                continue;
+            }
+            let retain = idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len();
+            self.render_entry(idx, &items[idx], revisions[idx], ctx, retain);
+            offsets_dirty_from = Some(offsets_dirty_from.map_or(idx, |current| current.min(idx)));
+        }
+
+        let paint_dirty = std::mem::take(&mut self.pending_paint);
+        for idx in paint_dirty {
+            if idx >= items.len() {
+                continue;
+            }
+            let old_rows = self.entries[idx].rows;
+            let retain = self.entries[idx].lines.is_some()
+                || idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len();
+            self.render_entry(idx, &items[idx], revisions[idx], ctx, retain);
+            if self.entries[idx].rows != old_rows {
+                offsets_dirty_from =
+                    Some(offsets_dirty_from.map_or(idx, |current| current.min(idx)));
+            }
+        }
+
+        if let Some(from) = offsets_dirty_from {
+            self.rebuild_row_offsets(from);
+        } else if self.row_ends.len() != self.entries.len() {
+            self.rebuild_row_offsets(0);
+        }
+
+        let scroll_offset = request
+            .follow_tail_rows
+            .map_or(request.scroll_offset, |visible_rows| {
+                self.total_rows.saturating_sub(visible_rows.max(1))
+            });
+        let (visible_start, visible_end) = self.item_window(scroll_offset, request.viewport_rows);
+        let retain_start = visible_start.saturating_sub(Self::OVERSCAN_ITEMS);
+        let retain_end = visible_end
+            .saturating_add(Self::OVERSCAN_ITEMS)
+            .min(items.len());
+        for idx in retain_start..retain_end {
+            if self.entries[idx].lines.is_none() {
+                let old_rows = self.entries[idx].rows;
+                self.render_entry(idx, &items[idx], revisions[idx], ctx, true);
+                debug_assert_eq!(self.entries[idx].rows, old_rows);
+            } else {
+                self.touch_entry(idx);
+            }
+        }
+        self.prune_lines(retain_start..retain_end);
+
+        self.key = Some(key);
+        self.store_revision = items.revision_clock();
+        self.structure_revision = items.structure_revision();
+        LayoutMetrics {
+            total_rows: self.total_rows,
+            scroll_offset,
+        }
+    }
+
+    pub fn visible_slice(
+        &self,
         scroll_offset: u32,
         viewport_rows: u32,
-    ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u32) {
-        if items.is_empty() {
-            self.item_cache.clear();
-            self.item_rows.clear();
-            self.cached_total_rows = 0;
-            self.cached_items_len = 0;
-            self.key = Some(key);
-            self.lines.clear();
-            self.ranges.clear();
-            self.node_regions.clear();
-            self.total_rows = 0;
-            return (Vec::new(), Vec::new(), Vec::new(), 0);
-        }
-
-        // Resize caches if item count changed
-        if items.len() != self.cached_items_len {
-            let old_len = self.item_rows.len();
-            self.item_cache.resize(items.len(), None);
-            self.item_rows.resize(items.len(), 0);
-            // New items have rows=0, will be rendered below
-            self.cached_items_len = items.len();
-            let _ = old_len;
-        }
-
-        // Incremental update: only render items whose content_hash changed.
-        // Adjust cached_total_rows by the row delta.
-        for (idx, item) in items.iter().enumerate() {
-            let is_hovered = ctx.hovered_thinking_idx == Some(idx);
-            let content_hash =
-                item_content_hash(item, is_hovered, ctx.expanded_tools, key.animation_frame);
-            let need_render = self.item_cache[idx]
-                .as_ref()
-                .map(|e| e.content_hash != content_hash)
-                .unwrap_or(true);
-            if !need_render {
+    ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>) {
+        let (start_idx, end_idx) = self.item_window(scroll_offset, viewport_rows);
+        let vis_bottom = scroll_offset.saturating_add(viewport_rows);
+        let mut lines = Vec::new();
+        let mut ranges = Vec::with_capacity(end_idx.saturating_sub(start_idx));
+        let mut regions = Vec::new();
+        for idx in start_idx..end_idx {
+            let entry = &self.entries[idx];
+            let start = self.row_start(idx);
+            let end = self.row_ends[idx];
+            let Some(item_lines) = entry.lines.as_ref() else {
+                debug_assert!(false, "visible entries must be prepared by update_dirty");
                 continue;
-            }
-            let old_rows = self.item_rows[idx];
-            let item_ctx = RenderCtx {
-                expanded_tools: ctx.expanded_tools,
-                messages: ctx.messages,
-                animation_frame: ctx.animation_frame,
-                panel_width: ctx.panel_width,
-                hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
-                    Some(idx)
-                } else {
-                    None
-                },
             };
-            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx, idx);
-            let (new_rows, _) = wrap_row_offsets(&item_lines, key.width);
-            self.item_cache[idx] = Some(ItemCacheEntry {
-                content_hash,
-                lines: Arc::from(item_lines),
-                rows: new_rows,
-                regions: item_regions,
-            });
-            self.item_rows[idx] = new_rows;
-            // Incremental total_rows adjustment
-            self.cached_total_rows = self
-                .cached_total_rows
-                .saturating_sub(old_rows)
-                .saturating_add(new_rows);
-        }
-
-        let total_rows = self.cached_total_rows;
-
-        // Virtual scroll: absolute coordinates. vis_top from top.
-        let vis_top = scroll_offset;
-        let vis_bot = scroll_offset.saturating_add(viewport_rows);
-
-        // Two-pass: first pass walks from vis_top backwards to preload
-        // PRELOAD_BLOCKS items above viewport. Second pass clones only
-        // viewport lines.
-        const PRELOAD_BLOCKS: usize = 3;
-
-        // Find the item index where vis_top falls, and preload above it
-        let mut cursor: u32 = 0;
-        let mut vis_start_idx: usize = 0;
-        for (idx, _) in items.iter().enumerate() {
-            let rows = self.item_rows[idx];
-            let end = cursor.saturating_add(rows);
-            if end > vis_top {
-                vis_start_idx = idx;
-                break;
-            }
-            cursor = end;
-            vis_start_idx = idx + 1;
-        }
-
-        // Ensure preloaded items above vis_start_idx are cached
-        let preload_start = vis_start_idx.saturating_sub(PRELOAD_BLOCKS);
-        for (idx, item) in items
-            .iter()
-            .enumerate()
-            .skip(preload_start)
-            .take(vis_start_idx.saturating_sub(preload_start))
-        {
-            if self.item_cache[idx].is_some() {
-                continue;
-            }
-            let is_hovered = ctx.hovered_thinking_idx == Some(idx);
-            let content_hash =
-                item_content_hash(item, is_hovered, ctx.expanded_tools, key.animation_frame);
-            let item_ctx = RenderCtx {
-                expanded_tools: ctx.expanded_tools,
-                messages: ctx.messages,
-                animation_frame: ctx.animation_frame,
-                panel_width: ctx.panel_width,
-                hovered_thinking_idx: None,
-            };
-            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx, idx);
-            let (rows, _) = wrap_row_offsets(&item_lines, key.width);
-            self.item_cache[idx] = Some(ItemCacheEntry {
-                content_hash,
-                lines: Arc::from(item_lines),
-                rows,
-                regions: item_regions,
-            });
-            self.item_rows[idx] = rows;
-        }
-
-        // Build visible lines: only clone items in [vis_top, vis_bot)
-        let mut visible_lines: Vec<Line<'static>> = Vec::new();
-        let mut visible_ranges: Vec<ItemRange> = Vec::new();
-        let mut visible_regions: Vec<NodeRegion> = Vec::new();
-        cursor = 0;
-        for (idx, _) in items.iter().enumerate() {
-            let entry = match self.item_cache[idx].as_ref() {
-                Some(e) => e,
-                None => continue,
-            };
-            let start = cursor;
-            let end = cursor.saturating_add(entry.rows);
-            cursor = end;
-            if end <= vis_top || start >= vis_bot {
-                continue;
-            }
-            let skip = vis_top.saturating_sub(start) as usize;
-            let take = end.min(vis_bot).saturating_sub(start.max(vis_top)) as usize;
-            let lo = skip.min(entry.lines.len());
-            let hi = (skip + take).min(entry.lines.len());
-            visible_lines.extend(entry.lines[lo..hi].iter().cloned());
-            visible_ranges.push(ItemRange {
+            let skip = scroll_offset.saturating_sub(start) as usize;
+            let take = end.min(vis_bottom).saturating_sub(start.max(scroll_offset)) as usize;
+            let lo = skip.min(item_lines.len());
+            let hi = skip.saturating_add(take).min(item_lines.len());
+            lines.extend(item_lines[lo..hi].iter().cloned());
+            ranges.push(ItemRange {
                 item_index: idx,
                 start_row: start,
                 end_row: end,
             });
-            for r in &entry.regions {
-                visible_regions.push(NodeRegion {
-                    panel_item_index: idx,
-                    path_key: r.path_key.clone(),
-                    start_row: r.start_row.saturating_add(start),
-                    end_row: r.end_row.saturating_add(start),
-                    col_start: r.col_start,
-                    col_end: r.col_end,
-                });
-            }
+            regions.extend(entry.regions.iter().map(|region| NodeRegion {
+                panel_item_index: idx,
+                path_key: region.path_key.clone(),
+                start_row: region.start_row.saturating_add(start),
+                end_row: region.end_row.saturating_add(start),
+                col_start: region.col_start,
+                col_end: region.col_end,
+            }));
         }
-
-        self.key = Some(key);
-        self.total_rows = total_rows;
-        (visible_lines, visible_ranges, visible_regions, total_rows)
+        (lines, ranges, regions)
     }
 
-    pub fn take_cached(&mut self) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>) {
-        (
-            std::mem::take(&mut self.lines),
-            std::mem::take(&mut self.ranges),
-            std::mem::take(&mut self.node_regions),
-        )
+    fn render_entry(
+        &mut self,
+        idx: usize,
+        item: &OutputItem,
+        revision: crate::app::OutputRevision,
+        ctx: &RenderCtx<'_>,
+        retain_lines: bool,
+    ) {
+        let hovered = ctx.hovered_thinking_idx == Some(idx);
+        let item_ctx = RenderCtx {
+            expanded_tools: ctx.expanded_tools,
+            messages: ctx.messages,
+            animation_frame: ctx.animation_frame,
+            panel_width: ctx.panel_width,
+            hovered_thinking_idx: (hovered && matches!(item, OutputItem::Thinking { .. }))
+                .then_some(idx),
+        };
+        let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
+        let rows = lines.len().min(u32::MAX as usize) as u32;
+        self.access_clock = self.access_clock.wrapping_add(1);
+        self.entries[idx] = ItemCacheEntry {
+            revision,
+            rows,
+            lines: retain_lines.then(|| Arc::from(lines)),
+            regions: if retain_lines {
+                Arc::from(regions)
+            } else {
+                Arc::from([])
+            },
+            last_used: self.access_clock,
+        };
     }
 
-    pub fn cached_total_rows(&self) -> u32 {
-        self.cached_total_rows
+    fn rebuild_row_offsets(&mut self, from: usize) {
+        self.row_ends.resize(self.entries.len(), 0);
+        let mut cursor = if from == 0 {
+            0
+        } else {
+            self.row_ends[from.saturating_sub(1)]
+        };
+        for idx in from..self.entries.len() {
+            cursor = cursor.saturating_add(self.entries[idx].rows);
+            self.row_ends[idx] = cursor;
+        }
+        self.total_rows = self.row_ends.last().copied().unwrap_or(0);
+    }
+
+    fn row_start(&self, index: usize) -> u32 {
+        index
+            .checked_sub(1)
+            .and_then(|previous| self.row_ends.get(previous).copied())
+            .unwrap_or(0)
+    }
+
+    fn item_window(&self, scroll_offset: u32, viewport_rows: u32) -> (usize, usize) {
+        if viewport_rows == 0 || self.entries.is_empty() {
+            return (0, 0);
+        }
+        let bottom = scroll_offset.saturating_add(viewport_rows);
+        let start = self.row_ends.partition_point(|end| *end <= scroll_offset);
+        let end = self
+            .row_ends
+            .partition_point(|end| *end < bottom)
+            .saturating_add(1)
+            .min(self.entries.len());
+        (start.min(end), end)
+    }
+
+    fn touch_entry(&mut self, index: usize) {
+        self.access_clock = self.access_clock.wrapping_add(1);
+        self.entries[index].last_used = self.access_clock;
+    }
+
+    fn prune_lines(&mut self, protected: std::ops::Range<usize>) {
+        let mut recent = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(idx, entry)| !protected.contains(idx) && entry.lines.is_some())
+            .map(|(idx, entry)| (entry.last_used, idx))
+            .collect::<Vec<_>>();
+        recent.sort_unstable_by(|left, right| right.cmp(left));
+        for (_, idx) in recent.into_iter().skip(Self::RECENT_ITEM_BUDGET) {
+            self.entries[idx].lines = None;
+            self.entries[idx].regions = Arc::from([]);
+        }
     }
 
     pub fn invalidate(&mut self) {
         self.key = None;
+        self.pending_structure_from = Some(0);
+    }
+
+    #[cfg(test)]
+    fn retained_item_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.lines.is_some())
+            .count()
+    }
+}
+
+fn item_has_active_animation(item: &OutputItem) -> bool {
+    match item {
+        OutputItem::Thinking { done, .. }
+        | OutputItem::Terminal { done, .. }
+        | OutputItem::Bash { done, .. }
+        | OutputItem::SubAgentActivity { done, .. } => !done,
+        OutputItem::WorkflowPanel { ended_at, .. } => ended_at.is_none(),
+        OutputItem::CompactionSummary { phase, .. } => {
+            matches!(phase, CompactionPhase::Running)
+        }
+        _ => false,
     }
 }
 
@@ -943,7 +856,17 @@ impl std::fmt::Debug for LayoutCache {
         f.debug_struct("LayoutCache")
             .field("key", &self.key)
             .field("total_rows", &self.total_rows)
+            .field("retained_items", &self.retained_item_count_for_debug())
             .finish()
+    }
+}
+
+impl LayoutCache {
+    fn retained_item_count_for_debug(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.lines.is_some())
+            .count()
     }
 }
 
@@ -5070,10 +4993,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "captures the pre-redesign full permission fingerprint traversal"]
-    fn baseline_layout_cache_revisits_every_permission_on_both_frame_calls() {
+    fn visible_slice_does_not_reinspect_workflow_permissions() {
         const PERMISSIONS: usize = 4_096;
-        let items = vec![workflow_with_permissions(PERMISSIONS)];
+        let items = OutputStore::from(vec![workflow_with_permissions(PERMISSIONS)]);
         let expanded_tools = std::collections::HashSet::new();
         let ctx = RenderCtx {
             expanded_tools: &expanded_tools,
@@ -5083,24 +5005,29 @@ mod tests {
             hovered_thinking_idx: None,
         };
         let key = LayoutKey {
-            items_version: 0,
-            expanded_version: 0,
             width: 120,
+            theme: crate::theme::current_mode(),
             animation_frame: Some(0),
         };
         let mut cache = LayoutCache::default();
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 40,
+            follow_tail_rows: None,
+        };
+        let metrics = cache.update_dirty(key, &items, &ctx, request);
         reset_perf_counters();
-        let _ = cache.get_or_build(key, &items, &ctx, 0, 0);
-        let _ = cache.get_or_build(key, &items, &ctx, 0, 40);
+        let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+        let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
         let counters = perf_counters();
-        assert_eq!(counters.semantic_item_visits, 2);
-        assert_eq!(counters.item_renders, 1);
-        assert_eq!(counters.panel_projection_builds, 1);
-        assert_eq!(counters.permission_table_entries, (PERMISSIONS * 2) as u64);
+        assert_eq!(counters.semantic_item_visits, 0);
+        assert_eq!(counters.item_renders, 0);
+        assert_eq!(counters.panel_projection_builds, 0);
+        assert_eq!(counters.permission_table_entries, 0);
     }
 
     #[test]
-    fn workflow_panel_hash_ignores_animation_frame_when_closed() {
+    fn closed_workflow_ignores_animation_frame_changes() {
         use atman_runtime::workflow::{NodeStatus, WorkflowGraph, WorkflowNode, WorkflowNodeKind};
         use std::collections::HashSet;
         use std::time::Instant;
@@ -5125,7 +5052,7 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let item = OutputItem::WorkflowPanel {
+        let items = OutputStore::from(vec![OutputItem::WorkflowPanel {
             turn_index: 0,
             graph,
             expanded_nodes: HashSet::new(),
@@ -5133,13 +5060,244 @@ mod tests {
             started_at: Instant::now(),
             ended_at: Some(Instant::now()),
             cancelled: false,
+        }]);
+        let expanded_tools = HashSet::new();
+        let mut ctx = RenderCtx {
+            expanded_tools: &expanded_tools,
+            messages: &[],
+            animation_frame: 0,
+            panel_width: 120,
+            hovered_thinking_idx: None,
         };
-        let h1 = item_content_hash(&item, false, &HashSet::new(), Some(0));
-        let h2 = item_content_hash(&item, false, &HashSet::new(), Some(999));
-        assert_eq!(
-            h1, h2,
-            "animation_frame must not affect hash when panel is closed"
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 40,
+            follow_tail_rows: None,
+        };
+        let mut cache = LayoutCache::default();
+        let key = LayoutKey {
+            width: 120,
+            theme: crate::theme::current_mode(),
+            animation_frame: Some(0),
+        };
+        cache.update_dirty(key, &items, &ctx, request);
+        reset_perf_counters();
+        ctx.animation_frame = 1;
+        cache.update_dirty(
+            LayoutKey {
+                animation_frame: Some(1),
+                ..key
+            },
+            &items,
+            &ctx,
+            request,
         );
+        assert_eq!(perf_counters().item_renders, 0);
+    }
+
+    #[test]
+    fn unchanged_layout_update_and_slice_do_not_render_items() {
+        let items = OutputStore::from(vec![
+            OutputItem::SystemNote {
+                text: "one".into(),
+                level: NoteLevel::Info,
+            },
+            OutputItem::SystemNote {
+                text: "two".into(),
+                level: NoteLevel::Info,
+            },
+        ]);
+        let ctx = RenderCtx::empty();
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+            animation_frame: None,
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 20,
+            follow_tail_rows: None,
+        };
+        let mut cache = LayoutCache::default();
+        cache.update_dirty(key, &items, &ctx, request);
+        reset_perf_counters();
+        cache.update_dirty(key, &items, &ctx, request);
+        let _ = cache.visible_slice(0, 20);
+        assert_eq!(perf_counters().item_renders, 0);
+    }
+
+    #[test]
+    fn middle_and_tail_removal_update_total_rows_exactly() {
+        let mut app = crate::app::AppState::new("layout-remove".into(), None).with_initial_items(
+            (0..5)
+                .map(|idx| OutputItem::SystemNote {
+                    text: format!("note-{idx}"),
+                    level: NoteLevel::Info,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+            animation_frame: None,
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 100,
+            follow_tail_rows: None,
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let initial = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        app.layout_cache = cache;
+
+        app.remove_item(2);
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let middle = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        assert_eq!(
+            middle.total_rows,
+            build_lines(&app.items, &RenderCtx::empty()).len() as u32
+        );
+        assert!(middle.total_rows < initial.total_rows);
+        app.layout_cache = cache;
+
+        app.remove_item(app.items.len() - 1);
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let tail = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        assert_eq!(
+            tail.total_rows,
+            build_lines(&app.items, &RenderCtx::empty()).len() as u32
+        );
+        assert!(tail.total_rows < middle.total_rows);
+    }
+
+    #[test]
+    fn mutation_followed_by_removal_keeps_the_shifted_entry_dirty() {
+        let mut app = crate::app::AppState::new("layout-shift".into(), None);
+        app.push_note("prefix", NoteLevel::Info);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: "old".into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+            animation_frame: None,
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 100,
+            follow_tail_rows: None,
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        app.layout_cache = cache;
+
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: "-new".into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        app.remove_item(0);
+
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        let (lines, _, _) = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("old-new"));
+    }
+
+    #[test]
+    fn rendered_line_retention_is_bounded() {
+        let items = OutputStore::from(
+            (0..1_000)
+                .map(|idx| OutputItem::SystemNote {
+                    text: format!("note-{idx}"),
+                    level: NoteLevel::Info,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut cache = LayoutCache::default();
+        cache.update_dirty(
+            LayoutKey {
+                width: 80,
+                theme: crate::theme::current_mode(),
+                animation_frame: None,
+            },
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 1_000,
+                viewport_rows: 20,
+                follow_tail_rows: None,
+            },
+        );
+        assert!(cache.retained_item_count() <= LayoutCache::RECENT_ITEM_BUDGET + 16);
+    }
+
+    #[test]
+    fn width_and_theme_changes_force_full_layout_invalidation() {
+        let items = OutputStore::from(vec![
+            OutputItem::SystemNote {
+                text: "one".into(),
+                level: NoteLevel::Info,
+            },
+            OutputItem::SystemNote {
+                text: "two".into(),
+                level: NoteLevel::Info,
+            },
+        ]);
+        let ctx = RenderCtx::empty();
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 20,
+            follow_tail_rows: None,
+        };
+        let theme = crate::theme::current_mode();
+        let mut cache = LayoutCache::default();
+        cache.update_dirty(
+            LayoutKey {
+                width: 80,
+                theme,
+                animation_frame: None,
+            },
+            &items,
+            &ctx,
+            request,
+        );
+
+        reset_perf_counters();
+        cache.update_dirty(
+            LayoutKey {
+                width: 79,
+                theme,
+                animation_frame: None,
+            },
+            &items,
+            &ctx,
+            request,
+        );
+        assert_eq!(perf_counters().item_renders, 2);
+
+        reset_perf_counters();
+        cache.update_dirty(
+            LayoutKey {
+                width: 79,
+                theme: match theme {
+                    crate::theme::ThemeMode::Dark => crate::theme::ThemeMode::Light,
+                    crate::theme::ThemeMode::Light => crate::theme::ThemeMode::Dark,
+                },
+                animation_frame: None,
+            },
+            &items,
+            &ctx,
+            request,
+        );
+        assert_eq!(perf_counters().item_renders, 2);
     }
 
     #[test]
@@ -5761,7 +5919,7 @@ mod tests {
             OutputItem::Divider,
         ];
         let (_lines, ranges, _regions, total) =
-            build_lines_with_ranges(&items, 80, &RenderCtx::empty(), &mut Vec::new(), None);
+            build_lines_with_ranges(&items, 80, &RenderCtx::empty());
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].item_index, 0);
         assert_eq!(ranges[1].item_index, 1);
@@ -5772,7 +5930,7 @@ mod tests {
     #[test]
     fn build_lines_with_ranges_empty_items_returns_empty_vecs() {
         let (lines, ranges, _regions, total) =
-            build_lines_with_ranges(&[], 80, &RenderCtx::empty(), &mut Vec::new(), None);
+            build_lines_with_ranges(&[], 80, &RenderCtx::empty());
         assert!(lines.is_empty());
         assert!(ranges.is_empty());
         assert_eq!(total, 0);

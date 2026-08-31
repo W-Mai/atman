@@ -15,8 +15,8 @@ use atman_runtime::workflow::{
     NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
     WorkflowPermissionIdentity, WorkflowPermissionRequest, WorkflowPermissionState,
 };
-use atman_tui::app::{NoteLevel, OutputItem};
-use atman_tui::output::{LayoutCache, LayoutKey, RenderCtx};
+use atman_tui::app::{NoteLevel, OutputItem, OutputStore};
+use atman_tui::output::{LayoutCache, LayoutKey, LayoutRequest, RenderCtx};
 
 struct LayoutBaseline {
     cold: Duration,
@@ -26,6 +26,7 @@ struct LayoutBaseline {
 }
 
 fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
+    let items = OutputStore::from(items.to_vec());
     let expanded_tools = HashSet::new();
     let mut cache = LayoutCache::default();
     let mut ctx = RenderCtx {
@@ -36,19 +37,23 @@ fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
         hovered_thinking_idx: None,
     };
     let cold_key = LayoutKey {
-        items_version: 0,
-        expanded_version: 0,
         width: 120,
+        theme: atman_tui::theme::current_mode(),
         animation_frame: Some(0),
     };
+    let request = LayoutRequest {
+        scroll_offset: 0,
+        viewport_rows: 40,
+        follow_tail_rows: None,
+    };
     let started = Instant::now();
-    let _ = cache.get_or_build(cold_key, items, &ctx, 0, 0);
-    let (_, _, _, total_rows) = cache.get_or_build(cold_key, items, &ctx, 0, 40);
+    let metrics = cache.update_dirty(cold_key, &items, &ctx, request);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
     let cold = started.elapsed();
 
     let started = Instant::now();
-    let _ = cache.get_or_build(cold_key, items, &ctx, 0, 0);
-    let _ = cache.get_or_build(cold_key, items, &ctx, 0, 40);
+    let metrics = cache.update_dirty(cold_key, &items, &ctx, request);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
     let warm = started.elapsed();
 
     ctx.animation_frame = 1;
@@ -57,14 +62,14 @@ fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
         ..cold_key
     };
     let started = Instant::now();
-    let _ = cache.get_or_build(animated_key, items, &ctx, 0, 0);
-    let _ = cache.get_or_build(animated_key, items, &ctx, 0, 40);
+    let metrics = cache.update_dirty(animated_key, &items, &ctx, request);
+    let _ = cache.visible_slice(metrics.scroll_offset, request.viewport_rows);
     let animated = started.elapsed();
     LayoutBaseline {
         cold,
         warm,
         animated,
-        total_rows,
+        total_rows: metrics.total_rows,
     }
 }
 
