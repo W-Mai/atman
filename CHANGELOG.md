@@ -8,7 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
-- **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
+- **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node, background-process, and terminal events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label.
 - **LLM context plan observations** — `Event::LlmCall` includes an optional `context_plan_id`, context epoch, token lanes, usage source, call purpose, root/child identity, provider-projected cache-prefix observation, and assistant tool-batch width for the plan compiled for the dispatch attempt. `StreamFrame::LlmCallStats`, workflow LLM statistics, and `ContextSnapshot` retain provider, model, purpose, and scope metadata. `Event::ToolResultMetrics` records raw and model-visible result sizes.
 - **Context record message parts** — `MessagePart` includes a structured `ContextRecord` variant with authority, retention, revision, and content digest metadata.
 - **Scoped compaction events** — `Event::CompactionSummary`, `Event::ContextCompact`, and `Event::Checkpoint` include an optional child flow owner.
@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Intent-first execution surfaces** — output blocks, workflow nodes, approvals, sub-agent panels, task windows, and active task leaves use localized call purposes as primary labels while retaining tool names, handles, arguments, and request identities as technical detail.
 - **Context cache diagnostics** — LLM call events identify the provider prompt profile, prefix digest and size, entry-boundary common prefix, cache reset cause, and assistant tool-batch width across root, child, and helper calls; tool result metrics compare raw output with its model-visible excerpt.
 - **Persistent context records** — Internal context records serialize through session events and checkpoints, retain the latest live value through compaction, stay hidden from the normal TUI transcript, and project to provider-appropriate model context.
 - **Isolated child compaction** — spawned flows apply the session compaction budget, anchored summaries, live-record retention, and owned checkpoints to their independent model histories.

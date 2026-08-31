@@ -163,6 +163,13 @@ Three input modes:
 - `/name arg` — run `~/.config/atman/commands/<name>.at`.
 - plain text — `routes.at` handles configured prefixes and its default route.
 
+Tool-call purposes become the primary labels in output blocks, workflow nodes,
+approval rows, sub-agent panels, task windows, and the Tasks activity area. The
+tool name and source handle remain visible as secondary technical metadata. The
+managed agent writes these dynamic labels in the current user's language when
+practical. The Tasks activity area shows running leaves, so a dispatcher is
+hidden while its concrete parallel tool calls are active.
+
 Try the smoke test first:
 
 ```
