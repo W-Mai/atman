@@ -1309,6 +1309,43 @@ impl AppState {
         }
     }
 
+    fn upsert_activity_node(&mut self, node: crate::task_panel::ActivityNode) {
+        if let Some(existing) = self
+            .activity_nodes
+            .iter_mut()
+            .rev()
+            .find(|existing| existing.run_id == node.run_id && existing.node_id == node.node_id)
+        {
+            existing.parent_node_id = node.parent_node_id;
+            existing.label = node.label;
+            existing.kind = node.kind;
+            if existing.status != crate::task_panel::ActivityStatus::Running {
+                existing.status = node.status;
+                existing.started_at = node.started_at;
+                existing.ended_at = node.ended_at;
+            }
+            return;
+        }
+        self.activity_nodes.push(node);
+        if self.activity_nodes.len() > 128 {
+            self.activity_nodes.remove(0);
+        }
+    }
+
+    fn finish_activity_node(
+        &mut self,
+        run_id: Option<&str>,
+        node_id: &str,
+        status: crate::task_panel::ActivityStatus,
+    ) {
+        if let Some(node) = self.activity_nodes.iter_mut().rev().find(|node| {
+            node.node_id == node_id && run_id.is_none_or(|run_id| node.run_id == run_id)
+        }) {
+            node.status = status;
+            node.ended_at = Some(std::time::Instant::now());
+        }
+    }
+
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         self.apply_permission_projection(&frame);
         match frame {
@@ -1423,7 +1460,15 @@ impl AppState {
                 self.streaming = false;
                 self.reset_lag_state();
             }
-            StreamFrame::ToolUseStart { .. } | StreamFrame::ToolUseDone { .. } => {}
+            StreamFrame::ToolUseStart { .. } => {}
+            StreamFrame::ToolUseDone { id, ok, .. } => {
+                let status = if ok {
+                    crate::task_panel::ActivityStatus::Ok
+                } else {
+                    crate::task_panel::ActivityStatus::Err
+                };
+                self.finish_activity_node(None, &id, status);
+            }
             StreamFrame::Note(text) => {
                 self.push_item(OutputItem::SystemNote {
                     text,
@@ -1525,20 +1570,43 @@ impl AppState {
                         node_id,
                         kind,
                         label,
-                        ..
+                        parent_node_id,
                     } => {
-                        self.activity_nodes.push(crate::task_panel::ActivityNode {
+                        self.upsert_activity_node(crate::task_panel::ActivityNode {
                             run_id: run_id.clone(),
                             node_id: node_id.clone(),
+                            parent_node_id: parent_node_id.clone(),
                             label: label.clone(),
                             kind: kind.clone(),
                             status: crate::task_panel::ActivityStatus::Running,
                             started_at: std::time::Instant::now(),
                             ended_at: None,
                         });
-                        if self.activity_nodes.len() > 128 {
-                            self.activity_nodes.remove(0);
-                        }
+                    }
+                    StreamFrame::ToolNode {
+                        run_id,
+                        parent_node_id,
+                        tool_use_id,
+                        tool,
+                        call_intent,
+                        ..
+                    } => {
+                        let label = call_intent
+                            .as_ref()
+                            .map(|intent| intent.as_str().to_owned())
+                            .unwrap_or_else(|| tool.clone());
+                        self.upsert_activity_node(crate::task_panel::ActivityNode {
+                            run_id: run_id.clone(),
+                            node_id: tool_use_id.clone(),
+                            parent_node_id: Some(parent_node_id.clone()),
+                            label,
+                            kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                                path: tool.clone(),
+                            },
+                            status: crate::task_panel::ActivityStatus::Running,
+                            started_at: std::time::Instant::now(),
+                            ended_at: None,
+                        });
                     }
                     StreamFrame::FlowNodeEnd {
                         run_id,
@@ -1562,6 +1630,26 @@ impl AppState {
                                 n.status = st;
                                 n.ended_at = Some(std::time::Instant::now());
                                 break;
+                            }
+                        }
+                    }
+                    StreamFrame::ToolResultMsg {
+                        flow_run_id: Some(run_id),
+                        message,
+                    } => {
+                        for part in &message.parts {
+                            if let atman_runtime::message::MessagePart::ToolResult {
+                                tool_use_id,
+                                is_error,
+                                ..
+                            } = part
+                            {
+                                let status = if *is_error {
+                                    crate::task_panel::ActivityStatus::Err
+                                } else {
+                                    crate::task_panel::ActivityStatus::Ok
+                                };
+                                self.finish_activity_node(Some(run_id), tool_use_id, status);
                             }
                         }
                     }
@@ -2624,6 +2712,83 @@ mod tests {
             app.items.is_empty(),
             "tool traffic flows through workflow panel now"
         );
+    }
+
+    #[test]
+    fn activity_projection_tracks_parallel_tool_intents_and_completion() {
+        use atman_runtime::event::FlowNodeStatus;
+        use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::FlowNodeStart {
+            run_id: "run-1".into(),
+            node_id: "dispatch".into(),
+            kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                path: "dispatch_all".into(),
+            },
+            label: "dispatch_all".into(),
+            parent_node_id: None,
+        });
+        for (id, intent) in [("tool-a", "读取配置"), ("tool-b", "检查进程")] {
+            app.apply_stream_frame(StreamFrame::ToolNode {
+                run_id: "run-1".into(),
+                parent_node_id: "dispatch".into(),
+                tool_use_id: id.into(),
+                tool: "fs.read".into(),
+                args_preview: String::new(),
+                call_intent: atman_runtime::message::ToolCallIntent::new(intent),
+            });
+        }
+
+        let leaves = crate::task_panel::running_activity_leaves(&app.activity_nodes)
+            .into_iter()
+            .map(|node| node.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(leaves, ["读取配置", "检查进程"]);
+
+        app.apply_stream_frame(StreamFrame::ToolUseDone {
+            tool: "fs.read".into(),
+            ok: true,
+            preview: String::new(),
+            id: "tool-a".into(),
+        });
+        let leaves = crate::task_panel::running_activity_leaves(&app.activity_nodes);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].node_id, "tool-b");
+
+        app.apply_stream_frame(StreamFrame::ToolResultMsg {
+            flow_run_id: Some("run-1".into()),
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "tool-b".into(),
+                    content: "failed".into(),
+                    is_error: true,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+        let leaves = crate::task_panel::running_activity_leaves(&app.activity_nodes);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].node_id, "dispatch");
+        assert_eq!(
+            app.activity_nodes
+                .iter()
+                .find(|node| node.node_id == "tool-b")
+                .unwrap()
+                .status,
+            crate::task_panel::ActivityStatus::Err
+        );
+
+        app.apply_stream_frame(StreamFrame::FlowNodeEnd {
+            run_id: "run-1".into(),
+            node_id: "dispatch".into(),
+            status: FlowNodeStatus::Ok,
+            output_preview: None,
+            parent_node_id: None,
+        });
+        assert!(crate::task_panel::running_activity_leaves(&app.activity_nodes).is_empty());
     }
 
     #[test]

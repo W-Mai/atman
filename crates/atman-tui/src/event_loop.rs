@@ -727,7 +727,7 @@ pub(crate) async fn run_frames(
                                         if let Some(label) = label {
                                             app.wm.open(
                                                 &panel_id,
-                                                crate::wm::ContentKey::Activity(run_id.clone()),
+                                                crate::wm::ContentKey::Activity(panel_id.clone()),
                                                 crate::wm::WindowContent::Activity { run_id: run_id.clone() },
                                                 &label,
                                                 canvas,
@@ -735,7 +735,7 @@ pub(crate) async fn run_frames(
                                             if let Some(p) = app.wm
                                                 .panels
                                                 .iter_mut()
-                                                .find(|p| p.content_key == crate::wm::ContentKey::Activity(run_id.clone()))
+                                                .find(|p| p.content_key == crate::wm::ContentKey::Activity(panel_id.clone()))
                                             {
                                                 p.content = Some(Box::new(
                                                     crate::window::activity_panel::ActivityPanelContent {

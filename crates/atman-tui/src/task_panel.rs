@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 pub struct ActivityNode {
     pub run_id: String,
     pub node_id: String,
+    pub parent_node_id: Option<String>,
     pub label: String,
     pub kind: atman_runtime::nodegraph::NodeKind,
     pub status: ActivityStatus,
@@ -23,6 +24,17 @@ pub enum ActivityStatus {
     Ok,
     Err,
     Cancelled,
+}
+
+impl ActivityStatus {
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Ok => "completed",
+            Self::Err => "failed",
+            Self::Cancelled => "stopped",
+        }
+    }
 }
 
 use atman_runtime::{TaskId, TaskKind, TaskSnapshot, TaskStatus};
@@ -233,10 +245,7 @@ pub fn render(
     )]));
     row += 1;
 
-    let running: Vec<&ActivityNode> = activity_nodes
-        .iter()
-        .filter(|n| n.status == ActivityStatus::Running)
-        .collect();
+    let running = running_activity_leaves(activity_nodes);
     let running_count = running.len();
     if running_count == 0 {
         let msg = "no active tasks";
@@ -839,6 +848,43 @@ pub fn render(
     hitmap
 }
 
+pub(crate) fn running_activity_leaves(activity_nodes: &[ActivityNode]) -> Vec<&ActivityNode> {
+    activity_nodes
+        .iter()
+        .filter(|node| {
+            node.status == ActivityStatus::Running
+                && !activity_nodes.iter().any(|candidate| {
+                    candidate.status == ActivityStatus::Running
+                        && candidate.run_id == node.run_id
+                        && candidate.node_id != node.node_id
+                        && is_activity_descendant(candidate, node, activity_nodes)
+                })
+        })
+        .collect()
+}
+
+fn is_activity_descendant(
+    candidate: &ActivityNode,
+    ancestor: &ActivityNode,
+    activity_nodes: &[ActivityNode],
+) -> bool {
+    let mut parent_id = candidate.parent_node_id.as_deref();
+    for _ in 0..activity_nodes.len() {
+        let Some(parent) = parent_id else {
+            return false;
+        };
+        if parent == ancestor.node_id {
+            return true;
+        }
+        parent_id = activity_nodes
+            .iter()
+            .rev()
+            .find(|node| node.run_id == candidate.run_id && node.node_id == parent)
+            .and_then(|node| node.parent_node_id.as_deref());
+    }
+    false
+}
+
 pub fn compute_content_lines(
     snap: &TaskSnapshot,
     activity_nodes: &[ActivityNode],
@@ -1058,6 +1104,46 @@ mod tests {
         use atman_runtime::nodegraph::NodeKind;
         let (icon, _) = node_kind_glyph(&NodeKind::Llm { model: None });
         assert_eq!(icon, "✦");
+    }
+
+    fn activity_node(node_id: &str, parent_node_id: Option<&str>, label: &str) -> ActivityNode {
+        ActivityNode {
+            run_id: "run-1".into(),
+            node_id: node_id.into(),
+            parent_node_id: parent_node_id.map(str::to_owned),
+            label: label.into(),
+            kind: atman_runtime::nodegraph::NodeKind::ToolCall { path: label.into() },
+            status: ActivityStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+        }
+    }
+
+    #[test]
+    fn running_activity_leaves_hide_ancestors_and_keep_parallel_tools() {
+        let nodes = vec![
+            activity_node("root", None, "agent loop"),
+            activity_node("dispatch", Some("root"), "dispatch_all"),
+            activity_node("tool-a", Some("dispatch"), "读取配置"),
+            activity_node("tool-b", Some("dispatch"), "检查进程"),
+        ];
+        let leaves = running_activity_leaves(&nodes)
+            .into_iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(leaves, ["tool-a", "tool-b"]);
+    }
+
+    #[test]
+    fn completed_child_reveals_still_running_parent() {
+        let mut nodes = vec![
+            activity_node("dispatch", None, "dispatch_all"),
+            activity_node("tool-a", Some("dispatch"), "读取配置"),
+        ];
+        nodes[1].status = ActivityStatus::Ok;
+        let leaves = running_activity_leaves(&nodes);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].node_id, "dispatch");
     }
 
     #[test]

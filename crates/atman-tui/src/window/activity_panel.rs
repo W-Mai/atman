@@ -102,7 +102,7 @@ fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("status ", Style::default().fg(t.subtle_fg.into())),
-        Span::styled(format!("{:?}", node.status), Style::default().fg(color)),
+        Span::styled(node.status.display_label(), Style::default().fg(color)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("run_id ", Style::default().fg(t.subtle_fg.into())),
@@ -113,6 +113,12 @@ fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
         Span::raw(" "),
         Span::styled(&node.node_id, Style::default().fg(t.tinted_fg.into())),
     ]));
+    if let Some(parent_node_id) = &node.parent_node_id {
+        lines.push(Line::from(vec![
+            Span::styled("parent ", Style::default().fg(t.subtle_fg.into())),
+            Span::styled(parent_node_id, Style::default().fg(t.tinted_fg.into())),
+        ]));
+    }
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
