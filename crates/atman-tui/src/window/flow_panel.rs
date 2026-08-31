@@ -146,7 +146,13 @@ impl WindowComponent for FlowPanelContent {
             .iter()
             .find(|s| s.source_handle == self.handle)
         {
-            super::common::render_task_meta(frame, area, atman_runtime::TaskKind::Flow, snap);
+            super::common::render_task_meta(
+                frame,
+                area,
+                atman_runtime::TaskKind::Flow,
+                snap,
+                &mut self.scroll,
+            );
         } else {
             super::common::render_placeholder(frame, area, &self.handle);
         }
@@ -318,15 +324,19 @@ pub(crate) fn render_sub_agent_panel(
         if matches!(msg.role, atman_runtime::message::MessageRole::Assistant) {
             for part in &msg.parts {
                 if let atman_runtime::message::MessagePart::ToolUse {
-                    id, name, intent, ..
+                    id,
+                    name,
+                    input,
+                    intent,
                 } = part
                 {
                     tool_map.insert(
                         id.clone(),
-                        crate::history::ToolDisplayMeta {
-                            name: name.clone(),
-                            call_intent: intent.as_ref().map(|intent| intent.as_str().to_owned()),
-                        },
+                        crate::history::ToolDisplayMeta::from_tool_use(
+                            name,
+                            input,
+                            intent.as_ref(),
+                        ),
                     );
                 }
             }
@@ -336,6 +346,7 @@ pub(crate) fn render_sub_agent_panel(
     for msg in messages {
         crate::history::flatten_message(msg, &mut items, &tool_map);
     }
+    crate::history::dedup_by_handle(&mut items);
 
     let render_ctx = crate::output::RenderCtx {
         expanded_tools,

@@ -30,14 +30,42 @@ impl WindowComponent for BashPanelContent {
             _ => false,
         });
         use crate::app::OutputItem;
-        if let Some(OutputItem::Bash { output, done, .. }) = item {
+        if let Some(OutputItem::Bash {
+            title,
+            command,
+            output,
+            done,
+            ..
+        }) = item
+        {
             if let Some(snap) = snap {
-                render_bash_content(frame, area, snap, output, *done);
+                render_bash_content(
+                    frame,
+                    area,
+                    snap,
+                    command.as_deref().or(snap.command.as_deref()),
+                    output,
+                    &mut self.scroll,
+                );
             } else {
-                render_bash_screen(frame, area, &self.handle, output, *done);
+                render_bash_screen(
+                    frame,
+                    area,
+                    title.as_deref().unwrap_or(&self.handle),
+                    command.as_deref(),
+                    output,
+                    *done,
+                    &mut self.scroll,
+                );
             }
         } else if let Some(snap) = snap {
-            super::common::render_task_meta(frame, area, atman_runtime::TaskKind::Bash, snap);
+            super::common::render_task_meta(
+                frame,
+                area,
+                atman_runtime::TaskKind::Bash,
+                snap,
+                &mut self.scroll,
+            );
         } else {
             render_bash_unavailable(frame, area, &self.handle);
         }
@@ -69,8 +97,9 @@ fn render_bash_content(
     f: &mut Frame,
     area: Rect,
     snap: &atman_runtime::TaskSnapshot,
+    command: Option<&str>,
     output: &str,
-    _done: bool,
+    scroll: &mut u16,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -101,19 +130,8 @@ fn render_bash_content(
         return;
     }
 
-    let all_lines: Vec<&str> = output.lines().collect();
-    let max_visible = body_area.height as usize;
-    let start = all_lines.len().saturating_sub(max_visible);
-    let visible: Vec<Line> = all_lines[start..]
-        .iter()
-        .map(|l| {
-            Line::from(Span::styled(
-                *l,
-                Style::default().fg(t.tinted_fg.into()).bg(t.code_bg.into()),
-            ))
-        })
-        .collect();
-    f.render_widget(Paragraph::new(visible), body_area);
+    let lines = bash_detail_lines(command, output, body_area.width as usize);
+    super::common::render_scrolled_lines(f, body_area, lines, scroll);
 }
 
 fn render_bash_unavailable(f: &mut Frame, area: Rect, title: &str) {
@@ -133,7 +151,15 @@ fn render_bash_unavailable(f: &mut Frame, area: Rect, title: &str) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done: bool) {
+fn render_bash_screen(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    command: Option<&str>,
+    output: &str,
+    done: bool,
+    scroll: &mut u16,
+) {
     let t = crate::theme::theme();
     let icon = if done { "✓" } else { "◐" };
     let icon_color = if done { t.success } else { t.accent };
@@ -153,19 +179,29 @@ fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done
         return;
     }
 
-    let all_lines: Vec<&str> = output.lines().collect();
-    let max_visible = body_area.height as usize;
-    let start = all_lines.len().saturating_sub(max_visible);
-    let visible: Vec<Line> = all_lines[start..]
-        .iter()
-        .map(|l| {
-            Line::from(Span::styled(
-                *l,
-                Style::default().fg(t.tinted_fg.into()).bg(t.code_bg.into()),
-            ))
-        })
-        .collect();
-    f.render_widget(Paragraph::new(visible), body_area);
+    let lines = bash_detail_lines(command, output, body_area.width as usize);
+    super::common::render_scrolled_lines(f, body_area, lines, scroll);
+}
+
+fn bash_detail_lines(command: Option<&str>, output: &str, width: usize) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let body_style = Style::default().fg(t.tinted_fg.into()).bg(t.code_bg.into());
+    let mut lines = Vec::new();
+    if let Some(command) = command.filter(|command| !command.is_empty()) {
+        lines.extend(super::common::detail_command_lines(command, width));
+        lines.push(Line::from(""));
+    }
+    lines.push(super::common::detail_section_label("output", width));
+    for row in crate::output::wrap_with_prefix(output, width, " ", " ") {
+        lines.push(crate::output::line_with_right_pad(
+            &row.prefix,
+            &row.body,
+            width,
+            body_style,
+            body_style,
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -180,6 +216,7 @@ mod tests {
             id: atman_runtime::TaskId::now(),
             kind: atman_runtime::TaskKind::Bash,
             label: format!("bash {src}"),
+            command: Some("cargo test --workspace".into()),
             status: TaskStatus::Ok,
             started_at: std::time::Instant::now(),
             ended_at: Some(std::time::Instant::now()),
@@ -195,6 +232,7 @@ mod tests {
         crate::app::OutputItem::Bash {
             handle: src.to_string(),
             title: None,
+            command: Some("cargo test --workspace".into()),
             output: output.to_string(),
             done,
             expanded: false,
@@ -269,6 +307,10 @@ mod tests {
         assert!(
             joined.contains("hello") && joined.contains("world"),
             "panel should show bash output, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("cargo test --workspace"),
+            "panel should show the raw command, got:\n{joined}"
         );
     }
 }

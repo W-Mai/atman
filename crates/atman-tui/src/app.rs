@@ -52,6 +52,7 @@ pub enum OutputItem {
     Terminal {
         handle: String,
         title: Option<String>,
+        command: Option<String>,
         screen: TerminalScreen,
         accumulated_bytes: Vec<u8>,
         mode: TerminalViewMode,
@@ -62,6 +63,7 @@ pub enum OutputItem {
     Bash {
         handle: String,
         title: Option<String>,
+        command: Option<String>,
         output: String,
         done: bool,
         expanded: bool,
@@ -504,6 +506,7 @@ impl AppState {
         Some(OutputItem::Bash {
             handle: snap.source_handle.clone(),
             title: (!snap.label.trim().is_empty()).then(|| snap.label.clone()),
+            command: snap.command.clone(),
             output,
             done: snap.status.is_terminal(),
             expanded: false,
@@ -593,6 +596,19 @@ impl AppState {
             return Some(handle.clone());
         }
         None
+    }
+
+    fn task_command(&self, handle: &str) -> Option<String> {
+        self.task_snapshots
+            .iter()
+            .find(|snapshot| snapshot.source_handle == handle)
+            .and_then(|snapshot| snapshot.command.clone())
+            .or_else(|| {
+                self.task_registry
+                    .as_ref()
+                    .and_then(|registry| registry.lookup_by_handle(handle))
+                    .and_then(|snapshot| snapshot.command)
+            })
     }
 
     pub fn sub_agent_item_handle(&self, idx: usize) -> Option<String> {
@@ -1708,6 +1724,7 @@ impl AppState {
                 {
                     return;
                 }
+                let task_command = self.task_command(&handle);
                 self.waiting_for_llm = false;
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
@@ -1721,6 +1738,7 @@ impl AppState {
                     .and_then(|idx| self.items.get_mut(idx));
                 if let Some(OutputItem::Terminal {
                     title,
+                    command,
                     screen: s,
                     accumulated_bytes: ab,
                     ..
@@ -1728,6 +1746,9 @@ impl AppState {
                 {
                     if title.is_none() {
                         *title = call_intent.map(|intent| intent.as_str().to_owned());
+                    }
+                    if command.is_none() {
+                        *command = task_command;
                     }
                     if let Some(new_screen) = screen {
                         *s = new_screen;
@@ -1739,6 +1760,7 @@ impl AppState {
                     self.push_item(OutputItem::Terminal {
                         handle,
                         title: call_intent.map(|intent| intent.as_str().to_owned()),
+                        command: task_command,
                         screen: screen.unwrap_or_else(|| {
                             atman_runtime::tools::term::TerminalScreen {
                                 rows: 0,
@@ -1769,11 +1791,20 @@ impl AppState {
                 {
                     return;
                 }
+                let task_command = self.task_command(&handle);
                 if let Some(idx) = self.find_item_by_handle(&handle) {
-                    if let Some(OutputItem::Terminal { title, done, .. }) = self.items.get_mut(idx)
+                    if let Some(OutputItem::Terminal {
+                        title,
+                        command,
+                        done,
+                        ..
+                    }) = self.items.get_mut(idx)
                     {
                         if title.is_none() {
                             *title = call_intent.map(|intent| intent.as_str().to_owned());
+                        }
+                        if command.is_none() {
+                            *command = task_command;
                         }
                         *done = true;
                         self.items_version = self.items_version.wrapping_add(1);
@@ -1782,6 +1813,7 @@ impl AppState {
                     self.push_item(OutputItem::Terminal {
                         handle,
                         title: call_intent.map(|intent| intent.as_str().to_owned()),
+                        command: task_command,
                         screen: TerminalScreen {
                             rows: 0,
                             cols: 0,
@@ -1809,6 +1841,7 @@ impl AppState {
                 {
                     return;
                 }
+                let task_command = self.task_command(&handle);
                 self.waiting_for_llm = false;
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
@@ -1821,9 +1854,18 @@ impl AppState {
                     })
                     .and_then(|idx| self.items.get_mut(idx));
                 let prefix = if kind == "stderr" { "[err] " } else { "" };
-                if let Some(OutputItem::Bash { title, output, .. }) = existing {
+                if let Some(OutputItem::Bash {
+                    title,
+                    command,
+                    output,
+                    ..
+                }) = existing
+                {
                     if title.is_none() {
                         *title = call_intent.map(|intent| intent.as_str().to_owned());
+                    }
+                    if command.is_none() {
+                        *command = task_command;
                     }
                     output.push_str(prefix);
                     output.push_str(&line);
@@ -1836,6 +1878,7 @@ impl AppState {
                     self.push_item(OutputItem::Bash {
                         handle,
                         title: call_intent.map(|intent| intent.as_str().to_owned()),
+                        command: task_command,
                         output,
                         done: false,
                         expanded: false,
@@ -1855,10 +1898,20 @@ impl AppState {
                 {
                     return;
                 }
+                let task_command = self.task_command(&handle);
                 if let Some(idx) = self.find_item_by_handle(&handle) {
-                    if let Some(OutputItem::Bash { title, done, .. }) = self.items.get_mut(idx) {
+                    if let Some(OutputItem::Bash {
+                        title,
+                        command,
+                        done,
+                        ..
+                    }) = self.items.get_mut(idx)
+                    {
                         if title.is_none() {
                             *title = call_intent.map(|intent| intent.as_str().to_owned());
+                        }
+                        if command.is_none() {
+                            *command = task_command;
                         }
                         *done = true;
                         self.items_version = self.items_version.wrapping_add(1);
@@ -1867,6 +1920,7 @@ impl AppState {
                     self.push_item(OutputItem::Bash {
                         handle,
                         title: call_intent.map(|intent| intent.as_str().to_owned()),
+                        command: task_command,
                         output: String::new(),
                         done: true,
                         expanded: false,
@@ -2831,6 +2885,7 @@ mod tests {
         app.push_item(OutputItem::Bash {
             handle: "h".into(),
             title: None,
+            command: None,
             output: "done".into(),
             done: true,
             expanded: false,
@@ -3685,6 +3740,35 @@ mod terminal_stream_tests {
     }
 
     #[test]
+    fn terminal_chunk_projects_raw_command_from_task_registry() {
+        let registry = atman_runtime::TaskRegistry::new();
+        registry.register(
+            atman_runtime::TaskKind::Terminal,
+            atman_runtime::TaskDisplay {
+                label: "检查系统负载".into(),
+                command: Some("htop --sort-key PERCENT_CPU".into()),
+            },
+            "term_s_0".into(),
+            "s".into(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let mut app = AppState::new("s".into(), None).with_task_registry(registry);
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: Vec::new(),
+            screen: Some(dummy_screen()),
+            state: TermStateSnapshot::Running,
+            call_intent: atman_runtime::message::ToolCallIntent::new("检查系统负载"),
+            run_id: None,
+        });
+        let OutputItem::Terminal { title, command, .. } = &app.items[0] else {
+            panic!("expected terminal item");
+        };
+        assert_eq!(title.as_deref(), Some("检查系统负载"));
+        assert_eq!(command.as_deref(), Some("htop --sort-key PERCENT_CPU"));
+    }
+
+    #[test]
     fn terminal_chunk_updates_existing_item() {
         let mut app = AppState::new("s".into(), None);
         let screen = dummy_screen();
@@ -3853,6 +3937,7 @@ mod terminal_stream_tests {
         app.items.push(OutputItem::Terminal {
             handle: "term_s_0".into(),
             title: None,
+            command: None,
             screen: TerminalScreen {
                 rows: 2,
                 cols: 5,
@@ -3869,6 +3954,7 @@ mod terminal_stream_tests {
         app.items.push(OutputItem::Terminal {
             handle: "term_s_1".into(),
             title: None,
+            command: None,
             screen: TerminalScreen {
                 rows: 3,
                 cols: 7,
@@ -3898,6 +3984,7 @@ mod terminal_stream_tests {
         app.items.push(OutputItem::Terminal {
             handle: "term_s_0".into(),
             title: None,
+            command: None,
             screen: TerminalScreen {
                 rows: 2,
                 cols: 5,
@@ -3914,6 +4001,7 @@ mod terminal_stream_tests {
         app.items.push(OutputItem::Terminal {
             handle: "term_s_1".into(),
             title: None,
+            command: None,
             screen: TerminalScreen {
                 rows: 3,
                 cols: 7,
@@ -4115,6 +4203,7 @@ mod terminal_e2e_tests {
                 id: atman_runtime::TaskId::now(),
                 kind: atman_runtime::TaskKind::Bash,
                 label: format!("bash {src}"),
+                command: None,
                 status: atman_runtime::TaskStatus::Ok,
                 started_at: std::time::Instant::now(),
                 ended_at: Some(std::time::Instant::now()),

@@ -377,6 +377,7 @@ impl TermRegistry {
         pty_result: crate::sandbox::PtySpawnResult,
         tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
         label: String,
+        command: String,
         call_intent: Option<crate::message::ToolCallIntent>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
@@ -390,6 +391,7 @@ impl TermRegistry {
             pty_result,
             tui_stream_tx,
             label,
+            command,
             call_intent,
             cancel,
             events,
@@ -408,6 +410,7 @@ impl TermRegistry {
         pty_result: crate::sandbox::PtySpawnResult,
         tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
         label: String,
+        command: String,
         call_intent: Option<crate::message::ToolCallIntent>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
@@ -487,7 +490,10 @@ impl TermRegistry {
             });
             tr.register_with_kill_hook(
                 crate::task_registry::TaskKind::Terminal,
-                label,
+                crate::task_registry::TaskDisplay {
+                    label,
+                    command: Some(command),
+                },
                 handle_str.clone(),
                 session_id.clone(),
                 cancel,
@@ -771,6 +777,7 @@ async fn spawn_impl(
         pixel_height: 0,
     };
     let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
+    let command = cmd_str.clone().unwrap_or_else(|| default_shell.clone());
     let cmd_args: Vec<&str> = if let Some(ref c) = cmd_str {
         vec!["sh", "-c", c.as_str()]
     } else {
@@ -808,6 +815,7 @@ async fn spawn_impl(
             .map(|intent| intent.as_str().to_owned())
             .or(cmd_str)
             .unwrap_or_else(|| "terminal".into()),
+        command,
         ctx.call_intent.clone(),
         {
             let tc = ctx.cancel.clone();
@@ -2081,6 +2089,7 @@ mod tests {
                 pty_result,
                 None,
                 "success".into(),
+                "printf success".into(),
                 None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
@@ -2165,6 +2174,7 @@ mod tests {
                 pty_result,
                 None,
                 "terminal".into(),
+                "sh".into(),
                 None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
@@ -2203,6 +2213,7 @@ mod tests {
                 pty_result,
                 None,
                 "terminal".into(),
+                "sh".into(),
                 None,
                 tokio_util::sync::CancellationToken::new(),
                 None,

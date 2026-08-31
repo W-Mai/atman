@@ -95,6 +95,7 @@ pub struct TaskSnapshot {
     pub id: TaskId,
     pub kind: TaskKind,
     pub label: String,
+    pub command: Option<String>,
     pub status: TaskStatus,
     pub started_at: Instant,
     pub ended_at: Option<Instant>,
@@ -103,6 +104,27 @@ pub struct TaskSnapshot {
     pub workspace_id: Option<String>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub termination: Option<TaskTermination>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDisplay {
+    pub label: String,
+    pub command: Option<String>,
+}
+
+impl From<String> for TaskDisplay {
+    fn from(label: String) -> Self {
+        Self {
+            label,
+            command: None,
+        }
+    }
+}
+
+impl From<&str> for TaskDisplay {
+    fn from(label: &str) -> Self {
+        label.to_owned().into()
+    }
 }
 
 impl TaskSnapshot {
@@ -202,7 +224,7 @@ impl Default for TaskRegistry {
 
 fn running_snapshot(
     kind: TaskKind,
-    label: String,
+    display: TaskDisplay,
     source_handle: String,
     session_id: String,
     workspace_id: Option<String>,
@@ -211,7 +233,8 @@ fn running_snapshot(
     TaskSnapshot {
         id: TaskId::now(),
         kind,
-        label,
+        label: display.label,
+        command: display.command,
         status: TaskStatus::Running,
         started_at: Instant::now(),
         ended_at: None,
@@ -231,13 +254,13 @@ impl TaskRegistry {
     pub fn register(
         &self,
         kind: TaskKind,
-        label: String,
+        display: TaskDisplay,
         source_handle: String,
         session_id: String,
         cancel: CancellationToken,
     ) -> TaskId {
         self.register_snapshot(
-            running_snapshot(kind, label, source_handle, session_id, None, None),
+            running_snapshot(kind, display, source_handle, session_id, None, None),
             cancel,
             None,
         )
@@ -254,7 +277,7 @@ impl TaskRegistry {
         self.register_snapshot(
             running_snapshot(
                 TaskKind::Flow,
-                label,
+                label.into(),
                 source_handle,
                 session_id,
                 workspace_id,
@@ -277,7 +300,7 @@ impl TaskRegistry {
         self.register_snapshot(
             running_snapshot(
                 TaskKind::Flow,
-                label,
+                label.into(),
                 source_handle,
                 session_id,
                 workspace_id,
@@ -291,14 +314,14 @@ impl TaskRegistry {
     pub fn register_with_kill_hook(
         &self,
         kind: TaskKind,
-        label: String,
+        display: TaskDisplay,
         source_handle: String,
         session_id: String,
         cancel: CancellationToken,
         kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     ) -> TaskId {
         self.register_snapshot(
-            running_snapshot(kind, label, source_handle, session_id, None, None),
+            running_snapshot(kind, display, source_handle, session_id, None, None),
             cancel,
             kill_hook,
         )
@@ -476,6 +499,25 @@ mod tests {
         assert_eq!(snap.kind, TaskKind::Bash);
         assert_eq!(snap.status, TaskStatus::Running);
         assert!(snap.ended_at.is_none());
+        assert!(snap.command.is_none());
+    }
+
+    #[test]
+    fn command_is_independent_from_the_user_facing_label() {
+        let reg = TaskRegistry::new();
+        let id = reg.register(
+            TaskKind::Bash,
+            TaskDisplay {
+                label: "运行项目测试".into(),
+                command: Some("cargo test --workspace".into()),
+            },
+            "bg_1".into(),
+            "sess".into(),
+            cancel(),
+        );
+        let snap = reg.lookup(&id).expect("found");
+        assert_eq!(snap.label, "运行项目测试");
+        assert_eq!(snap.command.as_deref(), Some("cargo test --workspace"));
     }
 
     #[test]
@@ -736,6 +778,7 @@ mod tests {
             id: TaskId::now(),
             kind: TaskKind::Terminal,
             label: "vim".into(),
+            command: None,
             status: TaskStatus::Running,
             started_at: Instant::now(),
             ended_at: None,

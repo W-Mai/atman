@@ -117,7 +117,7 @@ pub use session::{
     ContextUsageBucket, PendingCompactReview, Session, SessionId,
 };
 pub use task_registry::{
-    TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,
+    TaskDisplay, TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,
 };
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
 pub use tool_naming::{ToolNaming, from_wire, to_wire};

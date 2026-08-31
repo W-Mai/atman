@@ -33,19 +33,39 @@ impl WindowComponent for TerminalPanelContent {
         });
         use crate::app::OutputItem;
         if let Some(OutputItem::Terminal {
+            title,
+            command,
             screen,
-            accumulated_bytes,
-            done,
             ..
         }) = item
         {
             if let Some(snap) = snap {
-                render_terminal_content(frame, area, snap, screen, accumulated_bytes, *done);
+                render_terminal_content(
+                    frame,
+                    area,
+                    snap,
+                    command.as_deref().or(snap.command.as_deref()),
+                    screen,
+                    &mut self.scroll,
+                );
             } else {
-                render_terminal_screen(frame, area, &self.handle, screen);
+                render_terminal_screen(
+                    frame,
+                    area,
+                    title.as_deref().unwrap_or(&self.handle),
+                    command.as_deref(),
+                    screen,
+                    &mut self.scroll,
+                );
             }
         } else if let Some(snap) = snap {
-            super::common::render_task_meta(frame, area, atman_runtime::TaskKind::Terminal, snap);
+            super::common::render_task_meta(
+                frame,
+                area,
+                atman_runtime::TaskKind::Terminal,
+                snap,
+                &mut self.scroll,
+            );
         } else {
             super::common::render_placeholder(frame, area, &self.handle);
         }
@@ -77,9 +97,9 @@ fn render_terminal_content(
     f: &mut Frame,
     area: Rect,
     snap: &TaskSnapshot,
+    command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
-    _accumulated_bytes: &[u8],
-    _done: bool,
+    scroll: &mut u16,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -106,46 +126,20 @@ fn render_terminal_content(
         height: area.height.saturating_sub(2),
         ..area
     };
-    if body_area.height == 0 || screen.cells.is_empty() {
+    if body_area.height == 0 {
         return;
     }
-
-    let cols = screen.cols as usize;
-    let total_rows = screen.rows as usize;
-    let max_rows = (body_area.height as usize).min(total_rows);
-    let start_row = total_rows.saturating_sub(max_rows);
-    let bg: Color = t.code_bg.into();
-    let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
-    for row in start_row..total_rows {
-        let mut spans: Vec<Span> = Vec::with_capacity(cols);
-        for col in 0..cols {
-            let idx = row * cols + col;
-            if idx >= screen.cells.len() {
-                spans.push(Span::raw(" "));
-                continue;
-            }
-            let cell = &screen.cells[idx];
-            if cell.wide_continuation {
-                continue;
-            }
-            let style = crate::output::cell_style_for_viewer(cell, bg);
-            let text = if cell.chars.is_empty() {
-                " ".to_string()
-            } else {
-                cell.chars.clone()
-            };
-            spans.push(Span::styled(text, style));
-        }
-        lines.push(Line::from(spans));
-    }
-    f.render_widget(Paragraph::new(lines), body_area);
+    let lines = terminal_detail_lines(command, screen, body_area.width as usize);
+    super::common::render_scrolled_lines(f, body_area, lines, scroll);
 }
 
 fn render_terminal_screen(
     f: &mut Frame,
     area: Rect,
     title: &str,
+    command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
+    scroll: &mut u16,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -160,17 +154,31 @@ fn render_terminal_screen(
         height: area.height.saturating_sub(2),
         ..area
     };
-    if body_area.height == 0 || screen.cells.is_empty() {
+    if body_area.height == 0 {
         return;
     }
 
+    let lines = terminal_detail_lines(command, screen, body_area.width as usize);
+    super::common::render_scrolled_lines(f, body_area, lines, scroll);
+}
+
+fn terminal_detail_lines(
+    command: Option<&str>,
+    screen: &atman_runtime::tools::term::TerminalScreen,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let mut lines = Vec::new();
+    if let Some(command) = command.filter(|command| !command.is_empty()) {
+        lines.extend(super::common::detail_command_lines(command, width));
+        lines.push(Line::from(""));
+    }
+    lines.push(super::common::detail_section_label("screen", width));
+
     let cols = screen.cols as usize;
     let total_rows = screen.rows as usize;
-    let max_rows = (body_area.height as usize).min(total_rows);
-    let start_row = total_rows.saturating_sub(max_rows);
     let bg: Color = t.code_bg.into();
-    let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
-    for row in start_row..total_rows {
+    for row in 0..total_rows {
         let mut spans: Vec<Span> = Vec::with_capacity(cols);
         for col in 0..cols {
             let idx = row * cols + col;
@@ -192,7 +200,7 @@ fn render_terminal_screen(
         }
         lines.push(Line::from(spans));
     }
-    f.render_widget(Paragraph::new(lines), body_area);
+    lines
 }
 
 fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
@@ -226,4 +234,61 @@ fn format_elapsed(ms: u64) -> String {
         format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
     };
     format!("{:>5}", raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atman_runtime::task_registry::{TaskSnapshot, TaskStatus};
+    use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
+
+    #[test]
+    fn floating_panel_shows_the_raw_terminal_command() {
+        let command = "ps -axo pid,command | sort -n";
+        let snapshot = TaskSnapshot {
+            id: atman_runtime::TaskId::now(),
+            kind: atman_runtime::TaskKind::Terminal,
+            label: "检查进程".into(),
+            command: Some(command.into()),
+            status: TaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+            source_handle: "term_s_0".into(),
+            session_id: "s".into(),
+            workspace_id: None,
+            flow_run_id: None,
+            termination: None,
+        };
+        let screen = TerminalScreen {
+            rows: 1,
+            cols: 4,
+            cells: vec![TerminalCell::default(); 4],
+            cursor: None,
+            alt_screen: false,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).expect("terminal");
+        let mut scroll = 0;
+        terminal
+            .draw(|frame| {
+                render_terminal_content(
+                    frame,
+                    frame.area(),
+                    &snapshot,
+                    Some(command),
+                    &screen,
+                    &mut scroll,
+                );
+            })
+            .expect("draw");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(60)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains(command));
+    }
 }

@@ -6,6 +6,49 @@ use ratatui::widgets::Paragraph;
 
 use atman_runtime::TaskKind;
 
+pub(crate) fn detail_command_lines(command: &str, width: usize) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let prefix_style = Style::default().fg(t.meta_fg.into()).bg(t.code_bg.into());
+    let command_style = Style::default().fg(t.tinted_fg.into()).bg(t.code_bg.into());
+    crate::output::wrap_with_prefix(command, width, " command $ ", "           ")
+        .into_iter()
+        .map(|row| {
+            crate::output::line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                width,
+                prefix_style,
+                command_style,
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn detail_section_label(label: &str, width: usize) -> Line<'static> {
+    let t = crate::theme::theme();
+    let text = format!(" {label}");
+    let fill = width.saturating_sub(crate::width::width(text.as_str()));
+    let style = Style::default().fg(t.meta_fg.into()).bg(t.code_bg.into());
+    Line::from(vec![
+        Span::styled(text, style),
+        Span::styled(" ".repeat(fill), style),
+    ])
+}
+
+pub(crate) fn render_scrolled_lines(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    scroll: &mut u16,
+) {
+    let max_scroll = lines
+        .len()
+        .saturating_sub(area.height as usize)
+        .min(u16::MAX as usize) as u16;
+    *scroll = (*scroll).min(max_scroll);
+    f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
+}
+
 pub(crate) fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
     let t = crate::theme::theme();
     let msg = format!("no data: {title}");
@@ -25,6 +68,7 @@ pub(crate) fn render_task_meta(
     area: Rect,
     kind: TaskKind,
     snap: &atman_runtime::TaskSnapshot,
+    scroll: &mut u16,
 ) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
@@ -32,7 +76,7 @@ pub(crate) fn render_task_meta(
             format!(" {} ", status_icon(snap.status)),
             Style::default().fg(status_color(snap.status)),
         ),
-        Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
+        Span::styled(snap.label.clone(), Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(
             snap.status.display_label(),
@@ -58,7 +102,10 @@ pub(crate) fn render_task_meta(
         ]),
         Line::from(vec![
             Span::styled("handle ", Style::default().fg(t.subtle_fg.into())),
-            Span::styled(&snap.source_handle, Style::default().fg(t.tinted_fg.into())),
+            Span::styled(
+                snap.source_handle.clone(),
+                Style::default().fg(t.tinted_fg.into()),
+            ),
         ]),
         Line::from(vec![
             Span::styled("elapsed", Style::default().fg(t.subtle_fg.into())),
@@ -69,7 +116,12 @@ pub(crate) fn render_task_meta(
             ),
         ]),
     ];
-    f.render_widget(Paragraph::new(lines), body_area);
+    let mut lines = lines;
+    if let Some(command) = snap.command.as_deref() {
+        lines.push(Line::from(""));
+        lines.extend(detail_command_lines(command, body_area.width as usize));
+    }
+    render_scrolled_lines(f, body_area, lines, scroll);
 }
 
 pub(crate) fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {

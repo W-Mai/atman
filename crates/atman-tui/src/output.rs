@@ -402,6 +402,7 @@ fn item_content_hash(
         OutputItem::Terminal {
             handle,
             title,
+            command,
             screen,
             accumulated_bytes,
             mode,
@@ -412,6 +413,7 @@ fn item_content_hash(
             7u8.hash(&mut h);
             handle.hash(&mut h);
             title.hash(&mut h);
+            command.hash(&mut h);
             screen.rows.hash(&mut h);
             screen.cols.hash(&mut h);
             screen.alt_screen.hash(&mut h);
@@ -427,6 +429,7 @@ fn item_content_hash(
         OutputItem::Bash {
             handle,
             title,
+            command,
             output,
             done,
             expanded,
@@ -434,6 +437,7 @@ fn item_content_hash(
             8u8.hash(&mut h);
             handle.hash(&mut h);
             title.hash(&mut h);
+            command.hash(&mut h);
             str_fp(output).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
@@ -1595,6 +1599,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::Terminal {
             handle,
             title,
+            command,
             screen,
             accumulated_bytes,
             mode,
@@ -1604,6 +1609,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         } => render_terminal(
             handle,
             title.as_deref(),
+            command.as_deref(),
             screen,
             accumulated_bytes,
             *mode,
@@ -1615,12 +1621,14 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::Bash {
             handle,
             title,
+            command,
             output,
             done,
             expanded,
         } => render_bash(
             handle,
             title.as_deref(),
+            command.as_deref(),
             output,
             *done,
             *expanded,
@@ -1720,6 +1728,7 @@ fn render_sub_agent_activity(
         goal,
         Some(metadata.as_str()),
         glyph,
+        None,
         output,
         expanded,
         panel_width,
@@ -4354,10 +4363,55 @@ fn compact_header_label(title: &str, metadata: Option<&str>, max_width: usize) -
     format!("{title}{separator}{metadata}")
 }
 
+fn append_command_lines(
+    lines: &mut Vec<Line<'static>>,
+    command: Option<&str>,
+    expanded: bool,
+    target: usize,
+    command_style: Style,
+    hint_style: Style,
+) {
+    let Some(command) = command.filter(|command| !command.is_empty()) else {
+        return;
+    };
+    if expanded {
+        for row in wrap_with_prefix(command, target, "    $ ", "      ") {
+            lines.push(line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                target,
+                hint_style,
+                command_style,
+            ));
+        }
+    } else {
+        let first = command.split('\n').next().unwrap_or_default();
+        let suffix = if command.contains('\n') {
+            " ↩ …"
+        } else {
+            ""
+        };
+        let prefix = "    $ ";
+        let budget = target
+            .saturating_sub(crate::width::width(prefix))
+            .saturating_sub(crate::width::width(suffix));
+        let preview = crate::width::middle_truncate(first, budget);
+        lines.push(line_with_right_pad(
+            prefix,
+            &format!("{preview}{suffix}"),
+            target,
+            hint_style,
+            command_style,
+        ));
+    }
+    lines.push(Line::from(Span::styled(" ".repeat(target), command_style)));
+}
+
 fn render_output_block(
     title: &str,
     metadata: Option<&str>,
     glyph: &str,
+    command: Option<&str>,
     output: &str,
     expanded: bool,
     panel_width: u16,
@@ -4407,6 +4461,10 @@ fn render_output_block(
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
 
+    append_command_lines(
+        &mut lines, command, expanded, target, body_style, hint_style,
+    );
+
     let all_lines: Vec<&str> = output.lines().collect();
     let max_lines = if expanded {
         all_lines.len()
@@ -4451,6 +4509,7 @@ fn render_output_block(
 fn render_bash(
     handle: &str,
     title: Option<&str>,
+    command: Option<&str>,
     output: &str,
     done: bool,
     expanded: bool,
@@ -4467,6 +4526,7 @@ fn render_bash(
         title.unwrap_or("bash"),
         Some(&metadata),
         glyph,
+        command,
         output,
         expanded,
         panel_width,
@@ -4477,6 +4537,7 @@ fn render_bash(
 fn render_terminal(
     handle: &str,
     title: Option<&str>,
+    command: Option<&str>,
     screen: &atman_runtime::tools::term::TerminalScreen,
     accumulated_bytes: &[u8],
     mode: crate::app::TerminalViewMode,
@@ -4540,6 +4601,10 @@ fn render_terminal(
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
+
+    append_command_lines(
+        &mut lines, command, expanded, target, body_style, hint_style,
+    );
 
     match mode {
         crate::app::TerminalViewMode::Capture => {
@@ -4707,11 +4772,25 @@ mod terminal_render_tests {
         }
     }
 
+    fn rendered_text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn render_terminal_capture_produces_header_and_cells() {
         let scr = screen(2, 5, "hello");
         let lines = render_terminal(
             "term_s_0",
+            None,
             None,
             &scr,
             &[],
@@ -4749,6 +4828,7 @@ line2
         let lines = render_terminal(
             "term_s_0",
             None,
+            None,
             &scr,
             bytes,
             TerminalViewMode::Stream,
@@ -4777,6 +4857,7 @@ line2
         let lines = render_terminal(
             "term_session_with_a_long_handle",
             Some("检查终端输出"),
+            None,
             &scr,
             &[],
             TerminalViewMode::Capture,
@@ -4793,6 +4874,42 @@ line2
             .collect::<String>();
         assert!(rendered.contains("检查终端输出"));
         assert!(crate::width::spans_width(&header.spans) <= 32);
+    }
+
+    #[test]
+    fn expanded_bash_output_shows_the_complete_command() {
+        let lines = render_bash(
+            "bg_s_0",
+            Some("运行测试"),
+            Some("cargo test --workspace\nprintf 'done'"),
+            "ok",
+            true,
+            true,
+            0,
+            80,
+        );
+        let rendered = rendered_text(&lines);
+        assert!(rendered.contains("cargo test --workspace"));
+        assert!(rendered.contains("printf 'done'"));
+    }
+
+    #[test]
+    fn expanded_terminal_output_shows_the_complete_command() {
+        let scr = screen(1, 5, "hello");
+        let lines = render_terminal(
+            "term_s_0",
+            Some("检查进程"),
+            Some("ps -axo pid,command | sort -n"),
+            &scr,
+            &[],
+            TerminalViewMode::Capture,
+            true,
+            true,
+            0,
+            80,
+        );
+        let rendered = rendered_text(&lines);
+        assert!(rendered.contains("ps -axo pid,command | sort -n"));
     }
 }
 

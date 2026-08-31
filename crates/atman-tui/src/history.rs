@@ -12,6 +12,28 @@ use crate::app::{NoteLevel, OutputItem};
 pub(crate) struct ToolDisplayMeta {
     pub(crate) name: String,
     pub(crate) call_intent: Option<String>,
+    pub(crate) command: Option<String>,
+}
+
+impl ToolDisplayMeta {
+    pub(crate) fn from_tool_use(
+        name: &str,
+        input: &serde_json::Value,
+        intent: Option<&atman_runtime::message::ToolCallIntent>,
+    ) -> Self {
+        let command = match name {
+            "bash.spawn" | "term.spawn" => input
+                .get("cmd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        };
+        Self {
+            name: name.to_owned(),
+            call_intent: intent.map(|intent| intent.as_str().to_owned()),
+            command,
+        }
+    }
 }
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
@@ -28,17 +50,15 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             TranscriptEntry::Message { message, .. } => {
                 for part in &message.parts {
                     if let MessagePart::ToolUse {
-                        id, name, intent, ..
+                        id,
+                        name,
+                        input,
+                        intent,
                     } = part
                     {
                         tool_map.insert(
                             id.clone(),
-                            ToolDisplayMeta {
-                                name: name.clone(),
-                                call_intent: intent
-                                    .as_ref()
-                                    .map(|intent| intent.as_str().to_owned()),
-                            },
+                            ToolDisplayMeta::from_tool_use(name, input, intent.as_ref()),
                         );
                     }
                 }
@@ -820,7 +840,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
 /// When the later item has empty output but the earlier one has content
 /// (last call was bash.spawn with no output, but a prior bash.output had
 /// the real result), keep the one with content.
-fn dedup_by_handle(out: &mut Vec<OutputItem>) {
+pub(crate) fn dedup_by_handle(out: &mut Vec<OutputItem>) {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut i = 0;
     while i < out.len() {
@@ -829,10 +849,14 @@ fn dedup_by_handle(out: &mut Vec<OutputItem>) {
                 let prev_has_content = bash_has_content(&out[prev]);
                 let cur_has_content = bash_has_content(&out[i]);
                 if prev_has_content && !cur_has_content {
+                    let current_metadata = execution_metadata(&out[i]);
+                    inherit_execution_metadata(&mut out[prev], current_metadata);
                     // Keep the earlier item with content, skip current.
                     i += 1;
                     continue;
                 }
+                let previous_metadata = execution_metadata(&out[prev]);
+                inherit_execution_metadata(&mut out[i], previous_metadata);
                 out.remove(prev);
                 seen.iter_mut().for_each(|(_, idx)| {
                     if *idx > prev {
@@ -847,6 +871,32 @@ fn dedup_by_handle(out: &mut Vec<OutputItem>) {
         } else {
             i += 1;
         }
+    }
+}
+
+fn execution_metadata(item: &OutputItem) -> (Option<String>, Option<String>) {
+    match item {
+        OutputItem::Bash { title, command, .. } | OutputItem::Terminal { title, command, .. } => {
+            (title.clone(), command.clone())
+        }
+        _ => (None, None),
+    }
+}
+
+fn inherit_execution_metadata(
+    item: &mut OutputItem,
+    (inherited_title, inherited_command): (Option<String>, Option<String>),
+) {
+    match item {
+        OutputItem::Bash { title, command, .. } | OutputItem::Terminal { title, command, .. } => {
+            if title.is_none() {
+                *title = inherited_title;
+            }
+            if command.is_none() {
+                *command = inherited_command;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -982,6 +1032,7 @@ fn restore_tool_item(
         Some(OutputItem::Bash {
             handle,
             title,
+            command: tool_meta.and_then(|meta| meta.command.clone()),
             output,
             done: true,
             expanded: false,
@@ -1028,6 +1079,7 @@ fn restore_tool_item(
         Some(OutputItem::Terminal {
             handle,
             title,
+            command: tool_meta.and_then(|meta| meta.command.clone()),
             screen: TerminalScreen {
                 rows,
                 cols,
@@ -1541,7 +1593,7 @@ mod tests {
                     parts: vec![MessagePart::ToolUse {
                         id: tool_use_id.into(),
                         name: "bash.spawn".into(),
-                        input: serde_json::json!({}),
+                        input: serde_json::json!({"cmd": "cargo test --workspace"}),
                         intent: atman_runtime::message::ToolCallIntent::new("运行项目测试"),
                     }],
                     turn_id: TurnId::now(),
@@ -1565,13 +1617,51 @@ mod tests {
         ];
         let out = flatten_transcript(&entries);
         let bash = out.iter().find_map(|it| match it {
-            OutputItem::Bash { title, output, .. } => Some((title.clone(), output.clone())),
+            OutputItem::Bash {
+                title,
+                command,
+                output,
+                ..
+            } => Some((title.clone(), command.clone(), output.clone())),
             _ => None,
         });
         assert_eq!(
             bash,
-            Some((Some("运行项目测试".into()), "hello\nworld".into()))
+            Some((
+                Some("运行项目测试".into()),
+                Some("cargo test --workspace".into()),
+                "hello\nworld".into()
+            ))
         );
+    }
+
+    #[test]
+    fn dedup_preserves_spawn_command_on_later_output_item() {
+        let mut items = vec![
+            OutputItem::Bash {
+                handle: "bg_1".into(),
+                title: Some("运行测试".into()),
+                command: Some("cargo test --workspace".into()),
+                output: "started".into(),
+                done: true,
+                expanded: false,
+            },
+            OutputItem::Bash {
+                handle: "bg_1".into(),
+                title: None,
+                command: None,
+                output: "completed".into(),
+                done: true,
+                expanded: false,
+            },
+        ];
+        dedup_by_handle(&mut items);
+        assert_eq!(items.len(), 1);
+        let OutputItem::Bash { title, command, .. } = &items[0] else {
+            panic!("expected bash item");
+        };
+        assert_eq!(title.as_deref(), Some("运行测试"));
+        assert_eq!(command.as_deref(), Some("cargo test --workspace"));
     }
 
     #[test]

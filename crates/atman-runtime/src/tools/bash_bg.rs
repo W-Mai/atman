@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
-use crate::task_registry::{TaskKind, TaskRegistry, TaskStatus};
+use crate::task_registry::{TaskDisplay, TaskKind, TaskRegistry, TaskStatus};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -356,10 +356,14 @@ impl BgRegistry {
         let task_id = self.task_registry.as_ref().map(|tr| {
             tr.register(
                 TaskKind::Bash,
-                ctx.call_intent
-                    .as_ref()
-                    .map(|intent| intent.as_str().to_owned())
-                    .unwrap_or_else(|| cmd.clone()),
+                TaskDisplay {
+                    label: ctx
+                        .call_intent
+                        .as_ref()
+                        .map(|intent| intent.as_str().to_owned())
+                        .unwrap_or_else(|| cmd.clone()),
+                    command: Some(cmd.clone()),
+                },
                 handle_str.clone(),
                 session_id.clone(),
                 task_cancel.clone(),

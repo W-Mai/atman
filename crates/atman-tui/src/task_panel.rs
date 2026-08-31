@@ -1163,6 +1163,7 @@ mod tests {
                 id: TaskId::default(),
                 kind: TaskKind::Terminal,
                 label: "vim".into(),
+                command: Some("vim".into()),
                 status: TaskStatus::Running,
                 started_at: Instant::now(),
                 ended_at: None,
@@ -1176,6 +1177,7 @@ mod tests {
                 id: TaskId::default(),
                 kind: TaskKind::Flow,
                 label: "agent".into(),
+                command: None,
                 status: TaskStatus::Running,
                 started_at: Instant::now(),
                 ended_at: None,
@@ -1189,6 +1191,7 @@ mod tests {
         let items = vec![crate::app::OutputItem::Terminal {
             handle: "term_0".into(),
             title: None,
+            command: Some("vim".into()),
             screen: atman_runtime::tools::term::TerminalScreen {
                 rows: 3,
                 cols: 10,
