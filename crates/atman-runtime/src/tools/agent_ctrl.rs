@@ -1021,7 +1021,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let task_registry = ctx.task_registry.clone();
     let task_id = task_registry.as_ref().map(|tr| {
         tr.register_flow_with_run_id(
-            entry.goal.clone(),
+            entry.display_label.clone(),
             handle.clone(),
             session_id.clone().unwrap_or_default(),
             entry.cancel.clone(),

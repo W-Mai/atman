@@ -796,7 +796,11 @@ async fn spawn_impl(
         session_dir,
         pty_result,
         ctx.stream_tx.clone(),
-        cmd_str.unwrap_or_else(|| "terminal".into()),
+        ctx.call_intent
+            .as_ref()
+            .map(|intent| intent.as_str().to_owned())
+            .or(cmd_str)
+            .unwrap_or_else(|| "terminal".into()),
         {
             let tc = ctx.cancel.clone();
             tc.child_token()

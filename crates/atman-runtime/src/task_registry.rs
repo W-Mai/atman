@@ -67,6 +67,16 @@ pub enum KillOutcome {
 }
 
 impl TaskStatus {
+    pub fn display_label(self) -> &'static str {
+        match self {
+            TaskStatus::Running => "running",
+            TaskStatus::Killing => "stopping",
+            TaskStatus::Ok => "completed",
+            TaskStatus::Err => "failed",
+            TaskStatus::Killed => "stopped",
+        }
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(self, TaskStatus::Ok | TaskStatus::Err | TaskStatus::Killed)
     }
@@ -74,6 +84,10 @@ impl TaskStatus {
     pub fn is_running(self) -> bool {
         matches!(self, TaskStatus::Running | TaskStatus::Killing)
     }
+}
+
+pub fn normalize_task_label(value: &str) -> Option<String> {
+    crate::message::ToolCallIntent::new(value).map(|label| label.as_str().to_owned())
 }
 
 #[derive(Debug, Clone)]
@@ -743,5 +757,30 @@ mod tests {
             ..Default::default()
         };
         assert!(!f2.matches(&snap));
+    }
+
+    #[test]
+    fn task_status_has_stable_display_labels() {
+        assert_eq!(TaskStatus::Running.display_label(), "running");
+        assert_eq!(TaskStatus::Killing.display_label(), "stopping");
+        assert_eq!(TaskStatus::Ok.display_label(), "completed");
+        assert_eq!(TaskStatus::Err.display_label(), "failed");
+        assert_eq!(TaskStatus::Killed.display_label(), "stopped");
+    }
+
+    #[test]
+    fn task_label_normalization_matches_tool_intent_bounds() {
+        assert_eq!(
+            normalize_task_label("  检查   当前状态  ").as_deref(),
+            Some("检查 当前状态")
+        );
+        assert!(normalize_task_label(" \n\t ").is_none());
+        assert_eq!(
+            normalize_task_label(&"x".repeat(121))
+                .unwrap()
+                .chars()
+                .count(),
+            120
+        );
     }
 }

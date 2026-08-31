@@ -206,6 +206,11 @@ impl Executor {
             session.set_tool_output_budget(self.tool_ctx.tool_output_budget);
         }
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
+        let task_label = root_task_label(
+            &flow.name.name,
+            &args,
+            session.as_ref().and_then(|session| session.goal()),
+        );
         let flow_cancel = session
             .as_ref()
             .map(|s| s.flow_cancel_token())
@@ -258,7 +263,7 @@ impl Executor {
         )?;
         let task_id = self.tool_ctx.task_registry.as_ref().map(|tr| {
             tr.register_flow_with_run_id(
-                flow.name.name.clone(),
+                task_label,
                 run_id.0.to_string(),
                 self.tool_ctx
                     .session_id
@@ -425,6 +430,38 @@ impl Default for Executor {
     }
 }
 
+fn root_task_label(
+    flow_name: &str,
+    args: &[(String, Value)],
+    session_goal: Option<String>,
+) -> String {
+    const USER_TEXT_KEYS: &[&str] = &["input", "prompt", "goal", "task", "message", "query"];
+
+    let named_user_text = USER_TEXT_KEYS.iter().find_map(|wanted| {
+        args.iter().find_map(|(name, value)| {
+            (name == wanted)
+                .then_some(value)
+                .and_then(|value| match value {
+                    Value::Str(value) => crate::task_registry::normalize_task_label(value),
+                    _ => None,
+                })
+        })
+    });
+    named_user_text
+        .or_else(|| {
+            args.iter().find_map(|(_, value)| match value {
+                Value::Str(value) => crate::task_registry::normalize_task_label(value),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            session_goal
+                .as_deref()
+                .and_then(crate::task_registry::normalize_task_label)
+        })
+        .unwrap_or_else(|| flow_name.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +502,28 @@ mod tests {
             )),
             Err(ProviderLifecycleAlreadyAttached)
         ));
+    }
+
+    #[test]
+    fn root_task_title_prefers_named_user_text() {
+        let args = vec![
+            ("model".into(), Value::Str("gpt-example".into())),
+            ("input".into(), Value::Str("  检查   当前项目  ".into())),
+        ];
+
+        assert_eq!(
+            root_task_label("agent", &args, Some("旧目标".into())),
+            "检查 当前项目"
+        );
+    }
+
+    #[test]
+    fn root_task_title_falls_back_to_goal_then_flow_name() {
+        assert_eq!(
+            root_task_label("agent", &[], Some("  完成   审计 ".into())),
+            "完成 审计"
+        );
+        assert_eq!(root_task_label("agent", &[], None), "agent");
     }
 
     #[tokio::test]

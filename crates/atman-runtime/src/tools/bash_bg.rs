@@ -356,7 +356,10 @@ impl BgRegistry {
         let task_id = self.task_registry.as_ref().map(|tr| {
             tr.register(
                 TaskKind::Bash,
-                cmd.clone(),
+                ctx.call_intent
+                    .as_ref()
+                    .map(|intent| intent.as_str().to_owned())
+                    .unwrap_or_else(|| cmd.clone()),
                 handle_str.clone(),
                 session_id.clone(),
                 task_cancel.clone(),
