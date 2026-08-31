@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use atman_runtime::message::Message;
+use atman_runtime::projection::workflow::{
+    WorkflowAggregateStatus, WorkflowLlmAggregate as LlmStatsAggregate,
+    WorkflowLlmRoute as LlmStatsRoute, WorkflowProjection, WorkflowSummary,
+};
 use atman_runtime::stream::CompactionPhase;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,6 +22,7 @@ struct PerfCounters {
     animation_item_visits: u64,
     permission_table_entries: u64,
     panel_projection_builds: u64,
+    workflow_node_renders: u64,
 }
 
 #[cfg(test)]
@@ -29,6 +34,7 @@ thread_local! {
             animation_item_visits: 0,
             permission_table_entries: 0,
             panel_projection_builds: 0,
+            workflow_node_renders: 0,
         })
     };
 }
@@ -2595,71 +2601,6 @@ fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, style: Style
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct LlmStatsRoute {
-    provider: String,
-    model: String,
-    purpose: atman_runtime::ContextCallPurpose,
-    scope: atman_runtime::ContextCallScope,
-}
-
-impl LlmStatsRoute {
-    fn is_primary(&self) -> bool {
-        self.purpose == atman_runtime::ContextCallPurpose::General
-            && self.scope == atman_runtime::ContextCallScope::Root
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct LlmStatsAggregate {
-    calls: usize,
-    total_in: u64,
-    total_out: u64,
-    cache_read: u64,
-    cache_write: u64,
-    total_ttft_ms: u64,
-    speed_sum: f64,
-    speed_count: usize,
-}
-
-impl LlmStatsAggregate {
-    fn record(&mut self, stats: &atman_runtime::workflow::LlmStats) {
-        self.calls += 1;
-        self.total_in = self
-            .total_in
-            .saturating_add(stats.input_tokens)
-            .saturating_add(stats.cache_read)
-            .saturating_add(stats.cache_write);
-        self.total_out = self.total_out.saturating_add(stats.output_tokens);
-        self.cache_read = self.cache_read.saturating_add(stats.cache_read);
-        self.cache_write = self.cache_write.saturating_add(stats.cache_write);
-        self.total_ttft_ms = self.total_ttft_ms.saturating_add(stats.ttft_ms);
-        if stats.tokens_per_second > 0.0 {
-            self.speed_sum += stats.tokens_per_second;
-            self.speed_count += 1;
-        }
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.calls += other.calls;
-        self.total_in = self.total_in.saturating_add(other.total_in);
-        self.total_out = self.total_out.saturating_add(other.total_out);
-        self.cache_read = self.cache_read.saturating_add(other.cache_read);
-        self.cache_write = self.cache_write.saturating_add(other.cache_write);
-        self.total_ttft_ms = self.total_ttft_ms.saturating_add(other.total_ttft_ms);
-        self.speed_sum += other.speed_sum;
-        self.speed_count += other.speed_count;
-    }
-
-    fn average_speed(self) -> f64 {
-        if self.speed_count > 0 {
-            self.speed_sum / self.speed_count as f64
-        } else {
-            0.0
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct LlmStatsSummary {
     routes: std::collections::HashMap<LlmStatsRoute, LlmStatsAggregate>,
@@ -2688,15 +2629,22 @@ fn aggregate_llm_stats(nodes: &[atman_runtime::workflow::WorkflowNode]) -> Optio
 
 fn format_workflow_stats_footer(
     graph: &atman_runtime::workflow::WorkflowGraph,
+    summary: Option<&WorkflowSummary>,
     outer_width: u16,
     border_style: Style,
 ) -> Line<'static> {
     use atman_runtime::humanize::format_count;
-    let stats = aggregate_llm_stats(&graph.root);
-    let inner_w = (outer_width as usize).saturating_sub(2);
-    let bottom_text = if let Some(stats) = stats {
-        let primary_routes = stats
-            .routes
+    let fallback = if summary.is_none() {
+        aggregate_llm_stats(&graph.root)
+    } else {
+        None
+    };
+    let routes = summary
+        .map(WorkflowSummary::llm_routes)
+        .or_else(|| fallback.as_ref().map(|stats| &stats.routes))
+        .filter(|routes| !routes.is_empty());
+    let bottom_text = if let Some(routes) = routes {
+        let primary_routes = routes
             .iter()
             .filter(|(route, _)| route.is_primary())
             .collect::<Vec<_>>();
@@ -2704,15 +2652,14 @@ fn format_workflow_stats_footer(
         for (_, aggregate) in &primary_routes {
             primary.merge(**aggregate);
         }
-        let auxiliary_calls = stats
-            .routes
+        let auxiliary_calls = routes
             .iter()
             .filter(|(route, _)| !route.is_primary())
             .map(|(_, aggregate)| aggregate.calls)
             .sum::<usize>();
         let display = if primary_routes.is_empty() {
             let mut all = LlmStatsAggregate::default();
-            for aggregate in stats.routes.values() {
+            for aggregate in routes.values() {
                 all.merge(*aggregate);
             }
             all
@@ -2721,7 +2668,7 @@ fn format_workflow_stats_footer(
         };
         let speed = display.average_speed();
         let route_count = if primary_routes.is_empty() {
-            stats.routes.len()
+            routes.len()
         } else {
             primary_routes.len()
         };
@@ -2765,8 +2712,6 @@ fn format_workflow_stats_footer(
     } else {
         format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)))
     };
-    let fill = inner_w.saturating_sub(crate::width::width(bottom_text.as_str()));
-    let _ = fill;
     Line::from(Span::styled(bottom_text, border_style))
 }
 
@@ -2847,13 +2792,37 @@ fn render_workflow_panel_impl(
     max_body_rows: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let t = crate::theme::theme();
-    let count = count_workflow_nodes(&graph.root);
-    let (mut status_str, mut status_style, running) = workflow_overall_status(&graph.root);
+    let summary = permission_projection.map(WorkflowProjection::summary);
+    let count = summary
+        .map(|summary| summary.counts().nodes)
+        .unwrap_or_else(|| count_workflow_nodes(&graph.root));
+    let (mut status_str, mut status_style, running) = if let Some(summary) = summary {
+        match summary.status() {
+            WorkflowAggregateStatus::Running => {
+                ("running…".into(), Style::default().fg(t.warn.into()), true)
+            }
+            WorkflowAggregateStatus::Error => {
+                ("err".into(), Style::default().fg(t.error.into()), false)
+            }
+            WorkflowAggregateStatus::Empty => (
+                "empty".into(),
+                Style::default().fg(t.subtle_fg.into()),
+                false,
+            ),
+            WorkflowAggregateStatus::Ok => {
+                ("ok".into(), Style::default().fg(t.success.into()), false)
+            }
+        }
+    } else {
+        workflow_overall_status(&graph.root)
+    };
     if cancelled {
         status_str = "Cancelled".to_string();
         status_style = Style::default().fg(t.warn.into());
     }
-    let elapsed = compute_elapsed_secs(&graph.root, running);
+    let elapsed = summary
+        .map(|summary| summary.elapsed_secs(chrono::Utc::now()))
+        .unwrap_or_else(|| compute_elapsed_secs(&graph.root, running));
     let fold_glyph = if panel_expanded { "▼" } else { "▶" };
     let flow_glyph = if running {
         spinner_char(animation_frame)
@@ -2992,7 +2961,7 @@ fn dynamic_paint_for_item(item: &OutputItem, lines: &[Line<'static>]) -> Dynamic
 }
 
 pub(crate) fn workflow_dynamic_paint(
-    graph: &atman_runtime::workflow::WorkflowGraph,
+    graph: &WorkflowProjection,
     expanded: bool,
     lines: &[Line<'static>],
     line_offset: usize,
@@ -3007,7 +2976,7 @@ pub(crate) fn workflow_dynamic_paint(
     }
     let elapsed = expanded
         .then(|| {
-            let started_at = graph.root.iter().filter_map(|node| node.started_at).min()?;
+            let started_at = graph.summary().started_at()?;
             let line = lines.get(line_offset)?;
             let (span, span_value) = line
                 .spans
@@ -3125,22 +3094,6 @@ fn leaf_at_path<'a>(
     node
 }
 
-fn collect_visible_nodes<'a>(
-    nodes: &'a [atman_runtime::workflow::WorkflowNode],
-    visible: &std::collections::HashSet<Vec<usize>>,
-    path: &mut Vec<usize>,
-    out: &mut Vec<(&'a atman_runtime::workflow::WorkflowNode, Vec<usize>)>,
-) {
-    for (i, n) in nodes.iter().enumerate() {
-        path.push(i);
-        if visible.contains(path) {
-            out.push((n, path.clone()));
-            collect_visible_nodes(&n.children, visible, path, out);
-        }
-        path.pop();
-    }
-}
-
 fn render_collapsed_workflow_card(
     graph: &atman_runtime::workflow::WorkflowGraph,
     permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
@@ -3152,8 +3105,20 @@ fn render_collapsed_workflow_card(
     let t = crate::theme::theme();
     let outer_width = panel_width.clamp(40, MAX_BOX_WIDTH);
     let border_style = Style::default().fg(t.accent.into());
-    let mut stats = WorkflowStats::default();
-    collect_stats(&graph.root, &mut stats);
+    let summary = permission_projection.map(WorkflowProjection::summary);
+    let stats = if let Some(summary) = summary {
+        let counts = summary.counts();
+        WorkflowStats {
+            nodes: counts.nodes,
+            agents: counts.agents,
+            tools: counts.tools,
+            edits: counts.edits,
+        }
+    } else {
+        let mut stats = WorkflowStats::default();
+        collect_stats(&graph.root, &mut stats);
+        stats
+    };
     let flow_glyph = if running {
         spinner_char(animation_frame)
     } else {
@@ -3199,37 +3164,38 @@ fn render_collapsed_workflow_card(
     top_spans.push(Span::styled("─╮".to_string(), border_style));
     let mut lines: Vec<Line<'static>> = vec![Line::from(top_spans)];
 
-    let sorted_root: Vec<atman_runtime::workflow::WorkflowNode> = {
-        let mut r = graph.root.clone();
-        r.sort_by_key(|n| n.started_at);
-        r
-    };
-    let root = &sorted_root;
-
-    let mut all_leaf_paths: Vec<Vec<usize>> = Vec::new();
-    collect_all_leaves(root, &mut all_leaf_paths, &mut Vec::new());
-
-    let mut leaves_with_time: Vec<(Vec<usize>, chrono::DateTime<chrono::Utc>)> = all_leaf_paths
-        .iter()
-        .map(|p| {
-            let ts = leaf_at_path(root, p)
-                .and_then(|n| n.started_at)
-                .unwrap_or_else(chrono::Utc::now);
-            (p.clone(), ts)
-        })
-        .collect();
-    leaves_with_time.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-    let running_paths: Vec<Vec<usize>> = leaves_with_time
-        .iter()
-        .filter(|(p, _)| leaf_is_running(root, p))
-        .map(|(p, _)| p.clone())
-        .collect();
-
-    let ordered_pool: Vec<Vec<usize>> = if !running_paths.is_empty() {
-        running_paths
+    let root = if permission_projection.is_some() {
+        std::borrow::Cow::Borrowed(graph.root.as_slice())
     } else {
-        leaves_with_time.iter().map(|(p, _)| p.clone()).collect()
+        let mut root = graph.root.clone();
+        root.sort_by_key(|node| node.started_at);
+        std::borrow::Cow::Owned(root)
+    };
+    let ordered_pool = if let Some(summary) = summary {
+        summary.collapsed_leaf_paths(max_body_rows.saturating_mul(4).max(32))
+    } else {
+        let mut all_leaf_paths = Vec::new();
+        collect_all_leaves(&root, &mut all_leaf_paths, &mut Vec::new());
+        let mut leaves_with_time = all_leaf_paths
+            .into_iter()
+            .map(|path| {
+                let started_at = leaf_at_path(&root, &path)
+                    .and_then(|node| node.started_at)
+                    .unwrap_or_else(chrono::Utc::now);
+                (path, started_at)
+            })
+            .collect::<Vec<_>>();
+        leaves_with_time.sort_by_key(|(_, started_at)| std::cmp::Reverse(*started_at));
+        let running_paths = leaves_with_time
+            .iter()
+            .filter(|(path, _)| leaf_is_running(&root, path))
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        if running_paths.is_empty() {
+            leaves_with_time.into_iter().map(|(path, _)| path).collect()
+        } else {
+            running_paths
+        }
     };
 
     // `estimated_rows` only depends on how many distinct top-level nodes the
@@ -3237,8 +3203,7 @@ fn render_collapsed_workflow_card(
     //   top_level_count(count) = |{ path[0] : path ∈ ordered_pool[..count] }|
     // Monotonic non-decreasing in `count` (the visible set only grows), so we
     // precompute in O(N) and binary-search in O(log N), replacing the old
-    // O(N²) loop that rebuilt `visible` + re-ran `collect_visible_nodes` each
-    // iteration.
+    // O(N²) loop that rebuilt the visible subtree each iteration.
     let total = ordered_pool.len();
     let mut seen_top: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut prefix_top_level_count: Vec<usize> = Vec::with_capacity(total + 1);
@@ -3270,20 +3235,23 @@ fn render_collapsed_workflow_card(
                 .join("/")
         })
         .collect();
-    let mut visible_nodes: Vec<(&atman_runtime::workflow::WorkflowNode, Vec<usize>)> = Vec::new();
-    collect_visible_nodes(root, &visible, &mut Vec::new(), &mut visible_nodes);
-    let top_level: Vec<&atman_runtime::workflow::WorkflowNode> = visible_nodes
+    let mut seen_top_level = std::collections::HashSet::new();
+    let mut top_level = selected_paths
         .iter()
-        .filter(|(_, p)| p.len() == 1)
-        .map(|(n, _)| *n)
-        .collect();
+        .filter_map(|path| path.first().copied())
+        .filter(|root_index| seen_top_level.insert(*root_index))
+        .collect::<Vec<_>>();
+    top_level.reverse();
     let mut body_lines: Vec<Line<'static>> = Vec::new();
     let mut regions: Vec<NodeRegion> = Vec::new();
     let mut pending_counter: u8 = 0;
     let child_count = top_level.len();
-    for (i, node) in top_level.iter().enumerate() {
-        let path = format!("{i}");
-        let is_last = i + 1 == child_count;
+    for (position, root_index) in top_level.into_iter().enumerate() {
+        let Some(node) = root.get(root_index) else {
+            continue;
+        };
+        let path = root_index.to_string();
+        let is_last = position + 1 == child_count;
         append_workflow_node_boxed(
             &mut body_lines,
             &mut regions,
@@ -3338,7 +3306,7 @@ fn render_collapsed_workflow_card(
         r.end_row = r.end_row.saturating_add(card_body_start_row);
     }
     lines.extend(body_lines);
-    let bottom_line = format_workflow_stats_footer(graph, outer_width, border_style);
+    let bottom_line = format_workflow_stats_footer(graph, summary, outer_width, border_style);
     lines.push(bottom_line);
     lines.push(Line::raw(""));
     let card_rows = lines.len() as u32;
@@ -3678,6 +3646,10 @@ fn append_workflow_node_boxed(
     depth_offset: u16,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
+    #[cfg(test)]
+    update_perf_counters(|counters| {
+        counters.workflow_node_renders = counters.workflow_node_renders.saturating_add(1);
+    });
     let t = crate::theme::theme();
     let depth = ancestor_last.len() as u16;
     let prefix_w = depth.saturating_sub(depth_offset) * INDENT_PER_DEPTH;
@@ -6599,7 +6571,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
 
-        let line = format_workflow_stats_footer(&graph, 120, Style::default());
+        let line = format_workflow_stats_footer(&graph, None, 120, Style::default());
         let text = plain_line(&line);
         assert!(text.contains("↑150"), "{text}");
         assert!(text.contains("cache 80 (53%)"), "{text}");
@@ -6637,7 +6609,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
 
-        let line = format_workflow_stats_footer(&graph, 120, Style::default());
+        let line = format_workflow_stats_footer(&graph, None, 120, Style::default());
         let text = plain_line(&line);
         assert!(text.contains("2 routes"), "{text}");
         assert!(text.contains("cache 100"), "{text}");
@@ -6725,6 +6697,93 @@ mod tests {
             total <= 30,
             "collapsed card should cap at ~30 rows, got {total}"
         );
+    }
+
+    #[test]
+    fn projected_collapsed_card_renders_a_bounded_recent_slice() {
+        use atman_runtime::projection::workflow::WorkflowProjection;
+        use atman_runtime::workflow::WorkflowGraph;
+
+        let now = chrono::Utc::now();
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: (0..20_000)
+                .map(|index| {
+                    make_tool_node(
+                        &format!("node-{index}"),
+                        &format!("tool_{index}"),
+                        Some(now + chrono::Duration::milliseconds(index as i64)),
+                    )
+                })
+                .collect(),
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let projection = WorkflowProjection::from(graph);
+
+        reset_perf_counters();
+        let (lines, _) = render_workflow_projection_with_regions(
+            &projection,
+            &Default::default(),
+            false,
+            false,
+            0,
+            80,
+            MAX_COLLAPSED_BODY_ROWS,
+        );
+        let counters = perf_counters();
+        let rendered = flatten_lines(&lines);
+
+        assert!(rendered.contains("tool_19999"), "{rendered}");
+        assert!(!rendered.contains("tool_0"), "{rendered}");
+        assert!(
+            counters.workflow_node_renders <= 8,
+            "collapsed projection rendered {} workflow nodes",
+            counters.workflow_node_renders
+        );
+    }
+
+    #[test]
+    fn projected_collapsed_card_keeps_the_newest_root_at_the_bottom() {
+        use atman_runtime::projection::workflow::WorkflowProjection;
+        use atman_runtime::workflow::WorkflowGraph;
+
+        let now = chrono::Utc::now();
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![
+                make_tool_node(
+                    "newest",
+                    "tool_newest",
+                    Some(now + chrono::Duration::seconds(2)),
+                ),
+                make_tool_node("oldest", "tool_oldest", Some(now)),
+                make_tool_node(
+                    "middle",
+                    "tool_middle",
+                    Some(now + chrono::Duration::seconds(1)),
+                ),
+            ],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let projection = WorkflowProjection::from(graph);
+
+        let (lines, _) = render_workflow_projection_with_regions(
+            &projection,
+            &Default::default(),
+            false,
+            false,
+            0,
+            80,
+            MAX_COLLAPSED_BODY_ROWS,
+        );
+        let rendered = flatten_lines(&lines);
+
+        assert!(rendered.find("tool_oldest").unwrap() < rendered.find("tool_middle").unwrap());
+        assert!(rendered.find("tool_middle").unwrap() < rendered.find("tool_newest").unwrap());
     }
 
     #[test]

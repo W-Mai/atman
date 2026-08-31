@@ -7,7 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use atman_runtime::message::Message;
-use atman_runtime::workflow::{WorkflowGraph, WorkflowNodeKind};
+use atman_runtime::projection::workflow::WorkflowProjection;
+use atman_runtime::workflow::WorkflowNodeKind;
 
 use crate::app::OutputItem;
 use crate::wm::PanelRenderCache;
@@ -226,7 +227,7 @@ pub(crate) fn render_sub_agent_panel(
     iteration: u64,
     done: bool,
     messages: &[Message],
-    workflow_graph: &WorkflowGraph,
+    workflow_graph: &WorkflowProjection,
     expanded_nodes: &HashSet<String>,
     workflow_expanded: bool,
     expanded_tools: &HashSet<String>,
@@ -343,7 +344,7 @@ pub(crate) fn render_sub_agent_panel(
     } else {
         crate::output::LAYOUT_ANIMATION_FRAME
     };
-    let (wf_lines, regions) = crate::output::render_workflow_panel_with_regions(
+    let (wf_lines, regions) = crate::output::render_workflow_projection_with_regions(
         workflow_graph,
         expanded_nodes,
         workflow_expanded,
@@ -490,6 +491,7 @@ fn subagent_status_label(status: &str, done: bool) -> String {
 mod tests {
     use std::collections::HashSet;
 
+    use atman_runtime::projection::workflow::WorkflowProjection;
     use atman_runtime::workflow::{
         NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
     };
@@ -530,6 +532,7 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
+        let graph = WorkflowProjection::from(graph);
         let expanded = HashSet::new();
         let mut scroll = 0;
         let mut hitmap = Vec::new();

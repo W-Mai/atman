@@ -14,6 +14,10 @@ use crate::workflow::{
 };
 
 use super::workflow_permission::{PermissionProjection, ToolKey};
+pub use super::workflow_summary::{
+    WorkflowAggregateStatus, WorkflowCounts, WorkflowLlmAggregate, WorkflowLlmRoute,
+    WorkflowSummary,
+};
 
 type NodePath = Vec<usize>;
 
@@ -124,6 +128,7 @@ pub struct WorkflowProjection {
     graph: WorkflowGraph,
     index: WorkflowIndex,
     permissions: PermissionProjection,
+    summary: WorkflowSummary,
     revision: u64,
 }
 
@@ -165,6 +170,7 @@ impl From<WorkflowGraph> for WorkflowProjection {
             graph,
             index: WorkflowIndex::default(),
             permissions: PermissionProjection::default(),
+            summary: WorkflowSummary::default(),
             revision: 0,
         };
         projection.rebuild_index();
@@ -193,6 +199,10 @@ impl WorkflowProjection {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub fn summary(&self) -> &WorkflowSummary {
+        &self.summary
     }
 
     pub fn find_node(&self, id: &str) -> Option<&WorkflowNode> {
@@ -866,7 +876,13 @@ impl WorkflowProjection {
         now: DateTime<Utc>,
         recursive: bool,
     ) -> PendingDelta {
-        let changed = self.mutate_node(id, |node| {
+        let Some(path) = self.index.node_paths.get(id).cloned() else {
+            return PendingDelta::default();
+        };
+        let Some(node) = node_at_path_mut(&mut self.graph.root, &path) else {
+            return PendingDelta::default();
+        };
+        let changed = {
             let before = (node.status, node.ended_at, node.output_preview.clone());
             if recursive {
                 cascade_terminate(node, status, now);
@@ -884,9 +900,18 @@ impl WorkflowProjection {
                 node.output_preview = Some(output_preview.to_string());
             }
             before != (node.status, node.ended_at, node.output_preview.clone())
-        });
+        };
+        let summary_changed = if recursive {
+            self.summary.sync_subtree(node, path.len() == 1)
+        } else {
+            let mut changed = self.summary.sync_node(node, path.len() == 1);
+            for child in &node.children {
+                changed |= self.summary.sync_node(child, false);
+            }
+            changed
+        };
         let mut delta = PendingDelta::default();
-        if changed {
+        if changed || summary_changed {
             delta.mark(id);
         }
         delta
@@ -969,9 +994,11 @@ impl WorkflowProjection {
         {
             *result_preview = Some(content);
         }
+        let node_id = node.id.clone();
+        let summary_changed = self.summary.sync_node(node, path.len() == 1);
         let mut delta = PendingDelta::default();
-        if changed {
-            delta.mark(node.id.clone());
+        if changed || summary_changed {
+            delta.mark(node_id);
         }
         delta
     }
@@ -1077,6 +1104,7 @@ impl WorkflowProjection {
     fn append_root(&mut self, node: WorkflowNode, tool: Option<(&str, &str)>) {
         let path = vec![self.graph.root.len()];
         let id = node.id.clone();
+        self.summary.insert_node(&node, &path, true);
         self.graph.root.push(node);
         self.index.node_paths.insert(id, path.clone());
         if let Some((run_id, tool_use_id)) = tool {
@@ -1098,6 +1126,8 @@ impl WorkflowProjection {
         };
         path.push(parent.children.len());
         let id = node.id.clone();
+        self.summary.remove_leaf(parent_id);
+        self.summary.insert_node(&node, &path, false);
         parent.children.push(node);
         self.index.node_paths.insert(id, path.clone());
         if let Some((run_id, tool_use_id)) = tool {
@@ -1132,10 +1162,15 @@ impl WorkflowProjection {
     }
 
     fn mutate_node(&mut self, id: &str, mutation: impl FnOnce(&mut WorkflowNode) -> bool) -> bool {
-        let Some(path) = self.index.node_paths.get(id) else {
+        let Some(path) = self.index.node_paths.get(id).cloned() else {
             return false;
         };
-        node_at_path_mut(&mut self.graph.root, path).is_some_and(mutation)
+        let Some(node) = node_at_path_mut(&mut self.graph.root, &path) else {
+            return false;
+        };
+        let changed = mutation(node);
+        let summary_changed = self.summary.sync_node(node, path.len() == 1);
+        changed || summary_changed
     }
 
     fn rebuild_index(&mut self) {
@@ -1143,6 +1178,7 @@ impl WorkflowProjection {
         let mut path = Vec::new();
         index_nodes(&self.graph.root, &mut path, None, &mut self.index);
         self.permissions = PermissionProjection::rebuild(&self.graph);
+        self.summary = WorkflowSummary::rebuild(&self.graph);
     }
 
     fn commit(&mut self, pending: PendingDelta) -> ProjectionDelta {
@@ -2049,5 +2085,135 @@ mod tests {
         assert!(!noop.changed());
         assert_eq!(noop.revision, revision);
         assert_eq!(projection.revision(), revision);
+    }
+
+    #[test]
+    fn summary_tracks_incremental_structure_status_time_and_llm_usage() {
+        let now = Utc::now();
+        let mut projection = WorkflowProjection::new(TurnId::now());
+        projection.apply_stream_frame_at(
+            &StreamFrame::FlowStart {
+                run_id: "root".into(),
+                flow_name: "root".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+            },
+            Some(now),
+        );
+        projection.apply_stream_frame_at(
+            &StreamFrame::FlowNodeStart {
+                run_id: "root".into(),
+                node_id: "dispatch".into(),
+                kind: crate::nodegraph::NodeKind::ToolCall {
+                    path: "dispatch_all".into(),
+                },
+                label: "dispatch".into(),
+                parent_node_id: None,
+            },
+            Some(now + chrono::Duration::seconds(1)),
+        );
+        assert_eq!(projection.summary().counts().nodes, 2);
+        assert_eq!(projection.summary().collapsed_leaf_paths(8), [vec![0, 0]]);
+
+        for (tool_use_id, tool) in [
+            ("read", "fs.read"),
+            ("agent", "flow.spawn"),
+            ("edit", "fs.write"),
+        ] {
+            projection.apply_stream_frame_at(
+                &StreamFrame::ToolNode {
+                    run_id: "root".into(),
+                    parent_node_id: "dispatch".into(),
+                    tool_use_id: tool_use_id.into(),
+                    tool: tool.into(),
+                    args_preview: "{}".into(),
+                    call_intent: None,
+                },
+                Some(now + chrono::Duration::seconds(2)),
+            );
+        }
+        assert_eq!(
+            projection.summary().counts(),
+            WorkflowCounts {
+                nodes: 5,
+                agents: 1,
+                tools: 3,
+                edits: 1,
+            }
+        );
+        assert_eq!(
+            projection.summary().status(),
+            WorkflowAggregateStatus::Running
+        );
+        assert!(
+            projection
+                .summary()
+                .collapsed_leaf_paths(8)
+                .iter()
+                .all(|path| path.len() == 3)
+        );
+
+        projection.apply_stream_frame_at(
+            &StreamFrame::LlmCallStats {
+                model: "reasoning-model".into(),
+                provider: "openai-compatible".into(),
+                context_call_purpose: crate::context_plan::ContextCallPurpose::General,
+                context_call_scope: crate::context_plan::ContextCallScope::Root,
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_read: 300,
+                cache_write: 40,
+                ttft_ms: 50,
+                tokens_per_second: 60.0,
+                wallclock_ms: 70,
+                run_id: Some("root".into()),
+                node_id: Some("dispatch".into()),
+            },
+            Some(now + chrono::Duration::seconds(3)),
+        );
+        let aggregate = projection
+            .summary()
+            .llm_routes()
+            .values()
+            .next()
+            .expect("LLM route summary");
+        assert_eq!(aggregate.calls, 1);
+        assert_eq!(aggregate.total_in, 440);
+        assert_eq!(aggregate.total_out, 20);
+
+        projection.apply_stream_frame_at(
+            &StreamFrame::FlowDone {
+                run_id: "root".into(),
+                flow_name: "root".into(),
+                ok: true,
+                cancelled: false,
+                suicide: false,
+            },
+            Some(now + chrono::Duration::seconds(5)),
+        );
+        assert_eq!(projection.summary().status(), WorkflowAggregateStatus::Ok);
+        assert_eq!(projection.summary().started_at(), Some(now));
+        assert_eq!(
+            projection.summary().ended_at(),
+            Some(now + chrono::Duration::seconds(5))
+        );
+        assert_eq!(
+            projection
+                .summary()
+                .elapsed_secs(now + chrono::Duration::seconds(100)),
+            5
+        );
+
+        let restored = WorkflowProjection::from(projection.graph().clone());
+        assert_eq!(restored.summary().counts(), projection.summary().counts());
+        assert_eq!(restored.summary().status(), projection.summary().status());
+        assert_eq!(
+            restored.summary().collapsed_leaf_paths(8),
+            projection.summary().collapsed_leaf_paths(8)
+        );
+        assert_eq!(
+            restored.summary().llm_routes(),
+            projection.summary().llm_routes()
+        );
     }
 }
