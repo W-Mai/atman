@@ -2,6 +2,7 @@
 //! `MessageWindow` anchored at the last compaction summary (zero-copy);
 //! `full_messages()` returns a shared `Arc<Vec<Message>>` of every message.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -37,14 +38,56 @@ struct Acc {
     compacted: Vec<(u64, Message)>,
     full_raw: Vec<(u64, Message)>,
     replayed: usize,
+    projection_revision: u64,
+    ownership: FlowOwnership,
     full_cache: Arc<Vec<Message>>,
     window_cache: MessageWindow,
 }
 
+#[derive(Default)]
+struct FlowOwnership {
+    children: HashMap<crate::event::FlowRunId, HashSet<crate::event::FlowRunId>>,
+    spawned: HashSet<crate::event::FlowRunId>,
+}
+
+impl FlowOwnership {
+    fn observe(&mut self, event: &crate::event::Event) {
+        let crate::event::Event::FlowStart {
+            run_id,
+            parent_run_id,
+            spawned,
+            ..
+        } = event
+        else {
+            return;
+        };
+        if let Some(parent) = parent_run_id {
+            self.children
+                .entry(parent.clone())
+                .or_default()
+                .insert(run_id.clone());
+        }
+        if !*spawned
+            && !parent_run_id
+                .as_ref()
+                .is_some_and(|parent| self.spawned.contains(parent))
+        {
+            return;
+        }
+        let mut queue = VecDeque::from([run_id.clone()]);
+        while let Some(parent) = queue.pop_front() {
+            if !self.spawned.insert(parent.clone()) {
+                continue;
+            }
+            if let Some(children) = self.children.get(&parent) {
+                queue.extend(children.iter().cloned());
+            }
+        }
+    }
+}
+
 pub struct MessageStream {
     events: Arc<Mutex<Vec<EventEnvelope>>>,
-    initial_compacted: Vec<(u64, Message)>,
-    initial_raw: Vec<(u64, Message)>,
     acc: Mutex<Acc>,
 }
 
@@ -53,12 +96,12 @@ impl MessageStream {
         let empty = Arc::new(Vec::new());
         Self {
             events,
-            initial_compacted: Vec::new(),
-            initial_raw: Vec::new(),
             acc: Mutex::new(Acc {
                 compacted: Vec::new(),
                 full_raw: Vec::new(),
                 replayed: 0,
+                projection_revision: 0,
+                ownership: FlowOwnership::default(),
                 full_cache: Arc::clone(&empty),
                 window_cache: MessageWindow {
                     messages: empty,
@@ -84,14 +127,15 @@ impl MessageStream {
             messages: window_messages,
             start,
         };
+        let projection_revision = u64::from(!compacted.is_empty() || !raw.is_empty());
         Self {
             events,
-            initial_compacted: compacted.clone(),
-            initial_raw: raw.clone(),
             acc: Mutex::new(Acc {
                 compacted,
                 full_raw: raw,
                 replayed: 0,
+                projection_revision,
+                ownership: FlowOwnership::default(),
                 full_cache: full,
                 window_cache: window,
             }),
@@ -113,18 +157,18 @@ impl MessageStream {
     }
 
     fn ensure_fresh_locked(&self, events: &[EventEnvelope], acc: &mut Acc) {
-        if acc.compacted.is_empty() {
-            acc.compacted = self.initial_compacted.clone();
-            acc.full_raw = self.initial_raw.clone();
-        }
         if acc.replayed >= events.len() {
             return;
         }
-        let spawned_flow_ids = crate::projection::message_window::spawned_flow_ids(events);
+        let mut compacted_changed = false;
+        let mut full_changed = false;
+        for event in &events[acc.replayed..] {
+            acc.ownership.observe(&event.event);
+        }
         for ev in &events[acc.replayed..] {
-            crate::projection::message_window::apply_envelope_to_messages(
+            compacted_changed |= crate::projection::message_window::apply_envelope_to_messages(
                 ev,
-                &spawned_flow_ids,
+                &acc.ownership.spawned,
                 &mut acc.compacted,
             );
             match &ev.event {
@@ -142,42 +186,57 @@ impl MessageStream {
                     message,
                     flow_run_id,
                     ..
-                } if crate::projection::message_window::message_belongs_to_root(
-                    flow_run_id.as_ref(),
-                    &spawned_flow_ids,
-                ) =>
-                {
-                    acc.full_raw.push((ev.seq, message.clone()));
                 }
-                crate::event::Event::SystemMsg {
+                | crate::event::Event::SystemMsg {
                     message,
                     flow_run_id,
                     ..
                 } if crate::projection::message_window::message_belongs_to_root(
                     flow_run_id.as_ref(),
-                    &spawned_flow_ids,
+                    &acc.ownership.spawned,
                 ) =>
                 {
                     acc.full_raw.push((ev.seq, message.clone()));
+                    full_changed = true;
+                }
+                crate::event::Event::AttachmentDegraded { .. } => {
+                    full_changed |= crate::projection::message_window::apply_envelope_to_messages(
+                        ev,
+                        &acc.ownership.spawned,
+                        &mut acc.full_raw,
+                    );
                 }
                 _ => {}
             }
         }
         acc.replayed = events.len();
 
-        let compacted: Vec<Message> = acc.compacted.iter().map(|(_, msg)| msg).cloned().collect();
-        let start = compacted
-            .iter()
-            .rposition(is_compaction_summary)
-            .unwrap_or(0);
-        let compacted_arc = Arc::new(compacted);
-        acc.window_cache = MessageWindow {
-            messages: Arc::clone(&compacted_arc),
-            start,
-        };
-
-        let raw: Vec<Message> = acc.full_raw.iter().map(|(_, msg)| msg).cloned().collect();
-        acc.full_cache = Arc::new(raw);
+        if compacted_changed {
+            let compacted = acc
+                .compacted
+                .iter()
+                .map(|(_, message)| message.clone())
+                .collect::<Vec<_>>();
+            let start = compacted
+                .iter()
+                .rposition(is_compaction_summary)
+                .unwrap_or(0);
+            acc.window_cache = MessageWindow {
+                messages: Arc::new(compacted),
+                start,
+            };
+        }
+        if full_changed {
+            acc.full_cache = Arc::new(
+                acc.full_raw
+                    .iter()
+                    .map(|(_, message)| message.clone())
+                    .collect(),
+            );
+        }
+        if compacted_changed || full_changed {
+            acc.projection_revision = acc.projection_revision.saturating_add(1);
+        }
     }
 }
 
@@ -300,6 +359,136 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].text_concat(), "hello");
         assert_eq!(msgs[1].text_concat(), "hi there");
+    }
+
+    #[test]
+    fn non_message_events_preserve_message_cache_identity() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stream = MessageStream::with_initial(
+            Arc::clone(&events),
+            vec![(1, user("window"))],
+            vec![(1, user("full"))],
+        );
+        let full_before = stream.full_messages();
+        let window_before = stream.window();
+        let revision_before = stream.acc.lock().unwrap().projection_revision;
+        events.lock().unwrap().extend([
+            EventEnvelope::new(
+                2,
+                Event::TurnStart {
+                    turn_id: TurnId::now(),
+                },
+            ),
+            EventEnvelope::new(
+                3,
+                Event::FlowStart {
+                    run_id: crate::event::FlowRunId::now(),
+                    flow_name: "root".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            ),
+            EventEnvelope::new(
+                4,
+                Event::LlmCall {
+                    model: "model".into(),
+                    provider: "provider".into(),
+                    context_plan_id: None,
+                    context_epoch: None,
+                    context_tokens: None,
+                    usage_source: None,
+                    context_call_purpose: None,
+                    context_call_identity: None,
+                    context_cache: None,
+                    assistant_tool_batch_width: None,
+                    usage: crate::provider::TokenUsage::default(),
+                    wallclock_ms: 0,
+                    ttft_ms: None,
+                    tokens_per_second: None,
+                    status: crate::event::LlmCallStatus::Ok,
+                    run_id: None,
+                    node_id: None,
+                },
+            ),
+        ]);
+
+        let full_after = stream.full_messages();
+        let window_after = stream.window();
+        let acc = stream.acc.lock().unwrap();
+
+        assert!(Arc::ptr_eq(&full_before, &full_after));
+        assert!(Arc::ptr_eq(&window_before.messages, &window_after.messages));
+        assert_eq!(acc.projection_revision, revision_before);
+        assert_eq!(acc.replayed, 3);
+    }
+
+    #[test]
+    fn compaction_rebuilds_window_without_cloning_full_history() {
+        let summary = compact_summary("summary");
+        let compacted = vec![
+            (1, user("old")),
+            (2, assistant("old")),
+            (3, summary.clone()),
+        ];
+        let raw = compacted.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stream = MessageStream::with_initial(Arc::clone(&events), compacted, raw);
+        let full_before = stream.full_messages();
+        let window_before = stream.window();
+        events.lock().unwrap().push(EventEnvelope::new(
+            4,
+            make_context_compact(0, 1, 100, 10, "summary", 3),
+        ));
+
+        let full_after = stream.full_messages();
+        let window_after = stream.window();
+
+        assert!(Arc::ptr_eq(&full_before, &full_after));
+        assert!(!Arc::ptr_eq(
+            &window_before.messages,
+            &window_after.messages
+        ));
+        assert_eq!(window_after.len(), 1);
+        assert!(matches!(
+            window_after[0].parts[0],
+            MessagePart::CompactSummary { .. }
+        ));
+    }
+
+    #[test]
+    fn attachment_degradation_updates_both_message_views() {
+        let message = user("attachment");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stream = MessageStream::with_initial(
+            Arc::clone(&events),
+            vec![(5, message.clone())],
+            vec![(5, message)],
+        );
+        let full_before = stream.full_messages();
+        let window_before = stream.window();
+        events.lock().unwrap().push(EventEnvelope::new(
+            6,
+            Event::AttachmentDegraded {
+                turn_id: None,
+                flow_run_id: None,
+                message_seq: 5,
+                part_index: 0,
+                file_basename: "image.png".into(),
+                reason: "unreadable".into(),
+            },
+        ));
+
+        let full_after = stream.full_messages();
+        let window_after = stream.window();
+
+        assert!(!Arc::ptr_eq(&full_before, &full_after));
+        assert!(!Arc::ptr_eq(
+            &window_before.messages,
+            &window_after.messages
+        ));
+        assert_eq!(full_after[0].text_concat(), window_after[0].text_concat());
+        assert!(full_after[0].text_concat().contains("image.png"));
     }
 
     #[test]
@@ -835,5 +1024,35 @@ mod tests {
                 .iter()
                 .any(|message| message.text_concat() == "durable system")
         );
+    }
+
+    #[test]
+    fn batch_refresh_classifies_messages_after_collecting_flow_ownership() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stream = MessageStream::new(Arc::clone(&events));
+        let spawned = crate::event::FlowRunId::now();
+        events.lock().unwrap().extend([
+            EventEnvelope::new(
+                1,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(spawned.clone()),
+                    message: assistant("spawned output"),
+                },
+            ),
+            EventEnvelope::new(
+                2,
+                Event::FlowStart {
+                    run_id: spawned,
+                    flow_name: "spawned".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: true,
+                },
+            ),
+        ]);
+
+        assert!(stream.window().is_empty());
+        assert!(stream.full_messages().is_empty());
     }
 }

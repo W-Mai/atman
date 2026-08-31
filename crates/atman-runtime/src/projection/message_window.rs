@@ -1328,7 +1328,7 @@ pub(crate) fn apply_envelope_to_messages(
     env: &crate::event::EventEnvelope,
     spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
     acc: &mut Vec<(u64, Message)>,
-) {
+) -> bool {
     match &env.event {
         crate::event::Event::UserMsg {
             message,
@@ -1346,6 +1346,7 @@ pub(crate) fn apply_envelope_to_messages(
             ..
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             acc.push((env.seq, message.clone()));
+            true
         }
         crate::event::Event::SystemMsg {
             message,
@@ -1353,6 +1354,7 @@ pub(crate) fn apply_envelope_to_messages(
             ..
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             acc.push((env.seq, message.clone()));
+            true
         }
         crate::event::Event::ContextCompact {
             flow_run_id,
@@ -1367,16 +1369,16 @@ pub(crate) fn apply_envelope_to_messages(
             let range_start = *compacted_range_start as usize;
             let range_end = *compacted_range_end as usize;
             if range_start > range_end || range_end >= acc.len() {
-                return;
+                return false;
             }
             let Some(rep_seq) = replacement_msg_seq else {
-                return;
+                return false;
             };
             let Some(rep_idx) = acc.iter().position(|(s, _)| *s == *rep_seq) else {
-                return;
+                return false;
             };
             if *after_tokens >= *before_tokens {
-                return;
+                return false;
             }
             let replacement = acc.remove(rep_idx);
             let removed_count = range_end - range_start + 1;
@@ -1401,20 +1403,25 @@ pub(crate) fn apply_envelope_to_messages(
             } else {
                 acc.insert(insertion_idx, replacement);
             }
+            true
         }
         crate::event::Event::Checkpoint {
             flow_run_id,
             messages,
             ..
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
-            acc.clear();
-            acc.extend(
-                messages
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(index, message)| (u64::MAX.saturating_sub(index as u64), message)),
-            );
+            let checkpoint = messages
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, message)| (u64::MAX.saturating_sub(index as u64), message))
+                .collect::<Vec<_>>();
+            if *acc == checkpoint {
+                false
+            } else {
+                *acc = checkpoint;
+                true
+            }
         }
         crate::event::Event::AttachmentDegraded {
             message_seq,
@@ -1426,12 +1433,17 @@ pub(crate) fn apply_envelope_to_messages(
             if let Some((_, message)) = acc.iter_mut().find(|(seq, _)| *seq == *message_seq)
                 && let Some(part) = message.parts.get_mut(*part_index)
             {
-                *part = MessagePart::Text {
+                let replacement = MessagePart::Text {
                     text: format!("[attachment unavailable: {} — {}]", file_basename, reason),
                 };
+                if *part != replacement {
+                    *part = replacement;
+                    return true;
+                }
             }
+            false
         }
-        _ => {}
+        _ => false,
     }
 }
 
