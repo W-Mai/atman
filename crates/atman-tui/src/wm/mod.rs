@@ -715,9 +715,9 @@ impl WindowManager {
                     .iter_mut()
                     .find(|p| p.content_key == crate::wm::ContentKey::Mcp)
                 {
-                    p.content = Some(Box::new(crate::window::mcp_panel::McpPanelContent {
-                        scroll: 0,
-                    }));
+                    p.content = Some(Box::new(
+                        crate::window::mcp_panel::McpPanelContent::default(),
+                    ));
                 }
             }
             PaletteEntryId::ShowHelp => {
@@ -817,11 +817,9 @@ impl WindowManager {
                     let id = self.open(&label, key, window_content.clone(), &title, canvas);
                     let content: Option<Box<dyn crate::wm::WindowComponent>> = match window_content
                     {
-                        crate::wm::WindowContent::Mcp => {
-                            Some(Box::new(crate::window::mcp_panel::McpPanelContent {
-                                scroll: 0,
-                            }))
-                        }
+                        crate::wm::WindowContent::Mcp => Some(Box::new(
+                            crate::window::mcp_panel::McpPanelContent::default(),
+                        )),
                         crate::wm::WindowContent::Cheatsheet => Some(Box::new(
                             crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
                         )),
@@ -1706,6 +1704,7 @@ mod tests {
         let prompts = std::collections::HashMap::new();
         let browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
+            content_revision: 0,
             resources: &resources,
             prompts: &prompts,
         };
@@ -1793,6 +1792,7 @@ mod tests {
             std::collections::HashMap::new();
         let mcp_browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
+            content_revision: 0,
             resources: &mcp_resources,
             prompts: &mcp_prompts,
         };
@@ -1867,6 +1867,7 @@ mod tests {
             std::collections::HashMap::new();
         let mcp_browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
+            content_revision: 0,
             resources: &mcp_resources,
             prompts: &mcp_prompts,
         };

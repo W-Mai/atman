@@ -419,6 +419,7 @@ mod tests {
         let empty_prompts = std::collections::HashMap::new();
         let browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::Resources,
+            content_revision: 0,
             resources: &empty_resources,
             prompts: &empty_prompts,
         };

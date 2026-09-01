@@ -494,6 +494,7 @@ pub struct AppState {
     pub mcp_remove_armed: Option<String>,
     pub mcp_add_form: Option<crate::mcp_manager::McpAddForm>,
     pub mcp_browser_tab: crate::mcp_manager::McpBrowserTab,
+    pub mcp_content_revision: u64,
     pub mcp_resources_cache:
         std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>>,
     pub mcp_prompts_cache: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>>,
@@ -525,6 +526,40 @@ enum InputReasoningResolution {
     ModelUnavailable,
     Resolved(Option<atman_runtime::provider::ReasoningSelection>),
     Invalid(atman_runtime::provider::ReasoningSelection),
+}
+
+fn mcp_resources_equal(
+    left: &[atman_runtime::mcp::McpResource],
+    right: &[atman_runtime::mcp::McpResource],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.uri == right.uri
+                && left.name == right.name
+                && left.description == right.description
+                && left.mime_type == right.mime_type
+        })
+}
+
+fn mcp_prompts_equal(
+    left: &[atman_runtime::mcp::McpPrompt],
+    right: &[atman_runtime::mcp::McpPrompt],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.name == right.name
+                && left.description == right.description
+                && left.arguments.len() == right.arguments.len()
+                && left
+                    .arguments
+                    .iter()
+                    .zip(&right.arguments)
+                    .all(|(left, right)| {
+                        left.name == right.name
+                            && left.description == right.description
+                            && left.required == right.required
+                    })
+        })
 }
 
 pub use atman_runtime::stream::frame_run_id;
@@ -896,9 +931,49 @@ impl AppState {
     pub fn mcp_browser_state(&self) -> crate::mcp_manager::McpBrowserState<'_> {
         crate::mcp_manager::McpBrowserState {
             tab: self.mcp_browser_tab,
+            content_revision: self.mcp_content_revision,
             resources: &self.mcp_resources_cache,
             prompts: &self.mcp_prompts_cache,
         }
+    }
+
+    pub fn replace_context_snapshot(&mut self, context: atman_runtime::ContextSnapshot) {
+        if self.context.mcp_servers != context.mcp_servers {
+            self.mcp_content_revision = self.mcp_content_revision.wrapping_add(1);
+        }
+        self.context = context;
+    }
+
+    pub fn replace_mcp_resources(
+        &mut self,
+        name: String,
+        resources: Vec<atman_runtime::mcp::McpResource>,
+    ) {
+        let unchanged = self
+            .mcp_resources_cache
+            .get(&name)
+            .is_some_and(|current| mcp_resources_equal(current, &resources));
+        if unchanged {
+            return;
+        }
+        self.mcp_resources_cache.insert(name, resources);
+        self.mcp_content_revision = self.mcp_content_revision.wrapping_add(1);
+    }
+
+    pub fn replace_mcp_prompts(
+        &mut self,
+        name: String,
+        prompts: Vec<atman_runtime::mcp::McpPrompt>,
+    ) {
+        let unchanged = self
+            .mcp_prompts_cache
+            .get(&name)
+            .is_some_and(|current| mcp_prompts_equal(current, &prompts));
+        if unchanged {
+            return;
+        }
+        self.mcp_prompts_cache.insert(name, prompts);
+        self.mcp_content_revision = self.mcp_content_revision.wrapping_add(1);
     }
 
     pub fn open_task_panel(
@@ -2894,6 +2969,53 @@ mod tests {
             atman_runtime::model_registry::remove_provider_catalog("test-codex");
             atman_runtime::model_registry::remove_provider_catalog("test-compatible");
         }
+    }
+
+    #[test]
+    fn mcp_content_revision_tracks_only_canonical_changes() {
+        use atman_runtime::mcp::{
+            McpPrompt, McpResource, McpServerState, McpServerStatus, TransportKind,
+        };
+
+        let mut app = AppState::new("session".into(), None);
+        let mut context = atman_runtime::ContextSnapshot::default();
+        context.mcp_servers.push(McpServerStatus {
+            name: "server".into(),
+            transport: TransportKind::Stdio,
+            state: McpServerState::Pending,
+        });
+        app.replace_context_snapshot(context.clone());
+        assert_eq!(app.mcp_content_revision, 1);
+        app.replace_context_snapshot(context.clone());
+        assert_eq!(app.mcp_content_revision, 1);
+
+        context.tokens_in = 42;
+        app.replace_context_snapshot(context.clone());
+        assert_eq!(app.mcp_content_revision, 1);
+        context.mcp_servers[0].state = McpServerState::Connecting;
+        app.replace_context_snapshot(context);
+        assert_eq!(app.mcp_content_revision, 2);
+
+        let resources = vec![McpResource {
+            uri: "resource://one".into(),
+            name: "one".into(),
+            description: Some("description".into()),
+            mime_type: Some("text/plain".into()),
+        }];
+        app.replace_mcp_resources("server".into(), resources.clone());
+        assert_eq!(app.mcp_content_revision, 3);
+        app.replace_mcp_resources("server".into(), resources);
+        assert_eq!(app.mcp_content_revision, 3);
+
+        let prompts = vec![McpPrompt {
+            name: "prompt".into(),
+            description: Some("description".into()),
+            arguments: Vec::new(),
+        }];
+        app.replace_mcp_prompts("server".into(), prompts.clone());
+        assert_eq!(app.mcp_content_revision, 4);
+        app.replace_mcp_prompts("server".into(), prompts);
+        assert_eq!(app.mcp_content_revision, 4);
     }
 
     #[test]
@@ -4991,6 +5113,7 @@ mod terminal_e2e_tests {
                 let empty_prompts = std::collections::HashMap::new();
                 let browser = crate::mcp_manager::McpBrowserState {
                     tab: crate::mcp_manager::McpBrowserTab::Resources,
+                    content_revision: 0,
                     resources: &empty_resources,
                     prompts: &empty_prompts,
                 };

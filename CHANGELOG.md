@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Windowed MCP manager projection** — the active tools, resources, or prompts tab owns one cached row stream for wrapping, scroll bounds, visible rendering, and hit targets; stable frames reuse it, canonical MCP updates invalidate it exactly, and row offsets remain correct beyond 65,535.
 - **Windowed Bash output projection** — live and restored Bash output uses append-aware wrapped-row indexes, collapsed cards inspect only new source bytes, and expanded transcript and floating-panel views materialize only visible rows while retaining exact folding, scrolling, and command audit detail.
 - **Incremental streaming Markdown** — live assistant output caches completed top-level blocks, reparses only the mutable suffix, coalesces repaint work, skips unchanged transcript-retention scans, and performs an exact full render on completion; reference definitions and oversized open containers use an adaptive exact-render fallback.
 - **Visual-row output folding** — Bash, streamed terminal, sub-agent, and compaction cards count wrapped display rows when enforcing collapsed-height limits, so long physical lines cannot expand cards beyond their configured size.

@@ -6,8 +6,10 @@ use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
+#[derive(Default)]
 pub struct McpPanelContent {
     pub scroll: u32,
+    projection: crate::mcp_manager::McpPanelProjection,
 }
 
 impl WindowComponent for McpPanelContent {
@@ -19,11 +21,10 @@ impl WindowComponent for McpPanelContent {
             area.height,
         );
         let mut hitmap = WmHitmap::default();
-        let mut scroll = self.scroll.min(u16::MAX as u32) as u16;
         crate::mcp_manager::render_panel(
             frame,
             area,
-            &mut scroll,
+            &mut self.scroll,
             ctx.mcp_servers,
             ctx.expanded_mcp_servers,
             ctx.mcp_selected,
@@ -31,8 +32,8 @@ impl WindowComponent for McpPanelContent {
             &mut hitmap,
             ctx.mcp_browser,
             ctx.window_id,
+            &mut self.projection,
         );
-        self.scroll = scroll as u32;
         hitmap
             .mcp_row_rects
             .into_iter()

@@ -58,7 +58,7 @@ pub(crate) async fn run_frames(
         }
     }
     if let Some(rx) = handle.context_rx.as_ref() {
-        app.app.context = rx.borrow().clone();
+        app.app.replace_context_snapshot(rx.borrow().clone());
     }
     if app.app.reconcile_input_reasoning() {
         app.app.save_ui_state();
@@ -550,7 +550,7 @@ pub(crate) async fn run_frames(
                                         app.wm.panels.iter_mut().find(|p| p.content_key == crate::wm::ContentKey::Mcp)
                                     {
                                         p.content = Some(Box::new(
-                                            crate::window::mcp_panel::McpPanelContent { scroll: 0 },
+                                            crate::window::mcp_panel::McpPanelContent::default(),
                                         ));
                                     }
                                 } else if let Some(r) = app.app.last_goal_hdr_rect
@@ -1440,10 +1440,10 @@ pub(crate) async fn run_frames(
                             );
                         }
                         TuiCommand::McpResourcesResult { name, resources } => {
-                            app.app.mcp_resources_cache.insert(name, resources);
+                            app.app.replace_mcp_resources(name, resources);
                         }
                         TuiCommand::McpPromptsResult { name, prompts } => {
-                            app.app.mcp_prompts_cache.insert(name, prompts);
+                            app.app.replace_mcp_prompts(name, prompts);
                         }
                     }
                 }
@@ -1605,10 +1605,10 @@ fn apply_context_snapshot(
     if model_switch_pending {
         context.model.clone_from(&app.context.model);
         context.provider.clone_from(&app.context.provider);
-        app.context = context;
+        app.replace_context_snapshot(context);
         false
     } else {
-        app.context = context;
+        app.replace_context_snapshot(context);
         app.reconcile_input_reasoning()
     }
 }

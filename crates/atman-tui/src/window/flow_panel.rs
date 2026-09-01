@@ -709,6 +709,7 @@ mod tests {
         let prompts = HashMap::new();
         let browser = crate::mcp_manager::McpBrowserState {
             tab: crate::mcp_manager::McpBrowserTab::default(),
+            content_revision: 0,
             resources: &resources,
             prompts: &prompts,
         };
