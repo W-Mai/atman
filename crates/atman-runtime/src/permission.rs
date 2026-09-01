@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +14,7 @@ use crate::tools::agent_ctrl::FlowRegistry;
 use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind, TrustConfig};
 
 pub const ANCESTOR_OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RECENT_TERMINAL_REQUEST_LIMIT: usize = 256;
 
 macro_rules! permission_id {
     ($name:ident) => {
@@ -571,11 +572,69 @@ struct SubmissionContext {
 #[derive(Default)]
 struct BrokerState {
     requests: HashMap<PermissionRequestId, RequestEntry>,
+    recent_terminal_requests: VecDeque<PermissionRequest>,
     grants: Vec<PermissionGrant>,
     groups: HashMap<PermissionGroupId, PermissionGroup>,
     resolved_group_audits: BTreeSet<PermissionGroupId>,
     next_audit_bundle: u64,
     pending_audit_bundles: BTreeMap<u64, Vec<crate::permission_audit::PermissionAuditRecord>>,
+}
+
+impl BrokerState {
+    fn request(&self, request_id: &PermissionRequestId) -> Option<&PermissionRequest> {
+        self.requests
+            .get(request_id)
+            .map(|entry| &entry.request)
+            .or_else(|| {
+                self.recent_terminal_requests
+                    .iter()
+                    .find(|request| request.request_id == *request_id)
+            })
+    }
+
+    fn is_recent_terminal(&self, request_id: &PermissionRequestId) -> bool {
+        self.recent_terminal_requests
+            .iter()
+            .any(|request| request.request_id == *request_id)
+    }
+
+    fn remember_terminal(&mut self, request: PermissionRequest) {
+        debug_assert!(request.state.is_terminal());
+        if let Some(position) = self
+            .recent_terminal_requests
+            .iter()
+            .position(|existing| existing.request_id == request.request_id)
+        {
+            self.recent_terminal_requests.remove(position);
+        }
+        if self.recent_terminal_requests.len() == RECENT_TERMINAL_REQUEST_LIMIT {
+            self.recent_terminal_requests.pop_front();
+        }
+        self.recent_terminal_requests.push_back(request);
+    }
+
+    fn archive_terminal(&mut self, request_id: &PermissionRequestId) {
+        let Some(entry) = self.requests.get(request_id) else {
+            return;
+        };
+        if !entry.request.state.is_terminal() {
+            return;
+        }
+        let entry = self
+            .requests
+            .remove(request_id)
+            .expect("terminal request exists");
+        self.remember_terminal(entry.request);
+    }
+
+    fn archive_terminals<'a>(
+        &mut self,
+        request_ids: impl IntoIterator<Item = &'a PermissionRequestId>,
+    ) {
+        for request_id in request_ids {
+            self.archive_terminal(request_id);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -700,7 +759,7 @@ impl PermissionBroker {
 
     fn group_is_resolved(state: &BrokerState, group: &PermissionGroup) -> bool {
         group.request_ids.iter().all(|request_id| {
-            state.requests.get(request_id).is_some_and(|entry| {
+            state.requests.get(request_id).is_none_or(|entry| {
                 !matches!(entry.request.state, PermissionRequestState::Pending { .. })
             })
         })
@@ -742,9 +801,8 @@ impl PermissionBroker {
                 .iter()
                 .find_map(|request_id| {
                     state
-                        .requests
-                        .get(request_id)
-                        .map(|entry| entry.request.session_id.as_str())
+                        .request(request_id)
+                        .map(|request| request.session_id.as_str())
                 })
                 .unwrap_or("unknown");
             let audit =
@@ -1005,14 +1063,7 @@ impl PermissionBroker {
         };
         let audits = submission_audits(&request, immediate.as_ref(), now);
         if let Some(authorization) = immediate {
-            state.requests.insert(
-                request_id,
-                RequestEntry {
-                    request: request.clone(),
-                    responder: None,
-                    target_tx: None,
-                },
-            );
+            state.remember_terminal(request.clone());
             let sequence = Self::enqueue_audit_bundle(&mut state, audits);
             return Ok((
                 SubmissionOutcome::Immediate(Box::new(ImmediateSubmission {
@@ -1095,6 +1146,7 @@ impl PermissionBroker {
             &mut audits,
             decision.decided_at,
         );
+        state.archive_terminal(request_id);
         let sequence = Self::enqueue_audit_bundle(&mut state, audits);
         Ok((outcome, sequence))
     }
@@ -1107,12 +1159,13 @@ impl PermissionBroker {
         action: PermissionAction,
         grant_scope: Option<&GrantScope>,
     ) -> Result<PreparedResolution, PermissionError> {
-        let request = state
-            .requests
-            .get(request_id)
-            .ok_or(PermissionError::RequestNotFound)?
-            .request
-            .clone();
+        let request = match state.requests.get(request_id) {
+            Some(entry) => entry.request.clone(),
+            None if state.is_recent_terminal(request_id) => {
+                return Err(PermissionError::AlreadyResolved);
+            }
+            None => return Err(PermissionError::RequestNotFound),
+        };
         if request.state.is_terminal() {
             return Err(PermissionError::AlreadyResolved);
         }
@@ -1272,12 +1325,13 @@ impl PermissionBroker {
         grant_scope: Option<GrantScope>,
         reason: Option<String>,
     ) -> Result<ResolveOutcome, PermissionError> {
-        let request = state
-            .requests
-            .get(request_id)
-            .ok_or(PermissionError::RequestNotFound)?
-            .request
-            .clone();
+        let request = match state.requests.get(request_id) {
+            Some(entry) => entry.request.clone(),
+            None if state.is_recent_terminal(request_id) => {
+                return Err(PermissionError::AlreadyResolved);
+            }
+            None => return Err(PermissionError::RequestNotFound),
+        };
         if request.state.is_terminal() {
             return Err(PermissionError::AlreadyResolved);
         }
@@ -1296,6 +1350,7 @@ impl PermissionBroker {
                 grant.session_id != request.session_id
                     || grant.requesting_run_id != request.requesting_run_id
             });
+            state.archive_terminal(request_id);
             return Err(PermissionError::ActorNotRunning);
         }
 
@@ -1440,10 +1495,17 @@ impl PermissionBroker {
         component: &str,
         reason: &str,
     ) -> Result<(bool, Vec<crate::permission_audit::PermissionAuditRecord>), PermissionError> {
+        if !state.requests.contains_key(request_id) {
+            return if state.is_recent_terminal(request_id) {
+                Ok((false, Vec::new()))
+            } else {
+                Err(PermissionError::RequestNotFound)
+            };
+        }
         let entry = state
             .requests
             .get_mut(request_id)
-            .ok_or(PermissionError::RequestNotFound)?;
+            .expect("active request exists");
         if !matches!(
             &entry.request.state,
             PermissionRequestState::Pending { target: ApprovalTarget::Flow(run_id) }
@@ -1506,10 +1568,17 @@ impl PermissionBroker {
             let at = Utc::now();
             let request_ids = BTreeSet::from([request_id.clone()]);
             let candidate_groups = Self::unresolved_groups_for_requests(&state, &request_ids);
+            if !state.requests.contains_key(request_id) {
+                return if state.is_recent_terminal(request_id) {
+                    Err(PermissionError::AlreadyResolved)
+                } else {
+                    Err(PermissionError::RequestNotFound)
+                };
+            }
             let entry = state
                 .requests
                 .get_mut(request_id)
-                .ok_or(PermissionError::RequestNotFound)?;
+                .expect("active request exists");
             if entry.request.state.is_terminal() || entry.responder.is_none() {
                 return Err(PermissionError::AlreadyResolved);
             }
@@ -1519,6 +1588,7 @@ impl PermissionBroker {
             let mut audits =
                 vec![crate::permission_audit::PermissionAuditRecord::RequestCancelled(audit)];
             Self::append_resolved_group_audits(&mut state, &candidate_groups, &mut audits, at);
+            state.archive_terminal(request_id);
             Self::enqueue_audit_bundle(&mut state, audits)
         };
         self.dispatch_audit_bundle(sequence);
@@ -1564,6 +1634,7 @@ impl PermissionBroker {
                 .map(crate::permission_audit::PermissionAuditRecord::RequestCancelled)
                 .collect::<Vec<_>>();
             Self::append_resolved_group_audits(&mut state, &candidate_groups, &mut audits, at);
+            state.archive_terminals(&request_ids);
             Self::enqueue_audit_bundle(&mut state, audits)
         };
         self.dispatch_audit_bundle(sequence);
@@ -1676,6 +1747,7 @@ impl PermissionBroker {
             )
         }));
         Self::append_resolved_group_audits(state, &candidate_groups, &mut records, now);
+        state.archive_terminals(&request_ids);
         (cancelled, records)
     }
 
@@ -1744,6 +1816,7 @@ impl PermissionBroker {
                 .collect::<Vec<_>>();
             let expired = audits.len();
             Self::append_resolved_group_audits(&mut state, &candidate_groups, &mut audits, now);
+            state.archive_terminals(&request_ids);
             (expired, Self::enqueue_audit_bundle(&mut state, audits))
         };
         self.dispatch_audit_bundle(sequence);
@@ -1751,12 +1824,7 @@ impl PermissionBroker {
     }
 
     pub fn get(&self, request_id: &PermissionRequestId) -> Option<PermissionRequest> {
-        self.state
-            .lock()
-            .unwrap()
-            .requests
-            .get(request_id)
-            .map(|entry| entry.request.clone())
+        self.state.lock().unwrap().request(request_id).cloned()
     }
 
     pub fn user_list(&self, session_id: &str) -> (Vec<PermissionRequest>, Vec<PermissionGroup>) {
@@ -1923,6 +1991,11 @@ impl PermissionBroker {
                 &mut audits,
                 Utc::now(),
             );
+            let terminal_ids = results
+                .iter()
+                .map(|result| &result.request_id)
+                .collect::<Vec<_>>();
+            state.archive_terminals(terminal_ids);
             Ok((results, Self::enqueue_audit_bundle(&mut state, audits)))
         })?;
         self.dispatch_audit_bundle(sequence);
@@ -1930,13 +2003,12 @@ impl PermissionBroker {
     }
 
     pub fn list(&self) -> Vec<PermissionRequest> {
-        let mut requests: Vec<_> = self
-            .state
-            .lock()
-            .unwrap()
+        let state = self.state.lock().unwrap();
+        let mut requests: Vec<_> = state
             .requests
             .values()
             .map(|entry| entry.request.clone())
+            .chain(state.recent_terminal_requests.iter().cloned())
             .collect();
         requests.sort_by_key(|request| request.requested_at);
         requests
@@ -1995,13 +2067,13 @@ impl PermissionBroker {
         }
         let mut state = self.state.lock().unwrap();
         if request_ids.iter().any(|request_id| {
-            state.requests.get(request_id).is_none_or(|entry| {
-                !(self.visible_to(actor, &entry.request)
-                    || entry.request.state.is_terminal()
-                        && entry.request.session_id == actor.session_id
+            state.request(request_id).is_none_or(|request| {
+                !(self.visible_to(actor, request)
+                    || request.state.is_terminal()
+                        && request.session_id == actor.session_id
                         && self
                             .flows
-                            .is_strict_ancestor(&actor.run_id, &entry.request.requesting_run_id))
+                            .is_strict_ancestor(&actor.run_id, &request.requesting_run_id))
             })
         }) {
             return Err(PermissionError::ActorNotAuthorized);
@@ -2010,9 +2082,8 @@ impl PermissionBroker {
             .iter()
             .filter_map(|id| {
                 state
-                    .requests
-                    .get(id)
-                    .map(|entry| (id.clone(), entry.request.revision))
+                    .request(id)
+                    .map(|request| (id.clone(), request.revision))
             })
             .collect();
         let group = PermissionGroup {
@@ -2268,6 +2339,11 @@ impl PermissionBroker {
                 &mut audits,
                 Utc::now(),
             );
+            let terminal_ids = results
+                .iter()
+                .map(|result| &result.request_id)
+                .collect::<Vec<_>>();
+            state.archive_terminals(terminal_ids);
             let sequence = Self::enqueue_audit_bundle(&mut state, audits);
             Ok((results, sequence))
         })?;
@@ -3431,6 +3507,146 @@ mod tests {
             PermissionRequestState::Cancelled { .. }
         ));
         assert_eq!(broker.list().len(), 4);
+    }
+
+    #[test]
+    fn immediate_terminal_retention_is_bounded() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let policy = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Allow,
+            ..TrustConfig::default()
+        };
+        let mut first_id = None;
+        let mut last_id = None;
+
+        for _ in 0..10_000 {
+            let SubmissionOutcome::Immediate(submission) = broker
+                .submit(
+                    Some(&requester.session_id),
+                    Some(&requester.run_id),
+                    intent(),
+                    false,
+                    &policy,
+                )
+                .unwrap()
+            else {
+                panic!("expected immediate authorization");
+            };
+            first_id.get_or_insert_with(|| submission.request.request_id.clone());
+            last_id = Some(submission.request.request_id.clone());
+        }
+
+        let state = broker.state.lock().unwrap();
+        assert!(state.requests.is_empty());
+        assert_eq!(
+            state.recent_terminal_requests.len(),
+            RECENT_TERMINAL_REQUEST_LIMIT
+        );
+        drop(state);
+        assert_eq!(broker.list().len(), RECENT_TERMINAL_REQUEST_LIMIT);
+        let first_id = first_id.unwrap();
+        assert!(broker.get(&first_id).is_none());
+        assert!(matches!(
+            broker.cancel(&first_id, "already evicted"),
+            Err(PermissionError::RequestNotFound)
+        ));
+        assert!(matches!(
+            broker.get(&last_id.unwrap()).map(|request| request.state),
+            Some(PermissionRequestState::Approved { .. })
+        ));
+    }
+
+    #[test]
+    fn resolved_terminal_retention_is_bounded() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let authority = user_decision(&broker, "session");
+        let mut first_id = None;
+        let mut last_id = None;
+
+        for _ in 0..10_000 {
+            let pending = submit_to_user(&broker, &requester);
+            let request_id = pending.request.request_id.clone();
+            first_id.get_or_insert_with(|| request_id.clone());
+            broker
+                .resolve(
+                    &request_id,
+                    &authority,
+                    PermissionAction::Approve,
+                    Some(GrantScope::CurrentCall),
+                    None,
+                )
+                .unwrap();
+            last_id = Some(request_id);
+        }
+
+        let state = broker.state.lock().unwrap();
+        assert!(state.requests.is_empty());
+        assert_eq!(
+            state.recent_terminal_requests.len(),
+            RECENT_TERMINAL_REQUEST_LIMIT
+        );
+        drop(state);
+        assert_eq!(broker.list().len(), RECENT_TERMINAL_REQUEST_LIMIT);
+        let first_id = first_id.unwrap();
+        assert!(broker.get(&first_id).is_none());
+        assert!(matches!(
+            broker.resolve(
+                &first_id,
+                &authority,
+                PermissionAction::Approve,
+                Some(GrantScope::CurrentCall),
+                None,
+            ),
+            Err(PermissionError::RequestNotFound)
+        ));
+        assert!(matches!(
+            broker.get(&last_id.unwrap()).map(|request| request.state),
+            Some(PermissionRequestState::Approved { .. })
+        ));
+    }
+
+    #[test]
+    fn recent_terminal_requests_keep_resolved_operation_semantics() {
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_to_user(&broker, &requester);
+        let request_id = pending.request.request_id.clone();
+        let authority = user_decision(&broker, "session");
+        broker
+            .resolve(
+                &request_id,
+                &authority,
+                PermissionAction::Approve,
+                Some(GrantScope::CurrentCall),
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            broker.resolve(
+                &request_id,
+                &authority,
+                PermissionAction::Approve,
+                Some(GrantScope::CurrentCall),
+                None,
+            ),
+            Err(PermissionError::AlreadyResolved)
+        ));
+        assert!(matches!(
+            broker.cancel(&request_id, "already resolved"),
+            Err(PermissionError::AlreadyResolved)
+        ));
+        assert!(
+            !broker
+                .defer_timed_out_target(&request_id, &requester.run_id)
+                .unwrap()
+        );
     }
 
     #[test]

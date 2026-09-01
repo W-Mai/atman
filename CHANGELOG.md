@@ -42,6 +42,7 @@ All notable changes to atman are documented in this file.
 ### 🐛 Fixes
 
 - **Canonical permission lifecycle** — new requests persist their initial target once, genuine retargets remain explicit, and broker-backed outcomes no longer duplicate legacy tool approval records while existing session logs remain replay-compatible.
+- **Bounded permission coordination** — the broker retains complete state only for unresolved requests plus a 256-entry terminal diagnostic window, while durable permission history remains in session events.
 - **Bounded session discovery** — event, message, and user-message counts are maintained in validated per-session metadata; legacy sessions receive one streaming backfill, while the TUI picker, CLI listings, and daemon discovery no longer read complete event logs for every candidate.
 - **Windowed secondary panels** — History ordering follows task revisions, visible rows use bounded overscan and indexed output summaries, Flow panels cache by local content and interaction revisions, covered panels skip projection, and floating-panel scroll positions remain correct beyond 65,535 rows.
 - **Linear replay transforms** — Flow ownership uses adjacency traversal, message replacement uses sequence indexes, transcript compaction preserves interleaved workflow and child-flow entries, terminal final states use handle indexes, and restored tool outputs are deduplicated in one pass.

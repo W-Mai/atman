@@ -310,9 +310,11 @@ pub async fn request_approval_with_additional_risks(
             tokio::select! {
                 changed = pending.target_changes.changed() => {
                     if changed.is_err() {
-                        return ApprovalOutcome::Deny {
-                            reason: format!("{name}: permission target transport closed"),
-                        };
+                        // Terminal archival closes the target watch after settling the
+                        // authoritative one-shot, so consume that resolution instead of
+                        // racing the two channels into a false denial.
+                        broker_resolution = Some((&mut pending.resolution).await);
+                        break;
                     }
                 }
                 brokered = &mut pending.resolution => {

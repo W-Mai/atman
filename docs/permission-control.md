@@ -187,6 +187,8 @@ Records produced by one broker operation are emitted only after the operation co
 
 New invocations write the canonical permission lifecycle only. Legacy tool approval and denial records remain replay-compatible for existing session logs.
 
+The broker keeps complete state only for unresolved coordination work and retains the 256 most recent terminal requests for short-lived diagnostics. The persisted event log remains the durable complete history; a terminal request returns `RequestNotFound` from direct broker lookup after it leaves the recent window.
+
 ## Configuration reference
 
 A complete Eager configuration can look like this:
