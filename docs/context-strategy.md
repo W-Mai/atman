@@ -229,7 +229,7 @@ The default agent currently follows this sequence:
 8. When no tools are requested, check the current flow's pending interjections, classify structured task/transcript/response evidence as complete, awaiting user input, missing an intended action, or incomplete work, then continue or terminate accordingly.
 9. Before the root flow terminates, wait for an active watcher event, append a fired event to session history, and continue the loop.
 
-The managed `.at` files own these continuation and termination decisions. The shared classification contract is loaded from the managed `prompts/loop-disposition.md`, while the runtime supplies message, watcher, and pending-input primitives without deciding whether an agent loop is finished.
+The managed `.at` files own these continuation and termination decisions. The shared classification contract and continuation nudge are loaded from the managed `prompts/loop-disposition.md` and `prompts/loop-continuation.md`, while the runtime supplies message, watcher, and pending-input primitives without deciding whether an agent loop is finished.
 
 This is retrieval before the main loop plus full active-session context inside the loop. It is not a fixed ten-message sliding window and not automatic semantic recall.
 

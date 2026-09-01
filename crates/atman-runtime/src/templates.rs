@@ -187,6 +187,8 @@ Choose the category supported by the candidate response and transcript, not by i
 Evidence JSON:
 "#;
 
+pub const LOOP_CONTINUATION_MD: &str = r#"Agent loop control (not a new user request): the previous response did not establish that the current request is resolved. Re-read the current request and transcript. Continue only with the next concrete action or missing evidence needed to resolve that request; do not infer that the wider project or repository is unfinished. If no autonomous action remains, give the result clearly. Ask for user input only when progress genuinely depends on unavailable information or authority."#;
+
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
@@ -286,7 +288,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 continue
             }
             when disposition == "continue_work" {
-                session.push(message.user("The task isn't complete yet. Continue working toward a resolution — if you're genuinely blocked and need input, ask clearly."))
+                session.push(message.user(@"../prompts/loop-continuation.md"))
                 continue
             }
             when has_pending_injections() {
@@ -383,7 +385,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 continue
             }
             when disposition == "continue_work" {
-                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
+                session.push(message.user(@"../prompts/loop-continuation.md"))
                 continue
             }
             when has_pending_injections() {
@@ -449,7 +451,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 continue
             }
             when disposition == "continue_work" {
-                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
+                session.push(message.user(@"../prompts/loop-continuation.md"))
                 continue
             }
             when has_pending_injections() {
@@ -515,7 +517,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 continue
             }
             when disposition == "continue_work" {
-                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
+                session.push(message.user(@"../prompts/loop-continuation.md"))
                 continue
             }
             when has_pending_injections() {
@@ -576,7 +578,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 continue
             }
             when disposition == "continue_work" {
-                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
+                session.push(message.user(@"../prompts/loop-continuation.md"))
                 continue
             }
             when has_pending_injections() {
@@ -611,6 +613,9 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     let loop_disposition_md = prompts_dir.join("loop-disposition.md");
     std::fs::write(&loop_disposition_md, LOOP_DISPOSITION_MD)
         .with_context(|| format!("write {}", loop_disposition_md.display()))?;
+    let loop_continuation_md = prompts_dir.join("loop-continuation.md");
+    std::fs::write(&loop_continuation_md, LOOP_CONTINUATION_MD)
+        .with_context(|| format!("write {}", loop_continuation_md.display()))?;
 
     let prompt_files = [
         ("role-research.md", ROLE_RESEARCH_MD),
@@ -651,6 +656,12 @@ mod tests {
             1
         );
         assert!(!AGENT_AT.contains("disposition_prompt ="));
+        assert_eq!(
+            AGENT_AT
+                .matches("@\"../prompts/loop-continuation.md\"")
+                .count(),
+            1
+        );
         assert_eq!(AGENT_AT.matches("when has_pending_injections()").count(), 3);
         assert_eq!(
             AGENT_AT
@@ -729,6 +740,12 @@ mod tests {
         );
         assert!(!SUBAGENT_AT.contains("disposition_prompt ="));
         assert_eq!(
+            SUBAGENT_AT
+                .matches("@\"../prompts/loop-continuation.md\"")
+                .count(),
+            4
+        );
+        assert_eq!(
             SUBAGENT_AT.matches("when has_pending_injections()").count(),
             8
         );
@@ -767,21 +784,38 @@ mod tests {
     }
 
     #[test]
-    fn managed_loop_disposition_prompt_refreshes_without_overwriting_role_prompts() {
+    fn managed_loop_prompts_refresh_without_overwriting_role_prompts() {
         let dir = tempfile::tempdir().unwrap();
         ensure_managed_agent_at(dir.path()).unwrap();
-        let loop_prompt = dir.path().join("prompts/loop-disposition.md");
+        let disposition_prompt = dir.path().join("prompts/loop-disposition.md");
+        let continuation_prompt = dir.path().join("prompts/loop-continuation.md");
         let role_prompt = dir.path().join("prompts/role-research.md");
-        std::fs::write(&loop_prompt, "stale").unwrap();
+        std::fs::write(&disposition_prompt, "stale").unwrap();
+        std::fs::write(&continuation_prompt, "stale").unwrap();
         std::fs::write(&role_prompt, "custom role").unwrap();
 
         ensure_managed_agent_at(dir.path()).unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(loop_prompt).unwrap(),
+            std::fs::read_to_string(disposition_prompt).unwrap(),
             LOOP_DISPOSITION_MD
         );
+        assert_eq!(
+            std::fs::read_to_string(continuation_prompt).unwrap(),
+            LOOP_CONTINUATION_MD
+        );
         assert_eq!(std::fs::read_to_string(role_prompt).unwrap(), "custom role");
+    }
+
+    #[test]
+    fn loop_continuation_nudge_is_scoped_to_the_current_request() {
+        assert!(LOOP_CONTINUATION_MD.contains("not a new user request"));
+        assert!(LOOP_CONTINUATION_MD.contains("current request"));
+        assert!(
+            LOOP_CONTINUATION_MD
+                .contains("do not infer that the wider project or repository is unfinished")
+        );
+        assert!(!LOOP_CONTINUATION_MD.contains("task"));
     }
 
     #[test]
