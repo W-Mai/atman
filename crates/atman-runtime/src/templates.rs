@@ -348,6 +348,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         }
         reply = llm.call(
             model: model,
+            effort: env("effort"),
             context: "session",
             system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-research.md",
             cache: true,
@@ -404,6 +405,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         }
         reply = llm.call(
             model: model,
+            effort: env("effort"),
             context: "session",
             system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-verify.md",
             cache: true,
@@ -462,6 +464,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         }
         reply = llm.call(
             model: model,
+            effort: env("effort"),
             context: "session",
             system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-implement.md",
             cache: true,
@@ -520,6 +523,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         }
         reply = llm.call(
             model: model,
+            effort: env("effort"),
             context: "session",
             system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-review.md",
             cache: true,
@@ -648,6 +652,8 @@ mod tests {
     #[test]
     fn subagent_at_parses() {
         let file = parse_file(SUBAGENT_AT).expect("SUBAGENT_AT must parse");
+        assert_eq!(SUBAGENT_AT.matches("reply = llm.call(").count(), 4);
+        assert_eq!(SUBAGENT_AT.matches("effort: env(\"effort\")").count(), 4);
         let subagent = file
             .flows
             .iter()

@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Spawned-flow reasoning** — managed sub-agent LLM calls explicitly consume the inherited invocation effort, keeping root and child requests on the same selected reasoning depth while auxiliary classifiers remain independent.
 - **Empty LLM responses** — provider responses with no assistant message parts are recorded as errors, retried through the configured LLM policy, and never appended to root or spawned-flow history.
 - **Sub-agent discovery** — ranked keyword search handles natural-language flow queries, `flow.describe` accepts the same installed file shorthand as `flow.spawn`, and managed instructions use the bounded discovery contract exposed to the model.
 - **Cached Mermaid panel projection** — floating diagrams reuse revision-keyed renders, split and diagram views materialize only visible rows, source line numbers remain aligned past 999, and private two-axis offsets avoid truncation beyond 65,535 without changing the window scroll API.
