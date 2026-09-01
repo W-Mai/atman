@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Managed loop continuity** — managed agent and sub-agent flows check their own pending interjections before termination, classify no-tool responses from structured untrusted evidence, and keep root watcher events in the loop; the runtime only exposes the current flow's pending-input state.
 - **Spawned-flow reasoning** — managed sub-agent LLM calls explicitly consume the inherited invocation effort, keeping root and child requests on the same selected reasoning depth while auxiliary classifiers remain independent.
 - **Empty LLM responses** — provider responses with no assistant message parts are recorded as errors, retried through the configured LLM policy, and never appended to root or spawned-flow history.
 - **Sub-agent discovery** — ranked keyword search handles natural-language flow queries, `flow.describe` accepts the same installed file shorthand as `flow.spawn`, and managed instructions use the bounded discovery contract exposed to the model.

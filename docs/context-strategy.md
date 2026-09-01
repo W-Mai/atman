@@ -99,14 +99,9 @@ The flow chooses one message source:
 | `context: "session_recent(n)"` | The latest live records followed by the last `n` non-record messages from the current session window. |
 | `prompt: "..."` | The latest live runtime records followed by one user message, with no conversational history. This is also the default when `context:` is omitted. |
 
-The managed `commands/agent.at` uses `context: "session"`. It does **not** feed
-`memory.recent_turns` to the main model as a fixed sliding window.
+The managed `commands/agent.at` uses `context: "session"`. It does **not** feed `memory.recent_turns` to the main model as a fixed sliding window.
 
-At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_chars: 12000)`
-provides a bounded excerpt to the cheap rule/confession selector. The same bounded
-view is used later by the stall classifier. Its lossless `items` remain available to
-explicit callers, and these helper calls do not define the main model's session
-context.
+At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_chars: 12000)` provides a bounded excerpt to the cheap rule/confession selector. The same bounded view is used later by the loop-disposition classifier. Its lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context.
 
 ## Session history and active window
 
@@ -231,10 +226,12 @@ The default agent currently follows this sequence:
 5. Load the stable managed system prompt from `prompts/system.md`.
 6. Enter a `loop` whose main call uses `context: "session"` and the managed system prompt.
 7. Dispatch tool calls and push their results into session history.
-8. When no tools are requested, classify whether the agent is done, blocked, lazy, or forgot tools; continue or break accordingly.
+8. When no tools are requested, check the current flow's pending interjections, classify structured task/transcript/response evidence as complete, awaiting user input, missing an intended action, or incomplete work, then continue or terminate accordingly.
+9. Before the root flow terminates, wait for an active watcher event, append a fired event to session history, and continue the loop.
 
-This is retrieval before the main loop plus full active-session context inside the
-loop. It is not a fixed ten-message sliding window and not automatic semantic recall.
+The managed `.at` files own these continuation and termination decisions. The runtime supplies message, watcher, and pending-input primitives without deciding whether an agent loop is finished.
+
+This is retrieval before the main loop plus full active-session context inside the loop. It is not a fixed ten-message sliding window and not automatic semantic recall.
 
 ## Choosing a strategy
 
