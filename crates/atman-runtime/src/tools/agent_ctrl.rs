@@ -627,7 +627,7 @@ impl Tool for AgentSpawn {
             "type": "object",
             "properties": {
                 "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
-                "version": {"type": "string", "description": "Optional source fingerprint returned by flow.search or flow.describe."},
+                "version": {"type": "string", "minLength": 1, "description": "Staleness guard. Pass the non-empty source fingerprint returned by the current flow.search or flow.describe result verbatim. Omit this field when no fingerprint is available; never send an empty or invented value."},
                 "arguments": {
                     "type": "object",
                     "additionalProperties": true,
@@ -1720,6 +1720,7 @@ fn extract_flow(args: &ToolArgs) -> Result<Option<String>, RuntimeError> {
 fn extract_flow_version(args: &ToolArgs) -> Result<Option<String>, RuntimeError> {
     match args.named("version") {
         Some(Value::Str(version)) if !version.trim().is_empty() => Ok(Some(version.clone())),
+        Some(Value::Str(_)) => Ok(None),
         Some(Value::Unit) | None => Ok(None),
         Some(other) => Err(RuntimeError::TypeMismatch {
             expected: "version string".into(),
@@ -1820,8 +1821,8 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSpawn, FlowRegistry, FlowRunStatus, inherited_context_snapshot, prepare_flow_agent,
-        resolve_flow_arguments, terminal_then_emit,
+        AgentSpawn, FlowRegistry, FlowRunStatus, extract_flow_version, inherited_context_snapshot,
+        prepare_flow_agent, resolve_flow_arguments, terminal_then_emit,
     };
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use crate::permission::PermissionBroker;
@@ -1834,6 +1835,17 @@ mod tests {
     struct SandboxProbe;
 
     struct SessionTextProbe;
+
+    #[test]
+    fn empty_spawn_version_is_treated_as_omitted() {
+        for value in ["", " ", "\t\n"] {
+            let args = ToolArgs {
+                named: vec![("version".into(), Value::Str(value.into()))],
+                ..Default::default()
+            };
+            assert_eq!(extract_flow_version(&args).unwrap(), None);
+        }
+    }
 
     #[tokio::test]
     async fn prepared_flow_rejects_a_stale_discovery_version() {

@@ -177,7 +177,7 @@ impl Tool for FlowSearch {
             "properties": {
                 "query": {"type": "string", "description": "Case-insensitive keywords ranked across flow name, ref, and summary. Empty string lists the first page."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "default": DEFAULT_SEARCH_LIMIT},
-                "cursor": {"type": "string", "description": "Opaque cursor returned by the previous page."}
+                "cursor": {"type": "string", "minLength": 1, "description": "Pagination only. Omit this field for the first page. For a later page, pass the non-empty next_cursor returned by the immediately preceding flow.search call verbatim; never send an empty or invented value."}
             },
             "required": ["query"],
             "additionalProperties": false
@@ -216,7 +216,7 @@ impl Tool for FlowDescribe {
             "type": "object",
             "properties": {
                 "ref": {"type": "string", "description": "Exact flow ref returned by flow.search, or installed flow file such as subagent.at."},
-                "version": {"type": "string", "description": "Optional source fingerprint returned by flow.search."}
+                "version": {"type": "string", "minLength": 1, "description": "Staleness guard. Pass the non-empty source fingerprint returned by the current flow.search result verbatim. Omit this field when no fingerprint is available; never send an empty or invented value."}
             },
             "required": ["ref"],
             "additionalProperties": false
@@ -497,6 +497,7 @@ fn optional_string_arg(
     tool: &str,
 ) -> Result<Option<String>, RuntimeError> {
     match args.named(name) {
+        Some(Value::Str(value)) if value.trim().is_empty() => Ok(None),
         Some(Value::Str(value)) => Ok(Some(value.clone())),
         Some(Value::Unit) | None => Ok(None),
         Some(other) => Err(RuntimeError::ToolFailed(format!(
@@ -569,6 +570,29 @@ mod tests {
             Some(Value::Str(cursor)) => Some(cursor),
             _ => None,
         }
+    }
+
+    #[test]
+    fn optional_discovery_values_treat_blank_strings_as_omitted() {
+        for value in ["", " ", "\t\n"] {
+            let args = ToolArgs {
+                named: vec![("value".into(), Value::Str(value.into()))],
+                ..Default::default()
+            };
+            assert_eq!(
+                optional_string_arg(&args, "value", "flow.test").unwrap(),
+                None
+            );
+        }
+
+        let args = ToolArgs {
+            named: vec![("value".into(), Value::Str("blake3:123".into()))],
+            ..Default::default()
+        };
+        assert_eq!(
+            optional_string_arg(&args, "value", "flow.test").unwrap(),
+            Some("blake3:123".into())
+        );
     }
 
     #[test]
