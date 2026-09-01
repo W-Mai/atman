@@ -449,4 +449,55 @@ mod tests {
         assert!(content.secondary_scroll > u16::MAX as u32);
         assert_eq!(*ctx.h_scroll, 0);
     }
+
+    #[test]
+    #[ignore = "large release-mode Mermaid projection baseline"]
+    fn baseline_large_mermaid_projection_rebuild_and_stable_frames() {
+        const STABLE_FRAMES: u32 = 1_000;
+        const REBUILD_FRAMES: u32 = 16;
+
+        let source = flowchart(500);
+        let revision = crate::app::OutputRevision {
+            id: 1,
+            source_generation: 1,
+            ..Default::default()
+        };
+        let mut projection = MermaidPanelProjection::default();
+
+        let started = std::time::Instant::now();
+        projection.update(revision, std::hint::black_box(&source), 100);
+        let cold = started.elapsed();
+        assert!(projection.diagram_rows() > 500);
+
+        let started = std::time::Instant::now();
+        for _ in 0..STABLE_FRAMES {
+            projection.update(revision, std::hint::black_box(&source), 100);
+            std::hint::black_box(projection.visible_diagram(200, 40, 7, 100));
+            std::hint::black_box(projection.source_lines.visible_lines(&source, 200, 40));
+        }
+        let stable = started.elapsed();
+
+        let started = std::time::Instant::now();
+        for generation in 2..REBUILD_FRAMES + 2 {
+            projection.update(
+                crate::app::OutputRevision {
+                    source_generation: u64::from(generation),
+                    ..revision
+                },
+                std::hint::black_box(&source),
+                100,
+            );
+            std::hint::black_box(projection.visible_diagram(200, 40, 7, 100));
+        }
+        let rebuild = started.elapsed();
+
+        assert_eq!(projection.rebuild_count, u64::from(REBUILD_FRAMES) + 1);
+        eprintln!(
+            "Mermaid projection baseline: nodes=500 rows={} cold_ms={:.3} stable_us_per_frame={:.3} rebuild_ms_per_frame={:.3}",
+            projection.diagram_rows(),
+            cold.as_secs_f64() * 1_000.0,
+            stable.as_secs_f64() * 1_000_000.0 / f64::from(STABLE_FRAMES),
+            rebuild.as_secs_f64() * 1_000.0 / f64::from(REBUILD_FRAMES),
+        );
+    }
 }

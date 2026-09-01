@@ -916,4 +916,78 @@ mod tests {
         assert_eq!(clamp_scroll(u32::MAX, 70_000, 20), 69_980);
         assert!(clamp_scroll(u32::MAX, 70_000, 20) > u16::MAX as u32);
     }
+
+    #[test]
+    #[ignore = "large release-mode MCP projection baseline"]
+    fn baseline_large_mcp_projection_rebuild_and_stable_frames() {
+        const STABLE_FRAMES: u32 = 1_000;
+        const REBUILD_FRAMES: u32 = 16;
+
+        let servers = (0..8)
+            .map(|server| {
+                connected_server(
+                    &format!("server-{server}"),
+                    (0..250)
+                        .map(|tool| McpToolInfo {
+                            name: format!("tool-{server}-{tool}"),
+                            description: Some(format!(
+                                "Inspect projected data for server {server}, tool {tool}, with enough text to exercise wrapping"
+                            )),
+                        })
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expanded = (0..8)
+            .map(|server| format!("server-{server}"))
+            .collect::<HashSet<_>>();
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let browser = McpBrowserState {
+            tab: McpBrowserTab::Tools,
+            content_revision: 1,
+            resources: &resources,
+            prompts: &prompts,
+        };
+        let mut projection = McpPanelProjection::default();
+
+        let started = std::time::Instant::now();
+        projection.update(100, &servers, &expanded, &browser);
+        let cold = started.elapsed();
+        assert!(projection.total_rows() > 2_000);
+
+        let started = std::time::Instant::now();
+        for _ in 0..STABLE_FRAMES {
+            std::hint::black_box(&mut projection).update(
+                100,
+                std::hint::black_box(&servers),
+                &expanded,
+                &browser,
+            );
+        }
+        let stable = started.elapsed();
+
+        let started = std::time::Instant::now();
+        for content_revision in 2..REBUILD_FRAMES + 2 {
+            projection.update(
+                100,
+                std::hint::black_box(&servers),
+                &expanded,
+                &McpBrowserState {
+                    content_revision: u64::from(content_revision),
+                    ..browser
+                },
+            );
+        }
+        let rebuild = started.elapsed();
+
+        assert_eq!(projection.rebuild_count, u64::from(REBUILD_FRAMES) + 1);
+        eprintln!(
+            "MCP projection baseline: servers=8 tools=2000 rows={} cold_ms={:.3} stable_us_per_frame={:.3} rebuild_ms_per_frame={:.3}",
+            projection.total_rows(),
+            cold.as_secs_f64() * 1_000.0,
+            stable.as_secs_f64() * 1_000_000.0 / f64::from(STABLE_FRAMES),
+            rebuild.as_secs_f64() * 1_000.0 / f64::from(REBUILD_FRAMES),
+        );
+    }
 }
