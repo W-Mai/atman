@@ -660,9 +660,22 @@ impl Tool for HasPendingInjections {
     }
     fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let session = ctx.session_runtime.as_ref().ok_or_else(|| {
-                RuntimeError::ToolFailed("has_pending_injections: no session".into())
-            })?;
+            if ctx
+                .agent_entry
+                .as_ref()
+                .is_some_and(|entry| !entry.pending_injections.lock().unwrap().is_empty())
+            {
+                return Ok(Value::Bool(true));
+            }
+            let Some(session) = ctx.session_runtime.as_ref() else {
+                return if ctx.agent_entry.is_some() {
+                    Ok(Value::Bool(false))
+                } else {
+                    Err(RuntimeError::ToolFailed(
+                        "has_pending_injections: no current flow".into(),
+                    ))
+                };
+            };
             let turn_id = ctx.turn_id.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("has_pending_injections: no turn id".into())
             })?;
@@ -677,6 +690,57 @@ impl Tool for HasPendingInjections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pending_injection_check_uses_the_current_flow_store() {
+        let session = Arc::new(crate::session::Session::open_ephemeral());
+        let turn_id = crate::event::TurnId::now();
+        session.begin_turn(crate::message::Message::user_text(turn_id.clone(), "root"));
+        session.enqueue_injection("root correction").unwrap();
+        let root_ctx = ToolCtx::new()
+            .with_anchors(Some(turn_id), None, None)
+            .with_session_runtime(session);
+        assert!(matches!(
+            HasPendingInjections
+                .call(ToolArgs::default(), &root_ctx)
+                .await
+                .unwrap(),
+            Value::Bool(true)
+        ));
+
+        let registry = crate::tools::agent_ctrl::FlowRegistry::new();
+        let entry = registry.create_entry(
+            "child".into(),
+            "goal".into(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+        );
+        let child_ctx = ToolCtx::new().with_agent_entry(Arc::clone(&entry));
+        assert!(matches!(
+            HasPendingInjections
+                .call(ToolArgs::default(), &child_ctx)
+                .await
+                .unwrap(),
+            Value::Bool(false)
+        ));
+        entry
+            .pending_injections
+            .lock()
+            .unwrap()
+            .push(crate::injection::Injection::with_level(
+                crate::event::TurnId::now(),
+                "child correction",
+                crate::injection::InjectionLevel::L1Nudge,
+                None,
+            ));
+        assert!(matches!(
+            HasPendingInjections
+                .call(ToolArgs::default(), &child_ctx)
+                .await
+                .unwrap(),
+            Value::Bool(true)
+        ));
+    }
 
     #[test]
     fn watch_hub_register_and_unregister() {
