@@ -895,14 +895,6 @@ impl AppState {
         None
     }
 
-    pub fn mermaid_item_source(&self, idx: usize) -> Option<String> {
-        let item = self.items.get(idx)?;
-        if let crate::app::OutputItem::MermaidDiagram { source } = item {
-            return Some(source.clone());
-        }
-        None
-    }
-
     pub fn maximized_canvas(&self) -> ratatui::layout::Rect {
         let full = self.last_full_rect.unwrap_or_default();
         let transcript = self.last_transcript_rect.unwrap_or(full);

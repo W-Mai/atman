@@ -774,6 +774,17 @@ impl WindowManager {
         let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
             return (false, Vec::new());
         };
+        if let Some(content) = panel.content.as_mut() {
+            let mut ctx = EventCtx {
+                scroll: &mut panel.scroll,
+                h_scroll: &mut panel.h_scroll,
+            };
+            if let WmEventResult::Consumed(commands) =
+                content.handle_event(&WmEvent::Mouse(*event), &mut ctx)
+            {
+                return (true, commands);
+            }
+        }
         match event.kind {
             MouseEventKind::ScrollUp => panel.scroll = panel.scroll.saturating_sub(3),
             MouseEventKind::ScrollDown => panel.scroll = panel.scroll.saturating_add(3),
@@ -1082,6 +1093,8 @@ mod tests {
 
     struct CountingContent(Arc<AtomicUsize>);
 
+    struct MouseConsumingContent(Arc<AtomicUsize>);
+
     impl WindowComponent for CountingContent {
         fn render_content(
             &mut self,
@@ -1095,6 +1108,36 @@ mod tests {
 
         fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
             WmEventResult::Ignored
+        }
+
+        fn preferred_size(&self, _viewport: Rect) -> SizeHint {
+            SizeHint::default()
+        }
+    }
+
+    impl WindowComponent for MouseConsumingContent {
+        fn render_content(
+            &mut self,
+            _area: Rect,
+            _frame: &mut Frame,
+            _ctx: &RenderCtx,
+        ) -> Vec<HitRegion> {
+            Vec::new()
+        }
+
+        fn handle_event(&mut self, event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
+            if matches!(
+                event,
+                WmEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollRight,
+                    ..
+                })
+            ) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                WmEventResult::Consumed(Vec::new())
+            } else {
+                WmEventResult::Ignored
+            }
         }
 
         fn preferred_size(&self, _viewport: Rect) -> SizeHint {
@@ -1623,6 +1666,34 @@ mod tests {
         assert_eq!(wm.top_kind(), Some(ModalKind::ProviderManager));
         assert_eq!(app.toasts.len(), 1);
         assert_eq!(app.toasts[0].level, crate::app::NoteLevel::Error);
+    }
+
+    #[test]
+    fn component_can_consume_mouse_scroll_before_shell_fallback() {
+        let mut wm = WindowManager::default();
+        let id = wm.open(
+            "mouse",
+            ContentKey::Task("mouse".into()),
+            task_content("mouse"),
+            "mouse",
+            canvas(),
+        );
+        let consumed_count = Arc::new(AtomicUsize::new(0));
+        let panel = wm.panels.iter_mut().find(|panel| panel.id == id).unwrap();
+        panel.content = Some(Box::new(MouseConsumingContent(consumed_count.clone())));
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollRight,
+            column: panel.rect.x.saturating_add(3),
+            row: panel.rect.y.saturating_add(3),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let mut app = crate::app::AppState::new("session".into(), None);
+        let (consumed, commands) = wm.dispatch_mouse(&event, &mut app, None);
+
+        assert!(consumed);
+        assert!(commands.is_empty());
+        assert_eq!(consumed_count.load(Ordering::Relaxed), 1);
+        assert_eq!(wm.panels[0].h_scroll, 0);
     }
 
     #[test]

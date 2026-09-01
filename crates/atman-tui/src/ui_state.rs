@@ -64,15 +64,19 @@ impl UiState {
 
     pub fn open_mermaid_panel(&mut self, item_idx: usize, canvas: ratatui::layout::Rect) {
         let id = format!("mermaid:{item_idx}");
-        let source = self.app.mermaid_item_source(item_idx).unwrap_or_default();
-        let lines = crate::mermaid::render_mermaid(&source, canvas.width.saturating_sub(8));
-        let pw = lines
+        let source = match self.app.items.get(item_idx) {
+            Some(crate::app::OutputItem::MermaidDiagram { source }) => source.as_str(),
+            _ => "",
+        };
+        let lines = crate::mermaid::render_mermaid(source, canvas.width.saturating_sub(8));
+        let preferred_width = lines
             .iter()
             .map(|l| crate::width::spans_width(&l.spans))
             .max()
             .unwrap_or(80)
-            .max(80) as u16;
-        let ph = lines.len() as u16 + 5;
+            .max(80);
+        let preferred_width = u16::try_from(preferred_width).unwrap_or(u16::MAX);
+        let preferred_height = u16::try_from(lines.len().saturating_add(5)).unwrap_or(u16::MAX);
         self.wm.open_with_size(
             &id,
             crate::wm::ContentKey::Mermaid(id.clone()),
@@ -82,8 +86,8 @@ impl UiState {
             },
             "Mermaid Diagram",
             canvas,
-            pw,
-            ph,
+            preferred_width,
+            preferred_height,
             false,
         );
         if let Some(p) = self
@@ -93,12 +97,7 @@ impl UiState {
             .find(|p| p.content_key == crate::wm::ContentKey::Mermaid(id.clone()))
         {
             p.content = Some(Box::new(
-                crate::window::mermaid_panel::MermaidPanelContent {
-                    item_id: id.clone(),
-                    scroll: 0,
-                    h_scroll: 0,
-                    split: false,
-                },
+                crate::window::mermaid_panel::MermaidPanelContent::new(id.clone()),
             ));
         }
     }
