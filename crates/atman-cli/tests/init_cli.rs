@@ -58,10 +58,14 @@ fn init_is_idempotent_and_never_overwrites_user_edits() {
     let (out, _err, code) = run_init(&cfg);
     assert_eq!(code, 0);
     assert!(
+        out.contains("wrote 1 template"),
+        "want managed refresh: {out}"
+    );
+    assert!(!out.contains("already fully populated"));
+    assert!(
         out.contains("managed by atman"),
         "want managed-agent-at warning: {out}"
     );
-    // agent.at is overwritten even on second init → written > 0
     let hello_body = std::fs::read_to_string(&hello).unwrap();
     assert!(
         hello_body.contains("customised"),
@@ -72,6 +76,19 @@ fn init_is_idempotent_and_never_overwrites_user_edits() {
         agent_body.contains("flow agent(user_prompt: string) -> string"),
         "managed agent.at must be restored: {agent_body}"
     );
+}
+
+#[test]
+fn unchanged_init_reports_no_template_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("atman");
+    run_init(&cfg);
+
+    let (out, err, code) = run_init(&cfg);
+
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(out.contains("already fully populated"), "output: {out}");
+    assert!(!out.contains("wrote "), "output: {out}");
 }
 
 #[test]

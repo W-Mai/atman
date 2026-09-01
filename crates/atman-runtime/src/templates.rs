@@ -595,32 +595,69 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
 }
 "#;
 
+pub fn write_managed_template(path: &Path, contents: &str) -> Result<bool> {
+    match std::fs::read(path) {
+        Ok(existing) if existing == contents.as_bytes() => return Ok(false),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", path.display()));
+        }
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("template");
+    let temporary = parent.join(format!(".{filename}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        if let Some(permissions) = permissions {
+            std::fs::set_permissions(&temporary, permissions)?;
+        }
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
 pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     let commands_dir = config_dir.join("commands");
     std::fs::create_dir_all(&commands_dir)
         .with_context(|| format!("mkdir {}", commands_dir.display()))?;
-    let agent_path = commands_dir.join("agent.at");
-    std::fs::write(&agent_path, AGENT_AT)
-        .with_context(|| format!("write {}", agent_path.display()))?;
-    let subagent_path = commands_dir.join("subagent.at");
-    std::fs::write(&subagent_path, SUBAGENT_AT)
-        .with_context(|| format!("write {}", subagent_path.display()))?;
-
     let prompts_dir = config_dir.join("prompts");
     std::fs::create_dir_all(&prompts_dir)
         .with_context(|| format!("mkdir {}", prompts_dir.display()))?;
-    let system_md = prompts_dir.join("system.md");
-    std::fs::write(&system_md, SYSTEM_MD)
-        .with_context(|| format!("write {}", system_md.display()))?;
-    let loop_disposition_md = prompts_dir.join("loop-disposition.md");
-    std::fs::write(&loop_disposition_md, LOOP_DISPOSITION_MD)
-        .with_context(|| format!("write {}", loop_disposition_md.display()))?;
-    let loop_continuation_md = prompts_dir.join("loop-continuation.md");
-    std::fs::write(&loop_continuation_md, LOOP_CONTINUATION_MD)
-        .with_context(|| format!("write {}", loop_continuation_md.display()))?;
-    let loop_action_md = prompts_dir.join("loop-action.md");
-    std::fs::write(&loop_action_md, LOOP_ACTION_MD)
-        .with_context(|| format!("write {}", loop_action_md.display()))?;
+    let managed_templates = [
+        (commands_dir.join("agent.at"), AGENT_AT),
+        (commands_dir.join("subagent.at"), SUBAGENT_AT),
+        (prompts_dir.join("system.md"), SYSTEM_MD),
+        (prompts_dir.join("loop-disposition.md"), LOOP_DISPOSITION_MD),
+        (
+            prompts_dir.join("loop-continuation.md"),
+            LOOP_CONTINUATION_MD,
+        ),
+        (prompts_dir.join("loop-action.md"), LOOP_ACTION_MD),
+    ];
+    for (path, contents) in managed_templates {
+        write_managed_template(&path, contents)?;
+    }
 
     let prompt_files = [
         ("role-research.md", ROLE_RESEARCH_MD),
@@ -826,6 +863,29 @@ mod tests {
             LOOP_ACTION_MD
         );
         assert_eq!(std::fs::read_to_string(role_prompt).unwrap(), "custom role");
+    }
+
+    #[test]
+    fn managed_template_write_skips_identical_bytes_and_replaces_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed.md");
+        assert!(write_managed_template(&path, "first").unwrap());
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path).unwrap().ino()
+        };
+
+        assert!(!write_managed_template(&path, "first").unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        }
+
+        assert!(write_managed_template(&path, "second").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

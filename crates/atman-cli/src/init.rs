@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use atman_runtime::templates::{
     AGENT_AT, LOOP_ACTION_MD, LOOP_CONTINUATION_MD, LOOP_DISPOSITION_MD, SYSTEM_MD,
+    write_managed_template,
 };
 
 pub struct InitReport {
@@ -36,7 +37,6 @@ pub fn init_config_dir_with_mode(
     };
 
     let config_path = config_dir.join("config.toml");
-    let managed_path = commands_dir.join("agent.at");
     let optional_templates: [(PathBuf, String); 4] = [
         (config_path.clone(), config_toml_body),
         (config_dir.join("routes.at"), ROUTES_AT.into()),
@@ -51,37 +51,25 @@ pub fn init_config_dir_with_mode(
     let mut skipped = Vec::new();
     let mut managed = Vec::new();
 
-    std::fs::write(&managed_path, AGENT_AT)
-        .with_context(|| format!("write {}", managed_path.display()))?;
-    written.push(managed_path.clone());
-    managed.push(managed_path);
-
     let prompts_dir = config_dir.join("prompts");
     std::fs::create_dir_all(&prompts_dir)
         .with_context(|| format!("mkdir {}", prompts_dir.display()))?;
-    let system_md = prompts_dir.join("system.md");
-    std::fs::write(&system_md, SYSTEM_MD)
-        .with_context(|| format!("write {}", system_md.display()))?;
-    written.push(system_md.clone());
-    managed.push(system_md);
-
-    let loop_disposition_md = prompts_dir.join("loop-disposition.md");
-    std::fs::write(&loop_disposition_md, LOOP_DISPOSITION_MD)
-        .with_context(|| format!("write {}", loop_disposition_md.display()))?;
-    written.push(loop_disposition_md.clone());
-    managed.push(loop_disposition_md);
-
-    let loop_continuation_md = prompts_dir.join("loop-continuation.md");
-    std::fs::write(&loop_continuation_md, LOOP_CONTINUATION_MD)
-        .with_context(|| format!("write {}", loop_continuation_md.display()))?;
-    written.push(loop_continuation_md.clone());
-    managed.push(loop_continuation_md);
-
-    let loop_action_md = prompts_dir.join("loop-action.md");
-    std::fs::write(&loop_action_md, LOOP_ACTION_MD)
-        .with_context(|| format!("write {}", loop_action_md.display()))?;
-    written.push(loop_action_md.clone());
-    managed.push(loop_action_md);
+    let managed_templates = [
+        (commands_dir.join("agent.at"), AGENT_AT),
+        (prompts_dir.join("system.md"), SYSTEM_MD),
+        (prompts_dir.join("loop-disposition.md"), LOOP_DISPOSITION_MD),
+        (
+            prompts_dir.join("loop-continuation.md"),
+            LOOP_CONTINUATION_MD,
+        ),
+        (prompts_dir.join("loop-action.md"), LOOP_ACTION_MD),
+    ];
+    for (path, contents) in managed_templates {
+        if write_managed_template(&path, contents)? {
+            written.push(path.clone());
+        }
+        managed.push(path);
+    }
 
     for (path, body) in optional_templates {
         if path.exists() {
@@ -273,6 +261,19 @@ mod tests {
             std::fs::read_to_string(loop_action).unwrap(),
             LOOP_ACTION_MD
         );
+    }
+
+    #[test]
+    fn second_unchanged_init_reports_no_managed_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("atman");
+        init_config_dir(&cfg).unwrap();
+
+        let rep = init_config_dir(&cfg).unwrap();
+
+        assert!(rep.written.is_empty(), "written: {:?}", rep.written);
+        assert_eq!(rep.managed.len(), 5);
+        assert_eq!(rep.skipped.len(), 4);
     }
 
     #[test]

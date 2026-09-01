@@ -4728,18 +4728,12 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
         None => None,
     };
     let rep = init::init_config_dir_with_mode(&cfg, fs_access)?;
-    let unmanaged_written: Vec<_> = rep
-        .written
-        .iter()
-        .filter(|p| !rep.managed.contains(p))
-        .collect();
-    if unmanaged_written.is_empty() && rep.skipped.len() == 4 {
+    if rep.written.is_empty() && rep.skipped.len() == 4 {
         println!(
             "[atman] init: {} already fully populated ({} file(s) preserved)",
             rep.config_dir.display(),
             rep.skipped.len()
         );
-    } else if rep.written.len() == 2 && rep.managed.len() == 2 {
     } else {
         println!(
             "[atman] init: wrote {} template(s) under {}",
@@ -4766,7 +4760,7 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
         }
     }
     println!(
-        "Note: commands/agent.at is managed by atman and will be overwritten on each agent start. Do not edit it."
+        "Note: commands/agent.at is managed by atman and refreshed when bundled content changes. Do not edit it."
     );
     println!("To customize behavior, create your own .at file and route to it from routes.at.");
     println!();

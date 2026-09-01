@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Stable managed template sync** — Managed agent, sub-agent, system, and loop-control templates compare bytes before writing and use same-directory atomic replacement only when bundled content changes, avoiding per-turn modification-time churn and partial reads.
 - **Managed loop continuity** — managed agent and sub-agent flows check their own pending interjections before termination, classify no-tool responses from structured untrusted evidence, and keep root watcher events in the loop; the runtime only exposes the current flow's pending-input state.
 - **Spawned-flow reasoning** — managed sub-agent LLM calls explicitly consume the inherited invocation effort, keeping root and child requests on the same selected reasoning depth while auxiliary classifiers remain independent.
 - **Empty LLM responses** — provider responses with no assistant message parts are recorded as errors, retried through the configured LLM policy, and never appended to root or spawned-flow history.
