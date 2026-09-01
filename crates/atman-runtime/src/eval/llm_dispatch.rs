@@ -410,15 +410,23 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     .filter(|part| matches!(part, crate::message::MessagePart::ToolUse { .. }))
                     .count() as u64
             });
+            let response_error = outcome.as_ref().ok().and_then(|message| {
+                message.message.parts.is_empty().then(|| {
+                    RuntimeError::ToolFailed("LLM returned an empty assistant message".into())
+                })
+            });
             let (usage, usage_source) = crate::context_plan::reconcile_token_usage(
                 &provider_usage,
                 estimated_input,
                 estimated_output,
             );
-            let status = match &outcome {
-                Ok(_) => crate::event::LlmCallStatus::Ok,
-                Err(e) => crate::event::LlmCallStatus::Errored {
-                    message: e.to_string(),
+            let status = match (&outcome, &response_error) {
+                (_, Some(error)) => crate::event::LlmCallStatus::Errored {
+                    message: error.to_string(),
+                },
+                (Ok(_), None) => crate::event::LlmCallStatus::Ok,
+                (Err(error), None) => crate::event::LlmCallStatus::Errored {
+                    message: error.to_string(),
                 },
             };
             let (ttft_ms, tps) = match &outcome {
@@ -480,6 +488,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     tps,
                 );
             }
+            let outcome = match (outcome, response_error) {
+                (Ok(_), Some(error)) => Err(error),
+                (outcome, _) => outcome,
+            };
             match outcome {
                 Ok(am) => {
                     if let Some(exposures) = ctx.model_tool_exposures.as_ref() {
