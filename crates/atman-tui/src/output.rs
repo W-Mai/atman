@@ -21,6 +21,8 @@ struct PerfCounters {
     item_renders: u64,
     animation_item_visits: u64,
     retention_item_visits: u64,
+    bash_source_bytes: u64,
+    bash_materialized_rows: u64,
     permission_table_entries: u64,
     panel_projection_builds: u64,
     workflow_node_renders: u64,
@@ -34,6 +36,8 @@ thread_local! {
             item_renders: 0,
             animation_item_visits: 0,
             retention_item_visits: 0,
+            bash_source_bytes: 0,
+            bash_materialized_rows: 0,
             permission_table_entries: 0,
             panel_projection_builds: 0,
             workflow_node_renders: 0,
@@ -599,6 +603,7 @@ struct ItemCacheEntry {
     rows: u32,
     lines: Option<Arc<[Line<'static>]>>,
     streaming_markdown: Option<crate::markdown::StreamingMarkdownProjection>,
+    bash_output: Option<BashOutputProjection>,
     regions: Arc<[NodeRegion]>,
     dynamic: DynamicPaint,
     last_used: u64,
@@ -606,7 +611,7 @@ struct ItemCacheEntry {
 
 impl ItemCacheEntry {
     fn has_retained_lines(&self) -> bool {
-        self.lines.is_some() || self.streaming_markdown.is_some()
+        self.lines.is_some() || self.streaming_markdown.is_some() || self.bash_output.is_some()
     }
 
     fn append_line_range(&self, start: usize, end: usize, out: &mut Vec<Line<'static>>) -> bool {
@@ -617,6 +622,8 @@ impl ItemCacheEntry {
                 out.push(Line::from(Span::styled(String::new(), RESET)));
             }
             true
+        } else if let Some(projection) = &self.bash_output {
+            projection.append_prepared_range(start, end, out)
         } else if let Some(lines) = &self.lines {
             let start = start.min(lines.len());
             let end = end.min(lines.len()).max(start);
@@ -804,6 +811,25 @@ impl LayoutCache {
                 self.touch_entry(idx);
             }
         }
+        for idx in visible_start..visible_end {
+            let start = self.row_start(idx);
+            let end = self.row_ends[idx];
+            let local_start = scroll_offset.saturating_sub(start) as usize;
+            let local_end = end
+                .min(scroll_offset.saturating_add(request.viewport_rows))
+                .saturating_sub(start) as usize;
+            if let (Some(projection), OutputItem::Bash { output, .. }) =
+                (&mut self.entries[idx].bash_output, &items[idx])
+            {
+                let _materialized = projection.prepare_range(output, local_start, local_end);
+                #[cfg(test)]
+                update_perf_counters(|counters| {
+                    counters.bash_materialized_rows = counters
+                        .bash_materialized_rows
+                        .saturating_add(_materialized as u64);
+                });
+            }
+        }
         self.prune_lines(retain_start..retain_end);
 
         self.key = Some(key);
@@ -919,11 +945,68 @@ impl LayoutCache {
                 rows: projection.rows().saturating_add(1).min(u32::MAX as usize) as u32,
                 lines: None,
                 streaming_markdown: Some(projection),
+                bash_output: None,
                 regions: Arc::from([]),
                 dynamic: DynamicPaint::default(),
                 last_used: self.access_clock,
             };
             self.retention_dirty |= !retained_before;
+            return true;
+        }
+        if let OutputItem::Bash {
+            handle,
+            title,
+            command,
+            output,
+            done,
+            expanded,
+        } = item
+        {
+            let mut projection = self.entries[idx].bash_output.take().unwrap_or_default();
+            let _indexed_bytes = projection.update(BashProjectionInput {
+                handle,
+                title: title.as_deref(),
+                command: command.as_deref(),
+                output,
+                generation: revision.source_generation,
+                done: *done,
+                expanded: *expanded,
+                panel_width: ctx.panel_width,
+            });
+            #[cfg(test)]
+            update_perf_counters(|counters| {
+                counters.item_renders = counters.item_renders.saturating_add(1);
+                counters.bash_source_bytes = counters
+                    .bash_source_bytes
+                    .saturating_add(_indexed_bytes as u64);
+            });
+            self.access_clock = self.access_clock.wrapping_add(1);
+            let rows = projection.rows().min(u32::MAX as usize) as u32;
+            self.entries[idx] = ItemCacheEntry {
+                revision,
+                rows,
+                lines: None,
+                streaming_markdown: None,
+                bash_output: retain_lines.then_some(projection),
+                regions: if retain_lines {
+                    Arc::from([NodeRegion {
+                        panel_item_index: idx,
+                        path_key: BASH_FULLSCREEN_KEY.to_string(),
+                        start_row: 1,
+                        end_row: 2,
+                        col_start: ctx.panel_width.saturating_sub(6),
+                        col_end: ctx.panel_width,
+                    }])
+                } else {
+                    Arc::from([])
+                },
+                dynamic: DynamicPaint {
+                    active: !*done,
+                    elapsed: None,
+                },
+                last_used: self.access_clock,
+            };
+            self.retention_dirty |= retained_before != retain_lines;
             return true;
         }
         let hovered = ctx.hovered_thinking_idx == Some(idx);
@@ -948,6 +1031,7 @@ impl LayoutCache {
             rows,
             lines: retain_lines.then(|| Arc::from(lines)),
             streaming_markdown: None,
+            bash_output: None,
             regions: if retain_lines {
                 Arc::from(regions)
             } else {
@@ -1019,12 +1103,14 @@ impl LayoutCache {
             .entries
             .iter()
             .enumerate()
-            .filter(|(idx, entry)| !protected.contains(idx) && entry.lines.is_some())
+            .filter(|(idx, entry)| !protected.contains(idx) && entry.has_retained_lines())
             .map(|(idx, entry)| (entry.last_used, idx))
             .collect::<Vec<_>>();
         recent.sort_unstable_by(|left, right| right.cmp(left));
         for (_, idx) in recent.into_iter().skip(Self::RECENT_ITEM_BUDGET) {
             self.entries[idx].lines = None;
+            self.entries[idx].streaming_markdown = None;
+            self.entries[idx].bash_output = None;
             self.entries[idx].regions = Arc::from([]);
         }
     }
@@ -4800,6 +4886,205 @@ fn render_output_block(
     lines
 }
 
+struct BashProjectionInput<'a> {
+    handle: &'a str,
+    title: Option<&'a str>,
+    command: Option<&'a str>,
+    output: &'a str,
+    generation: u64,
+    done: bool,
+    expanded: bool,
+    panel_width: u16,
+}
+
+#[derive(Clone)]
+struct BashOutputProjection {
+    index: crate::wrapped_text::WrappedRowIndex,
+    before_output: Arc<[Line<'static>]>,
+    after_output: Arc<[Line<'static>]>,
+    output_start: usize,
+    output_rows: usize,
+    rows: usize,
+    target: usize,
+    body_style: Style,
+    prepared_start: usize,
+    prepared_end: usize,
+    prepared_lines: Arc<[Line<'static>]>,
+}
+
+impl Default for BashOutputProjection {
+    fn default() -> Self {
+        Self {
+            index: crate::wrapped_text::WrappedRowIndex::default(),
+            before_output: Arc::from([]),
+            after_output: Arc::from([]),
+            output_start: 0,
+            output_rows: 0,
+            rows: 0,
+            target: 0,
+            body_style: Style::default(),
+            prepared_start: 0,
+            prepared_end: 0,
+            prepared_lines: Arc::from([]),
+        }
+    }
+}
+
+impl BashOutputProjection {
+    const COLLAPSED_ROWS: usize = 8;
+    const OUTPUT_PREFIX: &'static str = "    ";
+
+    fn update(&mut self, input: BashProjectionInput<'_>) -> usize {
+        let t = crate::theme::theme();
+        let bg: Color = t.code_bg.into();
+        self.target = input.panel_width.max(20) as usize;
+        self.body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+        let body_width = self
+            .target
+            .saturating_sub(crate::width::width(Self::OUTPUT_PREFIX))
+            .saturating_sub(RIGHT_PAD)
+            .max(1);
+        let indexed_bytes = self
+            .index
+            .update(
+                input.output,
+                input.generation,
+                body_width,
+                crate::wrapped_text::WrappedLineMode::Lines,
+            )
+            .indexed_bytes;
+
+        let glyph = if input.done {
+            "✓"
+        } else {
+            spinner_char(LAYOUT_ANIMATION_FRAME)
+        };
+        let metadata = format!("bash[{}]", input.handle);
+        let mut before_output = render_output_block(
+            input.title.unwrap_or("bash"),
+            Some(&metadata),
+            glyph,
+            input.command,
+            "",
+            input.expanded,
+            input.panel_width,
+        );
+        let blank = before_output
+            .pop()
+            .unwrap_or_else(|| Line::from(Span::styled(" ".repeat(self.target), self.body_style)));
+
+        let total_output_rows = self.index.len();
+        self.output_start = if input.expanded {
+            0
+        } else {
+            total_output_rows.saturating_sub(Self::COLLAPSED_ROWS)
+        };
+        self.output_rows = total_output_rows.saturating_sub(self.output_start);
+        let mut after_output = Vec::with_capacity(2);
+        let hint = if !input.expanded && self.output_start > 0 {
+            let unit = if self.output_start == 1 {
+                "line"
+            } else {
+                "lines"
+            };
+            Some(format!(
+                "    ▼ {} more {unit} — click to expand",
+                self.output_start
+            ))
+        } else if input.expanded && total_output_rows > Self::COLLAPSED_ROWS {
+            Some("    ▲ click to collapse".to_string())
+        } else {
+            None
+        };
+        if let Some(hint) = hint {
+            let hint_style = Style::default()
+                .fg(t.meta_fg.into())
+                .bg(bg)
+                .add_modifier(Modifier::DIM);
+            let hint_pad = self
+                .target
+                .saturating_sub(crate::width::width(hint.as_str()));
+            let mut spans = vec![Span::styled(hint, hint_style)];
+            if hint_pad > 0 {
+                spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
+            }
+            after_output.push(Line::from(spans));
+        }
+        after_output.push(blank);
+        after_output.push(Line::from(Span::styled(String::new(), RESET)));
+
+        self.before_output = Arc::from(before_output);
+        self.after_output = Arc::from(after_output);
+        self.rows = self
+            .before_output
+            .len()
+            .saturating_add(self.output_rows)
+            .saturating_add(self.after_output.len());
+        self.prepared_start = 0;
+        self.prepared_end = 0;
+        self.prepared_lines = Arc::from([]);
+        indexed_bytes
+    }
+
+    fn rows(&self) -> usize {
+        self.rows
+    }
+
+    fn prepare_range(&mut self, source: &str, start: usize, end: usize) -> usize {
+        let start = start.min(self.rows);
+        let end = end.min(self.rows).max(start);
+        if start >= self.prepared_start && end <= self.prepared_end {
+            return 0;
+        }
+        let output_offset = self.before_output.len();
+        let after_offset = output_offset.saturating_add(self.output_rows);
+        let mut lines = Vec::with_capacity(end.saturating_sub(start));
+        let mut materialized_output_rows = 0usize;
+        for row in start..end {
+            if row < output_offset {
+                lines.push(self.before_output[row].clone());
+            } else if row < after_offset {
+                materialized_output_rows = materialized_output_rows.saturating_add(1);
+                let source_row = self
+                    .output_start
+                    .saturating_add(row.saturating_sub(output_offset));
+                let body = self.index.row(source, source_row).unwrap_or_default();
+                lines.push(line_with_right_pad(
+                    Self::OUTPUT_PREFIX,
+                    body,
+                    self.target,
+                    self.body_style,
+                    self.body_style,
+                ));
+            } else {
+                lines.push(self.after_output[row.saturating_sub(after_offset)].clone());
+            }
+        }
+        self.prepared_start = start;
+        self.prepared_end = end;
+        self.prepared_lines = Arc::from(lines);
+        materialized_output_rows
+    }
+
+    fn append_prepared_range(
+        &self,
+        start: usize,
+        end: usize,
+        out: &mut Vec<Line<'static>>,
+    ) -> bool {
+        if start == end {
+            return true;
+        }
+        if start < self.prepared_start || end > self.prepared_end {
+            return false;
+        }
+        let local_start = start.saturating_sub(self.prepared_start);
+        let local_end = end.saturating_sub(self.prepared_start);
+        out.extend(self.prepared_lines[local_start..local_end].iter().cloned());
+        true
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_bash(
     handle: &str,
@@ -5204,6 +5489,55 @@ line2
                 .iter()
                 .all(|line| crate::width::spans_width(&line.spans) <= 40)
         );
+    }
+
+    #[test]
+    fn bash_projection_matches_direct_renderer_corpus() {
+        let corpus = [
+            "",
+            "one",
+            "one\n",
+            "one\n\nthree",
+            "one\r\ntwo\r\n",
+            "你好世界\nemoji 😀😀\n",
+            "e\u{301}e\u{301}e\u{301}\n",
+            "a very long physical line that must wrap several times before it ends",
+        ];
+        for output in corpus {
+            for expanded in [false, true] {
+                for panel_width in [20, 40, 80] {
+                    let mut projection = BashOutputProjection::default();
+                    projection.update(BashProjectionInput {
+                        handle: "bg_s_0",
+                        title: Some("运行测试"),
+                        command: Some("printf 'hello'\nprintf 'world'"),
+                        output,
+                        generation: 1,
+                        done: true,
+                        expanded,
+                        panel_width,
+                    });
+                    projection.prepare_range(output, 0, projection.rows());
+                    let mut projected = Vec::new();
+                    assert!(projection.append_prepared_range(0, projection.rows(), &mut projected));
+                    let mut expected = render_bash(
+                        "bg_s_0",
+                        Some("运行测试"),
+                        Some("printf 'hello'\nprintf 'world'"),
+                        output,
+                        true,
+                        expanded,
+                        0,
+                        panel_width,
+                    );
+                    expected.push(Line::from(Span::styled(String::new(), RESET)));
+                    assert_eq!(
+                        projected, expected,
+                        "output={output:?}, expanded={expanded}, panel_width={panel_width}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -5694,6 +6028,306 @@ mod tests {
         cache.update_dirty(key, &items, &ctx, request);
         let _ = cache.visible_slice(0, 20, 0);
         assert_eq!(perf_counters().item_renders, 0);
+    }
+
+    #[test]
+    fn bash_line_appends_index_only_new_source_bytes() {
+        const CHUNKS: usize = 2_048;
+        let chunk = format!("{}\n", "x".repeat(63));
+        let mut app = crate::app::AppState::new("bash-projection".into(), None);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::BashChunk {
+            handle: "bg_s_0".into(),
+            kind: "stdout".into(),
+            line: chunk.clone(),
+            call_intent: None,
+            run_id: None,
+        });
+        let source_generation = app.items.revisions()[0].source_generation;
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 40,
+            follow_tail_rows: Some(40),
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        app.layout_cache = cache;
+
+        reset_perf_counters();
+        for _ in 1..CHUNKS {
+            app.apply_stream_frame(atman_runtime::stream::StreamFrame::BashChunk {
+                handle: "bg_s_0".into(),
+                kind: "stdout".into(),
+                line: chunk.clone(),
+                call_intent: None,
+                run_id: None,
+            });
+            let mut cache = std::mem::take(&mut app.layout_cache);
+            cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+            app.layout_cache = cache;
+        }
+
+        assert_eq!(
+            app.items.revisions()[0].source_generation,
+            source_generation
+        );
+        let counters = perf_counters();
+        assert_eq!(
+            counters.bash_source_bytes,
+            ((CHUNKS - 1) * chunk.len()) as u64
+        );
+        assert_eq!(counters.semantic_item_visits, 0);
+        assert!(counters.bash_materialized_rows <= ((CHUNKS - 1) * 8) as u64);
+
+        reset_perf_counters();
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::BashExited {
+            handle: "bg_s_0".into(),
+            exit_code: Some(0),
+            error: None,
+            call_intent: None,
+            run_id: None,
+        });
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        let (lines, _, _) = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
+        assert_eq!(perf_counters().bash_source_bytes, 0);
+        assert_eq!(
+            app.items.revisions()[0].source_generation,
+            source_generation
+        );
+        assert_eq!(lines, render_item(&app.items[0], &RenderCtx::empty()));
+    }
+
+    #[test]
+    fn expanded_bash_layout_materializes_only_the_visible_rows() {
+        let output = (0..4_096)
+            .map(|index| format!("line {index:04} 你好 {}\n", "x".repeat(index % 19)))
+            .collect::<String>();
+        let items = OutputStore::from(vec![OutputItem::Bash {
+            handle: "bg_large".into(),
+            title: Some("inspect output".into()),
+            command: Some("printf 'large output'".into()),
+            output,
+            done: true,
+            expanded: true,
+        }]);
+        let ctx = RenderCtx {
+            panel_width: 48,
+            ..RenderCtx::empty()
+        };
+        let key = LayoutKey {
+            width: 48,
+            theme: crate::theme::current_mode(),
+        };
+        let viewport_rows = 17;
+        let mut cache = LayoutCache::default();
+        let direct = render_item(&items[0], &ctx);
+
+        let first_request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows,
+            follow_tail_rows: None,
+        };
+        let metrics = cache.update_dirty(key, &items, &ctx, first_request);
+        assert_eq!(metrics.total_rows as usize, direct.len());
+        let (first, _, _) = cache.visible_slice(0, viewport_rows, 0);
+        assert_eq!(first, direct[..viewport_rows as usize]);
+
+        let max_scroll = metrics.total_rows.saturating_sub(viewport_rows);
+        for scroll_offset in [max_scroll / 2, max_scroll] {
+            reset_perf_counters();
+            let request = LayoutRequest {
+                scroll_offset,
+                viewport_rows,
+                follow_tail_rows: None,
+            };
+            cache.update_dirty(key, &items, &ctx, request);
+            let (projected, _, _) = cache.visible_slice(scroll_offset, viewport_rows, 0);
+            let end = scroll_offset
+                .saturating_add(viewport_rows)
+                .min(metrics.total_rows) as usize;
+            assert_eq!(projected, direct[scroll_offset as usize..end]);
+            let counters = perf_counters();
+            assert_eq!(counters.bash_source_bytes, 0);
+            assert_eq!(counters.item_renders, 0);
+            assert!(counters.bash_materialized_rows <= viewport_rows as u64);
+        }
+    }
+
+    #[test]
+    fn evicted_bash_projection_rebuilds_equivalently_when_revisited() {
+        let items = OutputStore::from(
+            (0..200)
+                .map(|index| OutputItem::Bash {
+                    handle: format!("bg_{index}"),
+                    title: None,
+                    command: Some(format!("printf '{index}'")),
+                    output: format!("output {index}\n"),
+                    done: true,
+                    expanded: true,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let ctx = RenderCtx::empty();
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let viewport_rows = 20;
+        let mut cache = LayoutCache::default();
+        cache.update_dirty(
+            key,
+            &items,
+            &ctx,
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows,
+                follow_tail_rows: None,
+            },
+        );
+        assert!(cache.entries[0].bash_output.is_some());
+
+        for item_index in (10..=120).step_by(10) {
+            let middle_scroll = cache.row_start(item_index);
+            cache.update_dirty(
+                key,
+                &items,
+                &ctx,
+                LayoutRequest {
+                    scroll_offset: middle_scroll,
+                    viewport_rows,
+                    follow_tail_rows: None,
+                },
+            );
+        }
+        assert!(cache.entries[0].bash_output.is_none());
+
+        reset_perf_counters();
+        let first_rows = cache.entries[0].rows;
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: first_rows,
+            follow_tail_rows: None,
+        };
+        cache.update_dirty(key, &items, &ctx, request);
+        let (projected, _, _) = cache.visible_slice(0, first_rows, 0);
+        assert_eq!(projected, render_item(&items[0], &ctx));
+        let rebuilt_bytes = items
+            .iter()
+            .take(1 + LayoutCache::OVERSCAN_ITEMS)
+            .filter_map(|item| match item {
+                OutputItem::Bash { output, .. } => Some(output.len() as u64),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert_eq!(perf_counters().bash_source_bytes, rebuilt_bytes);
+    }
+
+    #[test]
+    #[ignore = "large release-mode Bash output projection baseline"]
+    fn baseline_eight_mib_bash_output_projection() {
+        let chunk = format!("{}\n", "x".repeat(63));
+        let source = chunk.repeat(8 * 1024 * 1024 / chunk.len());
+        assert_eq!(source.len(), 8 * 1024 * 1024);
+
+        let mut projection = BashOutputProjection::default();
+        let started = std::time::Instant::now();
+        let indexed_bytes = projection.update(BashProjectionInput {
+            handle: "bg_baseline",
+            title: Some("baseline"),
+            command: Some("produce output"),
+            output: std::hint::black_box(&source),
+            generation: 1,
+            done: false,
+            expanded: false,
+            panel_width: 80,
+        });
+        projection.prepare_range(&source, 0, projection.rows());
+        let cold = started.elapsed();
+        assert_eq!(indexed_bytes, source.len());
+
+        let started = std::time::Instant::now();
+        for _ in 0..16 {
+            assert_eq!(
+                projection.update(BashProjectionInput {
+                    handle: "bg_baseline",
+                    title: Some("baseline"),
+                    command: Some("produce output"),
+                    output: std::hint::black_box(&source),
+                    generation: 1,
+                    done: false,
+                    expanded: false,
+                    panel_width: 80,
+                }),
+                0
+            );
+            projection.prepare_range(&source, 0, projection.rows());
+        }
+        let unchanged = started.elapsed();
+
+        let mut appended = String::new();
+        let mut append_projection = BashOutputProjection::default();
+        let started = std::time::Instant::now();
+        let mut append_indexed_bytes = 0usize;
+        for _ in 0..2_048 {
+            appended.push_str(&chunk);
+            append_indexed_bytes = append_indexed_bytes.saturating_add(append_projection.update(
+                BashProjectionInput {
+                    handle: "bg_append",
+                    title: None,
+                    command: None,
+                    output: std::hint::black_box(&appended),
+                    generation: 2,
+                    done: false,
+                    expanded: false,
+                    panel_width: 80,
+                },
+            ));
+            append_projection.prepare_range(&appended, 0, append_projection.rows());
+        }
+        let appends = started.elapsed();
+        assert_eq!(append_indexed_bytes, appended.len());
+
+        projection.update(BashProjectionInput {
+            handle: "bg_baseline",
+            title: Some("baseline"),
+            command: Some("produce output"),
+            output: &source,
+            generation: 1,
+            done: true,
+            expanded: true,
+            panel_width: 80,
+        });
+        let viewport_rows = 40;
+        let starts = [
+            0,
+            projection.rows() / 2,
+            projection.rows().saturating_sub(viewport_rows),
+        ];
+        let started = std::time::Instant::now();
+        let mut materialized_rows = 0usize;
+        for start in starts {
+            materialized_rows = materialized_rows.saturating_add(projection.prepare_range(
+                &source,
+                start,
+                start.saturating_add(viewport_rows),
+            ));
+        }
+        let viewports = started.elapsed();
+        assert!(materialized_rows <= 3 * viewport_rows);
+
+        eprintln!(
+            "bash output baseline: bytes={} rows={} cold_ms={} unchanged_16_us={} appends_2048_ms={} viewports_3_us={}",
+            source.len(),
+            projection.rows(),
+            cold.as_millis(),
+            unchanged.as_micros(),
+            appends.as_millis(),
+            viewports.as_micros()
+        );
     }
 
     #[test]

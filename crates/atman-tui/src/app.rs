@@ -144,7 +144,7 @@ pub struct OutputRevision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMutation {
     Semantic,
-    SemanticAppend,
+    SemanticPreserveSource,
     Interaction,
     Paint,
 }
@@ -258,7 +258,7 @@ impl OutputStore {
                 revision.layout = self.revision_clock;
                 revision.source_generation = self.revision_clock;
             }
-            OutputMutation::SemanticAppend => {
+            OutputMutation::SemanticPreserveSource => {
                 revision.semantic = self.revision_clock;
                 revision.layout = self.revision_clock;
             }
@@ -980,12 +980,9 @@ impl AppState {
         };
 
         let content: Box<dyn crate::wm::WindowComponent> = match kind {
-            atman_runtime::TaskKind::Bash => {
-                Box::new(crate::window::bash_panel::BashPanelContent {
-                    handle: handle.to_string(),
-                    scroll: 0,
-                })
-            }
+            atman_runtime::TaskKind::Bash => Box::new(
+                crate::window::bash_panel::BashPanelContent::new(handle.to_string()),
+            ),
             atman_runtime::TaskKind::Terminal => {
                 Box::new(crate::window::terminal_panel::TerminalPanelContent {
                     handle: handle.to_string(),
@@ -1515,7 +1512,7 @@ impl AppState {
         let changed = self.items.mutate(index, impact, mutation);
         if changed {
             match impact {
-                OutputMutation::Semantic | OutputMutation::SemanticAppend => {
+                OutputMutation::Semantic | OutputMutation::SemanticPreserveSource => {
                     self.items_version = self.items_version.wrapping_add(1);
                     self.layout_cache.mark_layout_dirty(index);
                 }
@@ -1835,7 +1832,7 @@ impl AppState {
                     )
                 });
                 if let Some(index) = last_index.filter(|_| continues_assistant) {
-                    self.mutate_item(index, OutputMutation::SemanticAppend, |item| {
+                    self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
                         let OutputItem::AssistantMd { md, streaming, .. } = item else {
                             return false;
                         };
@@ -2343,7 +2340,7 @@ impl AppState {
                 let prefix = if kind == "stderr" { "[err] " } else { "" };
                 if let Some(index) = existing_index {
                     let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
-                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                    self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
                         let OutputItem::Bash {
                             title,
                             command,
@@ -2399,7 +2396,7 @@ impl AppState {
                 let task_command = self.task_command(&handle);
                 if let Some(idx) = self.find_item_by_handle(&handle) {
                     let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
-                    self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                    self.mutate_item(idx, OutputMutation::SemanticPreserveSource, |item| {
                         let OutputItem::Bash {
                             title,
                             command,

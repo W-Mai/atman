@@ -47,6 +47,7 @@ pub mod task_panel;
 pub mod terminal_guard;
 pub mod theme;
 pub mod width;
+pub(crate) mod wrapped_text;
 
 use app::NoteLevel;
 use atman_runtime::stream::StreamFrame;
