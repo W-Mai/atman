@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use atman_runtime::templates::{AGENT_AT, LOOP_CONTINUATION_MD, LOOP_DISPOSITION_MD, SYSTEM_MD};
+use atman_runtime::templates::{
+    AGENT_AT, LOOP_ACTION_MD, LOOP_CONTINUATION_MD, LOOP_DISPOSITION_MD, SYSTEM_MD,
+};
 
 pub struct InitReport {
     pub config_dir: PathBuf,
@@ -74,6 +76,12 @@ pub fn init_config_dir_with_mode(
         .with_context(|| format!("write {}", loop_continuation_md.display()))?;
     written.push(loop_continuation_md.clone());
     managed.push(loop_continuation_md);
+
+    let loop_action_md = prompts_dir.join("loop-action.md");
+    std::fs::write(&loop_action_md, LOOP_ACTION_MD)
+        .with_context(|| format!("write {}", loop_action_md.display()))?;
+    written.push(loop_action_md.clone());
+    managed.push(loop_action_md);
 
     for (path, body) in optional_templates {
         if path.exists() {
@@ -178,8 +186,8 @@ mod tests {
         let cfg = tmp.path().join("atman");
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.is_empty());
-        assert_eq!(rep.written.len(), 8, "written: {:?}", rep.written);
-        assert_eq!(rep.managed.len(), 4);
+        assert_eq!(rep.written.len(), 9, "written: {:?}", rep.written);
+        assert_eq!(rep.managed.len(), 5);
         assert!(cfg.join("config.toml").exists());
         assert!(cfg.join("routes.at").exists());
         assert!(cfg.join("on_session_start.at").exists());
@@ -188,6 +196,7 @@ mod tests {
         assert!(cfg.join("prompts/system.md").exists());
         assert!(cfg.join("prompts/loop-disposition.md").exists());
         assert!(cfg.join("prompts/loop-continuation.md").exists());
+        assert!(cfg.join("prompts/loop-action.md").exists());
     }
 
     #[test]
@@ -227,6 +236,8 @@ mod tests {
         std::fs::write(&loop_disposition, "STALE\n").unwrap();
         let loop_continuation = cfg.join("prompts/loop-continuation.md");
         std::fs::write(&loop_continuation, "STALE\n").unwrap();
+        let loop_action = cfg.join("prompts/loop-action.md");
+        std::fs::write(&loop_action, "STALE\n").unwrap();
 
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.iter().any(|p| p.ends_with("hello.at")));
@@ -241,6 +252,7 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with("loop-continuation.md"))
         );
+        assert!(rep.managed.iter().any(|p| p.ends_with("loop-action.md")));
         let hello_body = std::fs::read_to_string(&touched).unwrap();
         assert!(
             hello_body.contains("CUSTOM"),
@@ -257,6 +269,10 @@ mod tests {
             std::fs::read_to_string(loop_continuation).unwrap(),
             LOOP_CONTINUATION_MD
         );
+        assert_eq!(
+            std::fs::read_to_string(loop_action).unwrap(),
+            LOOP_ACTION_MD
+        );
     }
 
     #[test]
@@ -267,7 +283,7 @@ mod tests {
         std::fs::write(cfg.join("some-other.toml"), "unrelated").unwrap();
         let rep = init_config_dir(&cfg).unwrap();
         assert!(cfg.join("commands").is_dir());
-        assert_eq!(rep.written.len(), 8);
+        assert_eq!(rep.written.len(), 9);
     }
 
     #[test]
