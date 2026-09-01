@@ -364,7 +364,6 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "plan.read",
             ],
         )
-        session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when has_pending_injections() {
@@ -430,7 +429,6 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 "plan.read",
             ],
         )
-        session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when has_pending_injections() {
@@ -496,7 +494,6 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 "plan.write", "plan.read", "plan.tick",
             ],
         )
-        session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when has_pending_injections() {
@@ -557,7 +554,6 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "rule.fetch",
             ],
         )
-        session.push(reply)
         tool_uses = extract_tool_uses(reply)
         when is_empty(tool_uses) {
             when has_pending_injections() {
@@ -777,7 +773,7 @@ mod tests {
         let file = parse_file(SUBAGENT_AT).expect("SUBAGENT_AT must parse");
         assert_eq!(SUBAGENT_AT.matches("reply = llm.call(").count(), 4);
         assert_eq!(SUBAGENT_AT.matches("effort: env(\"effort\")").count(), 4);
-        assert_eq!(SUBAGENT_AT.matches("session.push(reply)").count(), 4);
+        assert!(!SUBAGENT_AT.contains("session.push(reply)"));
         assert_eq!(
             SUBAGENT_AT
                 .matches("@\"../prompts/loop-disposition.md\"")

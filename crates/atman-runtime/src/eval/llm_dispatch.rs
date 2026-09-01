@@ -374,6 +374,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     context_call_identity.clone(),
                     context_prefix,
                 )
+            } else if let Some(tracker) = ctx.context_prefix_tracker.as_ref() {
+                tracker
+                    .lock()
+                    .expect("context prefix lock poisoned")
+                    .observe(
+                        context_call_purpose,
+                        context_call_identity.clone(),
+                        provider.name(),
+                        &api_model,
+                        context_prefix,
+                    )
             } else {
                 context_prefix.initial_observation()
             };
@@ -524,6 +535,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             compaction_budget,
                         )
                         .await;
+                    } else if uses_spawned_context {
+                        if let Err(error) = crate::tools::session::append_message_to_context(
+                            ctx,
+                            am.message.clone(),
+                        ) {
+                            return Value::Err(error);
+                        }
+                        drop(compact_guard.take());
                     }
                     if !matches!(context_mode, ContextMode::None) {
                         return Value::Message(am.message.clone());

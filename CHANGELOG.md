@@ -72,7 +72,7 @@ All notable changes to atman are documented in this file.
 - **Request tool exposure** — model-generated tool calls are bound to the exact tool name exposed by their originating LLM request and can be dispatched only once within the producing flow.
 - **Tool-pair projection** — model requests normalize parallel tool results in call order, preserve non-tool content from mixed messages, and remove orphan results without duplicating valid parts.
 - **Tool-result budgets** — direct Session appends, runtime dispatch, `session.push`, and spawned flows use the same configured output budget and continuation store.
-- **Child context trimming** — ephemeral subflow message limits cut at complete tool-transaction boundaries and preserve active tool calls until their results arrive.
+- **Spawned managed context** — successful session-context calls append assistant messages to root and child histories through the same runtime contract; child cache-prefix observations persist across calls, and child range replacement occurs only through checkpointed compaction.
 - **Spawned context transactions** — inherited child context excludes parent tool calls that are still executing while preserving complete tool pairs and surrounding assistant text.
 - **Working-directory context** — root and spawned LLM calls receive one resolved working-directory block without duplicating dynamic context or leaking a `{pwd}` placeholder.
 - **Compaction preflight freshness** — automatic compaction evaluates the current message window and fixed provider prefix instead of reusing the previous request's input-token count.

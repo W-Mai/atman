@@ -114,16 +114,11 @@ compaction, the active window contains a structured compact summary followed by
 recent messages. A checkpoint persists that replacement and synchronizes the live
 message handle, so subsequent `context: "session"` calls use the compacted window.
 
-Spawned flows keep a separate message segment. With `inherit_context: true`, the
-child starts from a copy of the parent's active window and then appends its invocation
-message. That copy contains only complete tool-use/result pairs, so the active parent
-`flow.spawn` transaction and other concurrently executing tools do not become orphaned
-requests in the child context.
+Spawned flows keep a separate message segment. With `inherit_context: true`, the child starts from a copy of the parent's active window and then appends its invocation message. That copy contains only complete tool-use/result pairs, so the active parent `flow.spawn` transaction and other concurrently executing tools do not become orphaned requests in the child context.
 
-Ephemeral child segments retain the existing 100-message target. Trimming moves the
-cut backward when necessary to keep a retained ToolResult with its ToolUse, so one
-complete tool batch may temporarily make the segment slightly larger than the target.
-An active unpaired ToolUse at the tail is preserved until its result is appended.
+Successful managed `llm.call(context: "session")` calls append their assistant message to the active root or child segment through the same runtime contract. Flow code uses `session.push` for tool results, interjections, and other explicit messages rather than re-appending the returned assistant message.
+
+Child segments use the same token-aware, transaction-aligned compaction and checkpoint mechanism as root history. No message-count trim rewrites the child prefix outside compaction; each child retains its own context epoch and cache-prefix observations.
 
 Tool results use the same configured line, byte, and per-line budget in dispatch,
 `session.push`, child segments, and direct Session appends. The Executor projects the

@@ -545,6 +545,70 @@ pub struct ContextPrefixSnapshot {
     compaction_digest: Option<[u8; 32]>,
 }
 
+const MAX_TRACKED_CONTEXT_PREFIXES: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ContextPrefixTraceKey {
+    call_purpose: ContextCallPurpose,
+    call_identity: ContextCallIdentity,
+}
+
+struct TrackedContextPrefix {
+    provider: String,
+    model: String,
+    snapshot: ContextPrefixSnapshot,
+}
+
+#[derive(Default)]
+pub(crate) struct ContextPrefixTracker {
+    entries: std::collections::HashMap<ContextPrefixTraceKey, TrackedContextPrefix>,
+    order: std::collections::VecDeque<ContextPrefixTraceKey>,
+}
+
+impl ContextPrefixTracker {
+    pub(crate) fn observe(
+        &mut self,
+        call_purpose: ContextCallPurpose,
+        call_identity: ContextCallIdentity,
+        provider: &str,
+        model: &str,
+        snapshot: ContextPrefixSnapshot,
+    ) -> ContextCacheObservation {
+        let key = ContextPrefixTraceKey {
+            call_purpose,
+            call_identity,
+        };
+        let observation = self.entries.get(&key).map_or_else(
+            || snapshot.initial_observation(),
+            |previous| {
+                snapshot.compare(
+                    &previous.provider,
+                    provider,
+                    &previous.model,
+                    model,
+                    &previous.snapshot,
+                )
+            },
+        );
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            TrackedContextPrefix {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                snapshot,
+            },
+        );
+        while self.entries.len() > MAX_TRACKED_CONTEXT_PREFIXES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        observation
+    }
+}
+
 impl ContextPrefixSnapshot {
     pub fn provider_neutral(request: &LlmRequest) -> Result<Self, crate::error::RuntimeError> {
         let mut builder =
@@ -1552,6 +1616,36 @@ mod tests {
         assert_eq!(observation.reset_reason, None);
         assert_eq!(observation.common_prefix_bytes, first.bytes);
         assert_eq!(observation.common_prefix_tokens, first.tokens);
+    }
+
+    #[test]
+    fn context_prefix_tracker_evicts_the_oldest_identity() {
+        let snapshot = ContextPrefixSnapshot::provider_neutral(&request()).unwrap();
+        let mut tracker = ContextPrefixTracker::default();
+        let mut oldest = None;
+        for index in 0..=MAX_TRACKED_CONTEXT_PREFIXES {
+            let identity = ContextCallIdentity {
+                scope: ContextCallScope::Child,
+                session_id: Some("session".into()),
+                flow_run_id: Some(crate::event::FlowRunId::now()),
+            };
+            if index == 0 {
+                oldest = Some(ContextPrefixTraceKey {
+                    call_purpose: ContextCallPurpose::General,
+                    call_identity: identity.clone(),
+                });
+            }
+            tracker.observe(
+                ContextCallPurpose::General,
+                identity,
+                "provider",
+                "model",
+                snapshot.clone(),
+            );
+        }
+
+        assert_eq!(tracker.entries.len(), MAX_TRACKED_CONTEXT_PREFIXES);
+        assert!(!tracker.entries.contains_key(&oldest.unwrap()));
     }
 
     #[test]

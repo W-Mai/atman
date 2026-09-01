@@ -111,6 +111,8 @@ pub struct ToolCtx {
     pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
     pub compact_lock_handle: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
     pub(crate) context_epoch_handle: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    pub(crate) context_prefix_tracker:
+        Option<std::sync::Arc<std::sync::Mutex<crate::context_plan::ContextPrefixTracker>>>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     pub read_files:

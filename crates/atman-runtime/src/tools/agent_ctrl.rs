@@ -1415,6 +1415,9 @@ async fn run_prepared_flow_agent(
     child_ctx.session_messages_handle = Some(child_messages);
     child_ctx.compact_lock_handle = Some(child_compact_lock);
     child_ctx.context_epoch_handle = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
+    child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
+        crate::context_plan::ContextPrefixTracker::default(),
+    )));
     seed_parent_handoff_context(
         &child_ctx,
         &flow,
@@ -1788,6 +1791,7 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
     c.session_messages_handle = None;
     c.compact_lock_handle = None;
     c.context_epoch_handle = None;
+    c.context_prefix_tracker = None;
     c.forms = None;
     c.on_memory_recent = None;
     c
