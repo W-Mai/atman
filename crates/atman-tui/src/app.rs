@@ -1857,19 +1857,28 @@ impl AppState {
                     self.streaming = true;
                 }
             }
-            StreamFrame::LlmChunk { text, run_id, .. } => {
+            StreamFrame::LlmChunk {
+                text,
+                model: chunk_model,
+                run_id,
+            } => {
                 if let Some(rid) = &run_id
                     && let Some(&idx) = self.sub_agent_run_ids.get(rid)
                 {
                     self.mutate_item(idx, OutputMutation::Semantic, |item| {
-                        let OutputItem::SubAgentActivity { output, .. } = item else {
+                        let OutputItem::SubAgentActivity { model, output, .. } = item else {
                             return false;
                         };
-                        if text.is_empty() {
-                            return false;
+                        let mut changed = false;
+                        if model.is_empty() && !chunk_model.is_empty() {
+                            *model = chunk_model;
+                            changed = true;
                         }
-                        output.push_str(&text);
-                        true
+                        if !text.is_empty() {
+                            output.push_str(&text);
+                            changed = true;
+                        }
+                        changed
                     });
                     self.streaming = true;
                     self.reset_lag_state();
@@ -2698,12 +2707,22 @@ impl AppState {
                 let OutputItem::SubAgentActivity {
                     workflow_graph,
                     messages,
+                    model,
                     ..
                 } = item
                 else {
                     return false;
                 };
                 let mut changed = workflow_graph.apply_stream_frame(frame).changed();
+                if model.is_empty()
+                    && let StreamFrame::LlmCallStats {
+                        model: call_model, ..
+                    } = frame
+                    && !call_model.is_empty()
+                {
+                    *model = call_model.clone();
+                    changed = true;
+                }
                 if let StreamFrame::AssistantMsg { message, .. }
                 | StreamFrame::ToolResultMsg { message, .. } = frame
                 {
@@ -3299,6 +3318,49 @@ mod tests {
             _ => panic!("expected streaming assistant md"),
         }
         assert!(app.streaming);
+    }
+
+    #[test]
+    fn sub_agent_uses_first_observed_llm_model_when_start_model_is_empty() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "agent_1".into(),
+            goal: "research".into(),
+            child_run_id: "spawned".into(),
+            model: String::new(),
+        });
+        app.apply_stream_frame(StreamFrame::FlowStart {
+            run_id: "worker".into(),
+            flow_name: "research_loop".into(),
+            parent_run_id: Some("spawned".into()),
+            parent_node_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "working".into(),
+            model: "primary-model".into(),
+            run_id: Some("worker".into()),
+        });
+        app.apply_stream_frame(StreamFrame::LlmCallStats {
+            model: "classifier-model".into(),
+            provider: String::new(),
+            context_call_purpose: Default::default(),
+            context_call_scope: Default::default(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read: 0,
+            cache_write: 0,
+            ttft_ms: 0,
+            tokens_per_second: 0.0,
+            wallclock_ms: 0,
+            run_id: Some("worker".into()),
+            node_id: None,
+        });
+
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::SubAgentActivity { model, output, .. }
+                if model == "primary-model" && output == "working"
+        ));
     }
 
     #[test]

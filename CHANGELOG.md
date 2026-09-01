@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Sub-agent model visibility** — async spawn events carry declared model arguments and defaults, live panels adopt the first observed LLM model for dynamic flows, and restored panels resolve the first model across the spawned flow's descendant runs.
 - **Stable managed template sync** — Managed agent, sub-agent, system, and loop-control templates compare bytes before writing and use same-directory atomic replacement only when bundled content changes, avoiding per-turn modification-time churn and partial reads.
 - **Managed loop continuity** — managed agent and sub-agent flows check their own pending interjections before termination, classify no-tool responses from structured untrusted evidence, and keep root watcher events in the loop; the runtime only exposes the current flow's pending-input state.
 - **Spawned-flow reasoning** — managed sub-agent LLM calls explicitly consume the inherited invocation effort, keeping root and child requests on the same selected reasoning depth while auxiliary classifiers remain independent.

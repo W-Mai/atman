@@ -44,7 +44,6 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut flow_children: HashMap<String, Vec<String>> = HashMap::new();
     let mut spawned_roots: HashSet<String> = HashSet::new();
     let mut flow_dones: HashMap<String, (bool, bool)> = HashMap::new();
-    let mut llm_models: HashMap<String, String> = HashMap::new();
     let mut tool_runs: HashMap<String, Option<String>> = HashMap::new();
     for entry in entries {
         match entry {
@@ -88,15 +87,6 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             } => {
                 flow_dones.insert(run_id.clone(), (*ok, *cancelled));
             }
-            TranscriptEntry::LlmCall {
-                run_id: Some(rid),
-                model,
-                ..
-            } => {
-                llm_models
-                    .entry(rid.0.to_string())
-                    .or_insert_with(|| model.clone());
-            }
             TranscriptEntry::ToolNode {
                 run_id,
                 tool_use_id,
@@ -138,6 +128,18 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     }
     let spawned_set = spawned_root_by_run.keys().cloned().collect::<HashSet<_>>();
     let find_spawned_root = |rid: &str| spawned_root_by_run.get(rid).cloned();
+    let mut llm_models: HashMap<String, String> = HashMap::new();
+    for entry in entries {
+        if let TranscriptEntry::LlmCall {
+            run_id: Some(run_id),
+            model,
+            ..
+        } = entry
+            && let Some(root_id) = find_spawned_root(&run_id.0.to_string())
+        {
+            llm_models.entry(root_id).or_insert_with(|| model.clone());
+        }
+    }
 
     let mut out: Vec<OutputItem> = Vec::new();
     let mut current_workflow_idx: Option<usize> = None;
@@ -1987,6 +1989,19 @@ mod tests {
                 spawned: false,
                 ts: None,
             },
+            TranscriptEntry::LlmCall {
+                model: "primary-model".into(),
+                provider: "provider".into(),
+                context_call_purpose: Default::default(),
+                context_call_scope: Default::default(),
+                usage: Default::default(),
+                wallclock_ms: 1,
+                ttft_ms: Some(1),
+                tokens_per_second: Some(1.0),
+                run_id: Some(research_flow_run_id.clone()),
+                node_id: None,
+                ts: None,
+            },
             // Sub-agent user message (flow_run_id = research_run)
             TranscriptEntry::Message {
                 message: Message::user_text(TurnId::now(), "read Cargo.toml"),
@@ -2066,12 +2081,14 @@ mod tests {
                 child_run_id,
                 messages,
                 goal,
+                model,
                 status,
                 workflow_graph,
                 ..
             } if child_run_id == &sub_run => Some((
                 messages.len(),
                 goal.clone(),
+                model.clone(),
                 status.clone(),
                 workflow_graph.root.len(),
                 workflow_graph
@@ -2081,9 +2098,10 @@ mod tests {
             _ => None,
         });
         assert!(sub_item.is_some(), "SubAgentActivity should be created");
-        let (msg_count, goal, status, graph_nodes, approval) = sub_item.unwrap();
+        let (msg_count, goal, model, status, graph_nodes, approval) = sub_item.unwrap();
         assert_eq!(msg_count, 2, "should have 2 messages (user + assistant)");
         assert_eq!(goal, "read Cargo.toml", "goal from first user message");
+        assert_eq!(model, "primary-model");
         assert_eq!(status, "ok", "status from FlowDone");
         assert!(
             graph_nodes > 0,

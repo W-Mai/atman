@@ -979,6 +979,26 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let version = extract_flow_version(&args)?;
     let prepared = prepare_flow_agent(&flow_ref, version.as_deref()).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
+    let model = flow_args
+        .iter()
+        .find_map(|(name, value)| match (name.as_str(), value) {
+            ("model", Value::Str(model)) => Some(model.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            prepared
+                .flow
+                .params
+                .iter()
+                .find(|parameter| parameter.name.name == "model")
+                .and_then(|parameter| match parameter.default.as_ref() {
+                    Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(model))) => {
+                        Some(model.clone())
+                    }
+                    _ => None,
+                })
+        })
+        .unwrap_or_default();
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
     let child_run_id = FlowRunId::now();
@@ -1003,7 +1023,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         handle.clone(),
         goal,
         display_label,
-        String::new(),
+        model,
         child_run_id.clone(),
         workspace.clone(),
     );
@@ -2104,6 +2124,78 @@ mod tests {
                 status,
                 FlowRunStatus::Ok { final_text, .. } if final_text == "high"
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn async_spawn_announces_declared_model() {
+        for (arguments, expected) in [
+            (Vec::new(), "smart"),
+            (
+                vec![("model".into(), Value::Str("vendor/model".into()))],
+                "vendor/model",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("child.at");
+            std::fs::write(
+                &path,
+                r#"flow child(model: string = "smart") -> string { return model }"#,
+            )
+            .unwrap();
+
+            let registry = Arc::new(FlowRegistry::new());
+            let root_run_id = crate::event::FlowRunId::now();
+            let root_identity = registry
+                .register_root(
+                    "test-session".into(),
+                    root_run_id.clone(),
+                    crate::flow_authority::EffectiveAuthority::root(
+                        &Default::default(),
+                        false,
+                        None,
+                    ),
+                )
+                .unwrap();
+            let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(16);
+            let mut ctx = ToolCtx::new()
+                .with_registry(Arc::new(ToolRegistry::new()))
+                .with_providers(Arc::new(ProviderRegistry::new()))
+                .with_flow_registry(registry)
+                .with_stream_tx(stream_tx);
+            ctx.flow_run_id = Some(root_run_id);
+            ctx.flow_identity = Some(root_identity);
+
+            AgentSpawn
+                .call(
+                    ToolArgs {
+                        positional: Vec::new(),
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@child", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(true)),
+                            ("arguments".into(), Value::Struct(arguments)),
+                        ],
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+
+            let announced_model = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let crate::stream::StreamFrame::SubAgentStarted { model, .. } =
+                        stream_rx.recv().await.unwrap()
+                    {
+                        break model;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(announced_model, expected);
         }
     }
 
