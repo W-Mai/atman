@@ -2593,10 +2593,8 @@ fn submission_audits(
         decision.as_ref(),
         at,
     );
-    let mut records = vec![
-        crate::permission_audit::PermissionAuditRecord::RequestCreated(audit.clone()),
-        crate::permission_audit::PermissionAuditRecord::RequestTargeted(audit.clone()),
-    ];
+    let mut records =
+        vec![crate::permission_audit::PermissionAuditRecord::RequestCreated(audit.clone())];
     if let Some(authorization) = authorization {
         records.push(match authorization {
             ImmediateAuthorization::Denied { .. } => {
@@ -3190,6 +3188,99 @@ mod tests {
         assert!(matches!(
             broker.submit(None, None, intent(), false, &policy),
             Err(PermissionError::MissingIdentity)
+        ));
+    }
+
+    #[test]
+    fn submissions_emit_only_canonical_lifecycle_transitions() {
+        let flows = Arc::new(FlowRegistry::default());
+        let controlled = register_root(&flows, "session", false);
+        let unrestricted_policy = TrustConfig {
+            mode: TrustMode::Reckless,
+            ..TrustConfig::default()
+        };
+        let unrestricted = flows
+            .register_root(
+                "session".into(),
+                FlowRunId::now(),
+                EffectiveAuthority::root(&unrestricted_policy, true, None),
+            )
+            .unwrap();
+        let broker = PermissionBroker::new(flows);
+        let mut audit = attach_audit(&broker);
+
+        let pending = submit_to_user(&broker, &controlled);
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [StreamFrame::PermissionRequestCreated { .. }]
+        ));
+        broker
+            .cancel(&pending.request.request_id, "test cleanup")
+            .unwrap();
+        drain_audit(&mut audit);
+
+        let auto_policy = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Allow,
+            ..TrustConfig::default()
+        };
+        assert!(matches!(
+            broker.submit(
+                Some(&controlled.session_id),
+                Some(&controlled.run_id),
+                intent(),
+                false,
+                &auto_policy,
+            ),
+            Ok(SubmissionOutcome::Immediate(_))
+        ));
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [
+                StreamFrame::PermissionRequestCreated { .. },
+                StreamFrame::PermissionRequestApproved { .. }
+            ]
+        ));
+
+        let deny_policy = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Deny,
+            ..TrustConfig::default()
+        };
+        assert!(matches!(
+            broker.submit(
+                Some(&controlled.session_id),
+                Some(&controlled.run_id),
+                intent(),
+                false,
+                &deny_policy,
+            ),
+            Ok(SubmissionOutcome::Immediate(_))
+        ));
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [
+                StreamFrame::PermissionRequestCreated { .. },
+                StreamFrame::PermissionRequestDenied { .. }
+            ]
+        ));
+
+        assert!(matches!(
+            broker.submit(
+                Some(&unrestricted.session_id),
+                Some(&unrestricted.run_id),
+                intent(),
+                false,
+                &unrestricted_policy,
+            ),
+            Ok(SubmissionOutcome::Immediate(_))
+        ));
+        assert!(matches!(
+            drain_audit(&mut audit).as_slice(),
+            [
+                StreamFrame::PermissionRequestCreated { .. },
+                StreamFrame::UnrestrictedExecution { .. }
+            ]
         ));
     }
 
@@ -4047,17 +4138,11 @@ mod tests {
         let first = first.join().unwrap();
 
         let frames = drain_audit(&mut audit);
-        let expected = [
-            first.request.request_id.clone(),
-            first.request.request_id,
-            second.request.request_id.clone(),
-            second.request.request_id,
-        ];
+        let expected = [first.request.request_id, second.request.request_id];
         let actual = frames
             .iter()
             .map(|frame| match frame {
-                StreamFrame::PermissionRequestCreated { payload, .. }
-                | StreamFrame::PermissionRequestTargeted { payload, .. } => {
+                StreamFrame::PermissionRequestCreated { payload, .. } => {
                     payload.request_id.clone().unwrap()
                 }
                 _ => panic!("unexpected frame: {frame:?}"),
@@ -4068,9 +4153,7 @@ mod tests {
             frames.as_slice(),
             [
                 StreamFrame::PermissionRequestCreated { .. },
-                StreamFrame::PermissionRequestTargeted { .. },
-                StreamFrame::PermissionRequestCreated { .. },
-                StreamFrame::PermissionRequestTargeted { .. }
+                StreamFrame::PermissionRequestCreated { .. }
             ]
         ));
     }

@@ -179,11 +179,13 @@ A sandbox denial is final for that invocation. The runtime never converts it int
 
 ## Audit events
 
-Permission lifecycle changes are projected to both the persisted event log and the live stream. The public event families cover request creation, targeting, deferral, approval, denial, and cancellation; group creation, update, and resolution; grant creation and expiry; and unrestricted execution.
+Permission lifecycle changes are projected to both the persisted event log and the live stream. Request creation includes the initial approval target; a separate targeting record is emitted only after a real defer or retarget. The public event families cover request creation, targeting, deferral, approval, denial, and cancellation; group creation, update, and resolution; grant creation and expiry; and unrestricted execution.
 
 Each record includes its stable request or grant identity, Flow ancestry, policy reference, authority actor, process boundary, scope, reason, and a bounded provenance summary. The summary includes resolved resource targets needed for audit without copying tool arguments or arbitrary payloads.
 
 Records produced by one broker operation are emitted only after the operation commits. Failed atomic batches emit no partial records, and a successful approval is emitted immediately before its corresponding persistent grant. Lifecycle cleanup records identify a system component rather than inheriting the original decision actor.
+
+New invocations write the canonical permission lifecycle only. Legacy tool approval and denial records remain replay-compatible for existing session logs.
 
 ## Configuration reference
 

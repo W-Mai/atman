@@ -95,49 +95,6 @@ fn submit_to_broker(
         .map_err(|error| error.to_string())
 }
 
-fn emit_approval_result(
-    ctx: &ToolCtx,
-    run_id: &crate::event::FlowRunId,
-    id: &str,
-    decision: &crate::session::ApprovalDecision,
-    decided_by: &str,
-) {
-    match decision {
-        crate::session::ApprovalDecision::Approve => {
-            if let Some(sink) = ctx.events.as_ref() {
-                sink.emit(crate::event::Event::ToolApproved {
-                    run_id: run_id.clone(),
-                    tool_use_id: id.to_string(),
-                    decided_by: decided_by.into(),
-                });
-            }
-            if let Some(tx) = &ctx.stream_tx {
-                let _ = tx.send(crate::stream::StreamFrame::ToolApproved {
-                    run_id: run_id.0.to_string(),
-                    tool_use_id: id.to_string(),
-                    decided_by: decided_by.into(),
-                });
-            }
-        }
-        crate::session::ApprovalDecision::Deny { reason } => {
-            if let Some(sink) = ctx.events.as_ref() {
-                sink.emit(crate::event::Event::ToolDenied {
-                    run_id: run_id.clone(),
-                    tool_use_id: id.to_string(),
-                    reason: reason.clone(),
-                });
-            }
-            if let Some(tx) = &ctx.stream_tx {
-                let _ = tx.send(crate::stream::StreamFrame::ToolDenied {
-                    run_id: run_id.0.to_string(),
-                    tool_use_id: id.to_string(),
-                    reason: reason.clone(),
-                });
-            }
-        }
-    }
-}
-
 async fn defer_after_ancestor_timeout(
     broker: &crate::permission::PermissionBroker,
     request_id: &crate::permission::PermissionRequestId,
@@ -270,11 +227,11 @@ pub async fn request_approval_with_additional_risks(
             execution_boundary,
         )
     };
-    let Some(run_id) = ctx.flow_run_id.clone() else {
+    if ctx.flow_run_id.is_none() {
         return ApprovalOutcome::Deny {
             reason: format!("{name}: blocked — missing run identity"),
         };
-    };
+    }
     let args_preview: String = format!("{:?}", call_args.named)
         .chars()
         .take(4000)
@@ -314,13 +271,6 @@ pub async fn request_approval_with_additional_risks(
             let request_id = immediate.request.request_id.clone();
             match immediate.authorization {
                 ImmediateAuthorization::Unrestricted => {
-                    emit_approval_result(
-                        ctx,
-                        &run_id,
-                        id,
-                        &crate::session::ApprovalDecision::Approve,
-                        "unrestricted",
-                    );
                     return ApprovalOutcome::Approve {
                         authorization: Box::new(permit(
                             request_id.clone(),
@@ -329,25 +279,11 @@ pub async fn request_approval_with_additional_risks(
                     };
                 }
                 ImmediateAuthorization::Auto { execution_boundary } => {
-                    emit_approval_result(
-                        ctx,
-                        &run_id,
-                        id,
-                        &crate::session::ApprovalDecision::Approve,
-                        "policy",
-                    );
                     return ApprovalOutcome::Approve {
                         authorization: Box::new(permit(request_id.clone(), execution_boundary)),
                     };
                 }
                 ImmediateAuthorization::Granted { grant } => {
-                    emit_approval_result(
-                        ctx,
-                        &run_id,
-                        id,
-                        &crate::session::ApprovalDecision::Approve,
-                        "grant",
-                    );
                     return ApprovalOutcome::Approve {
                         authorization: Box::new(permit(
                             request_id.clone(),
@@ -357,10 +293,6 @@ pub async fn request_approval_with_additional_risks(
                 }
                 ImmediateAuthorization::Denied { reason } => {
                     let reason = format!("{name}: {reason}");
-                    let decision = crate::session::ApprovalDecision::Deny {
-                        reason: reason.clone(),
-                    };
-                    emit_approval_result(ctx, &run_id, id, &decision, "policy");
                     return ApprovalOutcome::Deny { reason };
                 }
             }
@@ -435,7 +367,6 @@ pub async fn request_approval_with_additional_risks(
                 crate::permission::ExecutionBoundary::Sandboxed,
             ),
         };
-        emit_approval_result(ctx, &run_id, id, &decision, "broker");
         return match decision {
             crate::session::ApprovalDecision::Approve => ApprovalOutcome::Approve {
                 authorization: Box::new(permit(
@@ -467,10 +398,6 @@ pub async fn request_approval_with_additional_risks(
         {
             crate::notify!(warn, "permission cancel failed: {error}");
         }
-        let decision = crate::session::ApprovalDecision::Deny {
-            reason: reason.clone(),
-        };
-        emit_approval_result(ctx, &run_id, id, &decision, "system");
         return ApprovalOutcome::Deny { reason };
     }
     let request_id = pending.request.request_id.clone();
@@ -502,7 +429,6 @@ pub async fn request_approval_with_additional_risks(
             crate::permission::ExecutionBoundary::Sandboxed,
         ),
     };
-    emit_approval_result(ctx, &run_id, id, &decision, "user");
     match decision {
         crate::session::ApprovalDecision::Approve => ApprovalOutcome::Approve {
             authorization: Box::new(permit(request_id, execution_boundary)),

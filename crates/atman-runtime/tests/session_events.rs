@@ -46,7 +46,6 @@ async fn session_writes_events_to_jsonl_file() {
             "flow_graph",
             "flow_node_start",
             "tool_node",
-            "tool_approved",
             "llm_call",
             "flow_node_end",
             "flow_end",
