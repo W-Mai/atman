@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Visual-row output folding** — Bash, streamed terminal, sub-agent, and compaction cards count wrapped display rows when enforcing collapsed-height limits, so long physical lines cannot expand cards beyond their configured size.
 - **Canonical permission lifecycle** — new requests persist their initial target once, genuine retargets remain explicit, and broker-backed outcomes no longer duplicate legacy tool approval records while existing session logs remain replay-compatible.
 - **Bounded permission coordination** — the broker retains complete state only for unresolved requests plus a 256-entry terminal diagnostic window, while durable permission history remains in session events.
 - **Bounded session discovery** — event, message, and user-message counts are maintained in validated per-session metadata; legacy sessions receive one streaming backfill, while the TUI picker, CLI listings, and daemon discovery no longer read complete event logs for every candidate.

@@ -1018,6 +1018,26 @@ pub fn wrap_with_prefix(
     out
 }
 
+fn wrap_tail_with_prefix(
+    text: &str,
+    target: usize,
+    prefix: &str,
+    max_rows: usize,
+) -> (usize, Vec<PaddedRow>) {
+    let mut total_rows = 0usize;
+    let mut tail = std::collections::VecDeque::with_capacity(max_rows);
+    for line in text.lines() {
+        for row in wrap_with_prefix(line, target, prefix, prefix) {
+            total_rows = total_rows.saturating_add(1);
+            if tail.len() == max_rows {
+                tail.pop_front();
+            }
+            tail.push_back(row);
+        }
+    }
+    (total_rows, tail.into())
+}
+
 pub fn line_with_right_pad(
     prefix: &str,
     body: &str,
@@ -4621,34 +4641,35 @@ fn render_output_block(
         &mut lines, command, expanded, target, body_style, hint_style,
     );
 
-    let all_lines: Vec<&str> = output.lines().collect();
-    let max_lines = if expanded {
-        all_lines.len()
+    let (total_rows, output_rows) = if expanded {
+        let rows = output
+            .lines()
+            .flat_map(|line| wrap_with_prefix(line, target, "    ", "    "))
+            .collect::<Vec<_>>();
+        (rows.len(), rows)
     } else {
-        all_lines.len().min(8)
+        wrap_tail_with_prefix(output, target, "    ", 8)
     };
-    let start = all_lines.len().saturating_sub(max_lines);
-    for line in &all_lines[start..] {
-        let rows = wrap_with_prefix(line, target, "    ", "    ");
-        for row in rows {
-            lines.push(line_with_right_pad(
-                &row.prefix,
-                &row.body,
-                target,
-                body_style,
-                body_style,
-            ));
-        }
+    let hidden_rows = total_rows.saturating_sub(output_rows.len());
+    for row in output_rows {
+        lines.push(line_with_right_pad(
+            &row.prefix,
+            &row.body,
+            target,
+            body_style,
+            body_style,
+        ));
     }
-    if !expanded && all_lines.len() > 8 {
-        let hint = format!("    ▼ {} more lines — click to expand", all_lines.len() - 8);
+    if !expanded && hidden_rows > 0 {
+        let unit = if hidden_rows == 1 { "line" } else { "lines" };
+        let hint = format!("    ▼ {hidden_rows} more {unit} — click to expand");
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
         }
         lines.push(Line::from(spans));
-    } else if expanded && all_lines.len() > 8 {
+    } else if expanded && total_rows > 8 {
         let hint = "    ▲ click to collapse".to_string();
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
@@ -4821,34 +4842,35 @@ fn render_terminal(
         }
         crate::app::TerminalViewMode::Stream => {
             let text = String::from_utf8_lossy(accumulated_bytes).into_owned();
-            let all_lines: Vec<&str> = text.lines().collect();
-            let max_lines = if expanded {
-                all_lines.len()
+            let (total_rows, output_rows) = if expanded {
+                let rows = text
+                    .lines()
+                    .flat_map(|line| wrap_with_prefix(line, target, "    ", "    "))
+                    .collect::<Vec<_>>();
+                (rows.len(), rows)
             } else {
-                all_lines.len().min(6)
+                wrap_tail_with_prefix(&text, target, "    ", 6)
             };
-            let start = all_lines.len().saturating_sub(max_lines);
-            for line in &all_lines[start..] {
-                let rows = wrap_with_prefix(line, target, "    ", "    ");
-                for row in rows {
-                    lines.push(line_with_right_pad(
-                        &row.prefix,
-                        &row.body,
-                        target,
-                        body_style,
-                        body_style,
-                    ));
-                }
+            let hidden_rows = total_rows.saturating_sub(output_rows.len());
+            for row in output_rows {
+                lines.push(line_with_right_pad(
+                    &row.prefix,
+                    &row.body,
+                    target,
+                    body_style,
+                    body_style,
+                ));
             }
-            if !expanded && all_lines.len() > 6 {
-                let hint = format!("    ▼ {} more lines — click to expand", all_lines.len() - 6);
+            if !expanded && hidden_rows > 0 {
+                let unit = if hidden_rows == 1 { "line" } else { "lines" };
+                let hint = format!("    ▼ {hidden_rows} more {unit} — click to expand");
                 let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
                     spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
                 }
                 lines.push(Line::from(spans));
-            } else if expanded && all_lines.len() > 6 {
+            } else if expanded && total_rows > 6 {
                 let hint = "    ▲ click to collapse".to_string();
                 let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
                 let mut spans = vec![Span::styled(hint, hint_style)];
@@ -5047,6 +5069,78 @@ line2
         let rendered = rendered_text(&lines);
         assert!(rendered.contains("cargo test --workspace"));
         assert!(rendered.contains("printf 'done'"));
+    }
+
+    #[test]
+    fn collapsed_bash_limits_wrapped_visual_rows() {
+        let output = format!("{}{}", "A".repeat(68), "B".repeat(272));
+        let lines = render_bash("bg_s_0", None, None, &output, true, false, 0, 40);
+        let rendered = rendered_text(&lines);
+
+        assert_eq!(lines.len(), 13, "header + 8 output rows + hint + padding");
+        assert!(rendered.contains("2 more lines — click to expand"));
+        assert!(!rendered.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        assert!(rendered.contains("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"));
+        assert!(
+            lines
+                .iter()
+                .all(|line| crate::width::spans_width(&line.spans) <= 40)
+        );
+    }
+
+    #[test]
+    fn collapsed_terminal_stream_limits_wrapped_visual_rows() {
+        let scr = screen(1, 5, "");
+        let output = format!("{}{}", "A".repeat(34), "B".repeat(204));
+        let lines = render_terminal(
+            "term_s_0",
+            None,
+            None,
+            &scr,
+            output.as_bytes(),
+            TerminalViewMode::Stream,
+            true,
+            false,
+            0,
+            40,
+        );
+        let rendered = rendered_text(&lines);
+
+        assert_eq!(lines.len(), 11, "header + 6 output rows + hint + padding");
+        assert!(rendered.contains("1 more line — click to expand"));
+        assert!(!rendered.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        assert!(rendered.contains("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"));
+        assert!(
+            lines
+                .iter()
+                .all(|line| crate::width::spans_width(&line.spans) <= 40)
+        );
+    }
+
+    #[test]
+    fn collapsed_compaction_summary_limits_wrapped_visual_rows() {
+        let summary = "S".repeat(36 * 15);
+        let lines = render_compaction_summary(CompactionSummaryRender {
+            phase: CompactionPhase::Finished,
+            range_start: 0,
+            range_end: 10,
+            summary: &summary,
+            before_tokens: 100,
+            after_tokens: 50,
+            compacted_count: 10,
+            expanded: false,
+            animation_frame: 0,
+            panel_width: 40,
+        });
+        let rendered = rendered_text(&lines);
+
+        assert_eq!(lines.len(), 17, "header + 12 summary rows + hint + padding");
+        assert!(rendered.contains("3 more lines — click to expand"));
+        assert!(
+            lines
+                .iter()
+                .all(|line| crate::width::spans_width(&line.spans) <= 40)
+        );
     }
 
     #[test]
@@ -6944,7 +7038,8 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         return lines;
     }
 
-    let rendered = crate::markdown::render_markdown_with_width(summary, panel_width);
+    let rendered =
+        crate::markdown::render_markdown_with_width(summary, panel_width.saturating_sub(4));
     let total = rendered.len();
     let visible = if expanded { total } else { total.min(12) };
     for line in rendered.into_iter().take(visible) {
