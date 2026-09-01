@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use atman_runtime::templates::{AGENT_AT, SYSTEM_MD};
+use atman_runtime::templates::{AGENT_AT, LOOP_DISPOSITION_MD, SYSTEM_MD};
 
 pub struct InitReport {
     pub config_dir: PathBuf,
@@ -62,6 +62,12 @@ pub fn init_config_dir_with_mode(
         .with_context(|| format!("write {}", system_md.display()))?;
     written.push(system_md.clone());
     managed.push(system_md);
+
+    let loop_disposition_md = prompts_dir.join("loop-disposition.md");
+    std::fs::write(&loop_disposition_md, LOOP_DISPOSITION_MD)
+        .with_context(|| format!("write {}", loop_disposition_md.display()))?;
+    written.push(loop_disposition_md.clone());
+    managed.push(loop_disposition_md);
 
     for (path, body) in optional_templates {
         if path.exists() {
@@ -166,14 +172,15 @@ mod tests {
         let cfg = tmp.path().join("atman");
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.is_empty());
-        assert_eq!(rep.written.len(), 6, "written: {:?}", rep.written);
-        assert_eq!(rep.managed.len(), 2);
+        assert_eq!(rep.written.len(), 7, "written: {:?}", rep.written);
+        assert_eq!(rep.managed.len(), 3);
         assert!(cfg.join("config.toml").exists());
         assert!(cfg.join("routes.at").exists());
         assert!(cfg.join("on_session_start.at").exists());
         assert!(cfg.join("commands/agent.at").exists());
         assert!(cfg.join("commands/hello.at").exists());
         assert!(cfg.join("prompts/system.md").exists());
+        assert!(cfg.join("prompts/loop-disposition.md").exists());
     }
 
     #[test]
@@ -209,10 +216,17 @@ mod tests {
         std::fs::write(&touched, "flow hello() { return \"CUSTOM\" }\n").unwrap();
         let agent = cfg.join("commands/agent.at");
         std::fs::write(&agent, "flow agent() { return \"BROKEN\" }\n").unwrap();
+        let loop_disposition = cfg.join("prompts/loop-disposition.md");
+        std::fs::write(&loop_disposition, "STALE\n").unwrap();
 
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.iter().any(|p| p.ends_with("hello.at")));
         assert!(rep.managed.iter().any(|p| p.ends_with("agent.at")));
+        assert!(
+            rep.managed
+                .iter()
+                .any(|p| p.ends_with("loop-disposition.md"))
+        );
         let hello_body = std::fs::read_to_string(&touched).unwrap();
         assert!(
             hello_body.contains("CUSTOM"),
@@ -221,6 +235,10 @@ mod tests {
         let agent_body = std::fs::read_to_string(&agent).unwrap();
         assert!(agent_body.contains("flow agent(user_prompt: string) -> string"));
         assert!(!agent_body.contains("BROKEN"));
+        assert_eq!(
+            std::fs::read_to_string(loop_disposition).unwrap(),
+            LOOP_DISPOSITION_MD
+        );
     }
 
     #[test]
@@ -231,7 +249,7 @@ mod tests {
         std::fs::write(cfg.join("some-other.toml"), "unrelated").unwrap();
         let rep = init_config_dir(&cfg).unwrap();
         assert!(cfg.join("commands").is_dir());
-        assert_eq!(rep.written.len(), 6);
+        assert_eq!(rep.written.len(), 7);
     }
 
     #[test]
