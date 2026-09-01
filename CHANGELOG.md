@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Sub-agent discovery** — ranked keyword search handles natural-language flow queries, `flow.describe` accepts the same installed file shorthand as `flow.spawn`, and managed instructions use the bounded discovery contract exposed to the model.
 - **Cached Mermaid panel projection** — floating diagrams reuse revision-keyed renders, split and diagram views materialize only visible rows, source line numbers remain aligned past 999, and private two-axis offsets avoid truncation beyond 65,535 without changing the window scroll API.
 - **Windowed MCP manager projection** — the active tools, resources, or prompts tab owns one cached row stream for wrapping, scroll bounds, visible rendering, and hit targets; stable frames reuse it, canonical MCP updates invalidate it exactly, and row offsets remain correct beyond 65,535.
 - **Windowed Bash output projection** — live and restored Bash output uses append-aware wrapped-row indexes, collapsed cards inspect only new source bytes, and expanded transcript and floating-panel views materialize only visible rows while retaining exact folding, scrolling, and command audit detail.

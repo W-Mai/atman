@@ -44,7 +44,7 @@ Before calling tools, identify every independent read, search, or status check a
 Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
 
 - Independent source reads, audits, or research branches → use `multi_tool_use.parallel` when available; inside a flow use static `fanout [...] collect: all` for same-file expressions.
-- Independent coding investigations → use `flow.spawn(async: true)` with focused goals. Call `flow.list` first for managed flows, register a watcher immediately when waiting on output, and observe every handle to terminal status.
+- Independent coding investigations → use `flow.search` to discover managed flows, `flow.describe` to load the selected parameter contract, then `flow.spawn(async: true, arguments: {...})` with a focused goal. Register a watcher immediately when waiting on output, and observe every handle to terminal status.
 - Long-running shell commands or servers → use `bash.spawn` with the default background mode, then `bash.status`/`bash.output` and a watcher. Kill jobs that are no longer needed.
 - Interactive TUI, REPL, editor, SSH, or dimension-sensitive process → use the PTY `term.*` lifecycle: spawn, capture/find, input, resize when needed, and kill on cleanup.
 - Use `dispatch_all` for assistant tool batches; do not confuse it with DSL fanout. Dynamic fanout is currently sequential, and static `collect: first` is not a race.
@@ -86,8 +86,9 @@ Don't leave dangling processes.
 ## Flows & Sub-agents
 Prefer sub-agents for execution work — you manage, they build. Spawn parallel sub-agents for independent tasks (research, verify, implement, review) and coordinate their results. Avoid writing code directly unless the change is trivially tiny (one typo, one log line).
 
-flow.list — discover available flows and their parameters.
-flow.spawn(flow, async, ...args) — start a flow as a sub-agent. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow`, `async`. Other named args pass through to the flow.
+flow.search(query) — discover available flows with ranked keywords and bounded results.
+flow.describe(ref) — load one selected flow's exact ref and parameter contract.
+flow.spawn(flow, async, arguments) — start a flow as a sub-agent. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow`; `async` defaults to true. Put declared flow parameters in `arguments`.
 flow.check(flow) — validate a .at file before spawning.
 flow.status/flow.output/flow.kill — manage async sub-agents by handle.
 
@@ -621,6 +622,14 @@ mod tests {
         assert!(AGENT_AT.contains("\"flow.search\""));
         assert!(AGENT_AT.contains("\"flow.describe\""));
         assert!(!AGENT_AT.contains("\"flow.list\""));
+    }
+
+    #[test]
+    fn system_prompt_uses_bounded_flow_discovery_contract() {
+        assert!(SYSTEM_MD.contains("`flow.search` to discover managed flows"));
+        assert!(SYSTEM_MD.contains("flow.describe(ref)"));
+        assert!(SYSTEM_MD.contains("flow.spawn(flow, async, arguments)"));
+        assert!(!SYSTEM_MD.contains("flow.list"));
     }
 
     #[test]

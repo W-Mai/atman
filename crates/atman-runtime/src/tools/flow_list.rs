@@ -93,11 +93,21 @@ impl FlowCatalog {
     }
 
     fn find(&self, flow_ref: &str) -> Option<&FlowEntry> {
-        let normalized = normalize_flow_ref(flow_ref)?;
+        if flow_ref.contains('@') {
+            let normalized = normalize_flow_ref(flow_ref)?;
+            return self
+                .files
+                .iter()
+                .flat_map(|file| file.flows.iter())
+                .find(|flow| flow.reference == normalized);
+        }
+        let file_name = normalize_flow_file(flow_ref)?;
         self.files
             .iter()
-            .flat_map(|file| file.flows.iter())
-            .find(|flow| flow.reference == normalized)
+            .find(|file| file.name == file_name)?
+            .flows
+            .iter()
+            .find(|flow| flow.name != "describe")
     }
 
     fn legacy_value(&self) -> Value {
@@ -155,7 +165,7 @@ impl Tool for FlowSearch {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Search installed DSL flows without loading the complete catalog into context. \
+            "Search installed DSL flows by ranked keywords without loading the complete catalog into context. \
              Results contain an exact flow ref, a source fingerprint, and a short summary. \
              Use flow.describe on one result before flow.spawn when its parameters are unknown.",
         )
@@ -165,7 +175,7 @@ impl Tool for FlowSearch {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Case-insensitive text matched against flow ref and summary. Empty string lists the first page."},
+                "query": {"type": "string", "description": "Case-insensitive keywords ranked across flow name, ref, and summary. Empty string lists the first page."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "default": DEFAULT_SEARCH_LIMIT},
                 "cursor": {"type": "string", "description": "Opaque cursor returned by the previous page."}
             },
@@ -196,7 +206,8 @@ impl Tool for FlowDescribe {
     fn description(&self) -> Option<&str> {
         Some(
             "Describe one installed DSL flow. Returns its exact ref, current source fingerprint, \
-             summary, and parameter contract. An optional version rejects stale search results.",
+             summary, and parameter contract. Accepts an exact ref or installed flow-file shorthand. \
+             An optional version rejects stale search results.",
         )
     }
 
@@ -204,7 +215,7 @@ impl Tool for FlowDescribe {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "ref": {"type": "string", "description": "Exact flow ref returned by flow.search."},
+                "ref": {"type": "string", "description": "Exact flow ref returned by flow.search, or installed flow file such as subagent.at."},
                 "version": {"type": "string", "description": "Optional source fingerprint returned by flow.search."}
             },
             "required": ["ref"],
@@ -233,15 +244,16 @@ fn search_catalog(
         .map(|cursor| parse_cursor(cursor, &search_fingerprint))
         .transpose()?
         .unwrap_or(0);
-    let entries = catalog
+    let mut entries = catalog
         .searchable_entries()
         .into_iter()
-        .filter(|flow| {
-            normalized_query.is_empty()
-                || flow.reference.to_lowercase().contains(&normalized_query)
-                || flow.summary.to_lowercase().contains(&normalized_query)
-        })
+        .filter_map(|flow| search_score(flow, &normalized_query).map(|score| (score, flow)))
         .collect::<Vec<_>>();
+    entries.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.reference.cmp(&right.reference))
+    });
     if offset > entries.len() {
         return Err(RuntimeError::ToolFailed(
             "flow.search: cursor offset is outside the result set".into(),
@@ -250,7 +262,7 @@ fn search_catalog(
     let end = (offset + limit).min(entries.len());
     let items = entries[offset..end]
         .iter()
-        .map(|flow| {
+        .map(|(_, flow)| {
             Value::Struct(vec![
                 ("ref".into(), Value::Str(flow.reference.clone())),
                 ("version".into(), Value::Str(flow.version.clone())),
@@ -272,6 +284,38 @@ fn search_catalog(
             Value::Str(catalog.fingerprint.clone()),
         ),
     ]))
+}
+
+fn search_score(flow: &FlowEntry, query: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let name = flow.name.to_lowercase();
+    let reference = flow.reference.to_lowercase();
+    let summary = flow.summary.to_lowercase();
+    let mut score = if name.contains(query) || reference.contains(query) || summary.contains(query)
+    {
+        100
+    } else {
+        0
+    };
+    for token in query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+    {
+        if name == token {
+            score += 24;
+        } else if name.contains(token) {
+            score += 12;
+        }
+        if reference.contains(token) {
+            score += 8;
+        }
+        if summary.contains(token) {
+            score += 4;
+        }
+    }
+    (score > 0).then_some(score)
 }
 
 fn describe_catalog_entry(
@@ -398,12 +442,20 @@ fn normalize_flow_ref(flow_ref: &str) -> Option<String> {
     if file.is_empty() || flow.is_empty() {
         return None;
     }
-    let file = if file.ends_with(".at") {
+    let file = normalize_flow_file(file)?;
+    Some(format!("{file}@{flow}"))
+}
+
+fn normalize_flow_file(file: &str) -> Option<String> {
+    let file = file.trim();
+    if file.is_empty() {
+        return None;
+    }
+    Some(if file.ends_with(".at") {
         file.to_string()
     } else {
         format!("{file}.at")
-    };
-    Some(format!("{file}@{flow}"))
+    })
 }
 
 fn search_fingerprint(catalog_fingerprint: &str, query: &str) -> String {
@@ -585,6 +637,57 @@ flow review(goal: string, retries: int = 3) -> string { return goal }
         let error =
             describe_catalog_entry(&catalog, "review@review", Some("blake3:stale")).unwrap_err();
         assert!(error.to_string().contains("stale version"));
+    }
+
+    #[test]
+    fn search_ranks_partial_natural_language_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flow(
+            dir.path(),
+            "subagent.at",
+            r#"
+flow describe() -> string { return "Sub-agent flows for isolated research, verification, implementation, and review. The research role reads files without making changes." }
+flow subagent(goal: string, role: string = "research") -> string { return goal }
+"#,
+        );
+        write_flow(
+            dir.path(),
+            "review.at",
+            r#"
+flow describe() -> string { return "Review files" }
+flow review(goal: string) -> string { return goal }
+"#,
+        );
+        let catalog = FlowCatalog::load_from(dir.path()).unwrap();
+        let result = search_catalog(&catalog, "subagent research read files", 5, None).unwrap();
+        let items = match result.field("items") {
+            Some(Value::List(items)) => items,
+            _ => panic!("items must be a list"),
+        };
+        assert_eq!(
+            items[0].field("ref").and_then(as_str),
+            Some("subagent.at@subagent")
+        );
+    }
+
+    #[test]
+    fn describe_accepts_the_same_file_shorthand_as_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flow(
+            dir.path(),
+            "subagent.at",
+            r#"
+flow describe() -> string { return "Delegated work" }
+flow subagent(goal: string) -> string { return goal }
+flow research_loop(goal: string) -> string { return goal }
+"#,
+        );
+        let catalog = FlowCatalog::load_from(dir.path()).unwrap();
+        let described = describe_catalog_entry(&catalog, "subagent.at", None).unwrap();
+        assert_eq!(
+            described.field("ref").and_then(as_str),
+            Some("subagent.at@subagent")
+        );
     }
 
     fn as_str(value: &Value) -> Option<&str> {
