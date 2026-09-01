@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-09-02
+
 ### ⚠️ Breaking Changes
 
 - **Tool call purpose fields** — `MessagePart::ToolUse`, tool-node, background-process, and terminal events and stream frames, `WorkflowNodeKind::ToolCall`, `PermissionIntent`, `PermissionRequestAudit`, and `TranscriptEntry::ToolNode` include an optional call-purpose field; `FlowEntry` includes a separate display label, while task registration uses `TaskDisplay` to keep an optional raw command independent from its user-facing label and `TaskSnapshot` retains both values.
