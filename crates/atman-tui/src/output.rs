@@ -594,9 +594,34 @@ struct ItemCacheEntry {
     revision: crate::app::OutputRevision,
     rows: u32,
     lines: Option<Arc<[Line<'static>]>>,
+    streaming_markdown: Option<crate::markdown::StreamingMarkdownProjection>,
     regions: Arc<[NodeRegion]>,
     dynamic: DynamicPaint,
     last_used: u64,
+}
+
+impl ItemCacheEntry {
+    fn has_retained_lines(&self) -> bool {
+        self.lines.is_some() || self.streaming_markdown.is_some()
+    }
+
+    fn append_line_range(&self, start: usize, end: usize, out: &mut Vec<Line<'static>>) -> bool {
+        if let Some(projection) = &self.streaming_markdown {
+            let projection_rows = projection.rows();
+            projection.append_range(start, end.min(projection_rows), out);
+            if start <= projection_rows && end > projection_rows {
+                out.push(Line::from(Span::styled(String::new(), RESET)));
+            }
+            true
+        } else if let Some(lines) = &self.lines {
+            let start = start.min(lines.len());
+            let end = end.min(lines.len()).max(start);
+            out.extend(lines[start..end].iter().cloned());
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl LayoutCache {
@@ -705,8 +730,19 @@ impl LayoutCache {
                 continue;
             }
             let retain = idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len();
-            self.render_entry(idx, &items[idx], revisions[idx], ctx, retain);
-            offsets_dirty_from = Some(offsets_dirty_from.map_or(idx, |current| current.min(idx)));
+            if self.render_entry(
+                idx,
+                &items[idx],
+                revisions[idx],
+                ctx,
+                retain,
+                full_invalidation || structure_changed,
+            ) {
+                offsets_dirty_from =
+                    Some(offsets_dirty_from.map_or(idx, |current| current.min(idx)));
+            } else {
+                self.pending_layout.insert(idx);
+            }
         }
 
         let paint_dirty = std::mem::take(&mut self.pending_paint);
@@ -715,10 +751,11 @@ impl LayoutCache {
                 continue;
             }
             let old_rows = self.entries[idx].rows;
-            let retain = self.entries[idx].lines.is_some()
+            let retain = self.entries[idx].has_retained_lines()
                 || idx.saturating_add(Self::RECENT_ITEM_BUDGET) >= items.len();
-            self.render_entry(idx, &items[idx], revisions[idx], ctx, retain);
-            if self.entries[idx].rows != old_rows {
+            if !self.render_entry(idx, &items[idx], revisions[idx], ctx, retain, false) {
+                self.pending_layout.insert(idx);
+            } else if self.entries[idx].rows != old_rows {
                 offsets_dirty_from =
                     Some(offsets_dirty_from.map_or(idx, |current| current.min(idx)));
             }
@@ -741,9 +778,10 @@ impl LayoutCache {
             .saturating_add(Self::OVERSCAN_ITEMS)
             .min(items.len());
         for idx in retain_start..retain_end {
-            if self.entries[idx].lines.is_none() {
+            if !self.entries[idx].has_retained_lines() {
                 let old_rows = self.entries[idx].rows;
-                self.render_entry(idx, &items[idx], revisions[idx], ctx, true);
+                let rendered = self.render_entry(idx, &items[idx], revisions[idx], ctx, true, true);
+                debug_assert!(rendered);
                 debug_assert_eq!(self.entries[idx].rows, old_rows);
             } else {
                 self.touch_entry(idx);
@@ -775,14 +813,15 @@ impl LayoutCache {
             let entry = &self.entries[idx];
             let start = self.row_start(idx);
             let end = self.row_ends[idx];
-            let Some(item_lines) = entry.lines.as_ref() else {
+            if !entry.has_retained_lines() {
                 debug_assert!(false, "visible entries must be prepared by update_dirty");
                 continue;
-            };
+            }
             let skip = scroll_offset.saturating_sub(start) as usize;
             let take = end.min(vis_bottom).saturating_sub(start.max(scroll_offset)) as usize;
-            let lo = skip.min(item_lines.len());
-            let hi = skip.saturating_add(take).min(item_lines.len());
+            let row_count = entry.rows as usize;
+            let lo = skip.min(row_count);
+            let hi = skip.saturating_add(take).min(row_count);
             if entry.dynamic.active {
                 #[cfg(test)]
                 update_perf_counters(|counters| {
@@ -790,15 +829,16 @@ impl LayoutCache {
                         counters.animation_item_visits.saturating_add(1);
                 });
             }
-            for (line_index, item_line) in item_lines[lo..hi].iter().enumerate() {
-                let mut line = item_line.clone();
+            let slice_start = lines.len();
+            let prepared = entry.append_line_range(lo, hi, &mut lines);
+            debug_assert!(prepared);
+            for (line_index, line) in lines[slice_start..].iter_mut().enumerate() {
                 patch_animation_line(
-                    &mut line,
+                    line,
                     lo.saturating_add(line_index),
                     &entry.dynamic,
                     animation_frame,
                 );
-                lines.push(line);
             }
             ranges.push(ItemRange {
                 item_index: idx,
@@ -824,7 +864,49 @@ impl LayoutCache {
         revision: crate::app::OutputRevision,
         ctx: &RenderCtx<'_>,
         retain_lines: bool,
-    ) {
+        force_streaming: bool,
+    ) -> bool {
+        if let OutputItem::AssistantMd {
+            md,
+            streaming: true,
+            retried: false,
+        } = item
+        {
+            let mut projection = self.entries[idx]
+                .streaming_markdown
+                .take()
+                .unwrap_or_else(|| {
+                    crate::markdown::StreamingMarkdownProjection::new(revision.source_generation)
+                });
+            if matches!(
+                projection.update(
+                    md,
+                    revision.source_generation,
+                    ctx.panel_width,
+                    std::time::Instant::now(),
+                    force_streaming,
+                ),
+                crate::markdown::StreamingProjectionUpdate::Deferred
+            ) {
+                self.entries[idx].streaming_markdown = Some(projection);
+                return false;
+            }
+            #[cfg(test)]
+            update_perf_counters(|counters| {
+                counters.item_renders = counters.item_renders.saturating_add(1);
+            });
+            self.access_clock = self.access_clock.wrapping_add(1);
+            self.entries[idx] = ItemCacheEntry {
+                revision,
+                rows: projection.rows().saturating_add(1).min(u32::MAX as usize) as u32,
+                lines: None,
+                streaming_markdown: Some(projection),
+                regions: Arc::from([]),
+                dynamic: DynamicPaint::default(),
+                last_used: self.access_clock,
+            };
+            return true;
+        }
         let hovered = ctx.hovered_thinking_idx == Some(idx);
         let item_ctx = RenderCtx {
             expanded_tools: ctx.expanded_tools,
@@ -846,6 +928,7 @@ impl LayoutCache {
             revision,
             rows,
             lines: retain_lines.then(|| Arc::from(lines)),
+            streaming_markdown: None,
             regions: if retain_lines {
                 Arc::from(regions)
             } else {
@@ -854,6 +937,7 @@ impl LayoutCache {
             dynamic,
             last_used: self.access_clock,
         };
+        true
     }
 
     fn rebuild_row_offsets(&mut self, from: usize) {
@@ -920,7 +1004,7 @@ impl LayoutCache {
     fn retained_item_count(&self) -> usize {
         self.entries
             .iter()
-            .filter(|entry| entry.lines.is_some())
+            .filter(|entry| entry.has_retained_lines())
             .count()
     }
 }
@@ -939,7 +1023,7 @@ impl LayoutCache {
     fn retained_item_count_for_debug(&self) -> usize {
         self.entries
             .iter()
-            .filter(|entry| entry.lines.is_some())
+            .filter(|entry| entry.has_retained_lines())
             .count()
     }
 }
@@ -5574,6 +5658,63 @@ mod tests {
         cache.update_dirty(key, &items, &ctx, request);
         let _ = cache.visible_slice(0, 20, 0);
         assert_eq!(perf_counters().item_renders, 0);
+    }
+
+    #[test]
+    fn streaming_markdown_defers_layout_but_completion_flushes_latest_source() {
+        let mut app = crate::app::AppState::new("stream-projection".into(), None);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: "one".into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 100,
+            follow_tail_rows: None,
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        assert!(cache.entries[0].streaming_markdown.is_some());
+        assert!(cache.entries[0].lines.is_none());
+        app.layout_cache = cache;
+
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: " two".into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let current_revision = app.items.revisions()[0];
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        assert!(cache.pending_layout.contains(&0));
+        assert_ne!(cache.entries[0].revision.layout, current_revision.layout);
+        app.layout_cache = cache;
+
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmDone {
+            total_tokens: 2,
+            run_id: None,
+        });
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        assert_eq!(
+            lines,
+            render_item(
+                &OutputItem::AssistantMd {
+                    md: "one two".into(),
+                    streaming: false,
+                    retried: false,
+                },
+                &RenderCtx::empty(),
+            )
+        );
+        assert!(cache.entries[0].streaming_markdown.is_none());
+        assert!(!cache.pending_layout.contains(&0));
     }
 
     #[test]

@@ -117,6 +117,7 @@ impl OutputItem {
 
     pub(crate) fn has_dynamic_paint(&self) -> bool {
         match self {
+            Self::AssistantMd { streaming, .. } => *streaming,
             Self::Thinking { done, .. }
             | Self::Terminal { done, .. }
             | Self::Bash { done, .. }
@@ -137,11 +138,13 @@ pub struct OutputRevision {
     pub interaction: u64,
     pub layout: u64,
     pub paint: u64,
+    pub source_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMutation {
     Semantic,
+    SemanticAppend,
     Interaction,
     Paint,
 }
@@ -188,6 +191,7 @@ impl OutputStore {
                 id: self.next_id,
                 semantic: self.revision_clock,
                 layout: self.revision_clock,
+                source_generation: self.revision_clock,
                 ..OutputRevision::default()
             });
         }
@@ -202,6 +206,7 @@ impl OutputStore {
             id: self.next_id,
             semantic: self.revision_clock,
             layout: self.revision_clock,
+            source_generation: self.revision_clock,
             ..OutputRevision::default()
         });
         if self
@@ -249,6 +254,11 @@ impl OutputStore {
         }
         match impact {
             OutputMutation::Semantic => {
+                revision.semantic = self.revision_clock;
+                revision.layout = self.revision_clock;
+                revision.source_generation = self.revision_clock;
+            }
+            OutputMutation::SemanticAppend => {
                 revision.semantic = self.revision_clock;
                 revision.layout = self.revision_clock;
             }
@@ -1505,7 +1515,7 @@ impl AppState {
         let changed = self.items.mutate(index, impact, mutation);
         if changed {
             match impact {
-                OutputMutation::Semantic => {
+                OutputMutation::Semantic | OutputMutation::SemanticAppend => {
                     self.items_version = self.items_version.wrapping_add(1);
                     self.layout_cache.mark_layout_dirty(index);
                 }
@@ -1825,7 +1835,7 @@ impl AppState {
                     )
                 });
                 if let Some(index) = last_index.filter(|_| continues_assistant) {
-                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                    self.mutate_item(index, OutputMutation::SemanticAppend, |item| {
                         let OutputItem::AssistantMd { md, streaming, .. } = item else {
                             return false;
                         };
@@ -3967,6 +3977,32 @@ mod tests {
         );
         store.remove(1);
         assert!(store.animated_ids().is_empty());
+    }
+
+    #[test]
+    fn assistant_append_preserves_source_generation_until_finalization() {
+        let mut app = AppState::new("source-generation".into(), None);
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "one".into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let initial = app.items.revisions()[0];
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: " two".into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let appended = app.items.revisions()[0];
+        assert_eq!(appended.source_generation, initial.source_generation);
+        assert_ne!(appended.layout, initial.layout);
+
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 2,
+            run_id: None,
+        });
+        let finalized = app.items.revisions()[0];
+        assert_ne!(finalized.source_generation, appended.source_generation);
     }
 
     #[test]

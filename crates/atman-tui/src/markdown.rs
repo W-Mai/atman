@@ -1,6 +1,28 @@
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+
+const STREAM_REFRESH_MIN: Duration = Duration::from_millis(50);
+const STREAM_REFRESH_MAX: Duration = Duration::from_millis(750);
+const STREAM_TAIL_SOFT_LIMIT: usize = 32 * 1024;
+
+fn stream_refresh_interval(
+    working_source_len: usize,
+    exact_full_mode: bool,
+    render_cost: Duration,
+) -> Duration {
+    if working_source_len > STREAM_TAIL_SOFT_LIMIT || exact_full_mode {
+        render_cost
+            .saturating_mul(8)
+            .clamp(STREAM_REFRESH_MIN, STREAM_REFRESH_MAX)
+    } else {
+        STREAM_REFRESH_MIN
+    }
+}
 
 pub fn render_markdown(md: &str) -> Vec<Line<'static>> {
     render_markdown_with_width(md, 60)
@@ -8,38 +30,56 @@ pub fn render_markdown(md: &str) -> Vec<Line<'static>> {
 
 pub fn render_markdown_with_width(md: &str, rule_width: u16) -> Vec<Line<'static>> {
     let mut renderer = Renderer::with_rule_width(rule_width);
-    for segment in split_display_math_segments(md) {
+    for segment in split_display_math_segments(md).segments {
         match segment {
-            MarkdownSegment::Text(text) => {
-                let mut opts = Options::empty();
-                opts.insert(Options::ENABLE_TABLES);
-                opts.insert(Options::ENABLE_STRIKETHROUGH);
-                opts.insert(Options::ENABLE_TASKLISTS);
-                opts.insert(Options::ENABLE_MATH);
-                for ev in Parser::new_ext(&text, opts) {
+            MarkdownSegment::Text { text, .. } => {
+                for ev in Parser::new_ext(text, markdown_options()) {
                     renderer.consume(ev);
                 }
             }
-            MarkdownSegment::DisplayMath(tex) => renderer.render_display_math(&tex),
+            MarkdownSegment::DisplayMath { tex, .. } => renderer.render_display_math(&tex),
         }
     }
     renderer.finish()
 }
 
-enum MarkdownSegment {
-    Text(String),
-    DisplayMath(String),
+fn markdown_options() -> Options {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_MATH);
+    options
 }
 
-fn split_display_math_segments(md: &str) -> Vec<MarkdownSegment> {
-    let lines: Vec<&str> = md.split_inclusive('\n').collect();
+enum MarkdownSegment<'a> {
+    Text { text: &'a str, offset: usize },
+    DisplayMath { tex: String, range: Range<usize> },
+}
+
+struct MarkdownSegments<'a> {
+    segments: Vec<MarkdownSegment<'a>>,
+    unclosed_display_math_start: Option<usize>,
+}
+
+fn split_display_math_segments(md: &str) -> MarkdownSegments<'_> {
+    let mut offset = 0usize;
+    let lines = md
+        .split_inclusive('\n')
+        .map(|line| {
+            let start = offset;
+            offset = offset.saturating_add(line.len());
+            (start, line)
+        })
+        .collect::<Vec<_>>();
     let mut segments = Vec::new();
-    let mut text = String::new();
+    let mut text_start = 0usize;
     let mut in_code_fence = false;
     let mut index = 0;
+    let mut unclosed_display_math_start = None;
 
     while index < lines.len() {
-        let line = lines[index];
+        let (line_start, line) = lines[index];
         let trimmed = line.trim();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_code_fence = !in_code_fence;
@@ -48,35 +88,374 @@ fn split_display_math_segments(md: &str) -> Vec<MarkdownSegment> {
         if !in_code_fence && trimmed == "$$" {
             let Some(close_offset) = lines[index + 1..]
                 .iter()
-                .position(|candidate| candidate.trim() == "$$")
+                .position(|(_, candidate)| candidate.trim() == "$$")
             else {
-                text.push_str(line);
-                index += 1;
-                continue;
+                unclosed_display_math_start = Some(line_start);
+                break;
             };
             let close = index + 1 + close_offset;
-            if !text.is_empty() {
-                segments.push(MarkdownSegment::Text(std::mem::take(&mut text)));
+            if text_start < line_start {
+                segments.push(MarkdownSegment::Text {
+                    text: &md[text_start..line_start],
+                    offset: text_start,
+                });
             }
             let tex = lines[index + 1..close]
                 .iter()
-                .map(|line| line.trim())
+                .map(|(_, line)| line.trim())
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
-            segments.push(MarkdownSegment::DisplayMath(tex));
+            let close_end = lines[close].0.saturating_add(lines[close].1.len());
+            segments.push(MarkdownSegment::DisplayMath {
+                tex,
+                range: line_start..close_end,
+            });
+            text_start = close_end;
             index = close + 1;
             continue;
         }
 
-        text.push_str(line);
         index += 1;
     }
 
-    if !text.is_empty() {
-        segments.push(MarkdownSegment::Text(text));
+    if text_start < md.len() {
+        segments.push(MarkdownSegment::Text {
+            text: &md[text_start..],
+            offset: text_start,
+        });
     }
-    segments
+    MarkdownSegments {
+        segments,
+        unclosed_display_math_start,
+    }
+}
+
+enum ParsedRenderEvent<'a> {
+    Common {
+        event: Event<'a>,
+        range: Range<usize>,
+    },
+    DisplayMath {
+        tex: String,
+        range: Range<usize>,
+    },
+}
+
+impl ParsedRenderEvent<'_> {
+    fn start(&self) -> usize {
+        match self {
+            Self::Common { range, .. } | Self::DisplayMath { range, .. } => range.start,
+        }
+    }
+}
+
+struct ParsedMarkdown<'a> {
+    events: Vec<ParsedRenderEvent<'a>>,
+    top_level_starts: Vec<usize>,
+    has_reference_definitions: bool,
+}
+
+fn parse_markdown_for_projection(source: &str) -> ParsedMarkdown<'_> {
+    let mut events = Vec::new();
+    let mut top_level_starts = Vec::new();
+    let mut has_reference_definitions = false;
+    let split = split_display_math_segments(source);
+
+    for segment in split.segments {
+        match segment {
+            MarkdownSegment::Text { text, offset } => {
+                let parser = Parser::new_ext(text, markdown_options());
+                has_reference_definitions |= parser.reference_definitions().iter().next().is_some();
+                let mut depth = 0usize;
+                for (event, local_range) in parser.into_offset_iter() {
+                    let range = local_range.start.saturating_add(offset)
+                        ..local_range.end.saturating_add(offset);
+                    match &event {
+                        Event::Start(_) => {
+                            if depth == 0 {
+                                top_level_starts.push(range.start);
+                            }
+                            depth = depth.saturating_add(1);
+                        }
+                        Event::End(_) => {
+                            depth = depth.saturating_sub(1);
+                        }
+                        _ if depth == 0 => top_level_starts.push(range.start),
+                        _ => {}
+                    }
+                    events.push(ParsedRenderEvent::Common { event, range });
+                }
+            }
+            MarkdownSegment::DisplayMath { tex, range } => {
+                top_level_starts.push(range.start);
+                events.push(ParsedRenderEvent::DisplayMath { tex, range });
+            }
+        }
+    }
+
+    if let Some(open_math) = split.unclosed_display_math_start {
+        top_level_starts.retain(|start| *start < open_math);
+        top_level_starts.push(open_math);
+    }
+    top_level_starts.dedup();
+    ParsedMarkdown {
+        events,
+        top_level_starts,
+        has_reference_definitions,
+    }
+}
+
+struct ProjectionRender {
+    stable_lines: Vec<Line<'static>>,
+    tail_lines: Vec<Line<'static>>,
+    stable_boundary_fresh_line: bool,
+    committed_source_bytes: Option<usize>,
+}
+
+fn projection_cut(top_level_starts: &[usize]) -> Option<usize> {
+    top_level_starts
+        .len()
+        .checked_sub(2)
+        .and_then(|index| top_level_starts.get(index).copied())
+}
+
+fn render_projection_suffix(
+    parsed: ParsedMarkdown<'_>,
+    rule_width: u16,
+    initial_fresh_line: bool,
+) -> ProjectionRender {
+    let cut = projection_cut(&parsed.top_level_starts);
+    let mut renderer = Renderer::with_boundary(rule_width, initial_fresh_line);
+    let mut stable_lines = Vec::new();
+    let mut stable_boundary_fresh_line = initial_fresh_line;
+    let mut captured = false;
+    let mut committed_source_bytes = None;
+
+    for event in parsed.events {
+        if !captured && let Some(cut) = cut.filter(|cut| event.start() >= *cut) {
+            debug_assert!(renderer.at_top_level_boundary());
+            stable_lines = std::mem::take(&mut renderer.lines);
+            stable_boundary_fresh_line = renderer.fresh_line;
+            captured = true;
+            committed_source_bytes = Some(cut);
+        }
+        match event {
+            ParsedRenderEvent::Common { event, .. } => renderer.consume(event),
+            ParsedRenderEvent::DisplayMath { tex, .. } => renderer.render_display_math(&tex),
+        }
+    }
+
+    let mut tail_lines = renderer.finish();
+    if captured && tail_lines.is_empty() {
+        while stable_lines
+            .last()
+            .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+        {
+            stable_lines.pop();
+        }
+        tail_lines = stable_lines;
+        stable_lines = Vec::new();
+        committed_source_bytes = None;
+    }
+
+    ProjectionRender {
+        stable_lines,
+        tail_lines,
+        stable_boundary_fresh_line,
+        committed_source_bytes,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamingProjectionUpdate {
+    Rendered,
+    Deferred,
+}
+
+#[derive(Clone)]
+pub(crate) struct StreamingMarkdownProjection {
+    source_generation: u64,
+    observed_source_len: usize,
+    stable_source_end: usize,
+    stable_boundary_fresh_line: bool,
+    stable_segments: Vec<Arc<[Line<'static>]>>,
+    stable_row_ends: Vec<usize>,
+    tail_lines: Arc<[Line<'static>]>,
+    exact_full_mode: bool,
+    next_refresh_at: Option<Instant>,
+    #[cfg(test)]
+    parsed_source_bytes: usize,
+}
+
+impl StreamingMarkdownProjection {
+    pub(crate) fn new(source_generation: u64) -> Self {
+        Self {
+            source_generation,
+            observed_source_len: 0,
+            stable_source_end: 0,
+            stable_boundary_fresh_line: false,
+            stable_segments: Vec::new(),
+            stable_row_ends: Vec::new(),
+            tail_lines: Arc::from([]),
+            exact_full_mode: false,
+            next_refresh_at: None,
+            #[cfg(test)]
+            parsed_source_bytes: 0,
+        }
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        source: &str,
+        source_generation: u64,
+        rule_width: u16,
+        now: Instant,
+        force: bool,
+    ) -> StreamingProjectionUpdate {
+        if self.source_generation != source_generation
+            || source.len() < self.observed_source_len
+            || self.stable_source_end > source.len()
+        {
+            *self = Self::new(source_generation);
+        }
+        if !force
+            && self.observed_source_len > 0
+            && self.next_refresh_at.is_some_and(|deadline| now < deadline)
+        {
+            return StreamingProjectionUpdate::Deferred;
+        }
+
+        let started = Instant::now();
+        if self.exact_full_mode {
+            self.tail_lines = Arc::from(render_markdown_with_width(source, rule_width));
+            #[cfg(test)]
+            {
+                self.parsed_source_bytes = self.parsed_source_bytes.saturating_add(source.len());
+            }
+        } else {
+            let suffix = &source[self.stable_source_end..];
+            let parsed = parse_markdown_for_projection(suffix);
+            #[cfg(test)]
+            {
+                self.parsed_source_bytes = self.parsed_source_bytes.saturating_add(suffix.len());
+            }
+            if parsed.has_reference_definitions {
+                self.stable_source_end = 0;
+                self.stable_boundary_fresh_line = false;
+                self.stable_segments.clear();
+                self.stable_row_ends.clear();
+                self.exact_full_mode = true;
+                self.tail_lines = Arc::from(render_markdown_with_width(source, rule_width));
+                #[cfg(test)]
+                {
+                    self.parsed_source_bytes =
+                        self.parsed_source_bytes.saturating_add(source.len());
+                }
+            } else {
+                let rendered =
+                    render_projection_suffix(parsed, rule_width, self.stable_boundary_fresh_line);
+                if let Some(committed_source_bytes) = rendered.committed_source_bytes {
+                    if !rendered.stable_lines.is_empty() {
+                        let rows = rendered.stable_lines.len();
+                        self.stable_segments.push(Arc::from(rendered.stable_lines));
+                        let previous = self.stable_row_ends.last().copied().unwrap_or(0);
+                        self.stable_row_ends.push(previous.saturating_add(rows));
+                    }
+                    self.stable_source_end = self
+                        .stable_source_end
+                        .saturating_add(committed_source_bytes);
+                    self.stable_boundary_fresh_line = rendered.stable_boundary_fresh_line;
+                }
+                self.tail_lines = Arc::from(rendered.tail_lines);
+            }
+        }
+
+        self.observed_source_len = source.len();
+        let render_cost = started.elapsed();
+        let working_len = if self.exact_full_mode {
+            source.len()
+        } else {
+            source.len().saturating_sub(self.stable_source_end)
+        };
+        let interval = stream_refresh_interval(working_len, self.exact_full_mode, render_cost);
+        self.next_refresh_at = Some(now + interval);
+        StreamingProjectionUpdate::Rendered
+    }
+
+    pub(crate) fn rows(&self) -> usize {
+        self.raw_rows().max(1)
+    }
+
+    fn raw_rows(&self) -> usize {
+        self.stable_row_ends.last().copied().unwrap_or(0) + self.tail_lines.len()
+    }
+
+    pub(crate) fn append_range(&self, start: usize, end: usize, out: &mut Vec<Line<'static>>) {
+        let end = end.min(self.rows());
+        let start = start.min(end);
+        let raw_rows = self.raw_rows();
+        if raw_rows == 0 {
+            if start == 0 && end > 0 {
+                out.push(Line::from(streaming_cursor()));
+            }
+            return;
+        }
+
+        let stable_rows = self.stable_row_ends.last().copied().unwrap_or(0);
+        if start < stable_rows {
+            let mut segment_index = self.stable_row_ends.partition_point(|row| *row <= start);
+            while segment_index < self.stable_segments.len() {
+                let segment_start = segment_index
+                    .checked_sub(1)
+                    .and_then(|index| self.stable_row_ends.get(index).copied())
+                    .unwrap_or(0);
+                if segment_start >= end {
+                    break;
+                }
+                let segment = &self.stable_segments[segment_index];
+                let local_start = start.saturating_sub(segment_start).min(segment.len());
+                let local_end = end.saturating_sub(segment_start).min(segment.len());
+                out.extend(segment[local_start..local_end].iter().cloned());
+                segment_index += 1;
+            }
+        }
+
+        if end > stable_rows && start < raw_rows {
+            let local_start = start.saturating_sub(stable_rows).min(self.tail_lines.len());
+            let local_end = end.saturating_sub(stable_rows).min(self.tail_lines.len());
+            for (offset, line) in self.tail_lines[local_start..local_end].iter().enumerate() {
+                let global_row = stable_rows
+                    .saturating_add(local_start)
+                    .saturating_add(offset);
+                let mut line = line.clone();
+                if global_row.saturating_add(1) == raw_rows {
+                    line.spans.push(streaming_cursor());
+                }
+                out.push(line);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn all_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        self.append_range(0, self.rows(), &mut lines);
+        if let Some(last) = lines.last_mut()
+            && let Some(span) = last.spans.last()
+            && span.content == "▏"
+        {
+            last.spans.pop();
+        }
+        lines
+    }
+}
+
+fn streaming_cursor() -> Span<'static> {
+    Span::styled(
+        "▏".to_string(),
+        Style::default().add_modifier(Modifier::SLOW_BLINK),
+    )
 }
 
 #[derive(Default)]
@@ -106,6 +485,28 @@ impl Renderer {
             rule_width: w.max(4),
             ..Default::default()
         }
+    }
+
+    fn with_boundary(w: u16, fresh_line: bool) -> Self {
+        Self {
+            fresh_line,
+            ..Self::with_rule_width(w)
+        }
+    }
+
+    fn at_top_level_boundary(&self) -> bool {
+        self.current.is_empty()
+            && self.style_stack.is_empty()
+            && self.list_stack.is_empty()
+            && self.in_code_block.is_none()
+            && self.code_buffer.is_empty()
+            && self.heading_level.is_none()
+            && self.blockquote_depth == 0
+            && !self.in_table
+            && !self.in_table_head
+            && self.table_row.is_empty()
+            && self.table_header.is_empty()
+            && self.table_body.is_empty()
     }
 
     fn content_width(&self) -> usize {
@@ -1045,17 +1446,27 @@ mod tests {
 
     #[test]
     fn multiline_display_math_is_split_before_markdown_parsing() {
-        let segments = split_display_math_segments("before\n$$\nx = y\n=\nz\n$$\nafter\n");
-        assert!(matches!(segments[0], MarkdownSegment::Text(ref text) if text == "before\n"));
-        assert!(matches!(segments[1], MarkdownSegment::DisplayMath(ref tex) if tex == "x = y = z"));
-        assert!(matches!(segments[2], MarkdownSegment::Text(ref text) if text == "after\n"));
+        let split = split_display_math_segments("before\n$$\nx = y\n=\nz\n$$\nafter\n");
+        let segments = split.segments;
+        assert_eq!(split.unclosed_display_math_start, None);
+        assert!(
+            matches!(segments[0], MarkdownSegment::Text { text, offset: 0 } if text == "before\n")
+        );
+        assert!(
+            matches!(segments[1], MarkdownSegment::DisplayMath { ref tex, range: Range { start: 7, end: 23 } } if tex == "x = y = z")
+        );
+        assert!(
+            matches!(segments[2], MarkdownSegment::Text { text, offset: 23 } if text == "after\n")
+        );
     }
 
     #[test]
     fn multiline_display_math_keeps_code_fence_text_in_markdown_segment() {
-        let segments = split_display_math_segments("```text\n$$\nx = y\n$$\n```\n");
+        let split = split_display_math_segments("```text\n$$\nx = y\n$$\n```\n");
+        let segments = split.segments;
+        assert_eq!(split.unclosed_display_math_start, None);
         assert!(
-            matches!(segments.as_slice(), [MarkdownSegment::Text(text)] if text == "```text\n$$\nx = y\n$$\n```\n")
+            matches!(segments.as_slice(), [MarkdownSegment::Text { text, offset: 0 }] if *text == "```text\n$$\nx = y\n$$\n```\n")
         );
     }
 
@@ -1279,6 +1690,148 @@ mod tests {
         let joined = flat.join("");
         assert!(joined.contains("é"), "combining char lost: {joined:?}");
         assert!(joined.contains("ä"), "combining char lost: {joined:?}");
+    }
+
+    #[test]
+    fn streaming_projection_matches_full_renderer_at_arbitrary_boundaries() {
+        let fixtures = [
+            "# 标题\n\n正文包含 **粗体**、`code` 和 [link](https://example.com)。\n\n- one\n- two\n\n> quote\n\nend",
+            "before\n\n---\n\nafter\n\n$$\nx = y\n=\nz\n$$\n\nend",
+            "| name | value |\n| --- | ---: |\n| alpha | 123 |\n\n```rust\nfn main() {}\n```\n\nend",
+            "[earlier][target]\n\nbody\n\n[target]: https://example.com\n\nend",
+        ];
+        for source in fixtures {
+            let mut projection = StreamingMarkdownProjection::new(1);
+            let now = Instant::now();
+            for end in source
+                .char_indices()
+                .map(|(index, ch)| index + ch.len_utf8())
+            {
+                let prefix = &source[..end];
+                assert_eq!(
+                    projection.update(prefix, 1, 40, now, true),
+                    StreamingProjectionUpdate::Rendered
+                );
+                assert_eq!(
+                    projection.all_lines(),
+                    render_markdown_with_width(prefix, 40),
+                    "projection diverged at byte {end} for {source:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_projection_coalesces_refreshes_without_losing_source() {
+        let mut projection = StreamingMarkdownProjection::new(1);
+        let now = Instant::now();
+        assert_eq!(
+            projection.update("one", 1, 40, now, false),
+            StreamingProjectionUpdate::Rendered
+        );
+        assert_eq!(
+            projection.update("one two", 1, 40, now + Duration::from_millis(10), false,),
+            StreamingProjectionUpdate::Deferred
+        );
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width("one", 40)
+        );
+        assert_eq!(
+            projection.update("one two", 1, 40, now + Duration::from_millis(60), false,),
+            StreamingProjectionUpdate::Rendered
+        );
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width("one two", 40)
+        );
+    }
+
+    #[test]
+    fn streaming_projection_resets_after_non_append_generation() {
+        let mut projection = StreamingMarkdownProjection::new(1);
+        let now = Instant::now();
+        projection.update("one\n\ntwo\n\nthree", 1, 40, now, true);
+        projection.update("replacement", 2, 40, now, true);
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width("replacement", 40)
+        );
+        assert_eq!(projection.source_generation, 2);
+        assert_eq!(projection.stable_source_end, 0);
+    }
+
+    #[test]
+    fn streaming_projection_parses_block_rich_source_linearly() {
+        const BLOCK: &str = "## Section\n\nA paragraph with **bold**, `code`, and a [link](https://example.com).\n\n- one\n- two\n\n```rust\nfn example() {}\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n";
+        let mut source = String::new();
+        while source.len() < 64 * 1024 {
+            source.push_str(BLOCK);
+        }
+        let mut projection = StreamingMarkdownProjection::new(1);
+        let now = Instant::now();
+        let mut end = 64usize;
+        while end < source.len() {
+            projection.update(&source[..end], 1, 80, now, true);
+            end += 64;
+        }
+        projection.update(&source, 1, 80, now, true);
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width(&source, 80)
+        );
+        assert!(
+            projection.parsed_source_bytes <= source.len() * 12,
+            "parsed {} bytes for {} bytes of source",
+            projection.parsed_source_bytes,
+            source.len()
+        );
+    }
+
+    #[test]
+    fn streaming_projection_slices_segmented_lines_without_flattening() {
+        let source = "one\n\ntwo\n\nthree\n\nfour\n\nfive";
+        let mut projection = StreamingMarkdownProjection::new(1);
+        projection.update(source, 1, 40, Instant::now(), true);
+        assert!(!projection.stable_segments.is_empty());
+
+        let mut expected = render_markdown_with_width(source, 40);
+        expected
+            .last_mut()
+            .expect("rendered markdown")
+            .spans
+            .push(streaming_cursor());
+        for start in 0..expected.len() {
+            for end in start..=expected.len() {
+                let mut actual = Vec::new();
+                projection.append_range(start, end, &mut actual);
+                assert_eq!(actual, expected[start..end], "slice {start}..{end}");
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_stream_refresh_interval_obeys_cpu_budget_bounds() {
+        assert_eq!(
+            stream_refresh_interval(1024, false, Duration::from_millis(100)),
+            STREAM_REFRESH_MIN
+        );
+        assert_eq!(
+            stream_refresh_interval(STREAM_TAIL_SOFT_LIMIT + 1, false, Duration::from_millis(25),),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            stream_refresh_interval(
+                STREAM_TAIL_SOFT_LIMIT + 1,
+                false,
+                Duration::from_millis(200),
+            ),
+            STREAM_REFRESH_MAX
+        );
+        assert_eq!(
+            stream_refresh_interval(1024, true, Duration::from_millis(1)),
+            STREAM_REFRESH_MIN
+        );
     }
 }
 
