@@ -20,6 +20,7 @@ struct PerfCounters {
     semantic_item_visits: u64,
     item_renders: u64,
     animation_item_visits: u64,
+    retention_item_visits: u64,
     permission_table_entries: u64,
     panel_projection_builds: u64,
     workflow_node_renders: u64,
@@ -32,6 +33,7 @@ thread_local! {
             semantic_item_visits: 0,
             item_renders: 0,
             animation_item_visits: 0,
+            retention_item_visits: 0,
             permission_table_entries: 0,
             panel_projection_builds: 0,
             workflow_node_renders: 0,
@@ -586,6 +588,8 @@ pub struct LayoutCache {
     pending_layout: std::collections::BTreeSet<usize>,
     pending_paint: std::collections::BTreeSet<usize>,
     pending_structure_from: Option<usize>,
+    retention_protected: std::ops::Range<usize>,
+    retention_dirty: bool,
     access_clock: u64,
 }
 
@@ -659,6 +663,8 @@ impl LayoutCache {
             self.pending_layout.clear();
             self.pending_paint.clear();
             self.pending_structure_from = None;
+            self.retention_protected = 0..0;
+            self.retention_dirty = false;
             self.key = Some(key);
             return LayoutMetrics {
                 total_rows: 0,
@@ -675,12 +681,15 @@ impl LayoutCache {
             self.pending_layout.clear();
             self.pending_paint.clear();
             self.pending_structure_from = Some(0);
+            self.retention_protected = 0..0;
+            self.retention_dirty = false;
         }
 
         let revisions = items.revisions();
         let structure_changed = self.structure_revision != items.structure_revision()
             || self.entries.len() != items.len();
         if structure_changed {
+            self.retention_dirty = true;
             let changed_from = self.pending_structure_from.unwrap_or(0).min(items.len());
             if changed_from == self.entries.len() && self.entries.len() <= items.len() {
                 self.entries.resize(items.len(), ItemCacheEntry::default());
@@ -698,6 +707,10 @@ impl LayoutCache {
                 self.row_ends.resize(items.len(), 0);
             }
             for (idx, revision) in revisions.iter().enumerate().skip(changed_from) {
+                #[cfg(test)]
+                update_perf_counters(|counters| {
+                    counters.semantic_item_visits = counters.semantic_item_visits.saturating_add(1);
+                });
                 let cached = self.entries[idx].revision;
                 if cached.id != revision.id || cached.layout != revision.layout {
                     self.pending_layout.insert(idx);
@@ -714,6 +727,10 @@ impl LayoutCache {
             && !structure_changed
         {
             for (idx, revision) in revisions.iter().enumerate() {
+                #[cfg(test)]
+                update_perf_counters(|counters| {
+                    counters.semantic_item_visits = counters.semantic_item_visits.saturating_add(1);
+                });
                 let cached = self.entries[idx].revision;
                 if cached.layout != revision.layout {
                     self.pending_layout.insert(idx);
@@ -866,6 +883,7 @@ impl LayoutCache {
         retain_lines: bool,
         force_streaming: bool,
     ) -> bool {
+        let retained_before = self.entries[idx].has_retained_lines();
         if let OutputItem::AssistantMd {
             md,
             streaming: true,
@@ -905,6 +923,7 @@ impl LayoutCache {
                 dynamic: DynamicPaint::default(),
                 last_used: self.access_clock,
             };
+            self.retention_dirty |= !retained_before;
             return true;
         }
         let hovered = ctx.hovered_thinking_idx == Some(idx);
@@ -937,6 +956,7 @@ impl LayoutCache {
             dynamic,
             last_used: self.access_clock,
         };
+        self.retention_dirty |= retained_before != retain_lines;
         true
     }
 
@@ -981,6 +1001,20 @@ impl LayoutCache {
     }
 
     fn prune_lines(&mut self, protected: std::ops::Range<usize>) {
+        if self.retention_protected != protected {
+            self.retention_protected = protected.clone();
+            self.retention_dirty = true;
+        }
+        if !self.retention_dirty {
+            return;
+        }
+        self.retention_dirty = false;
+        #[cfg(test)]
+        update_perf_counters(|counters| {
+            counters.retention_item_visits = counters
+                .retention_item_visits
+                .saturating_add(self.entries.len() as u64);
+        });
         let mut recent = self
             .entries
             .iter()
@@ -5470,6 +5504,7 @@ mod tests {
         assert_eq!(counters.semantic_item_visits, 0);
         assert_eq!(counters.item_renders, 0);
         assert_eq!(counters.panel_projection_builds, 0);
+        assert_eq!(counters.retention_item_visits, 0);
         assert_eq!(counters.permission_table_entries, 0);
         assert_eq!(counters.animation_item_visits, 100);
         assert_ne!(
@@ -5527,6 +5562,7 @@ mod tests {
         assert_eq!(counters.semantic_item_visits, 0);
         assert_eq!(counters.item_renders, 0);
         assert_eq!(counters.animation_item_visits, 0);
+        assert_eq!(counters.retention_item_visits, 0);
         assert_eq!(counters.permission_table_entries, 0);
     }
 
@@ -5693,6 +5729,24 @@ mod tests {
         cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
         assert!(cache.pending_layout.contains(&0));
         assert_ne!(cache.entries[0].revision.layout, current_revision.layout);
+        assert!(app.has_active_animation());
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        assert!(!cache.pending_layout.contains(&0));
+        assert_eq!(cache.entries[0].revision.layout, current_revision.layout);
+        let (streaming_lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        assert_eq!(
+            streaming_lines,
+            render_item(
+                &OutputItem::AssistantMd {
+                    md: "one two".into(),
+                    streaming: true,
+                    retried: false,
+                },
+                &RenderCtx::empty(),
+            )
+        );
         app.layout_cache = cache;
 
         app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmDone {
@@ -5715,6 +5769,175 @@ mod tests {
         );
         assert!(cache.entries[0].streaming_markdown.is_none());
         assert!(!cache.pending_layout.contains(&0));
+    }
+
+    #[test]
+    fn adaptive_deferred_markdown_completion_flushes_latest_source() {
+        let mut initial = "```text\n".to_string();
+        while initial.len() <= 32 * 1024 {
+            initial.push_str("an unclosed streamed code line\n");
+        }
+        let mut app = crate::app::AppState::new("adaptive-completion".into(), None);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: initial.clone(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 100,
+            follow_tail_rows: None,
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        app.layout_cache = cache;
+
+        let suffix = "latest source before completion\n";
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: suffix.into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        assert!(cache.pending_layout.contains(&0));
+        app.layout_cache = cache;
+
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmDone {
+            total_tokens: 1,
+            run_id: None,
+        });
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        initial.push_str(suffix);
+        assert_eq!(
+            lines,
+            render_item(
+                &OutputItem::AssistantMd {
+                    md: initial,
+                    streaming: false,
+                    retried: false,
+                },
+                &RenderCtx::empty(),
+            )
+        );
+        assert!(cache.entries[0].streaming_markdown.is_none());
+        assert!(!cache.pending_layout.contains(&0));
+    }
+
+    #[test]
+    fn streaming_markdown_resets_for_width_theme_and_retry() {
+        let source = "# heading\n\nparagraph\n\n```rust\nfn main() {}\n```";
+        let mut app = crate::app::AppState::new("stream-reset".into(), None);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: source.into(),
+            model: "model".into(),
+            run_id: None,
+        });
+        let theme = crate::theme::current_mode();
+        let key = LayoutKey { width: 80, theme };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 100,
+            follow_tail_rows: None,
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+
+        let narrow_key = LayoutKey { width: 40, theme };
+        let narrow_ctx = RenderCtx {
+            panel_width: 40,
+            ..RenderCtx::empty()
+        };
+        reset_perf_counters();
+        cache.update_dirty(narrow_key, &app.items, &narrow_ctx, request);
+        assert_eq!(perf_counters().item_renders, 1);
+        assert!(cache.entries[0].streaming_markdown.is_some());
+
+        let alternate_theme = match theme {
+            crate::theme::ThemeMode::Dark => crate::theme::ThemeMode::Light,
+            crate::theme::ThemeMode::Light => crate::theme::ThemeMode::Dark,
+        };
+        let alternate_key = LayoutKey {
+            width: 40,
+            theme: alternate_theme,
+        };
+        reset_perf_counters();
+        cache.update_dirty(alternate_key, &app.items, &narrow_ctx, request);
+        assert_eq!(perf_counters().item_renders, 1);
+        assert!(cache.entries[0].streaming_markdown.is_some());
+        app.layout_cache = cache;
+
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmRetry);
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let metrics = cache.update_dirty(alternate_key, &app.items, &narrow_ctx, request);
+        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        assert_eq!(lines, render_item(&app.items[0], &narrow_ctx));
+        assert!(cache.entries[0].streaming_markdown.is_none());
+    }
+
+    #[test]
+    fn thousands_of_streaming_chunks_do_not_revisit_unrelated_entries() {
+        const UNRELATED: usize = 512;
+        const CHUNKS: usize = 2_048;
+        let mut items = (0..UNRELATED)
+            .map(|idx| OutputItem::SystemNote {
+                text: format!("note-{idx}"),
+                level: NoteLevel::Info,
+            })
+            .collect::<Vec<_>>();
+        items.push(OutputItem::AssistantMd {
+            md: "start".into(),
+            streaming: true,
+            retried: false,
+        });
+        let mut app =
+            crate::app::AppState::new("isolated-stream".into(), None).with_initial_items(items);
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::current_mode(),
+        };
+        let request = LayoutRequest {
+            scroll_offset: 0,
+            viewport_rows: 40,
+            follow_tail_rows: Some(40),
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+        let unrelated_revisions = cache.entries[..UNRELATED]
+            .iter()
+            .map(|entry| entry.revision)
+            .collect::<Vec<_>>();
+        app.layout_cache = cache;
+
+        reset_perf_counters();
+        for _ in 0..CHUNKS {
+            app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmChunk {
+                text: "x".into(),
+                model: "model".into(),
+                run_id: None,
+            });
+            let mut cache = std::mem::take(&mut app.layout_cache);
+            cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
+            app.layout_cache = cache;
+        }
+        let cache = &app.layout_cache;
+        assert_eq!(
+            cache.entries[..UNRELATED]
+                .iter()
+                .map(|entry| entry.revision)
+                .collect::<Vec<_>>(),
+            unrelated_revisions
+        );
+        let counters = perf_counters();
+        assert_eq!(counters.semantic_item_visits, 0);
+        assert_eq!(counters.retention_item_visits, 0);
+        assert!(counters.item_renders < UNRELATED as u64);
     }
 
     #[test]

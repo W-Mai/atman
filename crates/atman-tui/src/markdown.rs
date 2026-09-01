@@ -156,6 +156,12 @@ struct ParsedMarkdown<'a> {
     has_reference_definitions: bool,
 }
 
+fn source_line_start(source: &str, offset: usize) -> usize {
+    source[..offset.min(source.len())]
+        .rfind('\n')
+        .map_or(0, |newline| newline.saturating_add(1))
+}
+
 fn parse_markdown_for_projection(source: &str) -> ParsedMarkdown<'_> {
     let mut events = Vec::new();
     let mut top_level_starts = Vec::new();
@@ -174,14 +180,16 @@ fn parse_markdown_for_projection(source: &str) -> ParsedMarkdown<'_> {
                     match &event {
                         Event::Start(_) => {
                             if depth == 0 {
-                                top_level_starts.push(range.start);
+                                top_level_starts.push(source_line_start(source, range.start));
                             }
                             depth = depth.saturating_add(1);
                         }
                         Event::End(_) => {
                             depth = depth.saturating_sub(1);
                         }
-                        _ if depth == 0 => top_level_starts.push(range.start),
+                        _ if depth == 0 => {
+                            top_level_starts.push(source_line_start(source, range.start));
+                        }
                         _ => {}
                     }
                     events.push(ParsedRenderEvent::Common { event, range });
@@ -446,6 +454,9 @@ impl StreamingMarkdownProjection {
             && span.content == "▏"
         {
             last.spans.pop();
+        }
+        if lines.last().is_some_and(|line| line.spans.is_empty()) {
+            lines.pop();
         }
         lines
     }
@@ -1696,8 +1707,12 @@ mod tests {
     fn streaming_projection_matches_full_renderer_at_arbitrary_boundaries() {
         let fixtures = [
             "# 标题\n\n正文包含 **粗体**、`code` 和 [link](https://example.com)。\n\n- one\n- two\n\n> quote\n\nend",
+            "Setext heading\n===\n\n- [ ] pending\n- [x] done\n  - nested **item**\n    1. ordered child\n\nend",
+            "before\n\n    let x = 1;\n    let y = 2;\n\n<section>\n<div>html block</div>\n</section>\n\nafter",
             "before\n\n---\n\nafter\n\n$$\nx = y\n=\nz\n$$\n\nend",
             "| name | value |\n| --- | ---: |\n| alpha | 123 |\n\n```rust\nfn main() {}\n```\n\nend",
+            "table | header\n--- | ---\nleft | right\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n~~~text\ntilde fence\n~~~",
+            "[target]: https://example.com\n\n[resolved][target]\n\nend",
             "[earlier][target]\n\nbody\n\n[target]: https://example.com\n\nend",
         ];
         for source in fixtures {
@@ -1748,24 +1763,53 @@ mod tests {
     }
 
     #[test]
-    fn streaming_projection_resets_after_non_append_generation() {
+    fn streaming_projection_resets_after_replacement_and_source_shrink() {
         let mut projection = StreamingMarkdownProjection::new(1);
         let now = Instant::now();
         projection.update("one\n\ntwo\n\nthree", 1, 40, now, true);
-        projection.update("replacement", 2, 40, now, true);
+        let replacement = "replacement that is longer than the original source";
+        projection.update(replacement, 2, 40, now, true);
         assert_eq!(
             projection.all_lines(),
-            render_markdown_with_width("replacement", 40)
+            render_markdown_with_width(replacement, 40)
         );
         assert_eq!(projection.source_generation, 2);
         assert_eq!(projection.stable_source_end, 0);
+
+        projection.update("short", 2, 40, now, true);
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width("short", 40)
+        );
+        assert_eq!(projection.stable_source_end, 0);
+    }
+
+    #[test]
+    fn appended_reference_definition_discards_stable_projection() {
+        let mut projection = StreamingMarkdownProjection::new(1);
+        let now = Instant::now();
+        let unresolved = "before\n\n[earlier][target]\n\nbody\n\nend";
+        projection.update(unresolved, 1, 40, now, true);
+        assert!(!projection.stable_segments.is_empty());
+        assert!(!projection.exact_full_mode);
+
+        let resolved =
+            "before\n\n[earlier][target]\n\nbody\n\nend\n\n[target]: https://example.com";
+        projection.update(resolved, 1, 40, now, true);
+        assert!(projection.exact_full_mode);
+        assert!(projection.stable_segments.is_empty());
+        assert_eq!(projection.stable_source_end, 0);
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width(resolved, 40)
+        );
     }
 
     #[test]
     fn streaming_projection_parses_block_rich_source_linearly() {
         const BLOCK: &str = "## Section\n\nA paragraph with **bold**, `code`, and a [link](https://example.com).\n\n- one\n- two\n\n```rust\nfn example() {}\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n";
         let mut source = String::new();
-        while source.len() < 64 * 1024 {
+        while source.len() < 128 * 1024 {
             source.push_str(BLOCK);
         }
         let mut projection = StreamingMarkdownProjection::new(1);
@@ -1831,6 +1875,53 @@ mod tests {
         assert_eq!(
             stream_refresh_interval(1024, true, Duration::from_millis(1)),
             STREAM_REFRESH_MIN
+        );
+    }
+
+    #[test]
+    fn unclosed_128_kib_fence_obeys_adaptive_fake_clock_schedule() {
+        const CHUNKS: usize = 256;
+        let mut source = "```text\n".to_string();
+        while source.len() < 128 * 1024 {
+            source.push_str("a long unclosed code line that remains in the mutable tail\n");
+        }
+        let mut projection = StreamingMarkdownProjection::new(1);
+        let mut now = Instant::now();
+        assert_eq!(
+            projection.update(&source, 1, 80, now, true),
+            StreamingProjectionUpdate::Rendered
+        );
+        let first_interval = projection
+            .next_refresh_at
+            .and_then(|deadline| deadline.checked_duration_since(now))
+            .expect("refresh deadline");
+        assert!((STREAM_REFRESH_MIN..=STREAM_REFRESH_MAX).contains(&first_interval));
+
+        let chunk = "another streamed line inside the still-open fence\n";
+        let mut rendered = 1usize;
+        for _ in 0..CHUNKS {
+            source.push_str(chunk);
+            now += Duration::from_millis(5);
+            rendered += usize::from(matches!(
+                projection.update(&source, 1, 80, now, false),
+                StreamingProjectionUpdate::Rendered
+            ));
+        }
+
+        assert!(
+            rendered <= 27,
+            "adaptive schedule rendered {rendered} times for {CHUNKS} chunks"
+        );
+        projection.update(&source, 1, 80, now, true);
+        assert_eq!(
+            projection.all_lines(),
+            render_markdown_with_width(&source, 80)
+        );
+        assert!(
+            projection.parsed_source_bytes <= source.len() * 32,
+            "parsed {} bytes for {} bytes of unclosed source",
+            projection.parsed_source_bytes,
+            source.len()
         );
     }
 }
