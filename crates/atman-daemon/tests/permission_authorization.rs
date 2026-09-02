@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-fn register_session(
+async fn register_session(
     state: &DaemonState,
     owner: &str,
 ) -> (
@@ -37,6 +37,7 @@ fn register_session(
             },
             owner,
         )
+        .await
         .unwrap();
     (session_id, session, stream)
 }
@@ -89,7 +90,7 @@ fn pending_request(
 async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
-    let (session_id, session, mut events) = register_session(&state, "alice");
+    let (session_id, session, mut events) = register_session(&state, "alice").await;
     let group_pending = pending_request(&session, "group-call");
     let request_pending = pending_request(&session, "request-call");
 
@@ -239,8 +240,8 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
 async fn permission_rpcs_fail_closed_for_wrong_principal_and_cross_session() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
-    let (owned, _, _) = register_session(&state, "alice");
-    let (other, _, _) = register_session(&state, "bob");
+    let (owned, _, _) = register_session(&state, "alice").await;
+    let (other, _, _) = register_session(&state, "bob").await;
 
     let list = |session_id: &SessionId| {
         JsonRpcRequest::new(
@@ -307,8 +308,12 @@ async fn permission_rpcs_fail_closed_for_wrong_principal_and_cross_session() {
             },
             "alice",
         )
+        .await
         .unwrap();
     state.finish_run(&orphan_id, &orphan_run);
+    while state.has_live_runs(&orphan_id) {
+        tokio::task::yield_now().await;
+    }
     let response = dispatch_as(state, list(&orphan_id), "alice").await;
     assert!(
         response.error.is_some(),

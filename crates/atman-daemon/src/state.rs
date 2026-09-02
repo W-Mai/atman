@@ -8,6 +8,8 @@ use atman_runtime::event::{Event, EventSink};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::session_actor::SessionActorHandle;
+
 struct PendingPrompt {
     tx: oneshot::Sender<serde_json::Value>,
     broadcast_sink: Option<EventSink>,
@@ -16,7 +18,7 @@ struct PendingPrompt {
 pub struct DaemonState {
     data_dir: PathBuf,
     daemon_generation: String,
-    sessions: Mutex<HashMap<SessionId, SessionActorEntry>>,
+    sessions: Mutex<HashMap<SessionId, SessionActorHandle>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
@@ -28,13 +30,6 @@ pub struct LiveRun {
     pub flow_name: String,
     pub cancel: CancellationToken,
     pub started_at: chrono::DateTime<chrono::Utc>,
-}
-
-struct SessionActorEntry {
-    session: std::sync::Arc<atman_runtime::Session>,
-    runs: HashMap<FlowRunId, LiveRun>,
-    _permission_client: atman_runtime::permission::PermissionClientGuard,
-    owner_principal: String,
 }
 
 impl DaemonState {
@@ -158,7 +153,7 @@ impl DaemonState {
         self.data_dir.join("sessions")
     }
 
-    pub fn register_session_run(
+    pub async fn register_session_run(
         &self,
         id: SessionId,
         session: std::sync::Arc<atman_runtime::Session>,
@@ -166,68 +161,55 @@ impl DaemonState {
         owner_principal: impl Into<String>,
     ) -> Result<()> {
         let owner_principal = owner_principal.into();
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(entry) = sessions.get_mut(&id) {
+        let existing = {
+            let mut sessions = self.sessions.lock().unwrap();
+            if let Some(entry) = sessions.get(&id) {
+                Some(entry.clone())
+            } else {
+                sessions.insert(
+                    id.clone(),
+                    SessionActorHandle::spawn(
+                        id.clone(),
+                        session.clone(),
+                        run.clone(),
+                        owner_principal.clone(),
+                    ),
+                );
+                None
+            }
+        };
+        if let Some(entry) = existing {
             anyhow::ensure!(
-                entry.owner_principal == owner_principal,
+                entry.owns(&owner_principal),
                 "session {id} is owned by another principal"
             );
             anyhow::ensure!(
-                std::sync::Arc::ptr_eq(&entry.session, &session),
+                entry.owns_session(&session),
                 "session {id} is already registered with another runtime"
             );
-            anyhow::ensure!(
-                !entry.runs.contains_key(&run.run_id),
-                "run {} is already registered",
-                run.run_id
-            );
-            entry.runs.insert(run.run_id.clone(), run);
-            return Ok(());
+            entry.add_run(run).await?;
         }
-        let permission_client = session.permission_broker().register_client();
-        let mut runs = HashMap::new();
-        runs.insert(run.run_id.clone(), run);
-        sessions.insert(
-            id,
-            SessionActorEntry {
-                session,
-                runs,
-                _permission_client: permission_client,
-                owner_principal,
-            },
-        );
         Ok(())
     }
 
-    pub fn authorized_live_session(
-        &self,
-        id: &SessionId,
-        principal: &str,
-    ) -> Option<std::sync::Arc<atman_runtime::Session>> {
-        let sessions = self.sessions.lock().unwrap();
-        let entry = sessions.get(id)?;
-        (!entry.runs.is_empty() && entry.owner_principal == principal)
-            .then(|| entry.session.clone())
-    }
-
-    pub fn authorized_session(
-        &self,
-        id: &SessionId,
-        principal: &str,
-    ) -> Option<std::sync::Arc<atman_runtime::Session>> {
-        let sessions = self.sessions.lock().unwrap();
-        let entry = sessions.get(id)?;
-        (entry.owner_principal == principal).then(|| entry.session.clone())
+    fn authorized_actor(&self, id: &SessionId, principal: &str) -> Option<SessionActorHandle> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|entry| entry.owns(principal))
+            .cloned()
     }
 
     pub fn owns_live_session(&self, id: &SessionId, principal: &str) -> bool {
-        self.authorized_live_session(id, principal).is_some()
+        self.authorized_actor(id, principal)
+            .is_some_and(|actor| actor.view().is_live())
     }
 
     pub fn can_read_session(&self, id: &SessionId, principal: &str) -> bool {
         let sessions = self.sessions.lock().unwrap();
         match sessions.get(id) {
-            Some(entry) => entry.owner_principal == principal,
+            Some(entry) => entry.owns(principal),
             None => self
                 .sessions_root()
                 .join(id.to_string())
@@ -240,8 +222,9 @@ impl DaemonState {
         self.sessions
             .lock()
             .unwrap()
-            .get_mut(session_id)
-            .is_some_and(|entry| entry.runs.remove(run_id).is_some())
+            .get(session_id)
+            .filter(|entry| entry.view().runs.contains_key(run_id))
+            .is_some_and(|entry| entry.finish_run(run_id.clone()))
     }
 
     pub fn remove_session(&self, id: &SessionId) -> bool {
@@ -251,31 +234,62 @@ impl DaemonState {
         existed
     }
 
-    pub fn live_session(&self, id: &SessionId) -> Option<std::sync::Arc<atman_runtime::Session>> {
+    pub fn has_live_runs(&self, id: &SessionId) -> bool {
         self.sessions
             .lock()
             .unwrap()
             .get(id)
-            .filter(|entry| !entry.runs.is_empty())
-            .map(|entry| entry.session.clone())
+            .is_some_and(|entry| entry.view().is_live())
     }
 
-    pub fn cancel_run(&self, run_id: &FlowRunId) -> bool {
-        let cancel = self
+    pub fn has_live_run(&self, id: &SessionId, run_id: &FlowRunId) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|entry| entry.view().runs.contains_key(run_id))
+    }
+
+    pub fn session_revision(&self, id: &SessionId) -> Option<u64> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.view().revision)
+    }
+
+    pub fn is_authorized_session(&self, id: &SessionId, principal: &str) -> bool {
+        self.authorized_actor(id, principal).is_some()
+    }
+
+    pub async fn cancel_run(&self, run_id: &FlowRunId, principal: &str) -> Result<bool> {
+        let actor = self
             .sessions
             .lock()
             .unwrap()
             .values()
-            .find_map(|entry| entry.runs.get(run_id).map(|run| run.cancel.clone()));
-        if let Some(cancel) = cancel {
-            cancel.cancel();
-            true
-        } else {
-            false
+            .find(|entry| entry.owns(principal) && entry.view().runs.contains_key(run_id))
+            .cloned();
+        match actor {
+            Some(actor) => actor.cancel_run(run_id.clone()).await,
+            None => Ok(false),
         }
     }
 
-    pub fn rename_session(&self, sid: &SessionId, title: &str) -> Result<SessionSummary> {
+    pub async fn rename_session(
+        &self,
+        sid: &SessionId,
+        title: &str,
+        principal: &str,
+    ) -> Result<SessionSummary> {
+        let actor = self.sessions.lock().unwrap().get(sid).cloned();
+        if let Some(actor) = actor {
+            anyhow::ensure!(
+                actor.owns(principal),
+                "session {sid} is owned by another principal"
+            );
+            return actor.rename(title.to_owned()).await;
+        }
         let path = self.sessions_root().join(sid.0.to_string());
         atman_runtime::session_meta::SessionMeta::rename(&path, title)
             .with_context(|| format!("rename session {sid}"))?;
@@ -283,6 +297,74 @@ impl DaemonState {
             .into_iter()
             .find(|summary| &summary.id == sid)
             .ok_or_else(|| anyhow::anyhow!("session not found: {sid}"))
+    }
+
+    pub async fn list_permission_requests(
+        &self,
+        session_id: &SessionId,
+        principal: &str,
+    ) -> Result<atman_proto::ListPermissionRequestsResponse> {
+        let actor = self
+            .authorized_actor(session_id, principal)
+            .filter(|actor| actor.view().is_live())
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.list_permissions().await
+    }
+
+    pub async fn create_permission_group(
+        &self,
+        request: atman_proto::CreatePermissionGroupRequest,
+        principal: &str,
+    ) -> Result<atman_proto::CreatePermissionGroupResponse> {
+        let actor = self
+            .authorized_actor(&request.session_id, principal)
+            .filter(|actor| actor.view().is_live())
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor
+            .create_permission_group(
+                request.request_ids,
+                request.expected_request_revisions,
+                request.label,
+            )
+            .await
+    }
+
+    pub async fn resolve_permission_requests(
+        &self,
+        request: atman_proto::ResolvePermissionRequestsRequest,
+        principal: &str,
+        action: atman_runtime::permission::PermissionAction,
+        scope: Option<atman_runtime::permission::GrantScope>,
+    ) -> Result<atman_proto::ResolvePermissionRequestsResponse> {
+        let actor = self
+            .authorized_actor(&request.session_id, principal)
+            .filter(|actor| actor.view().is_live())
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        let (request_ids, expected_request_revisions, group) = match request.selector {
+            atman_proto::PermissionRpcSelector::Requests {
+                request_ids,
+                expected_request_revisions,
+            } => (request_ids, expected_request_revisions, None),
+            atman_proto::PermissionRpcSelector::Group {
+                group_id,
+                expected_group_revision,
+            } => (
+                Vec::new(),
+                Default::default(),
+                Some((group_id, expected_group_revision)),
+            ),
+        };
+        actor
+            .resolve_permissions(
+                request_ids,
+                expected_request_revisions,
+                group,
+                action,
+                scope,
+                request.reason,
+                principal.to_owned(),
+            )
+            .await
     }
 
     pub fn list_sessions_query(
@@ -326,10 +408,8 @@ impl DaemonState {
                 .iter()
                 .filter_map(|(sid, entry)| {
                     entry
-                        .runs
-                        .values()
-                        .map(|run| run.started_at)
-                        .min()
+                        .view()
+                        .first_run_started_at()
                         .map(|started_at| (sid.clone(), started_at))
                 })
                 .collect()

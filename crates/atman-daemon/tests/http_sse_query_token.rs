@@ -50,6 +50,7 @@ async fn sse_accepts_query_string_token_when_authorization_header_absent() {
             },
             "authenticated-daemon-client",
         )
+        .await
         .unwrap();
     let app = router(state);
     let resp = app

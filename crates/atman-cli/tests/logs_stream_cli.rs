@@ -43,6 +43,7 @@ async fn spawn_server(
             },
             "authenticated-daemon-client",
         )
+        .await
         .unwrap();
     let state = Arc::new(HttpState {
         daemon,

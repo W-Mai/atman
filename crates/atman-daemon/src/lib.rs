@@ -1,14 +1,11 @@
-use std::sync::Arc;
-
 use atman_proto::{
-    CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, CreatePermissionGroupResponse,
-    DaemonGeneration, EventCursor, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
-    ListSessionsRequest, MethodCapability, PermissionRpcAction, PermissionRpcScope,
-    PermissionRpcSelector, PingResponse, ProtocolLimits, RenameSessionRequest,
+    CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability,
+    PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionRequest,
     ResolvePromptResponse, RpcMethod, RunFlowResponse, methods, rpc,
 };
 use serde_json::json;
-use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 fn permission_action(action: PermissionRpcAction) -> atman_runtime::permission::PermissionAction {
     match action {
@@ -41,10 +38,6 @@ fn permission_scope(
     })
 }
 
-fn permission_error(error: impl std::fmt::Display) -> JsonRpcError {
-    JsonRpcError::application(error.to_string())
-}
-
 fn parse_params<M: RpcMethod>(
     params: Option<serde_json::Value>,
 ) -> Result<M::Params, JsonRpcError> {
@@ -62,16 +55,6 @@ fn method_response<M: RpcMethod>(
     }
 }
 
-fn authorized_permission_session(
-    state: &DaemonState,
-    session_id: &atman_proto::SessionId,
-    principal_id: &str,
-) -> Result<Arc<atman_runtime::Session>, JsonRpcError> {
-    state
-        .authorized_live_session(session_id, principal_id)
-        .ok_or_else(|| JsonRpcError::application("permission denied for session"))
-}
-
 pub mod bootstrap;
 pub mod config;
 mod events;
@@ -80,6 +63,7 @@ pub mod openapi;
 pub mod pidfile;
 pub mod prompt_bridge;
 pub mod run;
+mod session_actor;
 pub mod state;
 pub mod unix;
 
@@ -157,7 +141,10 @@ pub async fn dispatch_as(
         },
         methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
             Ok(RenameSessionRequest { session_id, title }) if !title.trim().is_empty() => {
-                match state.rename_session(&session_id, &title) {
+                match state
+                    .rename_session(&session_id, &title, principal_id)
+                    .await
+                {
                     Ok(summary) => method_response::<rpc::RenameSession>(id, summary),
                     Err(error) => {
                         JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
@@ -170,10 +157,14 @@ pub async fn dispatch_as(
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {
-            Ok(p) => {
-                let cancelled = state.cancel_run(&p.run_id);
-                method_response::<rpc::CancelRun>(id, CancelRunResponse { cancelled })
-            }
+            Ok(p) => match state.cancel_run(&p.run_id, principal_id).await {
+                Ok(cancelled) => {
+                    method_response::<rpc::CancelRun>(id, CancelRunResponse { cancelled })
+                }
+                Err(error) => {
+                    JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                }
+            },
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::GET_EVENTS => match parse_params::<rpc::GetEvents>(req.params) {
@@ -210,159 +201,46 @@ pub async fn dispatch_as(
         },
         methods::LIST_PERMISSION_REQUESTS => {
             match parse_params::<rpc::ListPermissionRequests>(req.params) {
-                Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
-                    Ok(session) => {
-                        let (requests, groups) = session
-                            .permission_broker()
-                            .user_list(&p.session_id.0.to_string());
-                        let response = atman_proto::ListPermissionRequestsResponse {
-                            requests: requests
-                                .into_iter()
-                                .map(|request| atman_proto::PermissionRequestView {
-                                    request_id: request.request_id.0,
-                                    session_id: request.session_id,
-                                    requesting_run_id: atman_proto::FlowRunId(
-                                        request.requesting_run_id.0,
-                                    ),
-                                    tool: request.intent.tool_name,
-                                    tier: format!("{:?}", request.intent.tier),
-                                    state: format!("{:?}", request.state),
-                                    target: request
-                                        .escalation_path
-                                        .last()
-                                        .map(|hop| format!("{:?}", hop.target))
-                                        .unwrap_or_default(),
-                                    revision: request.revision,
-                                })
-                                .collect(),
-                            groups: groups
-                                .into_iter()
-                                .map(|group| atman_proto::PermissionGroupView {
-                                    group_id: group.group_id.0,
-                                    label: group.label,
-                                    request_ids: group
-                                        .request_ids
-                                        .into_iter()
-                                        .map(|id| id.0)
-                                        .collect(),
-                                    revision: group.revision,
-                                })
-                                .collect(),
-                        };
-                        method_response::<rpc::ListPermissionRequests>(id, response)
+                Ok(p) => match state
+                    .list_permission_requests(&p.session_id, principal_id)
+                    .await
+                {
+                    Ok(response) => method_response::<rpc::ListPermissionRequests>(id, response),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                     }
-                    Err(error) => JsonRpcResponse::err(id, error),
                 },
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         methods::CREATE_PERMISSION_GROUP => {
             match parse_params::<rpc::CreatePermissionGroup>(req.params) {
-                Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
-                    Ok(session) => {
-                        let ids: BTreeSet<_> = p
-                            .request_ids
-                            .iter()
-                            .copied()
-                            .map(atman_runtime::permission::PermissionRequestId)
-                            .collect();
-                        let revisions: HashMap<_, _> = p
-                            .expected_request_revisions
-                            .into_iter()
-                            .map(|(id, revision)| {
-                                (atman_runtime::permission::PermissionRequestId(id), revision)
-                            })
-                            .collect();
-                        match session.permission_broker().user_create_group(
-                            &p.session_id.0.to_string(),
-                            ids,
-                            p.label,
-                            &revisions,
-                        ) {
-                            Ok(group) => method_response::<rpc::CreatePermissionGroup>(
-                                id,
-                                CreatePermissionGroupResponse {
-                                    group_id: group.group_id.0,
-                                    request_ids: group
-                                        .request_ids
-                                        .into_iter()
-                                        .map(|request_id| request_id.0)
-                                        .collect(),
-                                    revision: group.revision,
-                                    label: group.label,
-                                },
-                            ),
-                            Err(e) => JsonRpcResponse::err(id, permission_error(e)),
-                        }
+                Ok(p) => match state.create_permission_group(p, principal_id).await {
+                    Ok(response) => method_response::<rpc::CreatePermissionGroup>(id, response),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                     }
-                    Err(error) => JsonRpcResponse::err(id, error),
                 },
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         methods::RESOLVE_PERMISSION_REQUESTS => {
             match parse_params::<rpc::ResolvePermissionRequests>(req.params) {
-                Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
-                    Ok(session) => {
-                        let (request_ids, revisions, group) = match p.selector {
-                            PermissionRpcSelector::Requests {
-                                request_ids,
-                                expected_request_revisions,
-                            } => (
-                                request_ids
-                                    .into_iter()
-                                    .map(atman_runtime::permission::PermissionRequestId)
-                                    .collect(),
-                                expected_request_revisions
-                                    .into_iter()
-                                    .map(|(id, revision)| {
-                                        (
-                                            atman_runtime::permission::PermissionRequestId(id),
-                                            revision,
-                                        )
-                                    })
-                                    .collect(),
-                                None,
-                            ),
-                            PermissionRpcSelector::Group {
-                                group_id,
-                                expected_group_revision,
-                            } => (
-                                Vec::new(),
-                                HashMap::new(),
-                                Some((
-                                    atman_runtime::permission::PermissionGroupId(group_id),
-                                    expected_group_revision,
-                                )),
-                            ),
-                        };
-                        match session.permission_broker().user_resolve(
-                            &p.session_id.0.to_string(),
-                            Some(principal_id.to_owned()),
-                            request_ids,
-                            &revisions,
-                            group,
-                            permission_action(p.action),
-                            permission_scope(p.scope),
-                            p.reason,
-                        ) {
-                            Ok(results) => {
-                                let response = atman_proto::ResolvePermissionRequestsResponse {
-                                    resolutions: results
-                                        .into_iter()
-                                        .map(|result| atman_proto::PermissionResolutionView {
-                                            request_id: result.request_id.0,
-                                            outcome: format!("{:?}", result.outcome),
-                                        })
-                                        .collect(),
-                                };
-                                method_response::<rpc::ResolvePermissionRequests>(id, response)
-                            }
-                            Err(e) => JsonRpcResponse::err(id, permission_error(e)),
+                Ok(p) => {
+                    let action = permission_action(p.action.clone());
+                    let scope = permission_scope(p.scope.clone());
+                    match state
+                        .resolve_permission_requests(p, principal_id, action, scope)
+                        .await
+                    {
+                        Ok(response) => {
+                            method_response::<rpc::ResolvePermissionRequests>(id, response)
+                        }
+                        Err(error) => {
+                            JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                         }
                     }
-                    Err(error) => JsonRpcResponse::err(id, error),
-                },
+                }
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }

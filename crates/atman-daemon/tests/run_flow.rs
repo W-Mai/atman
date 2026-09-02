@@ -30,7 +30,7 @@ async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
         .await
         .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while state.live_session(&spawned.session_id).is_some() {
+    while state.has_live_runs(&spawned.session_id) {
         assert!(
             std::time::Instant::now() < deadline,
             "timed out waiting for daemon run to finish"

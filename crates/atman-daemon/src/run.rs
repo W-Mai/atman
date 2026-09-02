@@ -265,17 +265,19 @@ impl RunLauncher {
         let run_id_proto = ProtoRunId(run_id_runtime.0);
 
         let cancel = session.flow_cancel_token();
-        state.register_session_run(
-            sid_proto.clone(),
-            session.clone(),
-            LiveRun {
-                run_id: run_id_proto.clone(),
-                flow_name: String::new(),
-                cancel,
-                started_at: chrono::Utc::now(),
-            },
-            owner_principal,
-        )?;
+        state
+            .register_session_run(
+                sid_proto.clone(),
+                session.clone(),
+                LiveRun {
+                    run_id: run_id_proto.clone(),
+                    flow_name: String::new(),
+                    cancel,
+                    started_at: chrono::Utc::now(),
+                },
+                owner_principal,
+            )
+            .await?;
 
         let project_root = self.project_root.clone();
         let config_dir = self.config_dir.clone();
@@ -564,8 +566,8 @@ mod tests {
         tmp
     }
 
-    #[test]
-    fn registry_cleanup_guard_finishes_run_during_unwind() {
+    #[tokio::test]
+    async fn registry_cleanup_guard_finishes_run_during_unwind() {
         let state = Arc::new(DaemonState::new(
             tempfile::tempdir().unwrap().path().to_path_buf(),
         ));
@@ -584,12 +586,9 @@ mod tests {
                 },
                 "test-principal",
             )
+            .await
             .unwrap();
-        assert!(
-            state
-                .authorized_live_session(&session_id, "test-principal")
-                .is_some()
-        );
+        assert!(state.owns_live_session(&session_id, "test-principal"));
 
         let unwind = std::panic::catch_unwind({
             let state = Arc::clone(&state);
@@ -605,19 +604,12 @@ mod tests {
             }
         });
         assert!(unwind.is_err());
-        assert!(state.live_session(&session_id).is_none());
+        while state.has_live_runs(&session_id) {
+            tokio::task::yield_now().await;
+        }
         assert!(state.can_read_session(&session_id, "test-principal"));
-        assert!(Arc::ptr_eq(
-            &state
-                .authorized_session(&session_id, "test-principal")
-                .unwrap(),
-            &session
-        ));
-        assert!(
-            state
-                .authorized_live_session(&session_id, "test-principal")
-                .is_none()
-        );
+        assert!(state.is_authorized_session(&session_id, "test-principal"));
+        assert!(!state.owns_live_session(&session_id, "test-principal"));
     }
 
     #[test]

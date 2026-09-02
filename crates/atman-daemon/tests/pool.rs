@@ -5,6 +5,12 @@ use atman_proto::{FlowRunId, JsonRpcRequest, SessionId, methods};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+async fn wait_until_finished(state: &DaemonState, session_id: &SessionId) {
+    while state.has_live_runs(session_id) {
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test]
 async fn cancel_run_hits_matching_live_session() {
     let tmp = tempfile::tempdir().unwrap();
@@ -26,7 +32,11 @@ async fn cancel_run_hits_matching_live_session() {
             },
             "local-daemon",
         )
+        .await
         .unwrap();
+
+    assert!(!state.cancel_run(&run_id, "mallory").await.unwrap());
+    assert!(!cancel.is_cancelled());
 
     let req = JsonRpcRequest::new(
         1,
@@ -39,8 +49,8 @@ async fn cancel_run_hits_matching_live_session() {
     assert!(cancel.is_cancelled());
 }
 
-#[test]
-fn finished_run_keeps_the_owned_session_attachable() {
+#[tokio::test]
+async fn finished_run_keeps_the_owned_session_attachable() {
     let tmp = tempfile::tempdir().unwrap();
     let state = DaemonState::new(tmp.path().to_path_buf());
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
@@ -59,25 +69,22 @@ fn finished_run_keeps_the_owned_session_attachable() {
             },
             "alice",
         )
+        .await
         .unwrap();
-    assert!(Arc::ptr_eq(&state.live_session(&sid).unwrap(), &session));
-    assert!(state.authorized_live_session(&sid, "mallory").is_none());
-    assert!(Arc::ptr_eq(
-        &state.authorized_live_session(&sid, "alice").unwrap(),
-        &session
-    ));
+    assert!(state.has_live_runs(&sid));
+    assert_eq!(state.session_revision(&sid), Some(1));
+    assert!(!state.owns_live_session(&sid, "mallory"));
+    assert!(state.owns_live_session(&sid, "alice"));
 
     assert!(state.finish_run(&sid, &run_id));
-    assert!(state.live_session(&sid).is_none());
-    assert!(state.authorized_live_session(&sid, "alice").is_none());
-    assert!(Arc::ptr_eq(
-        &state.authorized_session(&sid, "alice").unwrap(),
-        &session
-    ));
+    wait_until_finished(&state, &sid).await;
+    assert_eq!(state.session_revision(&sid), Some(2));
+    assert!(!state.owns_live_session(&sid, "alice"));
+    assert!(state.is_authorized_session(&sid, "alice"));
 }
 
-#[test]
-fn finishing_one_run_preserves_other_runs_in_the_same_session() {
+#[tokio::test]
+async fn finishing_one_run_preserves_other_runs_in_the_same_session() {
     let tmp = tempfile::tempdir().unwrap();
     let state = DaemonState::new(tmp.path().to_path_buf());
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
@@ -97,16 +104,20 @@ fn finishing_one_run_preserves_other_runs_in_the_same_session() {
                 },
                 "alice",
             )
+            .await
             .unwrap();
     }
 
     assert!(state.finish_run(&sid, &first));
-    assert!(state.live_session(&sid).is_some());
-    assert!(!state.cancel_run(&first));
-    assert!(state.cancel_run(&second));
+    while state.has_live_run(&sid, &first) {
+        tokio::task::yield_now().await;
+    }
+    assert!(state.has_live_runs(&sid));
+    assert!(!state.cancel_run(&first, "alice").await.unwrap());
+    assert!(state.cancel_run(&second, "alice").await.unwrap());
     assert!(state.finish_run(&sid, &second));
-    assert!(state.live_session(&sid).is_none());
-    assert!(state.authorized_session(&sid, "alice").is_some());
+    wait_until_finished(&state, &sid).await;
+    assert!(state.is_authorized_session(&sid, "alice"));
 }
 
 #[tokio::test]
@@ -156,6 +167,7 @@ async fn list_sessions_includes_live_only_entry_as_running() {
             },
             "local-daemon",
         )
+        .await
         .unwrap();
 
     let req = JsonRpcRequest::new(1, methods::LIST_SESSIONS, serde_json::json!({}));

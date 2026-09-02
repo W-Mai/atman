@@ -11,7 +11,7 @@ use futures::StreamExt;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<HttpState> {
+async fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<HttpState> {
     let daemon = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
     if let Some(session_id) = session_id {
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
@@ -28,6 +28,7 @@ fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<HttpSta
                 },
                 "authenticated-daemon-client",
             )
+            .await
             .unwrap();
     }
     Arc::new(HttpState {
@@ -39,7 +40,7 @@ fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<HttpSta
 #[tokio::test]
 async fn sse_missing_auth_returns_401() {
     let tmp = tempfile::tempdir().unwrap();
-    let state = build_state(&tmp, None);
+    let state = build_state(&tmp, None).await;
     let app = router(state);
     let sid = Uuid::now_v7();
     let resp = app
@@ -68,7 +69,7 @@ async fn sse_streams_existing_and_appended_events() {
     )
     .unwrap();
 
-    let state = build_state(&tmp, Some(sid));
+    let state = build_state(&tmp, Some(sid)).await;
     let app = router(state);
     let resp = app
         .oneshot(
@@ -164,7 +165,7 @@ fn seed_sparse_events(tmp: &tempfile::TempDir) -> Uuid {
 async fn sse_honors_last_event_id_header_when_no_since_seq_query() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = seed_five_events(&tmp);
-    let app = router(build_state(&tmp, Some(sid)));
+    let app = router(build_state(&tmp, Some(sid)).await);
     let text = collect_sse_body(
         app,
         format!("/events?session_id={sid}"),
@@ -181,7 +182,7 @@ async fn sse_honors_last_event_id_header_when_no_since_seq_query() {
 async fn sse_since_seq_query_wins_over_last_event_id_header() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = seed_five_events(&tmp);
-    let app = router(build_state(&tmp, Some(sid)));
+    let app = router(build_state(&tmp, Some(sid)).await);
     let text = collect_sse_body(
         app,
         format!("/events?session_id={sid}&since_seq=4"),
@@ -196,7 +197,7 @@ async fn sse_since_seq_query_wins_over_last_event_id_header() {
 async fn sse_first_frame_advertises_retry_directive() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = seed_five_events(&tmp);
-    let app = router(build_state(&tmp, Some(sid)));
+    let app = router(build_state(&tmp, Some(sid)).await);
     let text = collect_sse_body(app, format!("/events?session_id={sid}"), None).await;
     assert!(
         text.contains("retry: 3000"),
@@ -208,7 +209,7 @@ async fn sse_first_frame_advertises_retry_directive() {
 async fn sse_ids_use_persisted_sequences_instead_of_line_numbers() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = seed_sparse_events(&tmp);
-    let app = router(build_state(&tmp, Some(sid)));
+    let app = router(build_state(&tmp, Some(sid)).await);
     let text = collect_sse_body(
         app,
         format!("/events?session_id={sid}"),
@@ -233,7 +234,7 @@ async fn sse_ids_use_persisted_sequences_instead_of_line_numbers() {
 async fn sse_reads_finished_session_history() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = seed_five_events(&tmp);
-    let app = router(build_state(&tmp, None));
+    let app = router(build_state(&tmp, None).await);
     let text = collect_sse_body(app, format!("/events?session_id={sid}"), None).await;
     assert!(
         text.contains("\"evt5\""),
