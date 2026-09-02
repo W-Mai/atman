@@ -56,6 +56,25 @@ fn cloned_sink_shares_counter_state() {
 }
 
 #[test]
+fn cloned_sink_publishes_the_persisted_envelope_sequence() {
+    let sink = EventSink::new();
+    let mut receiver = sink.clone().subscribe();
+    sink.emit(make_flow_start());
+    sink.emit(make_flow_end());
+
+    let first = receiver.try_recv().unwrap();
+    let second = receiver.try_recv().unwrap();
+    assert_eq!((first.seq, second.seq), (1, 2));
+    assert_eq!(
+        sink.snapshot_envelopes()
+            .into_iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        vec![first.seq, second.seq]
+    );
+}
+
+#[test]
 fn next_seq_peek_does_not_advance_counter() {
     let sink = EventSink::new();
     let a = sink.next_seq_peek();

@@ -474,13 +474,30 @@ pub struct Observable<T> {
     pub cancel: CancellationToken,
 }
 
-#[derive(Default, Clone)]
+const EVENT_SUBSCRIBER_BUFFER: usize = 2_048;
+
+#[derive(Clone)]
 pub struct EventSink {
     events: Arc<Mutex<Vec<EventEnvelope>>>,
+    event_tx: broadcast::Sender<EventEnvelope>,
     forwarder: Option<mpsc::UnboundedSender<EventEnvelope>>,
     seq_counter: Arc<std::sync::atomic::AtomicU64>,
     redactor: Option<Arc<crate::redact::Redactor>>,
     last_compact_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
+}
+
+impl Default for EventSink {
+    fn default() -> Self {
+        let (event_tx, _) = broadcast::channel(EVENT_SUBSCRIBER_BUFFER);
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            event_tx,
+            forwarder: None,
+            seq_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            redactor: None,
+            last_compact_at: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl EventSink {
@@ -531,7 +548,8 @@ impl EventSink {
         self.events
             .lock()
             .expect("event sink poisoned")
-            .push(envelope);
+            .push(envelope.clone());
+        let _ = self.event_tx.send(envelope);
         next
     }
 
@@ -547,11 +565,16 @@ impl EventSink {
         self.events
             .lock()
             .expect("event sink poisoned")
-            .push(envelope);
+            .push(envelope.clone());
+        let _ = self.event_tx.send(envelope);
     }
 
     pub fn events_handle(&self) -> Arc<Mutex<Vec<EventEnvelope>>> {
         self.events.clone()
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
+        self.event_tx.subscribe()
     }
 
     pub fn redactor(&self) -> Option<Arc<crate::redact::Redactor>> {
