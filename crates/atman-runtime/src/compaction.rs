@@ -429,24 +429,41 @@ async fn maybe_auto_compact_locked(
     let (anchor, new_messages) = extract_anchor(&filtered)
         .map(|(anchor, remaining)| (Some(anchor), remaining.to_vec()))
         .unwrap_or_else(|| (None, filtered.clone()));
-    let summary =
-        match generate_llm_summary(anchor.as_deref(), &new_messages, model, providers).await {
-            Ok(text) => text,
-            Err(err) => {
-                session.emit_compact_warning(
-                    model,
-                    current,
-                    trigger,
-                    info.context_budget,
-                    &format!("LLM summary failed: {err}. Degraded to placeholder."),
-                );
-                format!(
-                    "[atman: compacted {} messages, LLM summary unavailable at {}]",
-                    range.end - range.start,
-                    chrono::Utc::now().to_rfc3339()
-                )
-            }
-        };
+    let range_start = range.start;
+    let range_end = range.end.saturating_sub(1);
+    let stream_tx = session.stream_tx();
+    let on_delta: std::sync::Arc<dyn Fn(String) + Send + Sync> = std::sync::Arc::new(move |text| {
+        let _ = stream_tx.send(crate::stream::StreamFrame::CompactionDelta {
+            range_start,
+            range_end,
+            text,
+        });
+    });
+    let summary = match generate_llm_summary_with_delta(
+        anchor.as_deref(),
+        &new_messages,
+        model,
+        providers,
+        Some(on_delta),
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(err) => {
+            session.emit_compact_warning(
+                model,
+                current,
+                trigger,
+                info.context_budget,
+                &format!("LLM summary failed: {err}. Degraded to placeholder."),
+            );
+            format!(
+                "[atman: compacted {} messages, LLM summary unavailable at {}]",
+                range.end - range.start,
+                chrono::Utc::now().to_rfc3339()
+            )
+        }
+    };
     let final_summary =
         match request_review_if_enabled(session, forced, &filtered, &range, current, summary).await
         {
@@ -599,6 +616,16 @@ async fn generate_llm_summary(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
 ) -> Result<String, crate::error::RuntimeError> {
+    generate_llm_summary_with_delta(anchor, slice, model, providers, None).await
+}
+
+async fn generate_llm_summary_with_delta(
+    anchor: Option<&str>,
+    slice: &[Message],
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+    on_delta: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+) -> Result<String, crate::error::RuntimeError> {
     let provider = providers.resolve(model).ok_or_else(|| {
         crate::error::RuntimeError::ToolFailed(format!("no provider for {model}"))
     })?;
@@ -644,7 +671,32 @@ async fn generate_llm_summary(
         reasoning: crate::provider::ReasoningSelection::ProviderDefault,
         stall_timeout_secs: 0,
     };
-    let outcome = provider.call(req).await?;
+    let outcome = if let Some(on_delta) = on_delta {
+        let observable = provider.call_streaming(req);
+        let mut events = observable.events;
+        let mut output = observable.output;
+        let outcome = loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
+                        on_delta(text);
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break output.await?,
+                },
+                result = &mut output => break result?,
+            }
+        };
+        while let Ok(event) = events.try_recv() {
+            if let crate::event::NodeEvent::LlmChunk { text, .. } = event {
+                on_delta(text);
+            }
+        }
+        outcome
+    } else {
+        provider.call(req).await?
+    };
     let text = outcome.text_concat();
     if text.trim().is_empty() {
         return Err(crate::error::RuntimeError::ToolFailed(
