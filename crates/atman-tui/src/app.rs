@@ -2924,11 +2924,7 @@ impl AppState {
                 {
                     self.append_tool_dispatch(message);
                 }
-                if let StreamFrame::ToolResultMsg {
-                    flow_run_id: None,
-                    message,
-                } = &frame
-                {
+                if let StreamFrame::ToolResultMsg { message, .. } = &frame {
                     self.apply_tool_result_to_dispatch(message);
                 }
                 match &frame {
@@ -4320,6 +4316,47 @@ mod tests {
         preview.push("fs.write", &"界".repeat(64));
         preview.push("fs.write", r#"{"content":"完成"}"#);
         assert_eq!(preview.last_line(), Some("完成"));
+    }
+
+    #[test]
+    fn scoped_tool_result_completes_matching_document_flow_call() {
+        use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "read-1".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path": "README.md"}),
+                    intent: ToolCallIntent::new("读取项目说明"),
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        app.apply_stream_frame(StreamFrame::ToolResultMsg {
+            flow_run_id: Some("root-flow".into()),
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "read-1".into(),
+                    content: "done".into(),
+                    is_error: false,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+            panic!("expected grouped tool dispatch");
+        };
+        assert_eq!(calls[0].status, ToolCallStatus::Ok);
+        assert!(calls[0].ended_at.is_some());
     }
 
     #[test]
