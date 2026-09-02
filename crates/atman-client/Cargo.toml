@@ -1,0 +1,21 @@
+[package]
+name = "atman-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = true
+description = "Typed client transports for the atman daemon protocol"
+repository = "https://github.com/W-Mai/atman"
+homepage = "https://atman.run"
+keywords = ["atman", "client", "daemon", "json-rpc"]
+categories = ["api-bindings", "development-tools"]
+
+[dependencies]
+atman-proto = { path = "../atman-proto", version = "1.10.0" }
+futures.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
