@@ -243,13 +243,17 @@ impl WorkflowProjection {
     ) -> ProjectionDelta {
         let mut pending = PendingDelta::default();
         for event in events {
-            pending.merge(self.apply_event_inner(event));
+            pending.merge(self.apply_event_inner(event, Utc::now()));
         }
         self.commit(pending)
     }
 
     pub fn apply_event(&mut self, event: &Event) -> ProjectionDelta {
-        let pending = self.apply_event_inner(event);
+        self.apply_event_at(event, Utc::now())
+    }
+
+    pub fn apply_event_at(&mut self, event: &Event, at: DateTime<Utc>) -> ProjectionDelta {
+        let pending = self.apply_event_inner(event, at);
         self.commit(pending)
     }
 
@@ -343,7 +347,7 @@ impl WorkflowProjection {
         self.commit(pending)
     }
 
-    fn apply_event_inner(&mut self, event: &Event) -> PendingDelta {
+    fn apply_event_inner(&mut self, event: &Event, at: DateTime<Utc>) -> PendingDelta {
         match event {
             Event::FlowStart {
                 run_id,
@@ -356,7 +360,7 @@ impl WorkflowProjection {
                 flow_name.clone(),
                 parent_run_id.as_ref().map(|id| id.0.to_string()),
                 parent_node_id.clone(),
-                Utc::now(),
+                at,
                 false,
             ),
             Event::FlowEnd { run_id, status, .. } => {
@@ -365,7 +369,7 @@ impl WorkflowProjection {
                     FlowStatus::Errored { .. } => NodeStatus::Err,
                     FlowStatus::Cancelled => NodeStatus::Cancelled,
                 };
-                self.finish_node(&run_id.0.to_string(), status, None, Utc::now(), false)
+                self.finish_node(&run_id.0.to_string(), status, None, at, false)
             }
             Event::FlowNodeStart {
                 run_id,
@@ -380,7 +384,7 @@ impl WorkflowProjection {
                 kind,
                 label,
                 parent_node_id.as_deref(),
-                Utc::now(),
+                at,
             ),
             Event::FlowNodeEnd {
                 run_id,
@@ -398,7 +402,7 @@ impl WorkflowProjection {
                     &scope_id(&run_id.0.to_string(), node_id),
                     status,
                     output_preview.as_deref(),
-                    Utc::now(),
+                    at,
                     false,
                 )
             }
@@ -453,7 +457,7 @@ impl WorkflowProjection {
                 tool_name,
                 args_preview,
                 call_intent.clone(),
-                Utc::now(),
+                at,
             ),
             Event::ToolResultMsg {
                 flow_run_id,
@@ -462,7 +466,7 @@ impl WorkflowProjection {
             } => self.apply_tool_results(
                 flow_run_id.as_ref().map(|id| id.0.to_string()).as_deref(),
                 message,
-                Utc::now(),
+                at,
             ),
             Event::ToolPendingApproval {
                 run_id,
@@ -2085,6 +2089,36 @@ mod tests {
         assert!(!noop.changed());
         assert_eq!(noop.revision, revision);
         assert_eq!(projection.revision(), revision);
+    }
+
+    #[test]
+    fn persisted_event_projection_preserves_recorded_timestamps() {
+        let started_at = Utc::now() - chrono::Duration::minutes(2);
+        let finished_at = started_at + chrono::Duration::seconds(9);
+        let run_id = FlowRunId::now();
+        let mut projection = WorkflowProjection::new(TurnId::now());
+
+        projection.apply_event_at(
+            &Event::FlowStart {
+                run_id: run_id.clone(),
+                flow_name: "root".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+            started_at,
+        );
+        projection.apply_event_at(
+            &Event::FlowEnd {
+                run_id,
+                flow_name: "root".into(),
+                status: FlowStatus::Ok,
+            },
+            finished_at,
+        );
+
+        assert_eq!(projection.summary().started_at(), Some(started_at));
+        assert_eq!(projection.summary().ended_at(), Some(finished_at));
     }
 
     #[test]
