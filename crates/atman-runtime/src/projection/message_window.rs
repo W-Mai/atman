@@ -16,6 +16,16 @@ pub enum TranscriptEntry {
         message: Message,
         flow_run_id: Option<String>,
     },
+    ToolTiming {
+        tool_use_id: String,
+        elapsed_ms: u64,
+    },
+    ActivitySummary {
+        turn: crate::activity::ActivitySummary,
+        session: crate::activity::ActivitySummary,
+        turn_files: Vec<String>,
+        session_files: Vec<String>,
+    },
     CompactionSummary {
         range_start: usize,
         range_end: usize,
@@ -491,6 +501,26 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             }
         }
     }
+    let mut tool_started_at = HashMap::new();
+    for value in &values {
+        if value["type"].as_str() != Some("assistant_msg") {
+            continue;
+        }
+        let Some(ts) = parse_ts(value) else {
+            continue;
+        };
+        let Some(message) = value
+            .get("message")
+            .and_then(|message| serde_json::from_value::<Message>(message.clone()).ok())
+        else {
+            continue;
+        };
+        for part in message.parts {
+            if let MessagePart::ToolUse { id, .. } = part {
+                tool_started_at.insert(id, ts);
+            }
+        }
+    }
     let patches = collect_attachment_patches(&values);
     let mut out = Vec::new();
     let mut messages = Vec::new();
@@ -504,8 +534,18 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
         Vec<crate::workflow::WorkflowPermissionIdentity>,
     > = std::collections::HashMap::new();
     let mut canonical_permissions = std::collections::HashSet::new();
+    let mut session_activity = crate::activity::ActivityAccumulator::default();
+    let mut turn_activity = crate::activity::ActivityAccumulator::default();
     for v in &values {
         let ty = v["type"].as_str().unwrap_or("");
+        if let Ok(envelope) = serde_json::from_value::<crate::event::EventEnvelope>(v.clone()) {
+            if matches!(&envelope.event, crate::event::Event::TurnStart { .. }) {
+                turn_activity = crate::activity::ActivityAccumulator::default();
+            } else {
+                session_activity.observe(&envelope.event);
+                turn_activity.observe(&envelope.event);
+            }
+        }
         match ty {
             "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg" => {
                 if let Some(m) = v.get("message")
@@ -525,6 +565,19 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                             Some(raw.to_string())
                         }
                     });
+                    let timing_ids = if ty == "tool_result_msg" {
+                        msg.parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                MessagePart::ToolResult { tool_use_id, .. } => {
+                                    Some(tool_use_id.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
                     let entry = TranscriptEntry::Message {
                         message: msg,
                         flow_run_id,
@@ -540,8 +593,29 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     } else {
                         out.push(entry);
                     }
+                    if let Some(finished_at) = parse_ts(v) {
+                        for tool_use_id in timing_ids {
+                            if let Some(started_at) = tool_started_at.get(&tool_use_id) {
+                                let elapsed_ms = finished_at
+                                    .signed_duration_since(*started_at)
+                                    .num_milliseconds()
+                                    .max(0) as u64;
+                                out.push(TranscriptEntry::ToolTiming {
+                                    tool_use_id,
+                                    elapsed_ms,
+                                });
+                            }
+                        }
+                    }
                 }
             }
+            "turn_start" => {}
+            "turn_end" => out.push(TranscriptEntry::ActivitySummary {
+                turn: turn_activity.summary(),
+                session: session_activity.summary(),
+                turn_files: turn_activity.file_paths(),
+                session_files: session_activity.file_paths(),
+            }),
             "context_compact" => {
                 if !raw_event_belongs_to_root(v, &spawned_flow_ids) {
                     continue;
@@ -930,6 +1004,7 @@ pub(crate) fn project_transcript_records(
     ownership: &crate::event_log::replay::FlowOwnership,
 ) -> Vec<TranscriptEntry> {
     let mut patches: HashMap<u64, Vec<AttachmentPatch>> = HashMap::new();
+    let mut tool_started_at = HashMap::new();
     for record in records {
         if let crate::event::Event::AttachmentDegraded {
             message_seq,
@@ -948,6 +1023,15 @@ pub(crate) fn project_transcript_records(
                     reason: reason.clone(),
                 });
         }
+        if let crate::event::Event::AssistantMsg { message, .. } = &record.envelope.event
+            && let Some(ts) = record.persisted_ts
+        {
+            for part in &message.parts {
+                if let MessagePart::ToolUse { id, .. } = part {
+                    tool_started_at.insert(id.clone(), ts);
+                }
+            }
+        }
     }
     let mut out = Vec::new();
     let mut messages = Vec::new();
@@ -961,9 +1045,20 @@ pub(crate) fn project_transcript_records(
         Vec<crate::workflow::WorkflowPermissionIdentity>,
     >::new();
     let mut canonical_permissions = std::collections::HashSet::new();
+    let mut session_activity = crate::activity::ActivityAccumulator::default();
+    let mut turn_activity = crate::activity::ActivityAccumulator::default();
     for record in records {
         let seq = record.envelope.seq;
         let ts = record.persisted_ts;
+        if matches!(
+            &record.envelope.event,
+            crate::event::Event::TurnStart { .. }
+        ) {
+            turn_activity = crate::activity::ActivityAccumulator::default();
+        } else {
+            session_activity.observe(&record.envelope.event);
+            turn_activity.observe(&record.envelope.event);
+        }
         match &record.envelope.event {
             crate::event::Event::UserMsg {
                 message,
@@ -1013,6 +1108,33 @@ pub(crate) fn project_transcript_records(
                 } else {
                     out.push(entry);
                 }
+                if let crate::event::Event::ToolResultMsg { message, .. } = &record.envelope.event
+                    && let Some(finished_at) = ts
+                {
+                    for part in &message.parts {
+                        if let MessagePart::ToolResult { tool_use_id, .. } = part
+                            && let Some(started_at) = tool_started_at.get(tool_use_id)
+                        {
+                            let elapsed_ms = finished_at
+                                .signed_duration_since(*started_at)
+                                .num_milliseconds()
+                                .max(0) as u64;
+                            out.push(TranscriptEntry::ToolTiming {
+                                tool_use_id: tool_use_id.clone(),
+                                elapsed_ms,
+                            });
+                        }
+                    }
+                }
+            }
+            crate::event::Event::TurnStart { .. } => {}
+            crate::event::Event::TurnEnd { .. } => {
+                out.push(TranscriptEntry::ActivitySummary {
+                    turn: turn_activity.summary(),
+                    session: session_activity.summary(),
+                    turn_files: turn_activity.file_paths(),
+                    session_files: session_activity.file_paths(),
+                });
             }
             crate::event::Event::ContextCompact {
                 flow_run_id,
@@ -2250,5 +2372,116 @@ mod tests {
             }
         );
         assert_eq!(payload.tool, "bash.spawn");
+    }
+
+    #[test]
+    fn transcript_reconstructs_tool_timing_and_turn_activity() {
+        let turn_id = TurnId::now();
+        let run_id = FlowRunId::now();
+        let tool_use_id = "edit-1".to_string();
+        let started_at = chrono::Utc::now();
+        let finished_at = started_at + chrono::Duration::milliseconds(1_500);
+        let mut events = vec![
+            EventEnvelope::new(
+                1,
+                Event::TurnStart {
+                    turn_id: turn_id.clone(),
+                },
+            ),
+            EventEnvelope::new(2, flow_start(run_id.clone(), None, false)),
+            EventEnvelope::new(
+                3,
+                Event::AssistantMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(run_id.clone()),
+                    message: Message {
+                        role: MessageRole::Assistant,
+                        parts: vec![MessagePart::ToolUse {
+                            id: tool_use_id.clone(),
+                            name: "fs.edit".into(),
+                            input: serde_json::json!({"path": "/repo/src/lib.rs"}),
+                            intent: None,
+                        }],
+                        turn_id: turn_id.clone(),
+                        origin: MessageOrigin::User,
+                    },
+                },
+            ),
+            EventEnvelope::new(
+                4,
+                Event::ToolNode {
+                    run_id,
+                    parent_node_id: "node".into(),
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: "fs.edit".into(),
+                    args_preview: "{}".into(),
+                    call_intent: None,
+                },
+            ),
+            EventEnvelope::new(
+                5,
+                Event::FileEditApplied {
+                    turn_id: Some(turn_id.clone()),
+                    flow_run_id: None,
+                    tool_use_id: Some(tool_use_id.clone()),
+                    tool_name: "fs.edit".into(),
+                    path: "/repo/src/lib.rs".into(),
+                    metrics: crate::activity::EditMetrics {
+                        hunks: 2,
+                        insertions: 7,
+                        deletions: 3,
+                    },
+                },
+            ),
+            EventEnvelope::new(
+                6,
+                Event::ToolResultMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: None,
+                    message: Message {
+                        role: MessageRole::Tool,
+                        parts: vec![MessagePart::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: "null".into(),
+                            is_error: false,
+                        }],
+                        turn_id: turn_id.clone(),
+                        origin: MessageOrigin::User,
+                    },
+                },
+            ),
+            EventEnvelope::new(7, Event::TurnEnd { turn_id }),
+        ];
+        events[2].ts = started_at;
+        events[5].ts = finished_at;
+
+        let entries = crate::event_log::replay::transcript_from_envelopes(&events);
+
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            super::TranscriptEntry::ToolTiming {
+                tool_use_id: id,
+                elapsed_ms: 1_500,
+            } if id == &tool_use_id
+        )));
+        let (turn, session, turn_files, session_files) = entries
+            .iter()
+            .find_map(|entry| match entry {
+                super::TranscriptEntry::ActivitySummary {
+                    turn,
+                    session,
+                    turn_files,
+                    session_files,
+                } => Some((turn, session, turn_files, session_files)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(turn.attempted_calls, 1);
+        assert_eq!(turn.completed_calls, 1);
+        assert_eq!(turn.applied_edits, 1);
+        assert_eq!((turn.hunks, turn.insertions, turn.deletions), (2, 7, 3));
+        assert_eq!(session, turn);
+        assert_eq!(turn_files, &["/repo/src/lib.rs"]);
+        assert_eq!(session_files, turn_files);
     }
 }

@@ -427,6 +427,7 @@ enum ItemKind {
     Thinking,
     Assistant,
     ToolDispatch,
+    ActivitySummary,
     SystemNote,
     Divider,
     WorkflowPanel,
@@ -446,6 +447,7 @@ impl ItemKind {
             OutputItem::Thinking { .. } => Self::Thinking,
             OutputItem::AssistantMd { .. } => Self::Assistant,
             OutputItem::ToolDispatch { .. } => Self::ToolDispatch,
+            OutputItem::ActivitySummary { .. } => Self::ActivitySummary,
             OutputItem::SystemNote { .. } => Self::SystemNote,
             OutputItem::Divider => Self::Divider,
             OutputItem::WorkflowPanel { .. } => Self::WorkflowPanel,
@@ -465,6 +467,9 @@ impl ItemKind {
             || matches!(self, Self::Divider | Self::StartupCard | Self::UserTurn)
         {
             return false;
+        }
+        if matches!((prev, self), (Self::ToolDispatch, Self::ToolDispatch)) {
+            return true;
         }
         prev != self
     }
@@ -1874,6 +1879,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             retried,
         } => render_assistant(md, *streaming, *retried, ctx.panel_width),
         OutputItem::ToolDispatch { calls } => render_tool_dispatch(calls, ctx, 0).0,
+        OutputItem::ActivitySummary { turn, .. } => render_activity_summary(turn, ctx.panel_width),
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
         OutputItem::Divider => make_dashed_divider(ctx.panel_width),
         OutputItem::WorkflowPanel {
@@ -2615,8 +2621,49 @@ fn render_tool_dispatch(
         regions[call_region_index].end_row = lines.len() as u32;
     }
     lines.push(document_blank(width, header_style));
-    lines.push(Line::default());
     (lines, regions)
+}
+
+fn render_activity_summary(
+    activity: &crate::app::ActivityTotals,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let width = panel_width.max(1) as usize;
+    let bg: Color = t.note_success_bg.into();
+    let base = Style::default().bg(bg);
+    let title = Style::default()
+        .fg(t.success.into())
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let meta = Style::default().fg(t.meta_fg.into()).bg(bg);
+    let file_label = if activity.file_count() == 1 {
+        "file"
+    } else {
+        "files"
+    };
+    let edit_label = if activity.applied_edits == 1 {
+        "edit"
+    } else {
+        "edits"
+    };
+    let left = vec![Span::styled("changes · turn", title)];
+    let right = vec![Span::styled(
+        format!(
+            "{} {file_label} · {} {edit_label} · {}h · +{} −{}",
+            activity.file_count(),
+            activity.applied_edits,
+            activity.hunks,
+            activity.insertions,
+            activity.deletions
+        ),
+        meta,
+    )];
+    vec![
+        document_blank(width, base),
+        aligned_document_row(left, right, width, bg),
+        document_blank(width, base),
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8922,6 +8969,64 @@ mod tests {
             backgrounds(ToolCallStatus::Ok, 0),
             backgrounds(ToolCallStatus::Ok, 4)
         );
+    }
+
+    #[test]
+    fn tool_dispatch_leaves_a_document_gap_before_assistant_output() {
+        let call = ToolCallView {
+            id: "read-1".into(),
+            tool: "fs.read".into(),
+            intent: "读取项目文档".into(),
+            input: serde_json::json!({"path": "README.md"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: Some(Instant::now()),
+        };
+        let items = vec![
+            OutputItem::ToolDispatch { calls: vec![call] },
+            OutputItem::AssistantMd {
+                md: "继续输出".into(),
+                streaming: false,
+                retried: false,
+            },
+        ];
+        let (lines, ranges, _, _) = build_lines_with_ranges(&items, 80, &RenderCtx::empty());
+
+        assert_eq!(ranges[1].start_row, ranges[0].end_row + 1);
+        assert!(line_is_visually_blank(&lines[ranges[0].end_row as usize]));
+    }
+
+    #[test]
+    fn consecutive_tool_dispatches_remain_separate_documents() {
+        let call = ToolCallView {
+            id: "read-1".into(),
+            tool: "fs.read".into(),
+            intent: "读取项目文档".into(),
+            input: serde_json::json!({"path": "README.md"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: Some(Instant::now()),
+        };
+        let items = vec![
+            OutputItem::ToolDispatch {
+                calls: vec![call.clone()],
+            },
+            OutputItem::ToolDispatch { calls: vec![call] },
+        ];
+        let (lines, ranges, _, _) = build_lines_with_ranges(&items, 80, &RenderCtx::empty());
+
+        assert_eq!(ranges[1].start_row, ranges[0].end_row + 1);
+        assert!(line_is_visually_blank(&lines[ranges[0].end_row as usize]));
     }
 
     #[test]

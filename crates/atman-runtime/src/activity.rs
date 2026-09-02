@@ -19,20 +19,27 @@ pub struct ActivitySummary {
     pub deletions: usize,
 }
 
-pub fn summarize_events(events: &[crate::event::EventEnvelope]) -> ActivitySummary {
-    let mut summary = ActivitySummary::default();
-    let mut attempted = std::collections::HashSet::new();
-    let mut completed = std::collections::HashSet::new();
-    let mut files = std::collections::HashSet::new();
-    for envelope in events {
-        match &envelope.event {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ActivityAccumulator {
+    summary: ActivitySummary,
+    attempted: std::collections::HashSet<(String, String)>,
+    completed: std::collections::HashSet<(String, String)>,
+    files: std::collections::BTreeSet<String>,
+}
+
+impl ActivityAccumulator {
+    pub(crate) fn observe(&mut self, event: &crate::event::Event) {
+        match event {
             crate::event::Event::ToolNode {
                 run_id,
                 tool_use_id,
                 ..
             } => {
-                if attempted.insert((run_id.to_string(), tool_use_id.clone())) {
-                    summary.attempted_calls += 1;
+                if self
+                    .attempted
+                    .insert((run_id.to_string(), tool_use_id.clone()))
+                {
+                    self.summary.attempted_calls += 1;
                 }
             }
             crate::event::Event::ToolResultMsg {
@@ -54,25 +61,40 @@ pub fn summarize_events(events: &[crate::event::EventEnvelope]) -> ActivitySumma
                                 .unwrap_or_default(),
                             tool_use_id.clone(),
                         );
-                        if completed.insert(key) {
-                            summary.completed_calls += 1;
-                            summary.failed_calls += usize::from(*is_error);
+                        if self.completed.insert(key) {
+                            self.summary.completed_calls += 1;
+                            self.summary.failed_calls += usize::from(*is_error);
                         }
                     }
                 }
             }
             crate::event::Event::FileEditApplied { path, metrics, .. } => {
-                summary.applied_edits += 1;
-                files.insert(path.clone());
-                summary.hunks += metrics.hunks;
-                summary.insertions += metrics.insertions;
-                summary.deletions += metrics.deletions;
+                self.summary.applied_edits += 1;
+                self.files.insert(path.clone());
+                self.summary.hunks += metrics.hunks;
+                self.summary.insertions += metrics.insertions;
+                self.summary.deletions += metrics.deletions;
             }
             _ => {}
         }
+        self.summary.files = self.files.len();
     }
-    summary.files = files.len();
-    summary
+
+    pub(crate) fn summary(&self) -> ActivitySummary {
+        self.summary.clone()
+    }
+
+    pub(crate) fn file_paths(&self) -> Vec<String> {
+        self.files.iter().cloned().collect()
+    }
+}
+
+pub fn summarize_events(events: &[crate::event::EventEnvelope]) -> ActivitySummary {
+    let mut activity = ActivityAccumulator::default();
+    for envelope in events {
+        activity.observe(&envelope.event);
+    }
+    activity.summary()
 }
 
 pub fn edit_metrics(before: &str, after: &str) -> EditMetrics {

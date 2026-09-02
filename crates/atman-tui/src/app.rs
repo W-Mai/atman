@@ -222,6 +222,24 @@ impl ActivityTotals {
         self.deletions += metrics.deletions;
     }
 
+    pub(crate) fn from_summary(
+        summary: &atman_runtime::activity::ActivitySummary,
+        files: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            attempted_calls: summary.attempted_calls,
+            completed_calls: summary.completed_calls,
+            failed_calls: summary.failed_calls,
+            applied_edits: summary.applied_edits,
+            hunks: summary.hunks,
+            insertions: summary.insertions,
+            deletions: summary.deletions,
+            files: files.into_iter().collect(),
+            attempted_ids: HashSet::new(),
+            completed_ids: HashSet::new(),
+        }
+    }
+
     pub fn compact_label(&self) -> String {
         format!(
             "{} tools · {} files · +{} −{}",
@@ -251,6 +269,10 @@ pub enum OutputItem {
     },
     ToolDispatch {
         calls: Vec<ToolCallView>,
+    },
+    ActivitySummary {
+        turn: ActivityTotals,
+        session: ActivityTotals,
     },
     SystemNote {
         text: String,
@@ -1041,6 +1063,11 @@ impl AppState {
                             }
                         }
                     }
+                    (None, false)
+                }
+                OutputItem::ActivitySummary { session, .. } => {
+                    self.session_activity = session.clone();
+                    self.turn_activity = ActivityTotals::default();
                     (None, false)
                 }
                 _ => (None, false),
@@ -2631,9 +2658,9 @@ impl AppState {
             }
             StreamFrame::TurnEnded { .. } => {
                 if self.turn_activity.attempted_calls > 0 || self.turn_activity.applied_edits > 0 {
-                    self.push_item(OutputItem::SystemNote {
-                        text: format!("turn · {}", self.turn_activity.compact_label()),
-                        level: NoteLevel::Info,
+                    self.push_item(OutputItem::ActivitySummary {
+                        turn: self.turn_activity.clone(),
+                        session: self.session_activity.clone(),
                     });
                 }
             }

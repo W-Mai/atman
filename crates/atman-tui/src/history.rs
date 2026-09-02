@@ -7,7 +7,7 @@ use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
 
-use crate::app::{Disclosure, NoteLevel, OutputItem, ToolCallStatus, ToolCallView};
+use crate::app::{ActivityTotals, Disclosure, NoteLevel, OutputItem, ToolCallStatus, ToolCallView};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolDisplayMeta {
@@ -334,6 +334,39 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                                 .push(item_index);
                         }
                     }
+                }
+            }
+            TranscriptEntry::ToolTiming {
+                tool_use_id,
+                elapsed_ms,
+            } => {
+                let now = Instant::now();
+                let elapsed = std::time::Duration::from_millis(*elapsed_ms);
+                for item in out.iter_mut().rev() {
+                    let OutputItem::ToolDispatch { calls } = item else {
+                        continue;
+                    };
+                    if let Some(call) = calls.iter_mut().find(|call| call.id == *tool_use_id) {
+                        call.started_at = now.checked_sub(elapsed).unwrap_or(now);
+                        call.ended_at = Some(now);
+                        break;
+                    }
+                }
+            }
+            TranscriptEntry::ActivitySummary {
+                turn,
+                session,
+                turn_files,
+                session_files,
+            } => {
+                if turn.attempted_calls > 0 || turn.applied_edits > 0 {
+                    out.push(OutputItem::ActivitySummary {
+                        turn: ActivityTotals::from_summary(turn, turn_files.iter().cloned()),
+                        session: ActivityTotals::from_summary(
+                            session,
+                            session_files.iter().cloned(),
+                        ),
+                    });
                 }
             }
             TranscriptEntry::DiffPreview {
@@ -1378,6 +1411,80 @@ mod tests {
                     && calls[0].id == "toolu_1"
                     && calls[0].status == ToolCallStatus::Ok
         ));
+    }
+
+    #[test]
+    fn replay_restores_tool_duration_and_activity_panel() {
+        let tool_use_id = "toolu_1";
+        let summary = atman_runtime::activity::ActivitySummary {
+            attempted_calls: 1,
+            completed_calls: 1,
+            failed_calls: 0,
+            applied_edits: 1,
+            files: 1,
+            hunks: 2,
+            insertions: 7,
+            deletions: 3,
+        };
+        let entries = vec![
+            TranscriptEntry::Message {
+                message: assistant(vec![MessagePart::ToolUse {
+                    id: tool_use_id.into(),
+                    name: "fs.edit".into(),
+                    input: serde_json::json!({"path": "/repo/src/lib.rs"}),
+                    intent: None,
+                }]),
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: tool_use_id.into(),
+                        content: "null".into(),
+                        is_error: false,
+                    }],
+                    turn_id: TurnId::now(),
+                    origin: atman_runtime::message::MessageOrigin::User,
+                },
+                flow_run_id: None,
+            },
+            TranscriptEntry::ToolTiming {
+                tool_use_id: tool_use_id.into(),
+                elapsed_ms: 1_500,
+            },
+            TranscriptEntry::ActivitySummary {
+                turn: summary.clone(),
+                session: summary,
+                turn_files: vec!["/repo/src/lib.rs".into()],
+                session_files: vec!["/repo/src/lib.rs".into()],
+            },
+        ];
+
+        let out = flatten_transcript(&entries);
+        let call = out
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::ToolDispatch { calls } => calls.first(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            call.ended_at.unwrap().duration_since(call.started_at),
+            std::time::Duration::from_millis(1_500)
+        );
+        assert!(matches!(
+            out.last(),
+            Some(OutputItem::ActivitySummary { turn, session })
+                if turn.file_count() == 1
+                    && turn.insertions == 7
+                    && turn.deletions == 3
+                    && session.file_count() == 1
+        ));
+        let app = crate::app::AppState::new("session".into(), None).with_initial_items(out);
+        assert_eq!(app.session_activity.file_count(), 1);
+        assert_eq!(app.session_activity.insertions, 7);
+        assert_eq!(app.session_activity.deletions, 3);
     }
 
     #[test]
