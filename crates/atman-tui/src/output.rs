@@ -1749,6 +1749,25 @@ fn render_thinking(
     lines
 }
 
+pub(crate) fn next_thinking_disclosure(
+    text: &str,
+    disclosure: Disclosure,
+    panel_width: u16,
+) -> Disclosure {
+    let preview_has_less_content = crate::markdown::render_markdown_with_width(
+        text,
+        panel_width.saturating_sub((DOCUMENT_PAD_X + RIGHT_PAD) as u16),
+    )
+    .len()
+        > 6;
+    match disclosure {
+        Disclosure::Summary if preview_has_less_content => Disclosure::Preview,
+        Disclosure::Summary => Disclosure::Full,
+        Disclosure::Preview => Disclosure::Full,
+        Disclosure::Full => Disclosure::Summary,
+    }
+}
+
 fn render_assistant(
     md: &str,
     streaming: bool,
@@ -2745,6 +2764,7 @@ fn render_tool_dispatch(
         lines.push(document_blank(width, detail_style));
         regions[call_region_index].end_row = lines.len() as u32;
     }
+    lines.push(document_blank(width, header_style));
     (lines, regions)
 }
 
@@ -8750,6 +8770,35 @@ mod tests {
     }
 
     #[test]
+    fn thinking_disclosure_skips_an_indistinguishable_preview() {
+        assert_eq!(
+            next_thinking_disclosure("short thought", Disclosure::Summary, 60),
+            Disclosure::Full
+        );
+        assert_eq!(
+            next_thinking_disclosure("short thought", Disclosure::Full, 60),
+            Disclosure::Summary
+        );
+
+        let long = (1..=7)
+            .map(|line| format!("thought {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            next_thinking_disclosure(&long, Disclosure::Summary, 60),
+            Disclosure::Preview
+        );
+        assert_eq!(
+            next_thinking_disclosure(&long, Disclosure::Preview, 60),
+            Disclosure::Full
+        );
+        assert_eq!(
+            next_thinking_disclosure(&long, Disclosure::Full, 60),
+            Disclosure::Summary
+        );
+    }
+
+    #[test]
     fn system_note_wraps_long_line() {
         let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk lllll mmmmm";
         let lines = render_system_note(text, NoteLevel::Info, 30);
@@ -9552,7 +9601,7 @@ mod tests {
                 .collect::<String>()
         };
 
-        assert_eq!(summary_lines.len(), 5);
+        assert_eq!(summary_lines.len(), 6);
         assert!(line_is_visually_blank(&summary_lines[0]));
         assert!(line_is_visually_blank(summary_lines.last().unwrap()));
         assert!(line_is_visually_blank(&summary_lines[2]));
@@ -9581,11 +9630,21 @@ mod tests {
         assert!(line_is_visually_blank(lines.last().unwrap()));
         assert!(
             lines
-                .last()
+                .iter()
+                .rev()
+                .nth(1)
                 .unwrap()
                 .spans
                 .iter()
                 .all(|span| { span.style.bg == Some(crate::theme::theme().work_detail_bg.into()) })
+        );
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .spans
+                .iter()
+                .all(|span| { span.style.bg == Some(crate::theme::theme().work_bg.into()) })
         );
         assert_eq!(
             tool_headers

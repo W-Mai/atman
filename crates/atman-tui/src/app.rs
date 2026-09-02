@@ -1533,11 +1533,18 @@ impl AppState {
     }
 
     pub fn cycle_thinking_disclosure(&mut self, item_idx: usize) {
+        let panel_width = self
+            .last_transcript_rect
+            .map(|area| area.width)
+            .unwrap_or(80);
         self.mutate_item(item_idx, OutputMutation::Interaction, |item| {
-            let OutputItem::Thinking { disclosure, .. } = item else {
+            let OutputItem::Thinking {
+                text, disclosure, ..
+            } = item
+            else {
                 return false;
             };
-            *disclosure = disclosure.next();
+            *disclosure = crate::output::next_thinking_disclosure(text, *disclosure, panel_width);
             true
         });
     }
