@@ -109,6 +109,10 @@ pub struct Theme {
     pub note_error_bg: ThemeColor,
     pub note_success_bg: ThemeColor,
     pub note_debug_bg: ThemeColor,
+    pub diff_add_fg: ThemeColor,
+    pub diff_add_bg: ThemeColor,
+    pub diff_remove_fg: ThemeColor,
+    pub diff_remove_bg: ThemeColor,
     pub tinted_fg: ThemeColor,
     pub subtle_fg: ThemeColor,
     pub modal_bg: ThemeColor,
@@ -139,6 +143,10 @@ impl Theme {
             note_error_bg: ThemeColor(Color::Rgb(40, 20, 22)),
             note_success_bg: ThemeColor(Color::Rgb(18, 32, 22)),
             note_debug_bg: ThemeColor(Color::Rgb(22, 22, 24)),
+            diff_add_fg: ThemeColor(Color::Rgb(126, 150, 134)),
+            diff_add_bg: ThemeColor(Color::Rgb(26, 33, 30)),
+            diff_remove_fg: ThemeColor(Color::Rgb(160, 128, 132)),
+            diff_remove_bg: ThemeColor(Color::Rgb(35, 28, 30)),
             tinted_fg: ThemeColor(Color::Gray),
             subtle_fg: ThemeColor(Color::Rgb(96, 96, 96)),
             modal_bg: ThemeColor(Color::Rgb(12, 14, 18)),
@@ -169,6 +177,10 @@ impl Theme {
             note_error_bg: ThemeColor(Color::Rgb(250, 220, 220)),
             note_success_bg: ThemeColor(Color::Rgb(210, 240, 210)),
             note_debug_bg: ThemeColor(Color::Rgb(235, 235, 240)),
+            diff_add_fg: ThemeColor(Color::Rgb(78, 103, 86)),
+            diff_add_bg: ThemeColor(Color::Rgb(225, 231, 227)),
+            diff_remove_fg: ThemeColor(Color::Rgb(120, 88, 92)),
+            diff_remove_bg: ThemeColor(Color::Rgb(233, 225, 227)),
             tinted_fg: ThemeColor(Color::Rgb(30, 30, 30)),
             subtle_fg: ThemeColor(Color::Rgb(96, 96, 96)),
             modal_bg: ThemeColor(Color::Rgb(250, 250, 250)),
@@ -337,6 +349,20 @@ mod tests {
             assert_ne!(theme.work_bg, theme.work_detail_bg);
             assert_ne!(theme.work_detail_bg, theme.work_output_bg);
             assert_ne!(theme.work_bg, theme.work_hover_bg);
+        }
+    }
+
+    #[test]
+    fn diff_palette_is_muted_and_distinct_in_every_theme() {
+        for theme in [Theme::dark(), Theme::light()] {
+            assert_ne!(theme.diff_add_bg, theme.code_bg);
+            assert_ne!(theme.diff_remove_bg, theme.code_bg);
+            assert_ne!(theme.diff_add_bg, theme.diff_remove_bg);
+            for color in [theme.diff_add_fg, theme.diff_remove_fg] {
+                let (red, green, blue) = color.rgb();
+                let chroma = red.max(green).max(blue) - red.min(green).min(blue);
+                assert!(chroma <= 32, "diff foreground must remain low-saturation");
+            }
         }
     }
 }

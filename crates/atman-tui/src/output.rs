@@ -3356,8 +3356,7 @@ fn render_diff_preview(
     let layout = atman_runtime::config_hub::ConfigHub::global()
         .and_then(|hub| hub.diff_layout())
         .unwrap_or_default();
-    let unified_layout =
-        layout == atman_runtime::config_hub::DiffLayout::Unified || panel_width < 72;
+    let unified_layout = prefers_unified_diff(layout, panel_width, unified_diff);
     if unified_layout && let Some(diff) = unified_diff {
         let (body, total) = render_unified_diff_rows(diff, expanded, target, bg);
         lines.extend(body);
@@ -3384,6 +3383,35 @@ fn render_diff_preview(
     }
     lines.push(blank);
     lines
+}
+
+fn prefers_unified_diff(
+    layout: atman_runtime::config_hub::DiffLayout,
+    panel_width: u16,
+    unified_diff: Option<&str>,
+) -> bool {
+    layout == atman_runtime::config_hub::DiffLayout::Unified
+        || panel_width < 72
+        || unified_diff.is_some_and(diff_is_addition_only)
+}
+
+fn diff_is_addition_only(diff: &str) -> bool {
+    let mut has_old_header = false;
+    let mut has_new_header = false;
+    let mut has_addition = false;
+    let mut has_removal = false;
+    for line in diff.lines() {
+        if line.starts_with("--- ") {
+            has_old_header = true;
+        } else if line.starts_with("+++ ") {
+            has_new_header = true;
+        } else if line.starts_with('+') {
+            has_addition = true;
+        } else if line.starts_with('-') {
+            has_removal = true;
+        }
+    }
+    !has_removal && (has_addition || (has_new_header && !has_old_header))
 }
 
 fn push_diff_fold_hint(
@@ -3433,8 +3461,8 @@ fn render_unified_diff_rows(
                 "+  ",
                 text,
                 Style::default()
-                    .fg(t.success.into())
-                    .bg(t.note_success_bg.into()),
+                    .fg(t.diff_add_fg.into())
+                    .bg(t.diff_add_bg.into()),
                 true,
             )
         } else if let Some(text) = source.strip_prefix('-') {
@@ -3442,8 +3470,8 @@ fn render_unified_diff_rows(
                 "-  ",
                 text,
                 Style::default()
-                    .fg(t.error.into())
-                    .bg(t.note_error_bg.into()),
+                    .fg(t.diff_remove_fg.into())
+                    .bg(t.diff_remove_bg.into()),
                 true,
             )
         } else {
@@ -4051,11 +4079,11 @@ fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec
     let t = crate::theme::theme();
     let mark_style = match cell.kind {
         DiffCellKind::Delete => Style::default()
-            .fg(t.error.into())
-            .bg(t.note_error_bg.into()),
+            .fg(t.diff_remove_fg.into())
+            .bg(t.diff_remove_bg.into()),
         DiffCellKind::Insert => Style::default()
-            .fg(t.success.into())
-            .bg(t.note_success_bg.into()),
+            .fg(t.diff_add_fg.into())
+            .bg(t.diff_add_bg.into()),
         DiffCellKind::Meta => Style::default().fg(t.meta_fg.into()).bg(bg),
         DiffCellKind::Normal | DiffCellKind::Empty => Style::default().bg(bg),
     };
@@ -8185,6 +8213,32 @@ mod tests {
     }
 
     #[test]
+    fn addition_only_diff_bypasses_the_split_layout() {
+        use atman_runtime::config_hub::DiffLayout;
+
+        let addition = "--- new.rs\n+++ new.rs\n@@ -0,0 +1,2 @@\n+first\n+second\n";
+        let replacement = "--- file.rs\n+++ file.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let legacy_new_file = "+++ new.rs\nfirst\nsecond\n";
+
+        assert!(prefers_unified_diff(DiffLayout::Split, 120, Some(addition)));
+        assert!(prefers_unified_diff(
+            DiffLayout::Split,
+            120,
+            Some(legacy_new_file)
+        ));
+        assert!(!prefers_unified_diff(
+            DiffLayout::Split,
+            120,
+            Some(replacement)
+        ));
+        assert!(prefers_unified_diff(
+            DiffLayout::Unified,
+            120,
+            Some(replacement)
+        ));
+    }
+
+    #[test]
     fn diff_rows_wrap_and_align_long_sides() {
         let t = crate::theme::theme();
         let long = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789中文中文中文";
@@ -8323,13 +8377,17 @@ mod tests {
                 ("world".to_string(), true),
             ]),
         };
-        let lines = render_diff_side(&cell, 40, "", t.note_error_bg.into());
+        let lines = render_diff_side(&cell, 40, "", t.code_bg.into());
         assert_eq!(lines.len(), 1);
         let has_underline = lines[0]
             .spans
             .iter()
             .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED));
         assert!(has_underline, "changed delete chars should be underlined");
+        assert!(lines[0].spans.iter().all(|span| {
+            span.style.fg == Some(t.diff_remove_fg.into())
+                && span.style.bg == Some(t.diff_remove_bg.into())
+        }));
 
         // Insert cell with char_diff: changed segments should have BOLD
         let cell = DiffCell {
@@ -8341,12 +8399,16 @@ mod tests {
                 ("rust".to_string(), true),
             ]),
         };
-        let lines = render_diff_side(&cell, 40, "", t.note_success_bg.into());
+        let lines = render_diff_side(&cell, 40, "", t.code_bg.into());
         let has_bold = lines[0]
             .spans
             .iter()
             .any(|s| s.style.add_modifier.contains(Modifier::BOLD));
         assert!(has_bold, "changed insert chars should be bold");
+        assert!(lines[0].spans.iter().all(|span| {
+            span.style.fg == Some(t.diff_add_fg.into())
+                && span.style.bg == Some(t.diff_add_bg.into())
+        }));
     }
 
     #[test]
