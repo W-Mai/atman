@@ -253,6 +253,47 @@ impl SessionProjector {
                 },
                 &mut changes,
             ),
+            Event::ContextCompact {
+                flow_run_id,
+                compacted_range_start,
+                compacted_range_end,
+                replacement_msg_seq,
+                ..
+            } => {
+                if replacement_msg_seq.is_some_and(|replacement_seq| {
+                    self.compact_transcript_messages(
+                        flow_run_id.as_ref(),
+                        *compacted_range_start as usize,
+                        *compacted_range_end as usize,
+                        replacement_seq,
+                    )
+                }) {
+                    changes.push(ProjectionChange::TranscriptReplace {
+                        items: self.projection.transcript.clone(),
+                    });
+                }
+            }
+            Event::Checkpoint {
+                flow_run_id,
+                messages,
+                ..
+            } => {
+                let run_id = flow_run_id.as_ref().map(|id| FlowRunId(id.0));
+                let replacement = messages
+                    .iter()
+                    .map(|message| TranscriptItem::Message {
+                        seq: envelope.seq,
+                        ts: envelope.ts,
+                        run_id: run_id.clone(),
+                        message: message_projection(message),
+                    })
+                    .collect();
+                if self.replace_transcript_messages(flow_run_id.as_ref(), replacement) {
+                    changes.push(ProjectionChange::TranscriptReplace {
+                        items: self.projection.transcript.clone(),
+                    });
+                }
+            }
             Event::MermaidDiagram { source } => self.append_transcript(
                 TranscriptItem::Mermaid {
                     seq: envelope.seq,
@@ -537,6 +578,92 @@ impl SessionProjector {
         })
     }
 
+    fn compact_transcript_messages(
+        &mut self,
+        run_id: Option<&atman_runtime::event::FlowRunId>,
+        range_start: usize,
+        range_end: usize,
+        replacement_seq: u64,
+    ) -> bool {
+        let slots = transcript_message_slots(&self.projection.transcript, run_id);
+        if range_start > range_end || range_end >= slots.len() {
+            return false;
+        }
+        let Some(replacement_position) = slots.iter().position(|(_, seq)| *seq == replacement_seq)
+        else {
+            return false;
+        };
+        let insertion_output_index = slots[range_start].0;
+        let replacement_output_index = slots[replacement_position].0;
+        let replacement = self.projection.transcript[replacement_output_index].clone();
+        let removed = slots[range_start..=range_end]
+            .iter()
+            .map(|(output_index, _)| *output_index)
+            .chain(std::iter::once(replacement_output_index))
+            .collect::<std::collections::HashSet<_>>();
+        let mut compacted = Vec::with_capacity(
+            self.projection
+                .transcript
+                .len()
+                .saturating_sub(removed.len())
+                .saturating_add(1),
+        );
+        for (output_index, item) in self.projection.transcript.drain(..).enumerate() {
+            if output_index == insertion_output_index {
+                compacted.push(replacement.clone());
+            }
+            if !removed.contains(&output_index) {
+                compacted.push(item);
+            }
+        }
+        self.projection.transcript = compacted;
+        true
+    }
+
+    fn replace_transcript_messages(
+        &mut self,
+        run_id: Option<&atman_runtime::event::FlowRunId>,
+        replacement: Vec<TranscriptItem>,
+    ) -> bool {
+        let slots = transcript_message_slots(&self.projection.transcript, run_id);
+        let existing = slots
+            .iter()
+            .map(|(output_index, _)| &self.projection.transcript[*output_index])
+            .collect::<Vec<_>>();
+        if existing.iter().copied().eq(replacement.iter()) {
+            return false;
+        }
+        let removed = slots
+            .iter()
+            .map(|(output_index, _)| *output_index)
+            .collect::<std::collections::HashSet<_>>();
+        let insertion_output_index = slots
+            .first()
+            .map(|(output_index, _)| *output_index)
+            .unwrap_or(self.projection.transcript.len());
+        let mut replacement = Some(replacement);
+        let mut transcript = Vec::with_capacity(
+            self.projection
+                .transcript
+                .len()
+                .saturating_sub(removed.len())
+                .saturating_add(replacement.as_ref().map_or(0, Vec::len)),
+        );
+        for (output_index, item) in self.projection.transcript.drain(..).enumerate() {
+            if output_index == insertion_output_index {
+                transcript.append(replacement.as_mut().expect("replacement inserted once"));
+            }
+            if !removed.contains(&output_index) {
+                transcript.push(item);
+            }
+        }
+        if let Some(mut replacement) = replacement {
+            transcript.append(&mut replacement);
+        }
+        self.projection.transcript = transcript;
+        true
+    }
+
     fn upsert_approval(
         &mut self,
         payload: &atman_runtime::permission_audit::PermissionRequestAudit,
@@ -616,6 +743,25 @@ impl SessionProjector {
             .apply_event_at(&envelope.event, envelope.ts)
             .changed()
     }
+}
+
+fn transcript_message_slots(
+    transcript: &[TranscriptItem],
+    run_id: Option<&atman_runtime::event::FlowRunId>,
+) -> Vec<(usize, u64)> {
+    let run_id = run_id.map(|id| id.0);
+    transcript
+        .iter()
+        .enumerate()
+        .filter_map(|(output_index, item)| match item {
+            TranscriptItem::Message {
+                seq,
+                run_id: item_run_id,
+                ..
+            } if item_run_id.as_ref().map(|id| id.0) == run_id => Some((output_index, *seq)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn metadata_projection(
@@ -1153,5 +1299,136 @@ mod tests {
         assert_eq!(projector.projection().usage.output_tokens, 5);
         assert_eq!(projector.projection().usage.cache_read_tokens, 4);
         assert_eq!(projector.projection().usage.llm_calls, 1);
+    }
+
+    #[test]
+    fn context_rewrite_replaces_only_the_target_run_message_range() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let turn_id = RuntimeTurnId::now();
+        let run_id = RuntimeRunId::now();
+        let other_run_id = RuntimeRunId::now();
+        let now = chrono::Utc::now();
+        let events = vec![
+            envelope(
+                1,
+                now,
+                Event::UserMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(run_id.clone()),
+                    message: Message::user_text(turn_id.clone(), "old user"),
+                },
+            ),
+            envelope(
+                2,
+                now,
+                Event::UserMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(other_run_id),
+                    message: Message::user_text(turn_id.clone(), "other run"),
+                },
+            ),
+            envelope(
+                3,
+                now,
+                Event::AssistantMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(run_id.clone()),
+                    message: Message::assistant_text(turn_id.clone(), "old assistant"),
+                },
+            ),
+            envelope(
+                4,
+                now,
+                Event::SystemMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(run_id.clone()),
+                    message: Message::system_text(turn_id, "summary"),
+                },
+            ),
+            envelope(
+                5,
+                now,
+                Event::ContextCompact {
+                    session_id: session_id.to_string(),
+                    flow_run_id: Some(run_id),
+                    before_tokens: 100,
+                    after_tokens: 20,
+                    compacted_range_start: 0,
+                    compacted_range_end: 1,
+                    summary_text: Some("summary".into()),
+                    replacement_msg_seq: Some(4),
+                },
+            ),
+        ];
+
+        let projector = SessionProjector::from_events(session_id, None, &events);
+        let texts = projector
+            .projection()
+            .transcript
+            .iter()
+            .filter_map(transcript_text)
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["summary", "other run"]);
+    }
+
+    #[test]
+    fn checkpoint_replaces_messages_without_dropping_non_message_entries() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let turn_id = RuntimeTurnId::now();
+        let run_id = RuntimeRunId::now();
+        let now = chrono::Utc::now();
+        let events = vec![
+            envelope(
+                1,
+                now,
+                Event::UserMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(run_id.clone()),
+                    message: Message::user_text(turn_id.clone(), "old"),
+                },
+            ),
+            envelope(
+                2,
+                now,
+                Event::MermaidDiagram {
+                    source: "graph TD".into(),
+                },
+            ),
+            envelope(
+                3,
+                now,
+                Event::Checkpoint {
+                    session_id: session_id.to_string(),
+                    flow_run_id: Some(run_id),
+                    messages: vec![Message::user_text(turn_id.clone(), "kept")],
+                    window_tokens: 5,
+                },
+            ),
+        ];
+
+        let projector = SessionProjector::from_events(session_id, None, &events);
+        assert_eq!(
+            projector
+                .projection()
+                .transcript
+                .iter()
+                .filter_map(transcript_text)
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
+        assert!(matches!(
+            projector.projection().transcript[1],
+            TranscriptItem::Mermaid { .. }
+        ));
+    }
+
+    fn transcript_text(item: &TranscriptItem) -> Option<&str> {
+        let TranscriptItem::Message { message, .. } = item else {
+            return None;
+        };
+        message.parts.iter().find_map(|part| match part {
+            MessagePart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
     }
 }
