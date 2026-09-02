@@ -196,9 +196,22 @@ pub fn build_lines_with_tool_headers(
 ) -> (Vec<Line<'static>>, Vec<ToolHeaderSpot>) {
     let mut out = Vec::with_capacity(items.len() * 3);
     let mut spots = Vec::new();
-    for item in items {
+    for (item_index, item) in items.iter().enumerate() {
         let start = out.len() as u32;
-        out.extend(render_item(item, ctx));
+        let (lines, regions) = render_item_with_regions(item, ctx, item_index);
+        out.extend(lines);
+        if matches!(item, OutputItem::ToolDispatch { .. }) {
+            spots.extend(regions.iter().filter_map(|region| {
+                region
+                    .path_key
+                    .strip_prefix(TOOL_CALL_REGION_PREFIX)
+                    .map(|tool_id| ToolHeaderSpot {
+                        row: start.saturating_add(region.start_row).saturating_add(1),
+                        tool_id: tool_id.to_string(),
+                    })
+            }));
+            continue;
+        }
         if let Some(tool_id) = tool_block_id(item) {
             // Every collapsible block renderer emits a blank row at `start`,
             // then its header at `start + 1`.
@@ -217,7 +230,6 @@ fn tool_block_id(item: &OutputItem) -> Option<String> {
             Some(handle.clone())
         }
         OutputItem::DiffPreview { title, .. } => Some(title.clone()),
-        OutputItem::ToolDispatch { calls } => calls.first().map(|call| call.id.clone()),
         _ => None,
     }
 }
@@ -2337,18 +2349,17 @@ fn aligned_document_row_with_control(
     Line::from(spans)
 }
 
-fn edit_metric_spans(insertions: usize, deletions: usize, background: Color) -> Vec<Span<'static>> {
+fn edit_metric_spans(
+    insertions: usize,
+    deletions: usize,
+    background: Option<Color>,
+) -> Vec<Span<'static>> {
     let t = crate::theme::theme();
+    let surface = background.map_or_else(Style::default, |color| Style::default().bg(color));
     vec![
-        Span::styled(
-            format!("+{insertions}"),
-            Style::default().fg(t.success.into()).bg(background),
-        ),
-        Span::styled(" ", Style::default().bg(background)),
-        Span::styled(
-            format!("−{deletions}"),
-            Style::default().fg(t.error.into()).bg(background),
-        ),
+        Span::styled(format!("+{insertions}"), surface.fg(t.success.into())),
+        Span::styled(" ", surface),
+        Span::styled(format!("−{deletions}"), surface.fg(t.error.into())),
     ]
 }
 
@@ -2428,6 +2439,11 @@ fn render_tool_dispatch(
         });
     let panel_bg: Color = t.work_bg.into();
     let header_style = Style::default().fg(t.meta_fg.into()).bg(panel_bg);
+    let header_title_style = header_style.add_modifier(Modifier::BOLD);
+    let header_glyph_style = Style::default()
+        .fg(t.accent.into())
+        .bg(panel_bg)
+        .add_modifier(Modifier::BOLD);
     let mut header_right = vec![Span::styled(
         format!("{finished}/{}", calls.len()),
         header_style,
@@ -2438,14 +2454,14 @@ fn render_tool_dispatch(
             format!(" · {edited_files} {noun} · "),
             header_style,
         ));
-        header_right.extend(edit_metric_spans(insertions, deletions, panel_bg));
+        header_right.extend(edit_metric_spans(insertions, deletions, Some(panel_bg)));
     }
     let mut lines = vec![document_blank(width, header_style)];
     lines.push(aligned_document_row(
-        vec![Span::styled(
-            format!("working · {}", calls.len()),
-            header_style,
-        )],
+        vec![
+            Span::styled("⠋ ", header_glyph_style),
+            Span::styled(format!("working · {}", calls.len()), header_title_style),
+        ],
         header_right,
         width,
         panel_bg,
@@ -2454,19 +2470,11 @@ fn render_tool_dispatch(
     let mut regions = Vec::new();
 
     for call in calls {
-        let row = lines.len() as u32;
         let call_region_index = regions.len();
         let (glyph, color) = match call.status {
             ToolCallStatus::Running => (spinner_char(ctx.animation_frame), t.accent),
             ToolCallStatus::Ok => ("✓", t.success),
             ToolCallStatus::Error => ("✗", t.error),
-        };
-        let disclosure_depth = tool_disclosure_depth(call, ctx.panel_width);
-        let affordance = match (call.disclosure, disclosure_depth) {
-            (_, ToolDisclosureDepth::Summary) => "",
-            (Disclosure::Summary, _) => "›",
-            (Disclosure::Preview, ToolDisclosureDepth::Full) => "⌄",
-            (Disclosure::Preview | Disclosure::Full, _) => "⌃",
         };
         let elapsed = call
             .ended_at
@@ -2522,14 +2530,7 @@ fn render_tool_dispatch(
         let meta_style = Style::default().fg(t.meta_fg.into()).bg(row_bg);
         let mut left = vec![
             Span::styled(format!("{glyph} "), glyph_style),
-            Span::styled(
-                if affordance.is_empty() {
-                    call.intent.clone()
-                } else {
-                    format!("{}  {affordance}", call.intent)
-                },
-                body_style,
-            ),
+            Span::styled(call.intent.clone(), body_style),
         ];
         if !input_tail.is_empty() || !draft_tail.is_empty() || !edit_path.is_empty() {
             left.push(Span::styled(
@@ -2542,7 +2543,7 @@ fn render_tool_dispatch(
             right.extend(edit_metric_spans(
                 metrics.insertions,
                 metrics.deletions,
-                row_bg,
+                Some(row_bg),
             ));
             right.push(Span::styled(format!(" · {}h", metrics.hunks), meta_style));
         }
@@ -2577,12 +2578,16 @@ fn render_tool_dispatch(
         if call.status == ToolCallStatus::Running && ctx.animation_frame != LAYOUT_ANIMATION_FRAME {
             paint_running_foreground(&mut summary_line, ctx.animation_frame, t.accent.into());
         }
+        let row = lines.len() as u32;
+        lines.push(document_blank(width, Style::default().bg(row_bg)));
+        let content_row = lines.len() as u32;
         lines.push(summary_line);
+        lines.push(document_blank(width, Style::default().bg(row_bg)));
         regions.push(NodeRegion {
             panel_item_index: item_index,
             path_key: call_key,
             start_row: row,
-            end_row: row + 1,
+            end_row: lines.len() as u32,
             col_start: 0,
             col_end: ctx.panel_width,
         });
@@ -2590,8 +2595,8 @@ fn render_tool_dispatch(
             regions.push(NodeRegion {
                 panel_item_index: item_index,
                 path_key: fullscreen_key,
-                start_row: row,
-                end_row: row + 1,
+                start_row: content_row,
+                end_row: content_row + 1,
                 col_start: ctx
                     .panel_width
                     .saturating_sub((DOCUMENT_PAD_X + TOOL_CONTROL_WIDTH) as u16),
@@ -2688,11 +2693,8 @@ fn render_activity_summary(
     activity: &crate::app::ActivityTotals,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    let t = crate::theme::theme();
     let width = panel_width.max(1) as usize;
-    let bg: Color = t.activity_bg.into();
-    let title = Style::default().fg(t.subtle_fg.into()).bg(bg);
-    let meta = Style::default().fg(t.meta_fg.into()).bg(bg);
+    let text_style = Style::default();
     let file_label = if activity.file_count() == 1 {
         "file"
     } else {
@@ -2723,14 +2725,14 @@ fn render_activity_summary(
         descriptor = "· ".into();
     }
 
-    let mut body = vec![Span::styled(descriptor, title)];
+    let mut body = vec![Span::styled(descriptor, text_style)];
     body.extend(edit_metric_spans(
         activity.insertions,
         activity.deletions,
-        bg,
+        None,
     ));
-    body.push(Span::styled(" ·  ", meta));
-    body = crate::width::truncate_spans(body, width, Some(bg));
+    body.push(Span::styled(" ·  ", text_style));
+    body = crate::width::truncate_spans(body, width, None);
 
     let body_width = crate::width::spans_width(body.iter());
     let left_pad = width.saturating_sub(body_width) / 2;
@@ -4486,7 +4488,7 @@ fn dynamic_paint_for_item(
                     regions
                         .iter()
                         .find(|region| region.path_key == key)
-                        .map(|region| region.start_row as usize)
+                        .map(|region| region.start_row.saturating_add(1) as usize)
                 })
                 .collect(),
         },
@@ -9371,6 +9373,14 @@ mod tests {
             panel_width: 80,
             ..RenderCtx::empty()
         };
+        let mut second_call = call.clone();
+        second_call.id = "edit-2".into();
+        let (_, tool_headers) = build_lines_with_tool_headers(
+            &[OutputItem::ToolDispatch {
+                calls: vec![call.clone(), second_call],
+            }],
+            &ctx,
+        );
         let (lines, regions) = render_tool_dispatch(&[call], &ctx, 7);
         let line_text = |line: &Line<'_>| {
             line.spans
@@ -9382,10 +9392,18 @@ mod tests {
         assert!(line_is_visually_blank(&lines[0]));
         assert!(line_is_visually_blank(lines.last().unwrap()));
         assert!(line_is_visually_blank(&lines[2]));
+        assert!(line_is_visually_blank(&lines[3]));
+        assert!(line_is_visually_blank(&lines[5]));
         assert!(line_is_visually_blank(&lines[lines.len() - 2]));
-        assert!(line_text(&lines[1]).starts_with("  working · 1"));
+        assert!(line_text(&lines[1]).starts_with("  ⠋ working · 1"));
         assert!(line_text(&lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
-        assert!(line_text(&lines[3]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
+        assert!(line_text(&lines[4]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
+        let tool_row = line_text(&lines[4]);
+        assert!(
+            !['›', '⌄', '⌃']
+                .into_iter()
+                .any(|marker| tool_row.contains(marker))
+        );
 
         let call_region = regions
             .iter()
@@ -9396,8 +9414,15 @@ mod tests {
             .find(|region| region.path_key == format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1"))
             .unwrap();
         assert!(call_region.end_row > call_region.start_row + 1);
-        assert_eq!(fullscreen_region.start_row, call_region.start_row);
+        assert_eq!(fullscreen_region.start_row, call_region.start_row + 1);
         assert!(fullscreen_region.col_start > call_region.col_start);
+        assert_eq!(
+            tool_headers
+                .iter()
+                .map(|header| header.tool_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["edit-1", "edit-2"]
+        );
     }
 
     #[test]
@@ -9422,7 +9447,11 @@ mod tests {
                 animation_frame: frame,
                 ..RenderCtx::empty()
             };
-            let line = render_tool_dispatch(&[make_call(status)], &ctx, 0).0[3].clone();
+            let line = render_tool_dispatch(&[make_call(status)], &ctx, 0)
+                .0
+                .into_iter()
+                .find(|line| plain_line(line).contains("读取项目文档"))
+                .unwrap();
             line.spans
                 .iter()
                 .flat_map(|span| {
@@ -9444,6 +9473,40 @@ mod tests {
             running_4.iter().map(|(_, fg, _)| fg).collect::<Vec<_>>()
         );
         assert_eq!(colors(ToolCallStatus::Ok, 0), colors(ToolCallStatus::Ok, 4));
+    }
+
+    #[test]
+    fn activity_summary_is_a_centered_transparent_coda() {
+        let activity = crate::app::ActivityTotals::from_summary(
+            &atman_runtime::activity::ActivitySummary {
+                applied_edits: 2,
+                hunks: 3,
+                insertions: 8,
+                deletions: 2,
+                ..Default::default()
+            },
+            ["src/lib.rs".to_string()],
+        );
+        let lines = render_activity_summary(&activity, 80);
+        let line = &lines[0];
+        let theme = crate::theme::theme();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(crate::width::spans_width(line.spans.iter()), 80);
+        assert!(line.spans.iter().all(|span| span.style.bg.is_none()));
+        let left_pad = crate::width::width(line.spans.first().unwrap().content.as_ref());
+        let right_pad = crate::width::width(line.spans.last().unwrap().content.as_ref());
+        assert!(left_pad.abs_diff(right_pad) <= 1);
+        assert!(
+            line.spans.iter().any(|span| {
+                span.content == "+8" && span.style.fg == Some(theme.success.into())
+            })
+        );
+        assert!(
+            line.spans.iter().any(|span| {
+                span.content == "−2" && span.style.fg == Some(theme.error.into())
+            })
+        );
     }
 
     #[test]
