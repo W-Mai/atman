@@ -100,10 +100,18 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
         && msg.role != MessageRole::System
         && let Some(tx) = &ctx.stream_tx
     {
-        let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
-            flow_run_id,
-            message: msg.clone(),
-        });
+        let frame = match msg.role {
+            MessageRole::Assistant => crate::stream::StreamFrame::AssistantMsg {
+                flow_run_id,
+                message: msg.clone(),
+            },
+            MessageRole::User | MessageRole::Tool => crate::stream::StreamFrame::ToolResultMsg {
+                flow_run_id,
+                message: msg.clone(),
+            },
+            MessageRole::System => unreachable!(),
+        };
+        let _ = tx.send(frame);
     }
     let mut messages = handle.lock().unwrap();
     messages.push(msg);
