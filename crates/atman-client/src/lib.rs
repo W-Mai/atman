@@ -90,7 +90,9 @@ pub struct Client {
 struct ClientInner {
     transport: Arc<dyn RpcTransport>,
     next_request_id: AtomicU64,
-    capabilities: CapabilitiesResponse,
+    identity: ClientIdentity,
+    capabilities: std::sync::RwLock<CapabilitiesResponse>,
+    handshake_lock: tokio::sync::Mutex<()>,
 }
 
 impl Client {
@@ -104,9 +106,9 @@ impl Client {
             transport.as_ref(),
             request_id,
             &CapabilitiesRequest {
-                client_id: Some(identity.id),
-                client_name: Some(identity.name),
-                client_version: Some(identity.version),
+                client_id: Some(identity.id.clone()),
+                client_name: Some(identity.name.clone()),
+                client_version: Some(identity.version.clone()),
                 protocol_version: Some(PROTOCOL_VERSION),
             },
         )
@@ -121,17 +123,43 @@ impl Client {
             inner: Arc::new(ClientInner {
                 transport,
                 next_request_id: AtomicU64::new(request_id + 1),
-                capabilities,
+                identity,
+                capabilities: std::sync::RwLock::new(capabilities),
+                handshake_lock: tokio::sync::Mutex::new(()),
             }),
         })
     }
 
-    pub fn capabilities(&self) -> &CapabilitiesResponse {
-        &self.inner.capabilities
+    pub fn capabilities(&self) -> CapabilitiesResponse {
+        self.inner.capabilities.read().unwrap().clone()
+    }
+
+    pub async fn refresh_capabilities(&self) -> Result<CapabilitiesResponse, ClientError> {
+        let _guard = self.inner.handshake_lock.lock().await;
+        let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let capabilities = invoke::<rpc::DaemonCapabilities>(
+            self.inner.transport.as_ref(),
+            request_id,
+            &CapabilitiesRequest {
+                client_id: Some(self.inner.identity.id.clone()),
+                client_name: Some(self.inner.identity.name.clone()),
+                client_version: Some(self.inner.identity.version.clone()),
+                protocol_version: Some(PROTOCOL_VERSION),
+            },
+        )
+        .await?;
+        if capabilities.protocol_version != PROTOCOL_VERSION {
+            return Err(ClientError::ProtocolVersion {
+                client: PROTOCOL_VERSION,
+                daemon: capabilities.protocol_version,
+            });
+        }
+        *self.inner.capabilities.write().unwrap() = capabilities.clone();
+        Ok(capabilities)
     }
 
     pub async fn call<M: RpcMethod>(&self, params: &M::Params) -> Result<M::Output, ClientError> {
-        if !self.inner.capabilities.supports::<M>() {
+        if !self.capabilities().supports::<M>() {
             return Err(ClientError::UnsupportedMethod {
                 method: M::NAME,
                 revision: M::REVISION,

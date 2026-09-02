@@ -145,6 +145,7 @@ pub enum RefreshOutcome {
         has_more: bool,
     },
     Resynced,
+    Reconnected,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -174,7 +175,8 @@ impl SessionClient {
             })
             .await?;
         validate_session(&snapshot, &session_id)?;
-        let state = SessionState::new(snapshot, &client.capabilities().daemon_generation)?;
+        let capabilities = client.capabilities();
+        let state = SessionState::new(snapshot, &capabilities.daemon_generation)?;
         let (state, _) = watch::channel(state);
         Ok(Self {
             client,
@@ -199,12 +201,13 @@ impl SessionClient {
     pub async fn refresh(&self) -> Result<RefreshOutcome, SessionClientError> {
         let _guard = self.refresh_lock.lock().await;
         let current = self.current();
+        let capabilities = self.client.capabilities();
         let response = self
             .client
             .call::<rpc::GetSessionUpdates>(&GetSessionUpdatesRequest {
                 session_id: self.session_id.clone(),
                 after_cursor: current.cursor(),
-                limit: Some(self.client.capabilities().limits.max_event_page_size),
+                limit: Some(capabilities.limits.max_event_page_size),
             })
             .await?;
         let mut next = current.clone();
@@ -220,6 +223,24 @@ impl SessionClient {
                 }
                 Ok(outcome)
             }
+            Err(ReconcileError::DaemonGeneration { received, .. }) => {
+                let capabilities = self.client.capabilities();
+                let capabilities = if capabilities.daemon_generation == received {
+                    capabilities
+                } else {
+                    self.client.refresh_capabilities().await?
+                };
+                let snapshot = self
+                    .client
+                    .call::<rpc::GetSessionSnapshot>(&GetSessionSnapshotRequest {
+                        session_id: self.session_id.clone(),
+                    })
+                    .await?;
+                validate_session(&snapshot, &self.session_id)?;
+                let next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
+                self.state.send_replace(next);
+                Ok(RefreshOutcome::Reconnected)
+            }
             Err(error) if error.requires_resync() => {
                 let snapshot = self
                     .client
@@ -228,8 +249,7 @@ impl SessionClient {
                     })
                     .await?;
                 validate_session(&snapshot, &self.session_id)?;
-                let next =
-                    SessionState::new(snapshot, &self.client.capabilities().daemon_generation)?;
+                let next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 self.state.send_replace(next);
                 Ok(RefreshOutcome::Resynced)
             }
@@ -263,6 +283,7 @@ impl SessionClient {
                     });
                 }
                 RefreshOutcome::Resynced => return Ok(RefreshOutcome::Resynced),
+                RefreshOutcome::Reconnected => return Ok(RefreshOutcome::Reconnected),
             }
         }
     }
@@ -684,6 +705,31 @@ mod tests {
         assert_eq!(applied.signals.len(), 1);
     }
 
+    fn capabilities(generation: &str) -> CapabilitiesResponse {
+        CapabilitiesResponse {
+            protocol_version: atman_proto::PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            daemon_generation: DaemonGeneration(generation.into()),
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            methods: [
+                method_descriptor::<rpc::DaemonCapabilities>(),
+                method_descriptor::<rpc::GetSessionSnapshot>(),
+                method_descriptor::<rpc::GetSessionUpdates>(),
+            ]
+            .into_iter()
+            .map(|method| MethodCapability {
+                name: method.name.into(),
+                kind: method.kind,
+                revision: method.revision,
+            })
+            .collect(),
+            limits: ProtocolLimits {
+                max_event_page_size: 100,
+                subscriber_buffer: 100,
+            },
+        }
+    }
+
     struct RecoveringTransport {
         session_id: SessionId,
         snapshot_calls: AtomicUsize,
@@ -698,28 +744,9 @@ mod tests {
             Box::pin(async move {
                 self.requests.lock().unwrap().push(request.method.clone());
                 let result = match request.method.as_str() {
-                    methods::DAEMON_CAPABILITIES => serde_json::to_value(CapabilitiesResponse {
-                        protocol_version: atman_proto::PROTOCOL_VERSION,
-                        daemon_version: "test".into(),
-                        daemon_generation: DaemonGeneration("generation-a".into()),
-                        event_schema_version: EVENT_SCHEMA_VERSION,
-                        methods: [
-                            method_descriptor::<rpc::DaemonCapabilities>(),
-                            method_descriptor::<rpc::GetSessionSnapshot>(),
-                            method_descriptor::<rpc::GetSessionUpdates>(),
-                        ]
-                        .into_iter()
-                        .map(|method| MethodCapability {
-                            name: method.name.into(),
-                            kind: method.kind,
-                            revision: method.revision,
-                        })
-                        .collect(),
-                        limits: ProtocolLimits {
-                            max_event_page_size: 100,
-                            subscriber_buffer: 100,
-                        },
-                    })?,
+                    methods::DAEMON_CAPABILITIES => {
+                        serde_json::to_value(capabilities("generation-a"))?
+                    }
                     methods::GET_SESSION_SNAPSHOT => {
                         let call = self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
                         let mut projection =
@@ -775,6 +802,92 @@ mod tests {
         );
 
         assert_eq!(session.refresh().await.unwrap(), RefreshOutcome::Resynced);
+        assert_eq!(
+            session.current().projection().goal.as_deref(),
+            Some("after")
+        );
+        assert_eq!(session.current().cursor(), EventCursor(2));
+    }
+
+    struct RestartingTransport {
+        session_id: SessionId,
+        capability_calls: AtomicUsize,
+        snapshot_calls: AtomicUsize,
+    }
+
+    impl RpcTransport for RestartingTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<JsonRpcResponse, TransportError>> {
+            Box::pin(async move {
+                let result = match request.method.as_str() {
+                    methods::DAEMON_CAPABILITIES => {
+                        let call = self.capability_calls.fetch_add(1, Ordering::SeqCst);
+                        serde_json::to_value(capabilities(if call == 0 {
+                            "generation-a"
+                        } else {
+                            "generation-b"
+                        }))?
+                    }
+                    methods::GET_SESSION_SNAPSHOT => {
+                        let call = self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+                        let mut projection =
+                            projection(self.session_id.clone(), Revision(call as u64 + 1));
+                        projection.goal = Some(if call == 0 { "before" } else { "after" }.into());
+                        serde_json::to_value(SessionSnapshot {
+                            schema_version: SNAPSHOT_SCHEMA_VERSION,
+                            daemon_generation: DaemonGeneration(
+                                if call == 0 {
+                                    "generation-a"
+                                } else {
+                                    "generation-b"
+                                }
+                                .into(),
+                            ),
+                            cursor: EventCursor(call as u64 + 1),
+                            projection,
+                        })?
+                    }
+                    methods::GET_SESSION_UPDATES => {
+                        serde_json::to_value(GetSessionUpdatesResponse {
+                            daemon_generation: DaemonGeneration("generation-b".into()),
+                            events: Vec::new(),
+                            next_cursor: EventCursor(2),
+                            has_more: false,
+                            resync_required: None,
+                        })?
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                Ok(JsonRpcResponse::ok(request.id, result))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn session_client_rehandshakes_and_resnapshots_after_daemon_restart() {
+        let session_id: SessionId =
+            serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789abf"))
+                .unwrap();
+        let client = Client::connect(
+            RestartingTransport {
+                session_id: session_id.clone(),
+                capability_calls: AtomicUsize::new(0),
+                snapshot_calls: AtomicUsize::new(0),
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .unwrap();
+        let session = client.attach_session(session_id).await.unwrap();
+        assert_eq!(client.capabilities().daemon_generation.0, "generation-a");
+
+        assert_eq!(
+            session.refresh().await.unwrap(),
+            RefreshOutcome::Reconnected
+        );
+        assert_eq!(client.capabilities().daemon_generation.0, "generation-b");
         assert_eq!(
             session.current().projection().goal.as_deref(),
             Some("after")
