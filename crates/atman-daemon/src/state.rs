@@ -4,8 +4,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    DaemonGeneration, EventCursor, FlowRunId, PromptId, SNAPSHOT_SCHEMA_VERSION, SessionId,
-    SessionSnapshot, SessionStatus, SessionSummary,
+    DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse, PromptId, ResyncRequired,
+    SNAPSHOT_SCHEMA_VERSION, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
 };
 use atman_runtime::event::{Event, EventSink};
 use tokio::sync::oneshot;
@@ -176,6 +176,7 @@ impl DaemonState {
                         session.clone(),
                         run.clone(),
                         owner_principal.clone(),
+                        DaemonGeneration(self.daemon_generation.clone()),
                     ),
                 );
                 None
@@ -250,6 +251,44 @@ impl DaemonState {
             daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
             cursor,
             projection,
+        })
+    }
+
+    pub async fn session_updates(
+        &self,
+        id: &SessionId,
+        principal: &str,
+        after_cursor: EventCursor,
+        limit: Option<usize>,
+    ) -> Result<GetSessionUpdatesResponse> {
+        let actor = self.sessions.lock().unwrap().get(id).cloned();
+        if let Some(actor) = actor {
+            anyhow::ensure!(
+                actor.owns(principal),
+                "session {id} is owned by another principal"
+            );
+            return actor.updates(after_cursor, limit).await;
+        }
+
+        let snapshot = self.session_snapshot(id, principal).await?;
+        if after_cursor == snapshot.cursor {
+            return Ok(GetSessionUpdatesResponse {
+                events: Vec::new(),
+                next_cursor: snapshot.cursor,
+                has_more: false,
+                resync_required: None,
+            });
+        }
+        Ok(GetSessionUpdatesResponse {
+            events: Vec::new(),
+            next_cursor: snapshot.cursor,
+            has_more: false,
+            resync_required: Some(ResyncRequired {
+                requested_after: after_cursor,
+                available_from: snapshot.cursor,
+                snapshot_revision: snapshot.projection.revision,
+                reason: "session is idle and has no retained live update window".into(),
+            }),
         })
     }
 

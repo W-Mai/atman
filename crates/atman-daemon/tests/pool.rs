@@ -214,6 +214,106 @@ async fn live_snapshot_is_actor_consistent_and_redacted() {
     assert!(json.contains("<REDACTED:openai_api_key>"));
     assert!(!json.contains("sk-abcdefghijklmnop"));
     assert!(state.session_snapshot(&sid, "mallory").await.is_err());
+
+    session.set_goal(Some("keep sk-abcdefghijklmnopqrstuvwxyz secret".into()));
+    while state.session_projection_revision(&sid) == Some(snapshot.projection.revision) {
+        tokio::task::yield_now().await;
+    }
+    let updates = state
+        .session_updates(&sid, "alice", snapshot.cursor, Some(1))
+        .await
+        .unwrap();
+    assert_eq!(updates.events.len(), 1);
+    assert_eq!(updates.events[0].daemon_generation.0, "generation-a");
+    assert_eq!(updates.events[0].session_id, sid);
+    match &updates.events[0].event {
+        atman_proto::ServerEvent::ProjectionDelta { delta } => {
+            assert_eq!(delta.base_revision, snapshot.projection.revision);
+            assert_eq!(delta.revision.0, delta.base_revision.0 + 1);
+        }
+        event => panic!("expected projection delta, got {event:?}"),
+    }
+    let updates_json = serde_json::to_string(&updates).unwrap();
+    assert!(updates_json.contains("<REDACTED:openai_api_key>"));
+    assert!(!updates_json.contains("sk-abcdefghijklmnop"));
+
+    let gap = state
+        .session_updates(
+            &sid,
+            "alice",
+            atman_proto::EventCursor(updates.next_cursor.0 + 1),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(gap.resync_required.is_some());
+}
+
+#[tokio::test]
+async fn session_updates_page_in_order_and_report_retention_gaps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: FlowRunId(Uuid::now_v7()),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .await
+        .unwrap();
+    let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+    assert_eq!(snapshot.projection.runs.len(), 1);
+    assert_eq!(
+        snapshot.projection.runs[0].state,
+        atman_proto::RunLifecycle::Starting
+    );
+    assert_eq!(
+        snapshot.projection.lifecycle,
+        atman_proto::SessionLifecycle::Active
+    );
+
+    for goal in ["one", "two", "three"] {
+        let revision = state.session_projection_revision(&sid).unwrap();
+        session.set_goal(Some(goal.into()));
+        while state.session_projection_revision(&sid) == Some(revision) {
+            tokio::task::yield_now().await;
+        }
+    }
+    let first_page = state
+        .session_updates(&sid, "alice", snapshot.cursor, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(first_page.events.len(), 2);
+    assert!(first_page.has_more);
+    let second_page = state
+        .session_updates(&sid, "alice", first_page.next_cursor, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(second_page.events.len(), 1);
+    assert!(!second_page.has_more);
+    assert!(second_page.resync_required.is_none());
+
+    for index in 0..2_050 {
+        let revision = state.session_projection_revision(&sid).unwrap();
+        session.set_goal(Some(format!("retention-{index}")));
+        while state.session_projection_revision(&sid) == Some(revision) {
+            tokio::task::yield_now().await;
+        }
+    }
+    let gap = state
+        .session_updates(&sid, "alice", snapshot.cursor, None)
+        .await
+        .unwrap();
+    assert!(gap.events.is_empty());
+    assert!(gap.resync_required.is_some());
 }
 
 #[tokio::test]

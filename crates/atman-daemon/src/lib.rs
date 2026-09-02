@@ -1,9 +1,9 @@
 use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
-    GetSessionSnapshotRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListSessionsRequest,
-    MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits,
-    RenameSessionRequest, ResolvePromptResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse,
-    method_descriptor, methods, rpc,
+    GetSessionSnapshotRequest, GetSessionUpdatesRequest, JsonRpcError, JsonRpcRequest,
+    JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
+    PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionRequest, ResolvePromptResponse,
+    RpcMethod, RpcMethodDescriptor, RunFlowResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::CancelRun>(),
     method_descriptor::<rpc::GetEvents>(),
     method_descriptor::<rpc::GetSessionSnapshot>(),
+    method_descriptor::<rpc::GetSessionUpdates>(),
     method_descriptor::<rpc::ResolvePrompt>(),
     method_descriptor::<rpc::ListPermissionRequests>(),
     method_descriptor::<rpc::CreatePermissionGroup>(),
@@ -222,6 +223,22 @@ pub async fn dispatch_as(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        methods::GET_SESSION_UPDATES => match parse_params::<rpc::GetSessionUpdates>(req.params) {
+            Ok(GetSessionUpdatesRequest {
+                session_id,
+                after_cursor,
+                limit,
+            }) => match state
+                .session_updates(&session_id, principal_id, after_cursor, limit)
+                .await
+            {
+                Ok(updates) => method_response::<rpc::GetSessionUpdates>(id, updates),
+                Err(error) => {
+                    JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                }
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::RESOLVE_PROMPT => match parse_params::<rpc::ResolvePrompt>(req.params) {
             Ok(p) => {
                 let resolved = state.resolve_prompt(&p.prompt_id, p.answer);

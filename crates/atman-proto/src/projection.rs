@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{DaemonGeneration, EventCursor, FlowRunId, NameSource, Revision, SessionId};
 
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const PROJECTION_EVENT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]

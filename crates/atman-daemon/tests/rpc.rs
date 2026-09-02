@@ -30,6 +30,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
         atman_daemon::SUPPORTED_METHODS.len()
     );
     assert!(capabilities.supports::<atman_proto::rpc::GetSessionSnapshot>());
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionUpdates>());
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
 }
 
@@ -153,7 +154,7 @@ async fn get_snapshot_replays_idle_sessions_and_marks_interrupted_runs_lost() {
         },
     )
     .unwrap();
-    let snapshot = dispatch(state, request)
+    let snapshot = dispatch(state.clone(), request)
         .await
         .into_method_output::<atman_proto::rpc::GetSessionSnapshot>()
         .unwrap();
@@ -170,4 +171,39 @@ async fn get_snapshot_replays_idle_sessions_and_marks_interrupted_runs_lost() {
         atman_proto::RunLifecycle::Lost
     );
     assert_eq!(snapshot.cursor.0, snapshot.projection.revision.0);
+
+    let updates = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::GetSessionUpdates>(
+            6,
+            &atman_proto::GetSessionUpdatesRequest {
+                session_id: atman_proto::SessionId(sid),
+                after_cursor: snapshot.cursor,
+                limit: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::GetSessionUpdates>()
+    .unwrap();
+    assert!(updates.events.is_empty());
+    assert!(updates.resync_required.is_none());
+
+    let gap = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::GetSessionUpdates>(
+            7,
+            &atman_proto::GetSessionUpdatesRequest {
+                session_id: atman_proto::SessionId(sid),
+                after_cursor: atman_proto::EventCursor::default(),
+                limit: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::GetSessionUpdates>()
+    .unwrap();
+    assert!(gap.resync_required.is_some());
 }

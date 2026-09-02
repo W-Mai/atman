@@ -1,16 +1,21 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CreatePermissionGroupResponse, EventCursor, FlowRunId, ListPermissionRequestsResponse,
-    PermissionGroupView, PermissionRequestView, PermissionResolutionView,
-    ResolvePermissionRequestsResponse, SessionId, SessionProjection, SessionSummary,
+    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId,
+    GetSessionUpdatesResponse, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
+    PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
+    ProjectionEventEnvelope, ResolvePermissionRequestsResponse, ResyncRequired, ServerEvent,
+    SessionId, SessionProjection, SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::projection::SessionProjector;
 use crate::state::LiveRun;
+
+const UPDATE_RETENTION: usize = 2_048;
+const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionActorView {
@@ -49,6 +54,7 @@ impl SessionActorHandle {
         session: Arc<atman_runtime::Session>,
         initial_run: LiveRun,
         owner_principal: String,
+        daemon_generation: DaemonGeneration,
     ) -> Self {
         let events_rx = session.sink().subscribe();
         let goal_rx = session.subscribe_goal();
@@ -64,6 +70,11 @@ impl SessionActorHandle {
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
+        projection.register_run(
+            initial_run.run_id.clone(),
+            initial_run.flow_name.clone(),
+            initial_run.started_at,
+        );
         let event_cursor = EventCursor(projection.projection().revision.0);
         let (tx, rx) = mpsc::unbounded_channel();
         let mut runs = HashMap::new();
@@ -76,6 +87,8 @@ impl SessionActorHandle {
             revision: 1,
             projection,
             event_cursor,
+            daemon_generation,
+            updates: VecDeque::new(),
             view_tx,
             rx,
             events_rx,
@@ -129,6 +142,21 @@ impl SessionActorHandle {
             cursor,
             crate::projection::redacted_projection(&projection, redactor.as_deref())?,
         ))
+    }
+
+    pub async fn updates(
+        &self,
+        after_cursor: EventCursor,
+        limit: Option<usize>,
+    ) -> Result<GetSessionUpdatesResponse> {
+        let updates = request(&self.tx, |reply| Command::Updates {
+            after_cursor,
+            limit,
+            reply,
+        })
+        .await?;
+        let redactor = self.session.sink().redactor();
+        crate::projection::redacted_updates(&updates, redactor.as_deref())
     }
 
     pub async fn list_permissions(&self) -> Result<ListPermissionRequestsResponse> {
@@ -206,6 +234,11 @@ enum Command {
     Snapshot {
         reply: oneshot::Sender<(EventCursor, SessionProjection)>,
     },
+    Updates {
+        after_cursor: EventCursor,
+        limit: Option<usize>,
+        reply: oneshot::Sender<GetSessionUpdatesResponse>,
+    },
     ListPermissions {
         reply: oneshot::Sender<ListPermissionRequestsResponse>,
     },
@@ -243,6 +276,8 @@ struct SessionActor {
     revision: u64,
     projection: SessionProjector,
     event_cursor: EventCursor,
+    daemon_generation: DaemonGeneration,
+    updates: VecDeque<ProjectionEventEnvelope>,
     view_tx: watch::Sender<SessionActorView>,
     rx: mpsc::UnboundedReceiver<Command>,
     events_rx: broadcast::Receiver<atman_runtime::event::EventEnvelope>,
@@ -269,8 +304,8 @@ impl SessionActor {
                 ActorInput::Command(Some(command)) => self.handle_command(command),
                 ActorInput::Event(event) => match *event {
                     Ok(event) => {
-                        if self.projection.apply_envelope(&event).is_some() {
-                            self.publish_projection_change();
+                        if let Some(delta) = self.projection.apply_envelope(&event) {
+                            self.publish_projection_delta(delta);
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => self.rebuild_projection(),
@@ -278,26 +313,26 @@ impl SessionActor {
                 },
                 ActorInput::Goal(Ok(())) => {
                     let goal = self.goal_rx.borrow_and_update().clone();
-                    if self.projection.set_goal(goal).is_some() {
-                        self.publish_projection_change();
+                    if let Some(delta) = self.projection.set_goal(goal) {
+                        self.publish_projection_delta(delta);
                     }
                 }
                 ActorInput::Todos(Ok(())) => {
                     let todos = self.todos_rx.borrow_and_update().clone();
-                    if self.projection.set_todos(todos).is_some() {
-                        self.publish_projection_change();
+                    if let Some(delta) = self.projection.set_todos(todos) {
+                        self.publish_projection_delta(delta);
                     }
                 }
                 ActorInput::Plans(Ok(())) => {
                     let plans = self.plans_rx.borrow_and_update().clone();
-                    if self.projection.set_plans(plans).is_some() {
-                        self.publish_projection_change();
+                    if let Some(delta) = self.projection.set_plans(plans) {
+                        self.publish_projection_delta(delta);
                     }
                 }
                 ActorInput::Context(Ok(())) => {
                     let context = self.context_rx.borrow_and_update().clone();
-                    if self.projection.set_context(context).is_some() {
-                        self.publish_projection_change();
+                    if let Some(delta) = self.projection.set_context(context) {
+                        self.publish_projection_delta(delta);
                     }
                 }
                 ActorInput::Goal(Err(_))
@@ -314,8 +349,17 @@ impl SessionActor {
                 let result = if self.runs.contains_key(&run.run_id) {
                     Err(anyhow::anyhow!("run {} is already registered", run.run_id))
                 } else {
+                    let delta = self.projection.register_run(
+                        run.run_id.clone(),
+                        run.flow_name.clone(),
+                        run.started_at,
+                    );
                     self.runs.insert(run.run_id.clone(), run);
-                    self.publish();
+                    if let Some(delta) = delta {
+                        self.publish_projection_delta(delta);
+                    } else {
+                        self.publish();
+                    }
                     Ok(())
                 };
                 let _ = reply.send(result);
@@ -338,6 +382,13 @@ impl SessionActor {
             }
             Command::Snapshot { reply } => {
                 let _ = reply.send((self.event_cursor, self.projection.snapshot()));
+            }
+            Command::Updates {
+                after_cursor,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(self.updates_response(after_cursor, limit));
             }
             Command::ListPermissions { reply } => {
                 let _ = reply.send(self.list_permissions());
@@ -382,8 +433,20 @@ impl SessionActor {
             .send_replace(view_for(self.revision, &self.runs, &self.projection));
     }
 
-    fn publish_projection_change(&mut self) {
+    fn publish_projection_delta(&mut self, delta: ProjectionDelta) {
+        debug_assert_eq!(delta.revision, self.projection.projection().revision);
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
+        self.updates.push_back(ProjectionEventEnvelope {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            daemon_generation: self.daemon_generation.clone(),
+            session_id: self.session_id.clone(),
+            cursor: self.event_cursor,
+            ts: chrono::Utc::now(),
+            event: ServerEvent::ProjectionDelta { delta },
+        });
+        while self.updates.len() > UPDATE_RETENTION {
+            self.updates.pop_front();
+        }
         self.publish();
     }
 
@@ -395,8 +458,8 @@ impl SessionActor {
             self.session_id.clone(),
             self.runs.values(),
         )?;
-        if self.projection.set_metadata(self.session.meta()).is_some() {
-            self.publish_projection_change();
+        if let Some(delta) = self.projection.set_metadata(self.session.meta()) {
+            self.publish_projection_delta(delta);
         }
         Ok(summary)
     }
@@ -414,7 +477,61 @@ impl SessionActor {
         projection.set_context(self.context_rx.borrow().clone());
         projection.rebase_after_rebuild(previous_revision);
         self.projection = projection;
-        self.publish_projection_change();
+        self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
+        self.updates.clear();
+        self.publish();
+    }
+
+    fn updates_response(
+        &self,
+        after_cursor: EventCursor,
+        limit: Option<usize>,
+    ) -> GetSessionUpdatesResponse {
+        let first_available = self.updates.front().map(|event| event.cursor);
+        let coverage_start = first_available
+            .map(|cursor| EventCursor(cursor.0.saturating_sub(1)))
+            .unwrap_or(self.event_cursor);
+        if after_cursor > self.event_cursor || after_cursor < coverage_start {
+            return GetSessionUpdatesResponse {
+                events: Vec::new(),
+                next_cursor: self.event_cursor,
+                has_more: false,
+                resync_required: Some(ResyncRequired {
+                    requested_after: after_cursor,
+                    available_from: first_available.unwrap_or(self.event_cursor),
+                    snapshot_revision: self.projection.projection().revision,
+                    reason: if after_cursor > self.event_cursor {
+                        "requested cursor is ahead of this session actor".into()
+                    } else {
+                        "requested cursor is outside the retained update window".into()
+                    },
+                }),
+            };
+        }
+
+        let limit = limit
+            .unwrap_or(MAX_UPDATE_PAGE_SIZE)
+            .clamp(1, MAX_UPDATE_PAGE_SIZE);
+        let events = self
+            .updates
+            .iter()
+            .filter(|event| event.cursor > after_cursor)
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_cursor = events
+            .last()
+            .map(|event| event.cursor)
+            .unwrap_or(after_cursor);
+        GetSessionUpdatesResponse {
+            has_more: self
+                .updates
+                .back()
+                .is_some_and(|event| event.cursor > next_cursor),
+            events,
+            next_cursor,
+            resync_required: None,
+        }
     }
 
     fn list_permissions(&self) -> ListPermissionRequestsResponse {

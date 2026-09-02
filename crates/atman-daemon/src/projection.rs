@@ -135,6 +135,38 @@ impl SessionProjector {
         self.commit(changes)
     }
 
+    pub(crate) fn register_run(
+        &mut self,
+        run_id: FlowRunId,
+        flow_name: String,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<ProjectionDelta> {
+        if self.projection.runs.iter().any(|run| run.id == run_id) {
+            return None;
+        }
+        let run = RunProjection {
+            id: run_id,
+            flow_name,
+            parent_run_id: None,
+            parent_node_id: None,
+            state: RunLifecycle::Starting,
+            started_at,
+            finished_at: None,
+            error: None,
+        };
+        self.upsert_run(run.clone());
+        if self.projection.lifecycle != SessionLifecycle::Active {
+            self.projection.lifecycle = SessionLifecycle::Active;
+            return self.commit(vec![
+                ProjectionChange::RunUpsert { run },
+                ProjectionChange::LifecycleSet {
+                    lifecycle: SessionLifecycle::Active,
+                },
+            ]);
+        }
+        self.commit(vec![ProjectionChange::RunUpsert { run }])
+    }
+
     pub(crate) fn apply_envelope(&mut self, envelope: &EventEnvelope) -> Option<ProjectionDelta> {
         if envelope.seq <= self.last_runtime_seq {
             return None;
@@ -816,6 +848,18 @@ pub(crate) fn redacted_projection(
         return Ok(projection.clone());
     };
     let mut value = serde_json::to_value(projection)?;
+    redactor.redact_json(&mut value);
+    Ok(serde_json::from_value(value)?)
+}
+
+pub(crate) fn redacted_updates(
+    updates: &atman_proto::GetSessionUpdatesResponse,
+    redactor: Option<&atman_runtime::redact::Redactor>,
+) -> anyhow::Result<atman_proto::GetSessionUpdatesResponse> {
+    let Some(redactor) = redactor else {
+        return Ok(updates.clone());
+    };
+    let mut value = serde_json::to_value(updates)?;
     redactor.redact_json(&mut value);
     Ok(serde_json::from_value(value)?)
 }
