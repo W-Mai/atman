@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+mod projection;
+
+pub use projection::*;
+
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
@@ -287,6 +291,8 @@ pub mod methods {
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
+    pub const GET_SESSION_SNAPSHOT: &str = "session.get_snapshot";
+    pub const GET_SESSION_UPDATES: &str = "session.get_updates";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
     pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
@@ -301,6 +307,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::RunFlow>(),
         super::method_descriptor::<super::rpc::CancelRun>(),
         super::method_descriptor::<super::rpc::GetEvents>(),
+        super::method_descriptor::<super::rpc::GetSessionSnapshot>(),
+        super::method_descriptor::<super::rpc::GetSessionUpdates>(),
         super::method_descriptor::<super::rpc::ResolvePrompt>(),
         super::method_descriptor::<super::rpc::ListPermissionRequests>(),
         super::method_descriptor::<super::rpc::CreatePermissionGroup>(),
@@ -522,7 +530,7 @@ pub struct ResolvePermissionRequestsRequest {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct PermissionRequestView {
     pub request_id: Uuid,
     pub session_id: String,
@@ -534,7 +542,7 @@ pub struct PermissionRequestView {
     pub revision: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct PermissionGroupView {
     pub group_id: Uuid,
     pub label: String,
@@ -640,6 +648,20 @@ pub mod rpc {
         Query,
         GetEventsRequest,
         GetEventsResponse
+    );
+    method!(
+        GetSessionSnapshot,
+        methods::GET_SESSION_SNAPSHOT,
+        Query,
+        GetSessionSnapshotRequest,
+        SessionSnapshot
+    );
+    method!(
+        GetSessionUpdates,
+        methods::GET_SESSION_UPDATES,
+        Query,
+        GetSessionUpdatesRequest,
+        GetSessionUpdatesResponse
     );
     method!(
         ResolvePrompt,

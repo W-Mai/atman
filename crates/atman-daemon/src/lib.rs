@@ -2,7 +2,8 @@ use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability,
     PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionRequest,
-    ResolvePromptResponse, RpcMethod, RunFlowResponse, methods, rpc,
+    ResolvePromptResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, method_descriptor,
+    methods, rpc,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -69,6 +70,20 @@ pub mod unix;
 
 pub use state::{DaemonState, LiveRun};
 
+pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
+    method_descriptor::<rpc::DaemonCapabilities>(),
+    method_descriptor::<rpc::Ping>(),
+    method_descriptor::<rpc::ListSessions>(),
+    method_descriptor::<rpc::RenameSession>(),
+    method_descriptor::<rpc::RunFlow>(),
+    method_descriptor::<rpc::CancelRun>(),
+    method_descriptor::<rpc::GetEvents>(),
+    method_descriptor::<rpc::ResolvePrompt>(),
+    method_descriptor::<rpc::ListPermissionRequests>(),
+    method_descriptor::<rpc::CreatePermissionGroup>(),
+    method_descriptor::<rpc::ResolvePermissionRequests>(),
+];
+
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
     dispatch_as(state, req, "local-daemon").await
 }
@@ -100,7 +115,7 @@ pub async fn dispatch_as(
                         daemon_version: env!("CARGO_PKG_VERSION").into(),
                         daemon_generation: DaemonGeneration(state.daemon_generation().to_owned()),
                         event_schema_version: atman_proto::EVENT_SCHEMA_VERSION,
-                        methods: methods::ALL
+                        methods: SUPPORTED_METHODS
                             .iter()
                             .map(|method| MethodCapability {
                                 name: method.name.into(),

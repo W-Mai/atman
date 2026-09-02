@@ -25,7 +25,16 @@ async fn capabilities_are_typed_and_match_the_registry() {
 
     assert_eq!(capabilities.protocol_version, atman_proto::PROTOCOL_VERSION);
     assert_eq!(capabilities.daemon_generation.0, "test-generation");
-    assert_eq!(capabilities.methods.len(), methods::ALL.len());
+    assert_eq!(
+        capabilities.methods.len(),
+        atman_daemon::SUPPORTED_METHODS.len()
+    );
+    assert!(
+        !capabilities
+            .methods
+            .iter()
+            .any(|method| method.name == methods::GET_SESSION_SNAPSHOT)
+    );
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
 }
 
