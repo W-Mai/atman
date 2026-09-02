@@ -59,6 +59,13 @@ pub enum ThemePreference {
     Dark,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiffLayout {
+    #[default]
+    Split,
+    Unified,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterjectionMode {
     Off,
@@ -941,6 +948,33 @@ impl ConfigHub {
             "dark" => Ok(ThemePreference::Dark),
             _ => Err(ConfigError::Invalid(format!(
                 "invalid theme.mode: {mode:?}"
+            ))),
+        }
+    }
+
+    pub fn diff_layout(&self) -> Result<DiffLayout, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(DiffLayout::Split);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(diff) = document.get("diff") else {
+            return Ok(DiffLayout::Split);
+        };
+        let Some(diff) = diff.as_table() else {
+            return Err(ConfigError::Invalid("diff is not a table".into()));
+        };
+        let Some(layout) = diff.get("layout") else {
+            return Ok(DiffLayout::Split);
+        };
+        let Some(layout) = layout.as_str() else {
+            return Err(ConfigError::Invalid("diff.layout is not a string".into()));
+        };
+        match layout.to_ascii_lowercase().as_str() {
+            "split" => Ok(DiffLayout::Split),
+            "unified" => Ok(DiffLayout::Unified),
+            other => Err(ConfigError::Invalid(format!(
+                "diff.layout must be `split` or `unified`, got `{other}`"
             ))),
         }
     }
