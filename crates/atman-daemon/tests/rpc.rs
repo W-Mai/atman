@@ -4,6 +4,32 @@ use atman_daemon::{DaemonState, dispatch};
 use atman_proto::{JsonRpcRequest, methods};
 
 #[tokio::test]
+async fn capabilities_are_typed_and_match_the_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new_with_generation(
+        tmp.path().to_path_buf(),
+        "test-generation".into(),
+    ));
+    let req = JsonRpcRequest::for_method::<atman_proto::rpc::DaemonCapabilities>(
+        0,
+        &atman_proto::CapabilitiesRequest {
+            protocol_version: Some(atman_proto::PROTOCOL_VERSION),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let capabilities = dispatch(state, req)
+        .await
+        .into_method_output::<atman_proto::rpc::DaemonCapabilities>()
+        .unwrap();
+
+    assert_eq!(capabilities.protocol_version, atman_proto::PROTOCOL_VERSION);
+    assert_eq!(capabilities.daemon_generation.0, "test-generation");
+    assert_eq!(capabilities.methods.len(), methods::ALL.len());
+    assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
+}
+
+#[tokio::test]
 async fn ping_returns_pong() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

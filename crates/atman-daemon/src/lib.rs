@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    CancelRunRequest, CreatePermissionGroupRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
-    ListPermissionRequestsRequest, PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector,
-    ResolvePermissionRequestsRequest, ResolvePromptRequest, RunFlowRequest, RunFlowResponse,
-    methods,
+    CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, CreatePermissionGroupResponse,
+    DaemonGeneration, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListSessionsRequest,
+    MethodCapability, PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector, PingResponse,
+    ProtocolLimits, RenameSessionRequest, ResolvePromptResponse, RpcMethod, RunFlowResponse,
+    methods, rpc,
 };
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
@@ -42,6 +43,23 @@ fn permission_scope(
 
 fn permission_error(error: impl std::fmt::Display) -> JsonRpcError {
     JsonRpcError::application(error.to_string())
+}
+
+fn parse_params<M: RpcMethod>(
+    params: Option<serde_json::Value>,
+) -> Result<M::Params, JsonRpcError> {
+    serde_json::from_value(params.unwrap_or_else(|| json!({})))
+        .map_err(|error| JsonRpcError::invalid_params(error.to_string()))
+}
+
+fn method_response<M: RpcMethod>(
+    id: Option<serde_json::Value>,
+    output: M::Output,
+) -> JsonRpcResponse {
+    match serde_json::to_value(output) {
+        Ok(value) => JsonRpcResponse::ok(id, value),
+        Err(error) => JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string())),
+    }
 }
 
 fn authorized_permission_session(
@@ -87,77 +105,85 @@ pub async fn dispatch_as(
 
     let id = req.id.clone();
     match req.method.as_str() {
-        methods::PING => JsonRpcResponse::ok(
-            id,
-            json!({"pong": true, "version": env!("CARGO_PKG_VERSION")}),
-        ),
-        methods::LIST_SESSIONS => {
-            let params = req.params.unwrap_or(json!({}));
-            let project_root = params.get("project_root").and_then(|value| value.as_str());
-            let search = params.get("search").and_then(|value| value.as_str());
-            let limit = params
-                .get("limit")
-                .and_then(|value| value.as_u64())
-                .map(|value| value as usize);
-            match state.list_sessions_query(project_root, search, limit) {
-                Ok(summaries) => match serde_json::to_value(&summaries) {
-                    Ok(v) => JsonRpcResponse::ok(id, v),
-                    Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
-                },
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
-            }
-        }
-        methods::RENAME_SESSION => {
-            let params = req.params.unwrap_or(json!({}));
-            let sid = params
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| uuid::Uuid::parse_str(s).ok());
-            let title = params
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            match sid {
-                Some(uuid) if !title.trim().is_empty() => match state
-                    .rename_session(&atman_proto::SessionId(uuid), title)
-                {
-                    Ok(summary) => {
-                        JsonRpcResponse::ok(id, serde_json::to_value(summary).unwrap_or(json!({})))
-                    }
-                    Err(e) => JsonRpcResponse::err(id, JsonRpcError::application(e.to_string())),
-                },
-                _ => JsonRpcResponse::err(
+        methods::DAEMON_CAPABILITIES => {
+            let parsed = parse_params::<rpc::DaemonCapabilities>(req.params);
+            match parsed {
+                Ok(CapabilitiesRequest { .. }) => method_response::<rpc::DaemonCapabilities>(
                     id,
-                    JsonRpcError::invalid_params("session_id and non-empty title are required"),
+                    CapabilitiesResponse {
+                        protocol_version: atman_proto::PROTOCOL_VERSION,
+                        daemon_version: env!("CARGO_PKG_VERSION").into(),
+                        daemon_generation: DaemonGeneration(state.daemon_generation().to_owned()),
+                        event_schema_version: atman_proto::EVENT_SCHEMA_VERSION,
+                        methods: methods::ALL
+                            .iter()
+                            .map(|method| MethodCapability {
+                                name: method.name.into(),
+                                kind: method.kind,
+                                revision: method.revision,
+                            })
+                            .collect(),
+                        limits: ProtocolLimits {
+                            max_event_page_size: 1_000,
+                            subscriber_buffer: 2_048,
+                        },
+                    },
                 ),
+                Err(error) => JsonRpcResponse::err(id, error),
             }
         }
-        methods::CANCEL_RUN => {
-            let params = req.params.unwrap_or(json!({}));
-            let parsed: Result<CancelRunRequest, _> = serde_json::from_value(params);
-            match parsed {
-                Ok(p) => {
-                    let cancelled = state.cancel_run(&p.run_id);
-                    JsonRpcResponse::ok(id, json!({"cancelled": cancelled}))
+        methods::PING => method_response::<rpc::Ping>(
+            id,
+            PingResponse {
+                pong: true,
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+        ),
+        methods::LIST_SESSIONS => match parse_params::<rpc::ListSessions>(req.params) {
+            Ok(ListSessionsRequest {
+                project_root,
+                search,
+                limit,
+            }) => {
+                match state.list_sessions_query(project_root.as_deref(), search.as_deref(), limit) {
+                    Ok(summaries) => method_response::<rpc::ListSessions>(id, summaries),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string()))
+                    }
                 }
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
-        }
-        methods::RESOLVE_PROMPT => {
-            let params = req.params.unwrap_or(json!({}));
-            let parsed: Result<ResolvePromptRequest, _> = serde_json::from_value(params);
-            match parsed {
-                Ok(p) => {
-                    let resolved = state.resolve_prompt(&p.prompt_id, p.answer);
-                    JsonRpcResponse::ok(id, json!({"resolved": resolved}))
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
+            Ok(RenameSessionRequest { session_id, title }) if !title.trim().is_empty() => {
+                match state.rename_session(&session_id, &title) {
+                    Ok(summary) => method_response::<rpc::RenameSession>(id, summary),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
                 }
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
-        }
+            Ok(_) => {
+                JsonRpcResponse::err(id, JsonRpcError::invalid_params("title must not be empty"))
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {
+            Ok(p) => {
+                let cancelled = state.cancel_run(&p.run_id);
+                method_response::<rpc::CancelRun>(id, CancelRunResponse { cancelled })
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::RESOLVE_PROMPT => match parse_params::<rpc::ResolvePrompt>(req.params) {
+            Ok(p) => {
+                let resolved = state.resolve_prompt(&p.prompt_id, p.answer);
+                method_response::<rpc::ResolvePrompt>(id, ResolvePromptResponse { resolved })
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::LIST_PERMISSION_REQUESTS => {
-            let parsed: Result<ListPermissionRequestsRequest, _> =
-                serde_json::from_value(req.params.unwrap_or(json!({})));
-            match parsed {
+            match parse_params::<rpc::ListPermissionRequests>(req.params) {
                 Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
                     Ok(session) => {
                         let (requests, groups) = session
@@ -197,17 +223,15 @@ pub async fn dispatch_as(
                                 })
                                 .collect(),
                         };
-                        JsonRpcResponse::ok(id, serde_json::to_value(response).unwrap_or(json!({})))
+                        method_response::<rpc::ListPermissionRequests>(id, response)
                     }
                     Err(error) => JsonRpcResponse::err(id, error),
                 },
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
+                Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         methods::CREATE_PERMISSION_GROUP => {
-            let parsed: Result<CreatePermissionGroupRequest, _> =
-                serde_json::from_value(req.params.unwrap_or(json!({})));
-            match parsed {
+            match parse_params::<rpc::CreatePermissionGroup>(req.params) {
                 Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
                     Ok(session) => {
                         let ids: BTreeSet<_> = p
@@ -229,22 +253,29 @@ pub async fn dispatch_as(
                             p.label,
                             &revisions,
                         ) {
-                            Ok(group) => JsonRpcResponse::ok(
+                            Ok(group) => method_response::<rpc::CreatePermissionGroup>(
                                 id,
-                                json!({"group_id": group.group_id.0, "request_ids": group.request_ids, "revision": group.revision, "label": group.label}),
+                                CreatePermissionGroupResponse {
+                                    group_id: group.group_id.0,
+                                    request_ids: group
+                                        .request_ids
+                                        .into_iter()
+                                        .map(|request_id| request_id.0)
+                                        .collect(),
+                                    revision: group.revision,
+                                    label: group.label,
+                                },
                             ),
                             Err(e) => JsonRpcResponse::err(id, permission_error(e)),
                         }
                     }
                     Err(error) => JsonRpcResponse::err(id, error),
                 },
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
+                Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         methods::RESOLVE_PERMISSION_REQUESTS => {
-            let parsed: Result<ResolvePermissionRequestsRequest, _> =
-                serde_json::from_value(req.params.unwrap_or(json!({})));
-            match parsed {
+            match parse_params::<rpc::ResolvePermissionRequests>(req.params) {
                 Ok(p) => match authorized_permission_session(&state, &p.session_id, principal_id) {
                     Ok(session) => {
                         let (request_ids, revisions, group) = match p.selector {
@@ -299,17 +330,14 @@ pub async fn dispatch_as(
                                         })
                                         .collect(),
                                 };
-                                JsonRpcResponse::ok(
-                                    id,
-                                    serde_json::to_value(response).unwrap_or(json!({})),
-                                )
+                                method_response::<rpc::ResolvePermissionRequests>(id, response)
                             }
                             Err(e) => JsonRpcResponse::err(id, permission_error(e)),
                         }
                     }
                     Err(error) => JsonRpcResponse::err(id, error),
                 },
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
+                Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         methods::RUN_FLOW => {
@@ -319,9 +347,7 @@ pub async fn dispatch_as(
                     JsonRpcError::application("daemon started without a run launcher"),
                 );
             };
-            let params = req.params.unwrap_or(json!({}));
-            let parsed: Result<RunFlowRequest, _> = serde_json::from_value(params);
-            match parsed {
+            match parse_params::<rpc::RunFlow>(req.params) {
                 Ok(p) => {
                     let args: Vec<(String, atman_runtime::Value)> = p
                         .args
@@ -341,24 +367,19 @@ pub async fn dispatch_as(
                         )
                         .await
                     {
-                        Ok(spawned) => {
-                            let resp = RunFlowResponse {
+                        Ok(spawned) => method_response::<rpc::RunFlow>(
+                            id,
+                            RunFlowResponse {
                                 session_id: spawned.session_id,
                                 run_id: spawned.run_id,
-                            };
-                            match serde_json::to_value(&resp) {
-                                Ok(v) => JsonRpcResponse::ok(id, v),
-                                Err(e) => {
-                                    JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string()))
-                                }
-                            }
-                        }
+                            },
+                        ),
                         Err(e) => {
                             JsonRpcResponse::err(id, JsonRpcError::application(e.to_string()))
                         }
                     }
                 }
-                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
+                Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         other => JsonRpcResponse::err(id, JsonRpcError::method_not_found(other)),

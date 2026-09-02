@@ -1,7 +1,10 @@
 use atman_proto::{
-    CancelRunRequest, CreatePermissionGroupRequest, GetEventsRequest, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, ListPermissionRequestsRequest, ResolvePermissionRequestsRequest,
-    ResolvePromptRequest, RunFlowRequest, RunFlowResponse, SessionSummary,
+    CancelRunRequest, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
+    CreatePermissionGroupRequest, CreatePermissionGroupResponse, GetEventsRequest,
+    GetEventsResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    ListPermissionRequestsRequest, ListSessionsRequest, MethodCapability, ProtocolLimits,
+    RenameSessionRequest, ResolvePermissionRequestsRequest, ResolvePromptRequest,
+    ResolvePromptResponse, RunFlowRequest, RunFlowResponse, ServerEventEnvelope, SessionSummary,
 };
 use utoipa::OpenApi;
 
@@ -54,7 +57,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: ping, list_sessions, run_flow, cancel_run, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
+Methods dispatched at POST /rpc: daemon.capabilities, ping, list_sessions, rename_session, run_flow, cancel_run, get_events, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
 SSE event stream at GET /events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, openapi_endpoint),
@@ -62,13 +65,24 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         JsonRpcRequest,
         JsonRpcResponse,
         JsonRpcError,
+        CapabilitiesRequest,
+        CapabilitiesResponse,
+        MethodCapability,
+        ProtocolLimits,
         RunFlowRequest,
         RunFlowResponse,
         CancelRunRequest,
+        CancelRunResponse,
         ResolvePromptRequest,
+        ResolvePromptResponse,
         GetEventsRequest,
+        GetEventsResponse,
+        ServerEventEnvelope,
+        ListSessionsRequest,
+        RenameSessionRequest,
         ListPermissionRequestsRequest,
         CreatePermissionGroupRequest,
+        CreatePermissionGroupResponse,
         ResolvePermissionRequestsRequest,
         atman_proto::ListPermissionRequestsResponse,
         atman_proto::PermissionRequestView,
@@ -80,6 +94,13 @@ SSE event stream at GET /events. Every endpoint requires a bearer token."
         atman_proto::SessionId,
         atman_proto::FlowRunId,
         atman_proto::PromptId,
+        atman_proto::ClientId,
+        atman_proto::RequestId,
+        atman_proto::ProjectId,
+        atman_proto::DaemonGeneration,
+        atman_proto::EventCursor,
+        atman_proto::Revision,
+        atman_proto::RpcKind,
     )),
     modifiers(&BearerSecurity),
 )]

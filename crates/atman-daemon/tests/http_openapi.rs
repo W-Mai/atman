@@ -46,6 +46,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
     assert!(paths.contains_key("/openapi.json"));
     let description = doc["info"]["description"].as_str().unwrap();
     for method in [
+        "daemon.capabilities",
         "list_permission_requests",
         "create_permission_group",
         "resolve_permission_requests",
@@ -61,6 +62,9 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "JsonRpcRequest",
         "JsonRpcResponse",
         "JsonRpcError",
+        "CapabilitiesRequest",
+        "CapabilitiesResponse",
+        "MethodCapability",
         "InlineImage",
         "RunFlowRequest",
         "RunFlowResponse",
