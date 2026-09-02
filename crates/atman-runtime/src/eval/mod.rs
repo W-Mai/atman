@@ -1000,10 +1000,8 @@ fn prepare_diff_preview(name: &str, args: &ToolArgs) -> Option<DiffPreviewData> 
             let path = tool_arg_path(args, "path", 0)?;
             let content = tool_arg_string(args, "content", 1)?;
             let path_str = path.display().to_string();
-            let diff = match std::fs::read_to_string(&path).ok() {
-                Some(old) => crate::tools::fs::unified_diff_preview(&path_str, &old, &content),
-                None => format!("+++ {path_str}\n{content}"),
-            };
+            let old = std::fs::read_to_string(&path).unwrap_or_default();
+            let diff = crate::tools::fs::unified_diff_preview(&path_str, &old, &content);
             Some((path_str, None, None, Some(diff)))
         }
         "fs.edit" => {

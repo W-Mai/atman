@@ -1183,7 +1183,7 @@ fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> V
         Err(e) => (format!("{e}"), true),
     };
     if let Ok(v) = &result {
-        emit_diff_preview_if_relevant(ctx, name, v);
+        emit_diff_preview_if_relevant(ctx, id, name, v);
     }
     let msg = crate::message::Message {
         role: crate::message::MessageRole::Tool,
@@ -1203,7 +1203,7 @@ fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> V
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
 
-fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) {
+fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_use_id: &str, tool_name: &str, value: &Value) {
     let Some(sink) = ctx.events.as_ref() else {
         return;
     };
@@ -1247,7 +1247,7 @@ fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) 
         sink.emit(crate::event::Event::DiffPreview {
             turn_id: ctx.turn_id.clone(),
             flow_run_id: ctx.flow_run_id.clone(),
-            tool_use_id: ctx.tool_use_id.clone(),
+            tool_use_id: Some(tool_use_id.to_owned()),
             title,
             old_content,
             new_content,
@@ -2128,9 +2128,10 @@ mod tests {
         assert!(events.snapshot().iter().any(|event| matches!(
             event,
             crate::event::Event::DiffPreview {
+                tool_use_id: Some(tool_use_id),
                 unified_diff: Some(preview),
                 ..
-            } if preview == &diff
+            } if tool_use_id == "edit_id" && preview == &diff
         )));
     }
 

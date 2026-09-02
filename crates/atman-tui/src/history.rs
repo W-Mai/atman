@@ -2537,6 +2537,13 @@ mod tests {
                 },
                 flow_run_id: None,
             },
+            TranscriptEntry::DiffPreview {
+                tool_use_id: Some(tool_use_id.into()),
+                title: "a.rs".into(),
+                old_content: None,
+                new_content: None,
+                unified_diff: Some(diff.into()),
+            },
             TranscriptEntry::Message {
                 message: Message {
                     role: MessageRole::Tool,
@@ -2557,6 +2564,11 @@ mod tests {
             _ => None,
         });
         assert_eq!(diff_item.as_deref(), Some(diff));
+        assert!(
+            out.iter()
+                .all(|item| !matches!(item, OutputItem::DiffPreview { .. })),
+            "correlated previews must stay inside their tool row"
+        );
     }
 
     #[test]

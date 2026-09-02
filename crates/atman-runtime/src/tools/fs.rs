@@ -306,10 +306,11 @@ impl Tool for FsWrite {
             let canonical = canonicalize_or_owned(&path);
             ctx.note_read(&canonical);
             let path_str = path.display().to_string();
-            let diff_patch = match &old_content {
-                Some(old) => unified_diff_preview(&path_str, old, &content),
-                None => format!("+++ {path_str}\n{content}"),
-            };
+            let diff_patch = unified_diff_preview(
+                &path_str,
+                old_content.as_deref().unwrap_or_default(),
+                &content,
+            );
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
                     title: path_str,
@@ -894,6 +895,14 @@ async fn fs_grep_impl(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn new_file_preview_marks_every_content_line_as_an_insertion() {
+        let diff = unified_diff_preview("new.rs", "", "first\nsecond\n");
+        assert!(diff.lines().any(|line| line == "+first"));
+        assert!(diff.lines().any(|line| line == "+second"));
+        assert!(!diff.lines().any(|line| line == "first" || line == "second"));
+    }
 
     #[tokio::test]
     async fn fs_read_returns_file_content() {
