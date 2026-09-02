@@ -43,6 +43,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
     let paths = doc["paths"].as_object().expect("paths object");
     assert!(paths.contains_key("/rpc"), "paths keys: {paths:?}");
     assert!(paths.contains_key("/events"));
+    assert!(paths.contains_key("/session-events"));
     assert!(paths.contains_key("/openapi.json"));
     let description = doc["info"]["description"].as_str().unwrap();
     for method in [

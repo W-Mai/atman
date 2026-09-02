@@ -77,6 +77,7 @@ impl SessionActorHandle {
         );
         let event_cursor = EventCursor(projection.projection().revision.0);
         let (tx, rx) = mpsc::unbounded_channel();
+        let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
         let mut runs = HashMap::new();
         runs.insert(initial_run.run_id.clone(), initial_run);
         let (view_tx, view) = watch::channel(view_for(1, &runs, &projection));
@@ -89,6 +90,7 @@ impl SessionActorHandle {
             event_cursor,
             daemon_generation,
             updates: VecDeque::new(),
+            updates_tx,
             view_tx,
             rx,
             events_rx,
@@ -157,6 +159,16 @@ impl SessionActorHandle {
         .await?;
         let redactor = self.session.sink().redactor();
         crate::projection::redacted_updates(&updates, redactor.as_deref())
+    }
+
+    pub async fn subscribe_updates(
+        &self,
+    ) -> Result<(
+        broadcast::Receiver<ProjectionEventEnvelope>,
+        Option<Arc<atman_runtime::redact::Redactor>>,
+    )> {
+        let receiver = request(&self.tx, |reply| Command::SubscribeUpdates { reply }).await?;
+        Ok((receiver, self.session.sink().redactor()))
     }
 
     pub async fn list_permissions(&self) -> Result<ListPermissionRequestsResponse> {
@@ -239,6 +251,9 @@ enum Command {
         limit: Option<usize>,
         reply: oneshot::Sender<GetSessionUpdatesResponse>,
     },
+    SubscribeUpdates {
+        reply: oneshot::Sender<broadcast::Receiver<ProjectionEventEnvelope>>,
+    },
     ListPermissions {
         reply: oneshot::Sender<ListPermissionRequestsResponse>,
     },
@@ -278,6 +293,7 @@ struct SessionActor {
     event_cursor: EventCursor,
     daemon_generation: DaemonGeneration,
     updates: VecDeque<ProjectionEventEnvelope>,
+    updates_tx: broadcast::Sender<ProjectionEventEnvelope>,
     view_tx: watch::Sender<SessionActorView>,
     rx: mpsc::UnboundedReceiver<Command>,
     events_rx: broadcast::Receiver<atman_runtime::event::EventEnvelope>,
@@ -390,6 +406,9 @@ impl SessionActor {
             } => {
                 let _ = reply.send(self.updates_response(after_cursor, limit));
             }
+            Command::SubscribeUpdates { reply } => {
+                let _ = reply.send(self.updates_tx.subscribe());
+            }
             Command::ListPermissions { reply } => {
                 let _ = reply.send(self.list_permissions());
             }
@@ -436,17 +455,19 @@ impl SessionActor {
     fn publish_projection_delta(&mut self, delta: ProjectionDelta) {
         debug_assert_eq!(delta.revision, self.projection.projection().revision);
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
-        self.updates.push_back(ProjectionEventEnvelope {
+        let envelope = ProjectionEventEnvelope {
             schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
             daemon_generation: self.daemon_generation.clone(),
             session_id: self.session_id.clone(),
             cursor: self.event_cursor,
             ts: chrono::Utc::now(),
             event: ServerEvent::ProjectionDelta { delta },
-        });
+        };
+        self.updates.push_back(envelope.clone());
         while self.updates.len() > UPDATE_RETENTION {
             self.updates.pop_front();
         }
+        let _ = self.updates_tx.send(envelope);
         self.publish();
     }
 
@@ -465,6 +486,7 @@ impl SessionActor {
     }
 
     fn rebuild_projection(&mut self) {
+        let requested_after = self.event_cursor;
         let previous_revision = self.projection.projection().revision;
         let mut projection = SessionProjector::from_events(
             self.session_id.clone(),
@@ -479,6 +501,21 @@ impl SessionActor {
         self.projection = projection;
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
         self.updates.clear();
+        let _ = self.updates_tx.send(ProjectionEventEnvelope {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            daemon_generation: self.daemon_generation.clone(),
+            session_id: self.session_id.clone(),
+            cursor: self.event_cursor,
+            ts: chrono::Utc::now(),
+            event: ServerEvent::ResyncRequired {
+                gap: ResyncRequired {
+                    requested_after,
+                    available_from: self.event_cursor,
+                    snapshot_revision: self.projection.projection().revision,
+                    reason: "runtime event stream lagged; fetch a fresh session snapshot".into(),
+                },
+            },
+        });
         self.publish();
     }
 

@@ -294,6 +294,34 @@ impl DaemonState {
         })
     }
 
+    pub(crate) async fn subscribe_session_updates(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<
+        Option<(
+            tokio::sync::broadcast::Receiver<atman_proto::ProjectionEventEnvelope>,
+            Option<std::sync::Arc<atman_runtime::redact::Redactor>>,
+        )>,
+    > {
+        let actor = self.sessions.lock().unwrap().get(id).cloned();
+        let Some(actor) = actor else {
+            anyhow::ensure!(
+                self.sessions_root()
+                    .join(id.to_string())
+                    .join("events.jsonl")
+                    .is_file(),
+                "session not found: {id}"
+            );
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            actor.owns(principal),
+            "session {id} is owned by another principal"
+        );
+        Ok(Some(actor.subscribe_updates().await?))
+    }
+
     pub fn finish_run(&self, session_id: &SessionId, run_id: &FlowRunId) -> bool {
         self.sessions
             .lock()

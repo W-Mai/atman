@@ -15,7 +15,10 @@ use axum::{
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 
-use atman_proto::{EventCursor, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
+use atman_proto::{
+    EventCursor, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROJECTION_EVENT_SCHEMA_VERSION,
+    ProjectionEventEnvelope, ServerEvent, SessionId,
+};
 
 use crate::DaemonState;
 
@@ -28,6 +31,7 @@ pub fn router(state: Arc<HttpState>) -> Router {
     Router::new()
         .route("/rpc", post(rpc_handler))
         .route("/events", get(sse_handler))
+        .route("/session-events", get(session_sse_handler))
         .route("/openapi.json", get(openapi_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -64,6 +68,13 @@ pub struct SseQuery {
     pub session_id: SessionId,
     #[serde(default)]
     pub since_seq: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct SessionSseQuery {
+    pub session_id: SessionId,
+    #[serde(default, alias = "since_seq")]
+    pub after_cursor: Option<u64>,
 }
 
 async fn sse_handler(
@@ -137,6 +148,115 @@ fn tail_events_stream(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+}
+
+async fn session_sse_handler(
+    State(state): State<Arc<HttpState>>,
+    Extension(principal_id): Extension<String>,
+    Query(q): Query<SessionSseQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
+    if !state.daemon.can_read_session(&q.session_id, &principal_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "permission denied for session".into(),
+        ));
+    }
+    let start = q
+        .after_cursor
+        .or_else(|| last_event_id(&headers))
+        .unwrap_or(0);
+    let subscription = state
+        .daemon
+        .subscribe_session_updates(&q.session_id, &principal_id)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let prelude =
+        futures::stream::once(async { Ok(Event::default().retry(Duration::from_millis(3000))) });
+    let stream = prelude.chain(session_updates_stream(
+        state.daemon.clone(),
+        q.session_id,
+        principal_id,
+        EventCursor(start),
+        subscription,
+    ));
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn session_updates_stream(
+    daemon: Arc<DaemonState>,
+    session_id: SessionId,
+    principal_id: String,
+    start_cursor: EventCursor,
+    subscription: Option<(
+        tokio::sync::broadcast::Receiver<ProjectionEventEnvelope>,
+        Option<Arc<atman_runtime::redact::Redactor>>,
+    )>,
+) -> impl Stream<Item = Result<Event, std::io::Error>> {
+    async_stream::try_stream! {
+        let (mut receiver, redactor) = match subscription {
+            Some((receiver, redactor)) => (Some(receiver), redactor),
+            None => (None, None),
+        };
+        let mut cursor = start_cursor;
+        loop {
+            let page = daemon
+                .session_updates(&session_id, &principal_id, cursor, None)
+                .await
+                .map_err(stream_io_error)?;
+            if let Some(gap) = page.resync_required {
+                yield projection_sse_event(&ProjectionEventEnvelope {
+                    schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+                    daemon_generation: page.daemon_generation,
+                    session_id: session_id.clone(),
+                    cursor: page.next_cursor,
+                    ts: chrono::Utc::now(),
+                    event: ServerEvent::ResyncRequired { gap },
+                })?;
+                return;
+            }
+            for event in page.events {
+                cursor = event.cursor;
+                yield projection_sse_event(&event)?;
+            }
+            if page.has_more {
+                continue;
+            }
+            let Some(active_receiver) = receiver.as_mut() else {
+                return;
+            };
+            match active_receiver.recv().await {
+                Ok(event) if event.cursor <= cursor => continue,
+                Ok(event) => {
+                    let event = crate::projection::redacted_projection_event(
+                        &event,
+                        redactor.as_deref(),
+                    ).map_err(stream_io_error)?;
+                    let requires_resync =
+                        matches!(&event.event, ServerEvent::ResyncRequired { .. });
+                    cursor = event.cursor;
+                    yield projection_sse_event(&event)?;
+                    if requires_resync {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+fn projection_sse_event(envelope: &ProjectionEventEnvelope) -> Result<Event, std::io::Error> {
+    let data = serde_json::to_string(envelope).map_err(stream_io_error)?;
+    Ok(Event::default()
+        .event("session_event")
+        .id(envelope.cursor.0.to_string())
+        .data(data))
+}
+
+fn stream_io_error(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(error.to_string())
 }
 
 async fn require_bearer(

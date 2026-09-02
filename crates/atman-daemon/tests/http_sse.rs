@@ -241,3 +241,68 @@ async fn sse_reads_finished_session_history() {
         "expected historical event in {text}"
     );
 }
+
+#[tokio::test]
+async fn session_sse_streams_projection_updates_after_snapshot_cursor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = atman_proto::SessionId(Uuid::now_v7());
+    daemon
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            atman_daemon::LiveRun {
+                run_id: atman_proto::FlowRunId(Uuid::now_v7()),
+                flow_name: "projection-sse-test".into(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "authenticated-daemon-client",
+        )
+        .await
+        .unwrap();
+    let snapshot = daemon
+        .session_snapshot(&sid, "authenticated-daemon-client")
+        .await
+        .unwrap();
+    let app = router(Arc::new(HttpState {
+        daemon,
+        auth_token: "secret".into(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/session-events?session_id={sid}&after_cursor={}",
+                    snapshot.cursor.0
+                ))
+                .header("Authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    session.set_goal(Some("Converge every client".into()));
+    let mut body = response.into_body().into_data_stream();
+    let mut bytes = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(chunk))) =
+            tokio::time::timeout(Duration::from_millis(300), body.next()).await
+        {
+            bytes.extend_from_slice(&chunk);
+            if String::from_utf8_lossy(&bytes).contains("converge every client") {
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).to_lowercase();
+    assert!(text.contains("event: session_event"), "{text}");
+    assert!(text.contains("projection_delta"), "{text}");
+    assert!(text.contains("goal_set"), "{text}");
+    assert!(text.contains("converge every client"), "{text}");
+}

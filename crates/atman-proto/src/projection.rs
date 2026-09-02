@@ -305,6 +305,7 @@ pub struct WorkflowNodeProjection {
     #[serde(default)]
     pub output_preview: Option<String>,
     #[serde(default)]
+    #[schema(no_recursion)]
     pub children: Vec<WorkflowNodeProjection>,
     #[serde(default)]
     pub parallel: bool,

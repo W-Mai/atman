@@ -864,6 +864,18 @@ pub(crate) fn redacted_updates(
     Ok(serde_json::from_value(value)?)
 }
 
+pub(crate) fn redacted_projection_event(
+    event: &atman_proto::ProjectionEventEnvelope,
+    redactor: Option<&atman_runtime::redact::Redactor>,
+) -> anyhow::Result<atman_proto::ProjectionEventEnvelope> {
+    let Some(redactor) = redactor else {
+        return Ok(event.clone());
+    };
+    let mut value = serde_json::to_value(event)?;
+    redactor.redact_json(&mut value);
+    Ok(serde_json::from_value(value)?)
+}
+
 pub(crate) async fn load_historical_projection(
     session_id: SessionId,
     session_dir: &std::path::Path,
