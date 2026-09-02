@@ -41,6 +41,18 @@ pub enum TransportError {
     InvalidEventStream(String),
 }
 
+impl TransportError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Io(_) | Self::Http(_) | Self::Closed => true,
+            Self::HttpStatus { status, .. } => matches!(*status, 408 | 425 | 429) || *status >= 500,
+            Self::InvalidEndpoint(_) | Self::InvalidResponse(_) | Self::InvalidEventStream(_) => {
+                false
+            }
+        }
+    }
+}
+
 pub type SessionEventStream = BoxStream<'static, Result<ProjectionEventEnvelope, TransportError>>;
 
 pub trait RpcTransport: Send + Sync {
@@ -75,6 +87,12 @@ pub enum ClientError {
     ProtocolVersion { client: u32, daemon: u32 },
     #[error("daemon does not support {method} revision {revision}")]
     UnsupportedMethod { method: &'static str, revision: u32 },
+}
+
+impl ClientError {
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.is_retryable())
+    }
 }
 
 #[derive(Debug, Clone)]

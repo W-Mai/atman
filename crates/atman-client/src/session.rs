@@ -6,9 +6,14 @@ use atman_proto::{
     ProjectionEventEnvelope, Revision, SNAPSHOT_SCHEMA_VERSION, ServerEvent, SessionId,
     SessionProjection, SessionSignal, SessionSnapshot, rpc,
 };
-use tokio::sync::{Mutex, watch};
+use futures::StreamExt;
+use tokio::sync::{Mutex, broadcast, watch};
 
-use crate::{Client, ClientError};
+use crate::{Client, ClientError, TransportError};
+
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const MIN_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const MAX_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ReconcileError {
@@ -153,7 +158,19 @@ pub enum SessionClientError {
     #[error(transparent)]
     Client(#[from] ClientError),
     #[error(transparent)]
+    Transport(#[from] TransportError),
+    #[error(transparent)]
     Reconcile(#[from] ReconcileError),
+}
+
+impl SessionClientError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Client(error) => error.is_retryable(),
+            Self::Transport(error) => error.is_retryable(),
+            Self::Reconcile(_) => false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -161,6 +178,7 @@ pub struct SessionClient {
     client: Client,
     session_id: SessionId,
     state: watch::Sender<SessionState>,
+    signals: broadcast::Sender<SessionSignal>,
     refresh_lock: Arc<Mutex<()>>,
 }
 
@@ -178,10 +196,12 @@ impl SessionClient {
         let capabilities = client.capabilities();
         let state = SessionState::new(snapshot, &capabilities.daemon_generation)?;
         let (state, _) = watch::channel(state);
+        let (signals, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
         Ok(Self {
             client,
             session_id,
             state,
+            signals,
             refresh_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -198,6 +218,10 @@ impl SessionClient {
         self.state.subscribe()
     }
 
+    pub fn subscribe_signals(&self) -> broadcast::Receiver<SessionSignal> {
+        self.signals.subscribe()
+    }
+
     pub async fn refresh(&self) -> Result<RefreshOutcome, SessionClientError> {
         let _guard = self.refresh_lock.lock().await;
         let current = self.current();
@@ -210,16 +234,44 @@ impl SessionClient {
                 limit: Some(capabilities.limits.max_event_page_size),
             })
             .await?;
+        self.reconcile_response(current, response).await
+    }
+
+    pub async fn apply_event(
+        &self,
+        event: ProjectionEventEnvelope,
+    ) -> Result<RefreshOutcome, SessionClientError> {
+        let _guard = self.refresh_lock.lock().await;
+        let current = self.current();
+        let response = GetSessionUpdatesResponse {
+            daemon_generation: event.daemon_generation.clone(),
+            next_cursor: event.cursor,
+            events: vec![event],
+            has_more: false,
+            resync_required: None,
+        };
+        self.reconcile_response(current, response).await
+    }
+
+    async fn reconcile_response(
+        &self,
+        current: SessionState,
+        response: GetSessionUpdatesResponse,
+    ) -> Result<RefreshOutcome, SessionClientError> {
+        let capabilities = self.client.capabilities();
         let mut next = current.clone();
         match next.apply_updates(&response) {
             Ok(applied) => {
                 let outcome = RefreshOutcome::Applied {
                     events: applied.applied,
-                    signals: applied.signals,
+                    signals: applied.signals.clone(),
                     has_more: applied.has_more,
                 };
                 if next != current {
                     self.state.send_replace(next);
+                }
+                for signal in applied.signals {
+                    let _ = self.signals.send(signal);
                 }
                 Ok(outcome)
             }
@@ -287,6 +339,47 @@ impl SessionClient {
             }
         }
     }
+
+    pub async fn synchronize(&self) -> Result<(), SessionClientError> {
+        let mut reconnect_delay = MIN_RECONNECT_DELAY;
+        loop {
+            match self.synchronize_connection().await {
+                Ok(SyncConnection::Polled) => {
+                    reconnect_delay = MIN_RECONNECT_DELAY;
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+                Ok(SyncConnection::StreamEnded) => {
+                    tokio::time::sleep(reconnect_delay).await;
+                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                }
+                Err(error) if error.is_retryable() => {
+                    tokio::time::sleep(reconnect_delay).await;
+                    reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn synchronize_connection(&self) -> Result<SyncConnection, SessionClientError> {
+        self.refresh_until_current().await?;
+        let Some(mut events) = self
+            .client
+            .session_events(self.session_id.clone(), self.current().cursor())
+            .await?
+        else {
+            return Ok(SyncConnection::Polled);
+        };
+        while let Some(event) = events.next().await {
+            self.apply_event(event?).await?;
+        }
+        Ok(SyncConnection::StreamEnded)
+    }
+}
+
+enum SyncConnection {
+    Polled,
+    StreamEnded,
 }
 
 fn validate_snapshot(
@@ -344,6 +437,9 @@ fn apply_envelope(
             received: envelope.session_id.clone(),
         });
     }
+    if let ServerEvent::ResyncRequired { gap } = &envelope.event {
+        return Err(ReconcileError::ResyncRequired(gap.clone()));
+    }
     let expected_cursor = EventCursor(snapshot.cursor.0.saturating_add(1));
     if envelope.cursor != expected_cursor {
         return Err(ReconcileError::CursorGap {
@@ -354,9 +450,7 @@ fn apply_envelope(
     match &envelope.event {
         ServerEvent::ProjectionDelta { delta } => apply_delta(&mut snapshot.projection, delta)?,
         ServerEvent::Signal { signal } => signals.push(signal.clone()),
-        ServerEvent::ResyncRequired { gap } => {
-            return Err(ReconcileError::ResyncRequired(gap.clone()));
-        }
+        ServerEvent::ResyncRequired { .. } => unreachable!("handled before cursor validation"),
         ServerEvent::Heartbeat => {}
     }
     snapshot.cursor = envelope.cursor;
@@ -452,7 +546,7 @@ mod tests {
     use futures::future::BoxFuture;
 
     use super::*;
-    use crate::{ClientIdentity, RpcTransport, TransportError};
+    use crate::{ClientIdentity, RpcTransport, SessionEventStream, TransportError};
 
     fn projection(session_id: SessionId, revision: Revision) -> SessionProjection {
         SessionProjection {
@@ -622,6 +716,35 @@ mod tests {
             Err(ReconcileError::DaemonGeneration { .. })
         ));
         assert_eq!(state, original);
+    }
+
+    #[test]
+    fn resync_event_is_recognized_before_cursor_gap_validation() {
+        let mut state = state();
+        let gap = atman_proto::ResyncRequired {
+            requested_after: state.cursor(),
+            available_from: EventCursor(99),
+            snapshot_revision: state.projection().revision,
+            reason: "retained updates were replaced".into(),
+        };
+        let event = ProjectionEventEnvelope {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            session_id: state.snapshot.projection.metadata.id.clone(),
+            cursor: EventCursor(99),
+            ts: serde_json::from_value(serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
+            event: ServerEvent::ResyncRequired { gap: gap.clone() },
+        };
+        let error = state
+            .apply_updates(&GetSessionUpdatesResponse {
+                daemon_generation: state.snapshot.daemon_generation.clone(),
+                events: vec![event],
+                next_cursor: EventCursor(99),
+                has_more: false,
+                resync_required: None,
+            })
+            .unwrap_err();
+        assert_eq!(error, ReconcileError::ResyncRequired(gap));
     }
 
     #[test]
@@ -807,6 +930,163 @@ mod tests {
             Some("after")
         );
         assert_eq!(session.current().cursor(), EventCursor(2));
+    }
+
+    #[tokio::test]
+    async fn session_client_applies_stream_events_and_broadcasts_signals() {
+        let session_id: SessionId =
+            serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789ac0"))
+                .unwrap();
+        let client = Client::connect(
+            RecoveringTransport {
+                session_id: session_id.clone(),
+                snapshot_calls: AtomicUsize::new(0),
+                requests: StdMutex::new(Vec::new()),
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .unwrap();
+        let session = client.attach_session(session_id).await.unwrap();
+        let current = session.current();
+        session
+            .apply_event(envelope(
+                &current,
+                2,
+                ProjectionDelta {
+                    base_revision: Revision(1),
+                    revision: Revision(2),
+                    changes: vec![ProjectionChange::GoalSet {
+                        goal: Some("streamed".into()),
+                    }],
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            session.current().projection().goal.as_deref(),
+            Some("streamed")
+        );
+
+        let mut signals = session.subscribe_signals();
+        let mut signal_event = envelope(
+            &session.current(),
+            3,
+            ProjectionDelta {
+                base_revision: Revision(2),
+                revision: Revision(3),
+                changes: Vec::new(),
+            },
+        );
+        let signal = SessionSignal::Progress {
+            run_id: serde_json::from_value(serde_json::json!(
+                "018f7f24-1ab2-7c3d-8e4f-123456789ac1"
+            ))
+            .unwrap(),
+            label: "streaming".into(),
+        };
+        signal_event.event = ServerEvent::Signal {
+            signal: signal.clone(),
+        };
+        session.apply_event(signal_event).await.unwrap();
+        assert_eq!(signals.recv().await.unwrap(), signal);
+        assert_eq!(session.current().cursor(), EventCursor(3));
+    }
+
+    struct StreamingTransport {
+        session_id: SessionId,
+    }
+
+    impl RpcTransport for StreamingTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<JsonRpcResponse, TransportError>> {
+            Box::pin(async move {
+                let result = match request.method.as_str() {
+                    methods::DAEMON_CAPABILITIES => {
+                        serde_json::to_value(capabilities("generation-a"))?
+                    }
+                    methods::GET_SESSION_SNAPSHOT => serde_json::to_value(SessionSnapshot {
+                        schema_version: SNAPSHOT_SCHEMA_VERSION,
+                        daemon_generation: DaemonGeneration("generation-a".into()),
+                        cursor: EventCursor(1),
+                        projection: projection(self.session_id.clone(), Revision(1)),
+                    })?,
+                    methods::GET_SESSION_UPDATES => {
+                        serde_json::to_value(GetSessionUpdatesResponse {
+                            daemon_generation: DaemonGeneration("generation-a".into()),
+                            events: Vec::new(),
+                            next_cursor: EventCursor(1),
+                            has_more: false,
+                            resync_required: None,
+                        })?
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                Ok(JsonRpcResponse::ok(request.id, result))
+            })
+        }
+
+        fn session_events(
+            &self,
+            session_id: SessionId,
+            after_cursor: EventCursor,
+        ) -> BoxFuture<'_, Result<Option<SessionEventStream>, TransportError>> {
+            let expected = self.session_id.clone();
+            Box::pin(async move {
+                assert_eq!(session_id, expected);
+                let stream: SessionEventStream = if after_cursor == EventCursor(1) {
+                    futures::stream::iter(vec![Ok(ProjectionEventEnvelope {
+                        schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+                        daemon_generation: DaemonGeneration("generation-a".into()),
+                        session_id,
+                        cursor: EventCursor(2),
+                        ts: serde_json::from_value(serde_json::json!("2026-01-01T00:00:00Z"))
+                            .unwrap(),
+                        event: ServerEvent::ProjectionDelta {
+                            delta: ProjectionDelta {
+                                base_revision: Revision(1),
+                                revision: Revision(2),
+                                changes: vec![ProjectionChange::GoalSet {
+                                    goal: Some("live".into()),
+                                }],
+                            },
+                        },
+                    })])
+                    .chain(futures::stream::pending())
+                    .boxed()
+                } else {
+                    futures::stream::pending().boxed()
+                };
+                Ok(Some(stream))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn synchronize_drives_the_transport_stream_into_the_session_store() {
+        let session_id: SessionId =
+            serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789ac2"))
+                .unwrap();
+        let client = Client::connect(
+            StreamingTransport {
+                session_id: session_id.clone(),
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .unwrap();
+        let session = client.attach_session(session_id).await.unwrap();
+        let mut state = session.subscribe();
+        let sync_session = session.clone();
+        let sync = tokio::spawn(async move { sync_session.synchronize().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), state.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.borrow().projection().goal.as_deref(), Some("live"));
+        sync.abort();
     }
 
     struct RestartingTransport {
