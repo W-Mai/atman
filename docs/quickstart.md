@@ -125,6 +125,8 @@ max_bytes = 1024
 max_line_bytes = 384
 ```
 
+Tool dispatches appear as ordered `working · N` blocks. Click an intent once for a bounded tail or edit-hunk preview and again for the complete output; Bash, Terminal, sub-agent, and diff details retain their fullscreen action. File edit totals update as successful writes are applied. Diff views default to two columns and can be changed with `[diff] layout = "unified"` in `config.toml`.
+
 `fs.read` exposes `start_byte_in_line` for continuing a long UTF-8 line; `bash.output` continues with `next_cursor`, and `term.capture` continues with its returned terminal-area coordinates.
 
 ## 4. Sanity check

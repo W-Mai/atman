@@ -6,6 +6,18 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.
+- **Streaming edit and compaction output** — provider tool-argument deltas surface allowlisted file content while it is generated, and compaction summaries update incrementally without entering assistant history.
+- **Configurable diff layout** — file changes retain file and hunk structure, use two-column rendering by default, fall back safely in narrow views, and support `[diff] layout = "unified"`.
+- **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
+
+### 🐛 Fixes
+
+- **Spawned message stream roles** — assistant messages appended to isolated child context emit assistant frames instead of tool-result frames, keeping root and child document-flow projection equivalent.
+- **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.
+
 ## [1.10.0] — 2026-09-02
 
 ### ⚠️ Breaking Changes

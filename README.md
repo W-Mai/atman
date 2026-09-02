@@ -341,7 +341,12 @@ strict = false
 
 [theme]
 mode = "auto"             # auto | dark | light | wuxia
+
+[diff]
+layout = "split"           # split | unified
 ```
+
+Tool calls from one assistant dispatch are grouped into an ordered `working · N` block. Each intent opens from a one-line summary to a bounded preview and then the complete auditable output. Diff output uses a two-column layout by default, falls back to unified rendering in narrow inline views, and keeps the configured layout in larger views.
 
 Provider env vars: `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_BASE_URL`.
 
