@@ -1,8 +1,10 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 pub const JSONRPC_VERSION: &str = "2.0";
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
@@ -37,7 +39,113 @@ impl std::fmt::Display for PromptId {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
+pub struct ClientId(pub Uuid);
+
+impl ClientId {
+    pub fn now() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for ClientId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
+pub struct RequestId(pub Uuid);
+
+impl RequestId {
+    pub fn now() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+pub struct ProjectId(pub String);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+pub struct DaemonGeneration(pub String);
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    ToSchema,
+)]
+#[serde(transparent)]
+pub struct EventCursor(pub u64);
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    ToSchema,
+)]
+#[serde(transparent)]
+pub struct Revision(pub u64);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcKind {
+    Command,
+    Query,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RpcMethodDescriptor {
+    pub name: &'static str,
+    pub kind: RpcKind,
+    pub revision: u32,
+}
+
+pub trait RpcMethod {
+    const NAME: &'static str;
+    const KIND: RpcKind;
+    const REVISION: u32 = 1;
+    type Params: Serialize + DeserializeOwned;
+    type Output: Serialize + DeserializeOwned;
+}
+
+pub const fn method_descriptor<M: RpcMethod>() -> RpcMethodDescriptor {
+    RpcMethodDescriptor {
+        name: M::NAME,
+        kind: M::KIND,
+        revision: M::REVISION,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     #[schema(value_type = Option<Object>)]
@@ -61,9 +169,16 @@ impl JsonRpcRequest {
             params: Some(params),
         }
     }
+
+    pub fn for_method<M: RpcMethod>(
+        id: impl Into<serde_json::Value>,
+        params: &M::Params,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(id, M::NAME, serde_json::to_value(params)?))
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     #[schema(value_type = Option<Object>)]
@@ -93,9 +208,20 @@ impl JsonRpcResponse {
             error: Some(error),
         }
     }
+
+    pub fn into_method_output<M: RpcMethod>(self) -> Result<M::Output, JsonRpcError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        let result = self
+            .result
+            .ok_or_else(|| JsonRpcError::internal("JSON-RPC response has no result"))?;
+        serde_json::from_value(result)
+            .map_err(|error| JsonRpcError::internal(format!("invalid {} result: {error}", M::NAME)))
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize, thiserror::Error, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error, ToSchema)]
 #[error("json-rpc error {code}: {message}")]
 pub struct JsonRpcError {
     pub code: i32,
@@ -155,6 +281,7 @@ impl JsonRpcError {
 }
 
 pub mod methods {
+    pub const DAEMON_CAPABILITIES: &str = "daemon.capabilities";
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const LIST_SESSIONS: &str = "list_sessions";
@@ -165,6 +292,98 @@ pub mod methods {
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
     pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
     pub const PING: &str = "ping";
+
+    pub const ALL: &[super::RpcMethodDescriptor] = &[
+        super::method_descriptor::<super::rpc::DaemonCapabilities>(),
+        super::method_descriptor::<super::rpc::Ping>(),
+        super::method_descriptor::<super::rpc::ListSessions>(),
+        super::method_descriptor::<super::rpc::RenameSession>(),
+        super::method_descriptor::<super::rpc::RunFlow>(),
+        super::method_descriptor::<super::rpc::CancelRun>(),
+        super::method_descriptor::<super::rpc::GetEvents>(),
+        super::method_descriptor::<super::rpc::ResolvePrompt>(),
+        super::method_descriptor::<super::rpc::ListPermissionRequests>(),
+        super::method_descriptor::<super::rpc::CreatePermissionGroup>(),
+        super::method_descriptor::<super::rpc::ResolvePermissionRequests>(),
+    ];
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct EmptyParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PingResponse {
+    pub pong: bool,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct CapabilitiesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<ClientId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct MethodCapability {
+    pub name: String,
+    pub kind: RpcKind,
+    pub revision: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ProtocolLimits {
+    pub max_event_page_size: usize,
+    pub subscriber_buffer: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct CapabilitiesResponse {
+    pub protocol_version: u32,
+    pub daemon_version: String,
+    pub daemon_generation: DaemonGeneration,
+    pub event_schema_version: u32,
+    pub methods: Vec<MethodCapability>,
+    pub limits: ProtocolLimits,
+}
+
+impl CapabilitiesResponse {
+    pub fn supports<M: RpcMethod>(&self) -> bool {
+        self.methods
+            .iter()
+            .any(|method| method.name == M::NAME && method.revision >= M::REVISION)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ListSessionsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RenameSessionRequest {
+    pub session_id: SessionId,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CancelRunResponse {
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResolvePromptResponse {
+    pub resolved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -340,6 +559,118 @@ pub struct ResolvePermissionRequestsResponse {
     pub resolutions: Vec<PermissionResolutionView>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ServerEventEnvelope {
+    pub schema_version: u32,
+    pub cursor: EventCursor,
+    #[schema(value_type = Object)]
+    pub event: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GetEventsResponse {
+    pub events: Vec<ServerEventEnvelope>,
+    pub next_cursor: EventCursor,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreatePermissionGroupResponse {
+    pub group_id: Uuid,
+    pub request_ids: Vec<Uuid>,
+    pub revision: u64,
+    pub label: String,
+}
+
+pub mod rpc {
+    use super::*;
+
+    macro_rules! method {
+        ($marker:ident, $name:expr, $kind:ident, $params:ty, $output:ty) => {
+            pub struct $marker;
+
+            impl RpcMethod for $marker {
+                const NAME: &'static str = $name;
+                const KIND: RpcKind = RpcKind::$kind;
+                type Params = $params;
+                type Output = $output;
+            }
+        };
+    }
+
+    method!(
+        DaemonCapabilities,
+        methods::DAEMON_CAPABILITIES,
+        Query,
+        CapabilitiesRequest,
+        CapabilitiesResponse
+    );
+    method!(Ping, methods::PING, Query, EmptyParams, PingResponse);
+    method!(
+        ListSessions,
+        methods::LIST_SESSIONS,
+        Query,
+        ListSessionsRequest,
+        Vec<SessionSummary>
+    );
+    method!(
+        RenameSession,
+        methods::RENAME_SESSION,
+        Command,
+        RenameSessionRequest,
+        SessionSummary
+    );
+    method!(
+        RunFlow,
+        methods::RUN_FLOW,
+        Command,
+        RunFlowRequest,
+        RunFlowResponse
+    );
+    method!(
+        CancelRun,
+        methods::CANCEL_RUN,
+        Command,
+        CancelRunRequest,
+        CancelRunResponse
+    );
+    method!(
+        GetEvents,
+        methods::GET_EVENTS,
+        Query,
+        GetEventsRequest,
+        GetEventsResponse
+    );
+    method!(
+        ResolvePrompt,
+        methods::RESOLVE_PROMPT,
+        Command,
+        ResolvePromptRequest,
+        ResolvePromptResponse
+    );
+    method!(
+        ListPermissionRequests,
+        methods::LIST_PERMISSION_REQUESTS,
+        Query,
+        ListPermissionRequestsRequest,
+        ListPermissionRequestsResponse
+    );
+    method!(
+        CreatePermissionGroup,
+        methods::CREATE_PERMISSION_GROUP,
+        Command,
+        CreatePermissionGroupRequest,
+        CreatePermissionGroupResponse
+    );
+    method!(
+        ResolvePermissionRequests,
+        methods::RESOLVE_PERMISSION_REQUESTS,
+        Command,
+        ResolvePermissionRequestsRequest,
+        ResolvePermissionRequestsResponse
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +712,66 @@ mod tests {
             serde_json::to_string(&SessionStatus::Running).unwrap(),
             "\"running\""
         );
+    }
+
+    #[test]
+    fn method_registry_is_unique_and_complete() {
+        let names: std::collections::BTreeSet<_> = methods::ALL
+            .iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+        assert_eq!(names.len(), methods::ALL.len());
+        assert!(names.contains(methods::DAEMON_CAPABILITIES));
+        assert!(names.contains(methods::GET_EVENTS));
+        assert!(methods::ALL.iter().all(|method| method.revision > 0));
+    }
+
+    #[test]
+    fn typed_request_and_response_round_trip() {
+        let request = JsonRpcRequest::for_method::<rpc::ListSessions>(
+            7,
+            &ListSessionsRequest {
+                project_root: Some("/workspace".into()),
+                search: None,
+                limit: Some(10),
+            },
+        )
+        .unwrap();
+        assert_eq!(request.method, methods::LIST_SESSIONS);
+
+        let response = JsonRpcResponse::ok(
+            request.id,
+            serde_json::to_value(Vec::<SessionSummary>::new()).unwrap(),
+        );
+        assert!(
+            response
+                .into_method_output::<rpc::ListSessions>()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn capabilities_match_method_revision() {
+        let capabilities = CapabilitiesResponse {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "test".into(),
+            daemon_generation: DaemonGeneration("generation".into()),
+            event_schema_version: EVENT_SCHEMA_VERSION,
+            methods: methods::ALL
+                .iter()
+                .map(|method| MethodCapability {
+                    name: method.name.into(),
+                    kind: method.kind,
+                    revision: method.revision,
+                })
+                .collect(),
+            limits: ProtocolLimits {
+                max_event_page_size: 100,
+                subscriber_buffer: 64,
+            },
+        };
+        assert!(capabilities.supports::<rpc::DaemonCapabilities>());
+        assert!(capabilities.supports::<rpc::ResolvePermissionRequests>());
     }
 }
