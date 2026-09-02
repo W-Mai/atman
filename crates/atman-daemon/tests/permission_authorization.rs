@@ -117,12 +117,13 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
             .any(|request| request.request_id == request_pending.request.request_id.0)
     );
 
-    let group = dispatch_as(
-        state.clone(),
+    let create_request_id = atman_proto::RequestId::now();
+    let create_group = |id| {
         JsonRpcRequest::new(
-            2,
+            id,
             methods::CREATE_PERMISSION_GROUP,
             serde_json::json!({
+                "request_id": create_request_id,
                 "session_id": session_id,
                 "request_ids": [group_pending.request.request_id.0],
                 "expected_request_revisions": {
@@ -130,14 +131,15 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
                 },
                 "label": "grouped shell"
             }),
-        ),
-        "alice",
-    )
-    .await;
+        )
+    };
+    let group = dispatch_as(state.clone(), create_group(2), "alice").await;
     assert!(group.error.is_none(), "group creation failed: {group:?}");
     let group = group.result.unwrap();
     let group_id: Uuid = serde_json::from_value(group["group_id"].clone()).unwrap();
     let group_revision: u64 = serde_json::from_value(group["revision"].clone()).unwrap();
+    let group_retry = dispatch_as(state.clone(), create_group(20), "alice").await;
+    assert_eq!(group_retry.result.unwrap(), group);
 
     let stale_group = dispatch_as(
         state.clone(),
@@ -196,11 +198,13 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
         "stale request revision must fail"
     );
 
+    let resolve_request_id = atman_proto::RequestId::now();
     let request_json = |id| {
         JsonRpcRequest::new(
             id,
             methods::RESOLVE_PERMISSION_REQUESTS,
             serde_json::json!({
+                "request_id": resolve_request_id,
                 "session_id": session_id,
                 "selector": {"request_ids": [request_pending.request.request_id.0], "expected_request_revisions": {request_pending.request.request_id.0.to_string(): request_pending.request.revision}},
                 "action": "deny"
@@ -211,14 +215,9 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
         dispatch_as(state.clone(), request_json(6), "alice"),
         dispatch_as(state.clone(), request_json(7), "alice")
     );
-    assert_eq!(
-        [first.error.is_none(), second.error.is_none()]
-            .into_iter()
-            .filter(|succeeded| *succeeded)
-            .count(),
-        1,
-        "a request must resolve exactly once"
-    );
+    assert!(first.error.is_none(), "first retry failed: {first:?}");
+    assert!(second.error.is_none(), "second retry failed: {second:?}");
+    assert_eq!(first.result, second.result);
 
     let mut saw_created = false;
     let mut saw_resolved = false;

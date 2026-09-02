@@ -239,6 +239,7 @@ dependencies = [
  "atman-proto",
  "atman-runtime",
  "axum",
+ "blake3",
  "chrono",
  "futures",
  "libc",

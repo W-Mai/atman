@@ -19,7 +19,7 @@ struct CommandKey {
 
 struct Entry {
     method: Arc<str>,
-    params: serde_json::Value,
+    fingerprint: blake3::Hash,
     outcome: watch::Sender<Option<CommandOutcome>>,
 }
 
@@ -52,17 +52,22 @@ impl IdempotencyRegistry {
         }
     }
 
-    pub async fn execute<F>(
+    pub async fn execute<P, F>(
         &self,
         principal: impl Into<Arc<str>>,
         request_id: RequestId,
         method: impl Into<Arc<str>>,
-        params: serde_json::Value,
+        params: &P,
         operation: F,
     ) -> CommandOutcome
     where
+        P: serde::Serialize + ?Sized,
         F: Future<Output = CommandOutcome> + Send + 'static,
     {
+        let encoded = serde_json::to_vec(params).map_err(|error| {
+            JsonRpcError::internal(format!("could not fingerprint command parameters: {error}"))
+        })?;
+        let fingerprint = blake3::hash(&encoded);
         let key = CommandKey {
             principal: principal.into(),
             request_id,
@@ -71,7 +76,7 @@ impl IdempotencyRegistry {
         let (mut outcome, is_new) = {
             let mut inner = self.inner.lock().unwrap();
             if let Some(entry) = inner.entries.get(&key) {
-                if entry.method != method || entry.params != params {
+                if entry.method != method || entry.fingerprint != fingerprint {
                     return Err(JsonRpcError::invalid_params(format!(
                         "request_id {} was already used for a different command",
                         key.request_id
@@ -84,7 +89,7 @@ impl IdempotencyRegistry {
                     key.clone(),
                     Entry {
                         method,
-                        params,
+                        fingerprint,
                         outcome: tx,
                     },
                 );
@@ -172,7 +177,7 @@ mod tests {
                         "principal",
                         request_id,
                         "session.submit",
-                        serde_json::json!({"message": "hello"}),
+                        &serde_json::json!({"message": "hello"}),
                         async move {
                             calls.fetch_add(1, Ordering::SeqCst);
                             let _ = started.send(());
@@ -192,7 +197,7 @@ mod tests {
                         "principal",
                         request_id,
                         "session.submit",
-                        serde_json::json!({"message": "hello"}),
+                        &serde_json::json!({"message": "hello"}),
                         async {
                             panic!("duplicate operation must not execute");
                         },
@@ -218,7 +223,7 @@ mod tests {
                 "principal",
                 request_id.clone(),
                 "session.rename",
-                serde_json::json!({"title": "one"}),
+                &serde_json::json!({"title": "one"}),
                 async { Ok(serde_json::json!({"title": "one"})) },
             )
             .await
@@ -228,7 +233,7 @@ mod tests {
                 "principal",
                 request_id,
                 "session.rename",
-                serde_json::json!({"title": "two"}),
+                &serde_json::json!({"title": "two"}),
                 async { Ok(serde_json::Value::Null) },
             )
             .await
@@ -246,7 +251,7 @@ mod tests {
                     "principal",
                     request_id,
                     "command",
-                    serde_json::Value::Null,
+                    &serde_json::Value::Null,
                     async { Ok(serde_json::Value::Null) },
                 )
                 .await
@@ -254,7 +259,7 @@ mod tests {
         }
         let calls = Arc::new(AtomicUsize::new(0));
         registry
-            .execute("principal", first, "command", serde_json::Value::Null, {
+            .execute("principal", first, "command", &serde_json::Value::Null, {
                 let calls = calls.clone();
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);

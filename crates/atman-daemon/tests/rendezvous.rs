@@ -12,16 +12,18 @@ async fn resolve_prompt_wakes_registered_waiter() {
 
     let pid = PromptId(Uuid::now_v7());
     let rx = state.register_pending_prompt(pid.clone());
+    let command = atman_proto::ResolvePromptRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        prompt_id: pid,
+        answer: serde_json::json!({"choice": "yes"}),
+    };
 
     let state_rpc = state.clone();
-    let pid_rpc = pid.clone();
+    let command_rpc = command.clone();
     let rpc_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(30)).await;
-        let req = JsonRpcRequest::new(
-            1,
-            methods::RESOLVE_PROMPT,
-            serde_json::json!({"prompt_id": pid_rpc, "answer": {"choice": "yes"}}),
-        );
+        let req =
+            JsonRpcRequest::for_method::<atman_proto::rpc::ResolvePrompt>(1, &command_rpc).unwrap();
         dispatch(state_rpc, req).await
     });
 
@@ -33,6 +35,13 @@ async fn resolve_prompt_wakes_registered_waiter() {
 
     let resp = rpc_task.await.unwrap();
     assert_eq!(resp.result.unwrap()["resolved"], serde_json::json!(true));
+
+    let retry = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::ResolvePrompt>(2, &command).unwrap(),
+    )
+    .await;
+    assert_eq!(retry.result.unwrap()["resolved"], serde_json::json!(true));
 }
 
 #[tokio::test]

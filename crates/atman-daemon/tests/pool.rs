@@ -28,7 +28,7 @@ async fn cancel_run_hits_matching_live_session() {
     let cancel = CancellationToken::new();
     state
         .register_session_run(
-            sid,
+            sid.clone(),
             session,
             LiveRun {
                 run_id: run_id.clone(),
@@ -44,15 +44,25 @@ async fn cancel_run_hits_matching_live_session() {
     assert!(!state.cancel_run(&run_id, "mallory").await.unwrap());
     assert!(!cancel.is_cancelled());
 
-    let req = JsonRpcRequest::new(
-        1,
-        methods::CANCEL_RUN,
-        serde_json::json!({"run_id": run_id}),
-    );
+    let request_id = atman_proto::RequestId::now();
+    let command = atman_proto::CancelRunRequest {
+        request_id: Some(request_id),
+        run_id: run_id.clone(),
+    };
+    let req = JsonRpcRequest::for_method::<atman_proto::rpc::CancelRun>(1, &command).unwrap();
     let resp = dispatch(state.clone(), req).await;
     let result = resp.result.expect("cancel_run returns result");
     assert_eq!(result["cancelled"], serde_json::json!(true));
     assert!(cancel.is_cancelled());
+
+    assert!(state.finish_run(&sid, &run_id));
+    wait_until_finished(&state, &sid).await;
+    let retry = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::CancelRun>(2, &command).unwrap(),
+    )
+    .await;
+    assert_eq!(retry.result.unwrap()["cancelled"], serde_json::json!(true));
 }
 
 #[tokio::test]

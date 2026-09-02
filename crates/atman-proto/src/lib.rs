@@ -398,6 +398,8 @@ pub struct ResolvePromptResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RunFlowRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     pub flow_path: String,
     #[serde(default)]
     #[schema(value_type = Object)]
@@ -423,6 +425,8 @@ pub struct RunFlowResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CancelRunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     pub run_id: FlowRunId,
 }
 
@@ -467,6 +471,8 @@ pub struct GetEventsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePromptRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     pub prompt_id: PromptId,
     #[schema(value_type = Object)]
     pub answer: serde_json::Value,
@@ -479,6 +485,8 @@ pub struct ListPermissionRequestsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreatePermissionGroupRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub request_ids: Vec<Uuid>,
     pub expected_request_revisions: std::collections::BTreeMap<Uuid, u64>,
@@ -523,6 +531,8 @@ pub enum PermissionRpcSelector {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePermissionRequestsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub selector: PermissionRpcSelector,
     pub action: PermissionRpcAction,
@@ -725,6 +735,7 @@ mod tests {
         let s = r#"{"flow_path":"examples/hello.at"}"#;
         let req: RunFlowRequest = serde_json::from_str(s).unwrap();
         assert_eq!(req.flow_path, "examples/hello.at");
+        assert!(req.request_id.is_none());
         assert!(req.args.is_empty());
         assert!(req.reasoning.is_none());
         assert!(req.images.is_empty());

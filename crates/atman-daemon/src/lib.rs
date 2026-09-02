@@ -2,10 +2,11 @@ use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
-    PermissionRpcScope, PingResponse, ProtocolLimits, ResolvePromptResponse, RpcMethod,
+    PermissionRpcScope, PingResponse, ProtocolLimits, RequestId, ResolvePromptResponse, RpcMethod,
     RpcMethodDescriptor, RunFlowResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
+use std::future::Future;
 use std::sync::Arc;
 
 fn permission_action(action: PermissionRpcAction) -> atman_runtime::permission::PermissionAction {
@@ -54,6 +55,42 @@ fn method_response<M: RpcMethod>(
         Ok(value) => JsonRpcResponse::ok(id, value),
         Err(error) => JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string())),
     }
+}
+
+async fn execute_command<M, F>(
+    state: &DaemonState,
+    principal_id: &str,
+    request_id: Option<RequestId>,
+    params: &M::Params,
+    operation: F,
+) -> Result<M::Output, JsonRpcError>
+where
+    M: RpcMethod,
+    F: Future<Output = Result<M::Output, JsonRpcError>> + Send + 'static,
+{
+    let encoded = state
+        .idempotency
+        .execute(
+            principal_id,
+            request_id.unwrap_or_else(RequestId::now),
+            M::NAME,
+            params,
+            async move {
+                serde_json::to_value(operation.await?).map_err(|error| {
+                    JsonRpcError::internal(format!(
+                        "could not encode {} command result: {error}",
+                        M::NAME
+                    ))
+                })
+            },
+        )
+        .await?;
+    serde_json::from_value(encoded).map_err(|error| {
+        JsonRpcError::internal(format!(
+            "could not decode cached {} command result: {error}",
+            M::NAME
+        ))
+    })
 }
 
 pub mod bootstrap;
@@ -160,49 +197,28 @@ pub async fn dispatch_as(
         },
         methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
             Ok(params) if !params.title.trim().is_empty() => {
-                let request_id = params
-                    .request_id
-                    .clone()
-                    .unwrap_or_else(atman_proto::RequestId::now);
-                let fingerprint = match serde_json::to_value(&params) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return JsonRpcResponse::err(
-                            id,
-                            JsonRpcError::internal(format!(
-                                "could not encode rename_session command: {error}"
-                            )),
-                        );
-                    }
-                };
                 let operation_state = state.clone();
                 let operation_principal = principal_id.to_owned();
-                let outcome = state
-                    .idempotency
-                    .execute(
-                        principal_id,
-                        request_id,
-                        methods::RENAME_SESSION,
-                        fingerprint,
-                        async move {
-                            let summary = operation_state
-                                .rename_session(
-                                    &params.session_id,
-                                    &params.title,
-                                    &operation_principal,
-                                )
-                                .await
-                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
-                            serde_json::to_value(summary).map_err(|error| {
-                                JsonRpcError::internal(format!(
-                                    "could not encode rename_session result: {error}"
-                                ))
-                            })
-                        },
-                    )
-                    .await;
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::RenameSession, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .rename_session(
+                                &operation_params.session_id,
+                                &operation_params.title,
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await;
                 match outcome {
-                    Ok(result) => JsonRpcResponse::ok(id, result),
+                    Ok(result) => method_response::<rpc::RenameSession>(id, result),
                     Err(error) => JsonRpcResponse::err(id, error),
                 }
             }
@@ -212,14 +228,29 @@ pub async fn dispatch_as(
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {
-            Ok(p) => match state.cancel_run(&p.run_id, principal_id).await {
-                Ok(cancelled) => {
-                    method_response::<rpc::CancelRun>(id, CancelRunResponse { cancelled })
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::CancelRun, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .cancel_run(&operation_params.run_id, &operation_principal)
+                            .await
+                            .map(|cancelled| CancelRunResponse { cancelled })
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::CancelRun>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
                 }
-                Err(error) => {
-                    JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
-                }
-            },
+            }
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::GET_EVENTS => match parse_params::<rpc::GetEvents>(req.params) {
@@ -277,9 +308,28 @@ pub async fn dispatch_as(
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::RESOLVE_PROMPT => match parse_params::<rpc::ResolvePrompt>(req.params) {
-            Ok(p) => {
-                let resolved = state.resolve_prompt(&p.prompt_id, p.answer);
-                method_response::<rpc::ResolvePrompt>(id, ResolvePromptResponse { resolved })
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_params = params.clone();
+                match execute_command::<rpc::ResolvePrompt, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        Ok(ResolvePromptResponse {
+                            resolved: operation_state.resolve_prompt(
+                                &operation_params.prompt_id,
+                                operation_params.answer,
+                            ),
+                        })
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::ResolvePrompt>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
@@ -299,30 +349,62 @@ pub async fn dispatch_as(
         }
         methods::CREATE_PERMISSION_GROUP => {
             match parse_params::<rpc::CreatePermissionGroup>(req.params) {
-                Ok(p) => match state.create_permission_group(p, principal_id).await {
-                    Ok(response) => method_response::<rpc::CreatePermissionGroup>(id, response),
-                    Err(error) => {
-                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::CreatePermissionGroup, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            operation_state
+                                .create_permission_group(operation_params, &operation_principal)
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await
+                    {
+                        Ok(response) => method_response::<rpc::CreatePermissionGroup>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
                     }
-                },
+                }
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
         methods::RESOLVE_PERMISSION_REQUESTS => {
             match parse_params::<rpc::ResolvePermissionRequests>(req.params) {
-                Ok(p) => {
-                    let action = permission_action(p.action.clone());
-                    let scope = permission_scope(p.scope.clone());
-                    match state
-                        .resolve_permission_requests(p, principal_id, action, scope)
-                        .await
+                Ok(params) => {
+                    let action = permission_action(params.action.clone());
+                    let scope = permission_scope(params.scope.clone());
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::ResolvePermissionRequests, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            operation_state
+                                .resolve_permission_requests(
+                                    operation_params,
+                                    &operation_principal,
+                                    action,
+                                    scope,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await
                     {
                         Ok(response) => {
                             method_response::<rpc::ResolvePermissionRequests>(id, response)
                         }
-                        Err(error) => {
-                            JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
-                        }
+                        Err(error) => JsonRpcResponse::err(id, error),
                     }
                 }
                 Err(error) => JsonRpcResponse::err(id, error),
@@ -336,35 +418,44 @@ pub async fn dispatch_as(
                 );
             };
             match parse_params::<rpc::RunFlow>(req.params) {
-                Ok(p) => {
-                    let args: Vec<(String, atman_runtime::Value)> = p
-                        .args
-                        .into_iter()
-                        .map(|(k, v)| (k, atman_runtime::Value::from_json(v)))
-                        .collect();
-                    match launcher
-                        .spawn_as_with_options(
-                            state.clone(),
-                            &p.flow_path,
-                            args,
-                            principal_id,
-                            crate::run::RunOptions {
-                                reasoning: p.reasoning,
-                                images: p.images,
-                            },
-                        )
-                        .await
-                    {
-                        Ok(spawned) => method_response::<rpc::RunFlow>(
-                            id,
-                            RunFlowResponse {
-                                session_id: spawned.session_id,
-                                run_id: spawned.run_id,
-                            },
-                        ),
-                        Err(e) => {
-                            JsonRpcResponse::err(id, JsonRpcError::application(e.to_string()))
-                        }
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    let outcome = execute_command::<rpc::RunFlow, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let args: Vec<(String, atman_runtime::Value)> = operation_params
+                                .args
+                                .into_iter()
+                                .map(|(k, v)| (k, atman_runtime::Value::from_json(v)))
+                                .collect();
+                            launcher
+                                .spawn_as_with_options(
+                                    operation_state,
+                                    &operation_params.flow_path,
+                                    args,
+                                    &operation_principal,
+                                    crate::run::RunOptions {
+                                        reasoning: operation_params.reasoning,
+                                        images: operation_params.images,
+                                    },
+                                )
+                                .await
+                                .map(|spawned| RunFlowResponse {
+                                    session_id: spawned.session_id,
+                                    run_id: spawned.run_id,
+                                })
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(response) => method_response::<rpc::RunFlow>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
                     }
                 }
                 Err(error) => JsonRpcResponse::err(id, error),

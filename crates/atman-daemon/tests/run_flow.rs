@@ -55,9 +55,17 @@ async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
 async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
 
-    let launcher =
-        Arc::new(RunLauncher::new(std::env::current_dir().unwrap(), None, None).unwrap());
+    let launcher = Arc::new(
+        RunLauncher::new(std::env::current_dir().unwrap(), Some(config_dir), None).unwrap(),
+    );
     state.set_launcher(launcher);
 
     let flow_path = repo_root().join("examples/hello.at");
@@ -67,24 +75,31 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
         flow_path.display()
     );
 
-    let req = JsonRpcRequest::new(
-        1,
-        methods::RUN_FLOW,
-        serde_json::json!({
-            "flow_path": flow_path.to_string_lossy(),
-            "reasoning": "high@pro",
-            "images": [{
-                "data_base64": "iVBORw0KGgo=",
-                "name": "daemon-input.png"
-            }]
-        }),
-    );
+    let command = atman_proto::RunFlowRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        flow_path: flow_path.to_string_lossy().into_owned(),
+        args: serde_json::Map::new(),
+        reasoning: Some("high@pro".into()),
+        images: vec![atman_proto::InlineImage {
+            data_base64: "iVBORw0KGgo=".into(),
+            name: Some("daemon-input.png".into()),
+        }],
+    };
+    let req = JsonRpcRequest::for_method::<atman_proto::rpc::RunFlow>(1, &command).unwrap();
     let resp = dispatch(state.clone(), req).await;
-    let result = resp.result.expect("run_flow ok");
-    let sid_val = result["session_id"]
-        .as_str()
-        .expect("session_id")
-        .to_string();
+    let result = resp
+        .into_method_output::<atman_proto::rpc::RunFlow>()
+        .expect("run_flow ok");
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::RunFlow>(2, &command).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::RunFlow>()
+    .expect("run_flow retry ok");
+    assert_eq!(retry.session_id, result.session_id);
+    assert_eq!(retry.run_id, result.run_id);
+    let sid_val = result.session_id.to_string();
     assert!(!sid_val.is_empty());
 
     let sessions_root = tmp.path().join("sessions");
