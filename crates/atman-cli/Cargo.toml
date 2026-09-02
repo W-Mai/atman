@@ -27,6 +27,7 @@ path = "src/main.rs"
 
 [dependencies]
 atman-dsl      = { path = "../atman-dsl", version = "1.10.0" }
+atman-client   = { path = "../atman-client", version = "1.10.0" }
 atman-runtime  = { path = "../atman-runtime", version = "1.10.0" }
 atman-daemon   = { path = "../atman-daemon", version = "1.10.0" }
 atman-proto    = { path = "../atman-proto", version = "1.10.0" }

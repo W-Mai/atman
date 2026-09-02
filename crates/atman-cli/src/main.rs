@@ -466,7 +466,12 @@ async fn cmd_daemon_run(
     let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
         .load_or_init_daemon_config()?;
     let base = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::new();
+    let client = atman_client::Client::connect(
+        atman_client::HttpTransport::new(&base, &cfg.auth_token)?,
+        atman_client::ClientIdentity::new("atman-cli", env!("CARGO_PKG_VERSION")),
+    )
+    .await
+    .with_context(|| format!("connect to {base} (is atman-daemon running?)"))?;
 
     let abs = if file.is_absolute() {
         file.clone()
@@ -480,48 +485,39 @@ async fn cmd_daemon_run(
             let source = atman_runtime::attachment_store::AttachmentStore::at("")
                 .import_path(&path)
                 .with_context(|| format!("reading image {}", path.display()))?;
-            Ok(serde_json::json!({
-                "data_base64": atman_runtime::attachment_store::image_base64(&source)?,
-                "name": path.file_name().and_then(|name| name.to_str()),
-            }))
+            Ok(atman_proto::InlineImage {
+                data_base64: atman_runtime::attachment_store::image_base64(&source)?,
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned),
+            })
         })
         .collect::<Result<Vec<_>>>()?;
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "run_flow",
-        "params": {
-            "flow_path": abs.to_string_lossy(),
-            "reasoning": reasoning,
-            "images": images,
-        }
-    });
-    let resp = client
-        .post(format!("{base}/rpc"))
-        .bearer_auth(&cfg.auth_token)
-        .json(&body)
-        .send()
+    let run = client
+        .call::<atman_proto::rpc::RunFlow>(&atman_proto::RunFlowRequest {
+            flow_path: abs.to_string_lossy().into_owned(),
+            args: serde_json::Map::new(),
+            reasoning,
+            images,
+        })
         .await
-        .with_context(|| format!("POST {base}/rpc (is atman-daemon running?)"))?;
-    if !resp.status().is_success() {
-        bail!("daemon returned HTTP {}", resp.status());
-    }
-    let out: serde_json::Value = resp.json().await?;
-    if let Some(err) = out.get("error") {
-        bail!("daemon rpc error: {err}");
-    }
-    let sid = out["result"]["session_id"]
-        .as_str()
-        .context("no session_id in response")?
-        .to_string();
-    let rid = out["result"]["run_id"].as_str().unwrap_or("");
-    println!("session_id: {sid}");
-    println!("run_id:     {rid}");
+        .context("start daemon flow")?;
+    println!("session_id: {}", run.session_id);
+    println!("run_id:     {}", run.run_id);
 
     if !follow {
         return Ok(());
     }
-    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, None, true).await?;
+    stream_daemon_events(
+        &reqwest::Client::new(),
+        &base,
+        &cfg.auth_token,
+        &run.session_id.to_string(),
+        None,
+        true,
+    )
+    .await?;
     Ok(())
 }
 

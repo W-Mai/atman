@@ -189,6 +189,7 @@ name = "atman-cli"
 version = "1.10.0"
 dependencies = [
  "anyhow",
+ "atman-client",
  "atman-daemon",
  "atman-dsl",
  "atman-proto",
