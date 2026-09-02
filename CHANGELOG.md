@@ -17,6 +17,7 @@ All notable changes to atman are documented in this file.
 
 - **Spawned message stream roles** — assistant messages appended to isolated child context emit assistant frames instead of tool-result frames, keeping root and child document-flow projection equivalent.
 - **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.
+- **Tool document rendering** — thinking and nested tool rows fill their surfaces, dispatch sections keep a stable gap from following prose, running rows animate foreground without relayout, edit metrics use semantic colors, and right-side controls keep a fixed alignment slot.
 
 ## [1.10.0] — 2026-09-02
 

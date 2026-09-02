@@ -99,6 +99,11 @@ impl Deref for ThemeColor {
 pub struct Theme {
     pub mode: ThemeMode,
     pub code_bg: ThemeColor,
+    pub work_bg: ThemeColor,
+    pub work_detail_bg: ThemeColor,
+    pub work_output_bg: ThemeColor,
+    pub work_hover_bg: ThemeColor,
+    pub activity_bg: ThemeColor,
     pub user_msg_bg: ThemeColor,
     pub note_info_bg: ThemeColor,
     pub note_warn_bg: ThemeColor,
@@ -125,6 +130,11 @@ impl Theme {
         Self {
             mode: ThemeMode::Dark,
             code_bg: ThemeColor(Color::Rgb(22, 24, 28)),
+            work_bg: ThemeColor(Color::Rgb(28, 30, 36)),
+            work_detail_bg: ThemeColor(Color::Rgb(23, 25, 31)),
+            work_output_bg: ThemeColor(Color::Rgb(18, 20, 25)),
+            work_hover_bg: ThemeColor(Color::Rgb(35, 39, 47)),
+            activity_bg: ThemeColor(Color::Rgb(18, 32, 22)),
             user_msg_bg: ThemeColor(Color::Rgb(38, 42, 54)),
             note_info_bg: ThemeColor(Color::Rgb(20, 26, 34)),
             note_warn_bg: ThemeColor(Color::Rgb(38, 30, 16)),
@@ -151,6 +161,11 @@ impl Theme {
         Self {
             mode: ThemeMode::Light,
             code_bg: ThemeColor(Color::Rgb(240, 240, 240)),
+            work_bg: ThemeColor(Color::Rgb(232, 232, 236)),
+            work_detail_bg: ThemeColor(Color::Rgb(222, 225, 232)),
+            work_output_bg: ThemeColor(Color::Rgb(246, 247, 249)),
+            work_hover_bg: ThemeColor(Color::Rgb(210, 220, 232)),
+            activity_bg: ThemeColor(Color::Rgb(210, 240, 210)),
             user_msg_bg: ThemeColor(Color::Rgb(220, 225, 235)),
             note_info_bg: ThemeColor(Color::Rgb(220, 232, 244)),
             note_warn_bg: ThemeColor(Color::Rgb(248, 236, 210)),
@@ -317,5 +332,14 @@ mod tests {
         assert_eq!(ThemeColor(Color::Cyan).rgb(), (40, 180, 180));
         assert_eq!(ThemeColor(Color::White).rgb(), (240, 240, 240));
         assert_eq!(ThemeColor(Color::Black).rgb(), (16, 16, 16));
+    }
+
+    #[test]
+    fn document_flow_layers_are_distinct_in_every_theme() {
+        for theme in [Theme::dark(), Theme::light()] {
+            assert_ne!(theme.work_bg, theme.work_detail_bg);
+            assert_ne!(theme.work_detail_bg, theme.work_output_bg);
+            assert_ne!(theme.work_bg, theme.work_hover_bg);
+        }
     }
 }
