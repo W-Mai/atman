@@ -194,3 +194,11 @@ pub fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
         .map(|records| context_snapshot_from_records(&records))
         .unwrap_or_default()
 }
+
+pub fn context_snapshot_from_envelopes(events: &[EventEnvelope]) -> ContextSnapshot {
+    let mut snapshot = ContextSnapshot::default();
+    for envelope in events {
+        apply_context_record(&mut snapshot, &envelope.event);
+    }
+    snapshot
+}

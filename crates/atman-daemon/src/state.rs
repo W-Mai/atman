@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use atman_proto::{FlowRunId, PromptId, SessionId, SessionStatus, SessionSummary};
+use atman_proto::{
+    DaemonGeneration, EventCursor, FlowRunId, PromptId, SNAPSHOT_SCHEMA_VERSION, SessionId,
+    SessionSnapshot, SessionStatus, SessionSummary,
+};
 use atman_runtime::event::{Event, EventSink};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -216,6 +219,38 @@ impl DaemonState {
                 .join("events.jsonl")
                 .is_file(),
         }
+    }
+
+    pub async fn session_snapshot(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<SessionSnapshot> {
+        let actor = self.sessions.lock().unwrap().get(id).cloned();
+        let (cursor, projection) = if let Some(actor) = actor {
+            anyhow::ensure!(
+                actor.owns(principal),
+                "session {id} is owned by another principal"
+            );
+            actor.snapshot().await?
+        } else {
+            let session_dir = self.sessions_root().join(id.to_string());
+            let projection =
+                crate::projection::load_historical_projection(id.clone(), &session_dir).await?;
+            let config_dir = self
+                .launcher()
+                .and_then(|launcher| launcher.config_dir.clone());
+            let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
+            let projection =
+                crate::projection::redacted_projection(&projection, redactor.as_deref())?;
+            (EventCursor(projection.revision.0), projection)
+        };
+        Ok(SessionSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
+            cursor,
+            projection,
+        })
     }
 
     pub fn finish_run(&self, session_id: &SessionId, run_id: &FlowRunId) -> bool {

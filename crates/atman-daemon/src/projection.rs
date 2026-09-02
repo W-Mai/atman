@@ -74,6 +74,67 @@ impl SessionProjector {
         self.last_runtime_seq
     }
 
+    pub(crate) fn snapshot(&self) -> SessionProjection {
+        self.projection.clone()
+    }
+
+    pub(crate) fn rebase_after_rebuild(&mut self, previous_revision: Revision) {
+        self.projection.revision = Revision(previous_revision.0.saturating_add(1));
+    }
+
+    pub(crate) fn reconcile_disconnected(&mut self) -> Option<ProjectionDelta> {
+        let mut changes = Vec::new();
+        for run in &mut self.projection.runs {
+            if matches!(
+                run.state,
+                RunLifecycle::Queued
+                    | RunLifecycle::Starting
+                    | RunLifecycle::Running
+                    | RunLifecycle::WaitingInput
+                    | RunLifecycle::Cancelling
+            ) {
+                run.state = RunLifecycle::Lost;
+                changes.push(ProjectionChange::RunUpsert { run: run.clone() });
+            }
+        }
+        for resource in &mut self.projection.resources {
+            if matches!(
+                resource.state,
+                ResourceState::Starting | ResourceState::Running | ResourceState::Terminating
+            ) {
+                resource.state = ResourceState::Orphaned;
+                changes.push(ProjectionChange::ResourceUpsert {
+                    resource: resource.clone(),
+                });
+            }
+        }
+
+        let previous_interactions = self.projection.interactions.clone();
+        self.projection.interactions.prompts.clear();
+        self.projection.interactions.forms.clear();
+        self.projection.interactions.compact_review = None;
+        for approval in &mut self.projection.interactions.approvals {
+            if matches!(
+                approval.state,
+                ApprovalState::Evaluating | ApprovalState::Pending
+            ) {
+                approval.state = ApprovalState::Cancelled;
+            }
+        }
+        if self.projection.interactions != previous_interactions {
+            changes.push(ProjectionChange::InteractionsSet {
+                interactions: self.projection.interactions.clone(),
+            });
+        }
+        if self.projection.lifecycle != SessionLifecycle::Idle {
+            self.projection.lifecycle = SessionLifecycle::Idle;
+            changes.push(ProjectionChange::LifecycleSet {
+                lifecycle: SessionLifecycle::Idle,
+            });
+        }
+        self.commit(changes)
+    }
+
     pub(crate) fn apply_envelope(&mut self, envelope: &EventEnvelope) -> Option<ProjectionDelta> {
         if envelope.seq <= self.last_runtime_seq {
             return None;
@@ -409,8 +470,10 @@ impl SessionProjector {
             } => {
                 let previous_usage = self.projection.usage.clone();
                 let previous_context = self.projection.context.clone();
-                self.event_usage.input_tokens =
-                    self.event_usage.input_tokens.saturating_add(usage.input);
+                self.event_usage.input_tokens = self
+                    .event_usage
+                    .input_tokens
+                    .saturating_add(usage.prompt_input());
                 self.event_usage.output_tokens =
                     self.event_usage.output_tokens.saturating_add(usage.output);
                 self.event_usage.cache_read_tokens = self
@@ -743,6 +806,51 @@ impl SessionProjector {
             .apply_event_at(&envelope.event, envelope.ts)
             .changed()
     }
+}
+
+pub(crate) fn redacted_projection(
+    projection: &SessionProjection,
+    redactor: Option<&atman_runtime::redact::Redactor>,
+) -> anyhow::Result<SessionProjection> {
+    let Some(redactor) = redactor else {
+        return Ok(projection.clone());
+    };
+    let mut value = serde_json::to_value(projection)?;
+    redactor.redact_json(&mut value);
+    Ok(serde_json::from_value(value)?)
+}
+
+pub(crate) async fn load_historical_projection(
+    session_id: SessionId,
+    session_dir: &std::path::Path,
+) -> anyhow::Result<SessionProjection> {
+    let replay_dir = session_dir.to_path_buf();
+    let replay_session_id = session_id.clone();
+    let (meta, events, goal) = tokio::task::spawn_blocking(move || {
+        let events_path = replay_dir.join("events.jsonl");
+        anyhow::ensure!(
+            events_path.is_file(),
+            "session not found: {replay_session_id}"
+        );
+        let meta = atman_runtime::session_meta::SessionMeta::load(&replay_dir);
+        let events = atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
+        let goal = atman_runtime::memory::goal::GoalStore::at(&replay_dir).get()?;
+        Ok::<_, anyhow::Error>((meta, events, goal))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("historical session replay task failed: {error}"))??;
+
+    let context = atman_runtime::event_log::reader::context_snapshot_from_envelopes(&events);
+    let todo_store = atman_runtime::memory::todo::TodoStore::at(session_dir);
+    let plan_store = atman_runtime::memory::plan::PlanStore::at(session_dir);
+    let (todos, plans) = tokio::join!(todo_store.list(), plan_store.list());
+    let mut projector = SessionProjector::from_events(session_id, meta, &events);
+    projector.set_goal((!goal.is_empty()).then_some(goal));
+    projector.set_todos(todos?);
+    projector.set_plans(plans?);
+    projector.set_context(context);
+    projector.reconcile_disconnected();
+    Ok(projector.snapshot())
 }
 
 fn transcript_message_slots(
@@ -1222,7 +1330,7 @@ mod tests {
             projection.workflows[0].roots[0].started_at,
             Some(started_at)
         );
-        assert_eq!(projection.usage.input_tokens, 10);
+        assert_eq!(projection.usage.input_tokens, 32);
         assert_eq!(projection.usage.cache_read_tokens, 20);
         let encoded = serde_json::to_string(&projection.transcript).unwrap();
         assert!(!encoded.contains("secret-binary"));
@@ -1254,7 +1362,7 @@ mod tests {
         projector.set_context(atman_runtime::ContextSnapshot {
             model: "reasoning-model".into(),
             provider: "openai-compatible".into(),
-            tokens_in: 10,
+            tokens_in: 14,
             tokens_out: 5,
             cache_read: 4,
             cache_write: 0,
@@ -1295,7 +1403,7 @@ mod tests {
             },
         ));
 
-        assert_eq!(projector.projection().usage.input_tokens, 10);
+        assert_eq!(projector.projection().usage.input_tokens, 14);
         assert_eq!(projector.projection().usage.output_tokens, 5);
         assert_eq!(projector.projection().usage.cache_read_tokens, 4);
         assert_eq!(projector.projection().usage.llm_calls, 1);

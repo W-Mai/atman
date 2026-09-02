@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CreatePermissionGroupResponse, FlowRunId, ListPermissionRequestsResponse, PermissionGroupView,
-    PermissionRequestView, PermissionResolutionView, ResolvePermissionRequestsResponse, SessionId,
-    SessionSummary,
+    CreatePermissionGroupResponse, EventCursor, FlowRunId, ListPermissionRequestsResponse,
+    PermissionGroupView, PermissionRequestView, PermissionResolutionView,
+    ResolvePermissionRequestsResponse, SessionId, SessionProjection, SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -64,6 +64,7 @@ impl SessionActorHandle {
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
+        let event_cursor = EventCursor(projection.projection().revision.0);
         let (tx, rx) = mpsc::unbounded_channel();
         let mut runs = HashMap::new();
         runs.insert(initial_run.run_id.clone(), initial_run);
@@ -74,6 +75,7 @@ impl SessionActorHandle {
             runs,
             revision: 1,
             projection,
+            event_cursor,
             view_tx,
             rx,
             events_rx,
@@ -118,6 +120,15 @@ impl SessionActorHandle {
 
     pub async fn rename(&self, title: String) -> Result<SessionSummary> {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
+    }
+
+    pub async fn snapshot(&self) -> Result<(EventCursor, SessionProjection)> {
+        let (cursor, projection) = request(&self.tx, |reply| Command::Snapshot { reply }).await?;
+        let redactor = self.session.sink().redactor();
+        Ok((
+            cursor,
+            crate::projection::redacted_projection(&projection, redactor.as_deref())?,
+        ))
     }
 
     pub async fn list_permissions(&self) -> Result<ListPermissionRequestsResponse> {
@@ -192,6 +203,9 @@ enum Command {
         title: String,
         reply: oneshot::Sender<Result<SessionSummary>>,
     },
+    Snapshot {
+        reply: oneshot::Sender<(EventCursor, SessionProjection)>,
+    },
     ListPermissions {
         reply: oneshot::Sender<ListPermissionRequestsResponse>,
     },
@@ -228,6 +242,7 @@ struct SessionActor {
     runs: HashMap<FlowRunId, LiveRun>,
     revision: u64,
     projection: SessionProjector,
+    event_cursor: EventCursor,
     view_tx: watch::Sender<SessionActorView>,
     rx: mpsc::UnboundedReceiver<Command>,
     events_rx: broadcast::Receiver<atman_runtime::event::EventEnvelope>,
@@ -255,7 +270,7 @@ impl SessionActor {
                 ActorInput::Event(event) => match *event {
                     Ok(event) => {
                         if self.projection.apply_envelope(&event).is_some() {
-                            self.publish();
+                            self.publish_projection_change();
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => self.rebuild_projection(),
@@ -264,25 +279,25 @@ impl SessionActor {
                 ActorInput::Goal(Ok(())) => {
                     let goal = self.goal_rx.borrow_and_update().clone();
                     if self.projection.set_goal(goal).is_some() {
-                        self.publish();
+                        self.publish_projection_change();
                     }
                 }
                 ActorInput::Todos(Ok(())) => {
                     let todos = self.todos_rx.borrow_and_update().clone();
                     if self.projection.set_todos(todos).is_some() {
-                        self.publish();
+                        self.publish_projection_change();
                     }
                 }
                 ActorInput::Plans(Ok(())) => {
                     let plans = self.plans_rx.borrow_and_update().clone();
                     if self.projection.set_plans(plans).is_some() {
-                        self.publish();
+                        self.publish_projection_change();
                     }
                 }
                 ActorInput::Context(Ok(())) => {
                     let context = self.context_rx.borrow_and_update().clone();
                     if self.projection.set_context(context).is_some() {
-                        self.publish();
+                        self.publish_projection_change();
                     }
                 }
                 ActorInput::Goal(Err(_))
@@ -320,6 +335,9 @@ impl SessionActor {
             Command::Rename { title, reply } => {
                 let result = self.rename(title);
                 let _ = reply.send(result);
+            }
+            Command::Snapshot { reply } => {
+                let _ = reply.send((self.event_cursor, self.projection.snapshot()));
             }
             Command::ListPermissions { reply } => {
                 let _ = reply.send(self.list_permissions());
@@ -364,6 +382,11 @@ impl SessionActor {
             .send_replace(view_for(self.revision, &self.runs, &self.projection));
     }
 
+    fn publish_projection_change(&mut self) {
+        self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
+        self.publish();
+    }
+
     fn rename(&mut self, title: String) -> Result<SessionSummary> {
         atman_runtime::session_meta::SessionMeta::rename(self.session.dir(), title)
             .with_context(|| format!("rename session {}", self.session_id))?;
@@ -373,12 +396,13 @@ impl SessionActor {
             self.runs.values(),
         )?;
         if self.projection.set_metadata(self.session.meta()).is_some() {
-            self.publish();
+            self.publish_projection_change();
         }
         Ok(summary)
     }
 
     fn rebuild_projection(&mut self) {
+        let previous_revision = self.projection.projection().revision;
         let mut projection = SessionProjector::from_events(
             self.session_id.clone(),
             self.session.meta(),
@@ -388,8 +412,9 @@ impl SessionActor {
         projection.set_todos(self.todos_rx.borrow().clone());
         projection.set_plans(self.plans_rx.borrow().clone());
         projection.set_context(self.context_rx.borrow().clone());
+        projection.rebase_after_rebuild(previous_revision);
         self.projection = projection;
-        self.publish();
+        self.publish_projection_change();
     }
 
     fn list_permissions(&self) -> ListPermissionRequestsResponse {

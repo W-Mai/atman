@@ -170,6 +170,53 @@ async fn session_actor_projects_durable_events_and_watch_state() {
 }
 
 #[tokio::test]
+async fn live_snapshot_is_actor_consistent_and_redacted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new_with_generation(tmp.path().to_path_buf(), "generation-a".into());
+    let session = Arc::new(
+        atman_runtime::Session::open_with_redactor(
+            tmp.path(),
+            Some(Arc::new(atman_runtime::redact::Redactor::builtin())),
+        )
+        .unwrap(),
+    );
+    let sid = SessionId(session.id().0);
+    let run_id = FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: run_id.clone(),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .await
+        .unwrap();
+    let turn_id = atman_runtime::event::TurnId::now();
+    session.sink().emit(atman_runtime::event::Event::UserMsg {
+        turn_id: turn_id.clone(),
+        flow_run_id: Some(atman_runtime::event::FlowRunId(run_id.0)),
+        message: atman_runtime::message::Message::user_text(
+            turn_id,
+            "token=sk-abcdefghijklmnop1234567890",
+        ),
+    });
+    wait_for_runtime_event(&state, &sid, 1).await;
+
+    let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+    let json = serde_json::to_string(&snapshot).unwrap();
+    assert_eq!(snapshot.daemon_generation.0, "generation-a");
+    assert_eq!(snapshot.cursor.0, snapshot.projection.revision.0);
+    assert!(json.contains("<REDACTED:openai_api_key>"));
+    assert!(!json.contains("sk-abcdefghijklmnop"));
+    assert!(state.session_snapshot(&sid, "mallory").await.is_err());
+}
+
+#[tokio::test]
 async fn list_sessions_accepts_search_and_limit_query() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

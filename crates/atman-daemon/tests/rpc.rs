@@ -29,12 +29,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
         capabilities.methods.len(),
         atman_daemon::SUPPORTED_METHODS.len()
     );
-    assert!(
-        !capabilities
-            .methods
-            .iter()
-            .any(|method| method.name == methods::GET_SESSION_SNAPSHOT)
-    );
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionSnapshot>());
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
 }
 
@@ -111,4 +106,68 @@ async fn get_events_reads_finished_sessions_by_persisted_sequence() {
     assert_eq!(page.events[0].cursor, atman_proto::EventCursor(20));
     assert_eq!(page.next_cursor, atman_proto::EventCursor(20));
     assert!(!page.has_more);
+}
+
+#[tokio::test]
+async fn get_snapshot_replays_idle_sessions_and_marks_interrupted_runs_lost() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = uuid::Uuid::now_v7();
+    let run_id = atman_runtime::event::FlowRunId::now();
+    let sdir = tmp.path().join("sessions").join(sid.to_string());
+    std::fs::create_dir_all(&sdir).unwrap();
+    atman_runtime::session_meta::SessionMeta {
+        title: Some("Recovered session".into()),
+        name_source: atman_runtime::session_meta::NameSource::User,
+        ..Default::default()
+    }
+    .save(&sdir)
+    .unwrap();
+    atman_runtime::memory::goal::GoalStore::at(&sdir)
+        .set("Recover state")
+        .unwrap();
+    let event = atman_runtime::event::EventEnvelope {
+        seq: 1,
+        ts: chrono::Utc::now(),
+        event: atman_runtime::event::Event::FlowStart {
+            run_id,
+            flow_name: "agent".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: false,
+        },
+    };
+    std::fs::write(
+        sdir.join("events.jsonl"),
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+
+    let state = Arc::new(DaemonState::new_with_generation(
+        tmp.path().to_path_buf(),
+        "snapshot-generation".into(),
+    ));
+    let request = JsonRpcRequest::for_method::<atman_proto::rpc::GetSessionSnapshot>(
+        5,
+        &atman_proto::GetSessionSnapshotRequest {
+            session_id: atman_proto::SessionId(sid),
+        },
+    )
+    .unwrap();
+    let snapshot = dispatch(state, request)
+        .await
+        .into_method_output::<atman_proto::rpc::GetSessionSnapshot>()
+        .unwrap();
+
+    assert_eq!(snapshot.daemon_generation.0, "snapshot-generation");
+    assert_eq!(snapshot.projection.metadata.title, "Recovered session");
+    assert_eq!(snapshot.projection.goal.as_deref(), Some("Recover state"));
+    assert_eq!(
+        snapshot.projection.lifecycle,
+        atman_proto::SessionLifecycle::Idle
+    );
+    assert_eq!(
+        snapshot.projection.runs[0].state,
+        atman_proto::RunLifecycle::Lost
+    );
+    assert_eq!(snapshot.cursor.0, snapshot.projection.revision.0);
 }
