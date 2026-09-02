@@ -9,6 +9,7 @@ pub struct StatusInputs<'a> {
     pub streaming: bool,
     pub waiting_for_llm: bool,
     pub status_notes: &'a std::collections::HashMap<String, String>,
+    pub activity: Option<&'a crate::app::ActivityTotals>,
 }
 
 pub fn render_bar<'a>(inputs: StatusInputs<'a>) -> Paragraph<'a> {
@@ -67,6 +68,15 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
             Style::default()
                 .fg(t.success.into())
                 .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(activity) = inputs.activity
+        && (activity.attempted_calls > 0 || activity.applied_edits > 0)
+    {
+        spans.push(Span::raw("  · "));
+        spans.push(Span::styled(
+            activity.compact_label(),
+            Style::default().fg(t.meta_fg.into()),
         ));
     }
     // Status notes from notify system

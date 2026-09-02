@@ -263,6 +263,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             streaming: app.streaming,
             waiting_for_llm: app.waiting_for_llm,
             status_notes: &app.status_notes,
+            activity: Some(&app.session_activity),
         }),
         l.status,
     );

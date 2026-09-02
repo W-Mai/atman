@@ -2605,6 +2605,7 @@ async fn cmd_repl_once(
     };
     let session_id = session.id().to_string();
     let session_dir = session.dir().to_path_buf();
+    let activity = session.activity_summary();
     session.shutdown().await;
     if is_fresh_session
         && user_msg_count == 0
@@ -2622,6 +2623,7 @@ async fn cmd_repl_once(
             goal,
             todos,
             plans,
+            activity,
         });
     });
     Ok(())
@@ -2640,44 +2642,32 @@ struct SessionSummary {
     goal: Option<String>,
     todos: Vec<atman_runtime::memory::todo::Todo>,
     plans: Vec<atman_runtime::memory::plan::Plan>,
+    activity: atman_runtime::activity::ActivitySummary,
 }
 
 pub fn flush_pending_summary() {
     SUMMARY_PENDING.with(|cell| {
         if let Some(s) = cell.borrow_mut().take() {
-            print_session_summary(
-                &s.sid,
-                s.name.as_deref(),
-                s.project_root.as_deref(),
-                s.msg_count,
-                s.goal.as_deref(),
-                &s.todos,
-                &s.plans,
-            );
+            print_session_summary(&s);
         }
     });
 }
 
-fn print_session_summary(
-    sid: &str,
-    name: Option<&str>,
-    project_root: Option<&str>,
-    msg_count: usize,
-    goal: Option<&str>,
-    todos: &[atman_runtime::memory::todo::Todo],
-    plans: &[atman_runtime::memory::plan::Plan],
-) {
-    let sid_short = sid;
-    let goal_line = goal.unwrap_or("(none)");
-    let pending = todos
+fn print_session_summary(summary: &SessionSummary) {
+    let sid_short = &summary.sid;
+    let goal_line = summary.goal.as_deref().unwrap_or("(none)");
+    let pending = summary
+        .todos
         .iter()
         .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Pending))
         .count();
-    let done = todos
+    let done = summary
+        .todos
         .iter()
         .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done))
         .count();
-    let plan_line = plans
+    let plan_line = summary
+        .plans
         .iter()
         .max_by_key(|p| p.updated_at)
         .map(|p| {
@@ -2690,17 +2680,24 @@ fn print_session_summary(
         " ∴ ATMAN".to_string(),
         format!(
             " name      {}",
-            truncate_str(name.unwrap_or("Untitled session"), 60)
+            truncate_str(summary.name.as_deref().unwrap_or("Untitled session"), 60)
         ),
         format!(
             " project   {}",
-            truncate_str(project_root.unwrap_or("-"), 80)
+            truncate_str(summary.project_root.as_deref().unwrap_or("-"), 80)
         ),
         format!(" session   {sid_short}"),
-        format!(" messages  {msg_count}"),
+        format!(" messages  {}", summary.msg_count),
         format!(" goal      {}", truncate_str(goal_line, 50)),
         format!(" plan      {plan_line}"),
         format!(" todos     {done} done · {pending} pending"),
+        format!(
+            " activity  {} tools · {} files · +{} −{}",
+            summary.activity.attempted_calls,
+            summary.activity.files,
+            summary.activity.insertions,
+            summary.activity.deletions
+        ),
         String::new(),
         format!(" resume    atman --continue {sid_short}"),
     ];
@@ -3218,12 +3215,15 @@ fn render_stream_frame(
         StreamFrame::Note(s) => render_note(printer, s),
         StreamFrame::Notification(frame) => render_note(printer, frame.message),
         StreamFrame::FlowGraph { .. }
+        | StreamFrame::TurnStarted { .. }
+        | StreamFrame::TurnEnded { .. }
         | StreamFrame::FlowStart { .. }
         | StreamFrame::FlowNodeStart { .. }
         | StreamFrame::FlowNodeEnd { .. }
         | StreamFrame::FlowDone { .. }
         | StreamFrame::ToolNode { .. }
         | StreamFrame::ThinkingChunk { .. }
+        | StreamFrame::ToolCallDraft { .. }
         | StreamFrame::LlmCallStats { .. }
         | StreamFrame::AssistantMsg { .. }
         | StreamFrame::ToolResultMsg { .. }
@@ -3247,7 +3247,9 @@ fn render_stream_frame(
         | StreamFrame::BashChunk { .. }
         | StreamFrame::BashExited { .. }
         | StreamFrame::DiffPreview { .. }
+        | StreamFrame::FileEditApplied { .. }
         | StreamFrame::CompactionSummary { .. }
+        | StreamFrame::CompactionDelta { .. }
         | StreamFrame::MermaidDiagram { .. }
         | StreamFrame::SubAgentStarted { .. }
         | StreamFrame::SubAgentDone { .. }
@@ -5486,6 +5488,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         kind: "stdout".into(),
         line: "$ cargo test --workspace\n".into(),
         call_intent: None,
+        tool_use_id: None,
         run_id: None,
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -5494,6 +5497,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         kind: "stdout".into(),
         line: "    Finished test [unoptimized + debuginfo] target(s) in 0.52s\n".into(),
         call_intent: None,
+        tool_use_id: None,
         run_id: None,
     });
     let _ = tx.send(StreamFrame::BashChunk {
@@ -5501,6 +5505,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         kind: "stdout".into(),
         line: "     Running unittests src/lib.rs\n".into(),
         call_intent: None,
+        tool_use_id: None,
         run_id: None,
     });
     let _ = tx.send(StreamFrame::BashChunk {
@@ -5508,6 +5513,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         kind: "stdout".into(),
         line: "running 258 tests\ntest result: ok. 258 passed; 0 failed\n".into(),
         call_intent: None,
+        tool_use_id: None,
         run_id: None,
     });
 
@@ -5555,6 +5561,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         screen: Some(screen),
         state: atman_runtime::tools::term::TermStateSnapshot::Running,
         call_intent: None,
+        tool_use_id: None,
         run_id: None,
     });
 
