@@ -362,6 +362,21 @@ impl TaskRegistry {
             .map(|e| e.snapshot.clone())
     }
 
+    pub fn lookup_by_handle_in_session(
+        &self,
+        handle: &str,
+        session_id: &str,
+    ) -> Option<TaskSnapshot> {
+        self.inner
+            .lock()
+            .unwrap()
+            .values()
+            .find(|entry| {
+                entry.snapshot.source_handle == handle && entry.snapshot.session_id == session_id
+            })
+            .map(|entry| entry.snapshot.clone())
+    }
+
     pub fn list(&self, filter: &TaskFilter) -> Vec<TaskSnapshot> {
         let inner = self.inner.lock().unwrap();
         let mut out: Vec<TaskSnapshot> = inner
@@ -379,6 +394,13 @@ impl TaskRegistry {
     /// for a Flow killing itself.
     pub fn kill_from_operator(&self, id: &TaskId) -> KillOutcome {
         self.kill_from(id, None, false)
+    }
+
+    pub fn kill_by_handle_from_operator(&self, handle: &str, session_id: &str) -> KillOutcome {
+        let id = self
+            .lookup_by_handle_in_session(handle, session_id)
+            .map(|snapshot| snapshot.id);
+        id.map_or(KillOutcome::NotFound, |id| self.kill_from_operator(&id))
     }
 
     pub fn kill_from(
@@ -436,6 +458,11 @@ impl TaskRegistry {
             return;
         }
         let old = entry.snapshot.status;
+        let status = if old == TaskStatus::Killing && entry.snapshot.termination.is_some() {
+            TaskStatus::Killed
+        } else {
+            status
+        };
         entry.snapshot.status = status;
         entry.snapshot.ended_at = Some(Instant::now());
         let kind = entry.snapshot.kind;
@@ -663,6 +690,56 @@ mod tests {
             reg.lookup(&id).unwrap().termination,
             Some(TaskTermination::Killed)
         );
+    }
+
+    #[test]
+    fn operator_kill_by_handle_is_scoped_to_the_session() {
+        let reg = TaskRegistry::new();
+        let first = reg.register(
+            TaskKind::Terminal,
+            "first".into(),
+            "term_shared".into(),
+            "session_a".into(),
+            cancel(),
+        );
+        let second = reg.register(
+            TaskKind::Terminal,
+            "second".into(),
+            "term_shared".into(),
+            "session_b".into(),
+            cancel(),
+        );
+
+        assert_eq!(
+            reg.kill_by_handle_from_operator("term_shared", "session_b"),
+            KillOutcome::Killed {
+                termination: TaskTermination::Killed
+            }
+        );
+        assert_eq!(reg.lookup(&first).unwrap().status, TaskStatus::Running);
+        assert_eq!(reg.lookup(&second).unwrap().status, TaskStatus::Killing);
+    }
+
+    #[test]
+    fn operator_kill_cannot_be_finished_as_success() {
+        let reg = TaskRegistry::new();
+        let id = reg.register(
+            TaskKind::Terminal,
+            "terminal".into(),
+            "term_1".into(),
+            "session".into(),
+            cancel(),
+        );
+
+        assert!(matches!(
+            reg.kill_from_operator(&id),
+            KillOutcome::Killed { .. }
+        ));
+        reg.finish(&id, TaskStatus::Ok);
+
+        let snapshot = reg.lookup(&id).unwrap();
+        assert_eq!(snapshot.status, TaskStatus::Killed);
+        assert_eq!(snapshot.termination, Some(TaskTermination::Killed));
     }
 
     #[test]

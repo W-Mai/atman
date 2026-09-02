@@ -40,6 +40,21 @@ pub enum ToolCallStatus {
     Error,
 }
 
+fn tool_result_reports_running(tool: &str, content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return false;
+    };
+    match tool {
+        "bash.spawn" | "flow.spawn" => {
+            value.get("status").and_then(|status| status.as_str()) == Some("running")
+        }
+        "term.spawn" => {
+            value.pointer("/state/kind").and_then(|kind| kind.as_str()) == Some("running")
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ToolDraftPreview {
     target: Option<&'static str>,
@@ -2407,40 +2422,42 @@ impl AppState {
                         )
                     })
             });
-            let keeps_running = !*is_error
-                && meta.as_ref().is_some_and(|meta| {
-                    matches!(
-                        meta.name.as_str(),
-                        "bash.spawn" | "term.spawn" | "flow.spawn"
-                    )
-                });
+            let reports_running = !*is_error
+                && meta
+                    .as_ref()
+                    .is_some_and(|meta| tool_result_reports_running(&meta.name, content));
             let mut restored = crate::history::restore_tool_item(meta.as_ref(), content, *is_error);
-            if keeps_running && let Some(detail) = restored.as_mut() {
-                match detail {
+            self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
+                if call.status == ToolCallStatus::Running {
+                    call.status = if reports_running {
+                        ToolCallStatus::Running
+                    } else if *is_error {
+                        ToolCallStatus::Error
+                    } else {
+                        ToolCallStatus::Ok
+                    };
+                    if call.status != ToolCallStatus::Running && call.ended_at.is_none() {
+                        call.ended_at = Some(Instant::now());
+                    }
+                }
+                let call_done = call.status != ToolCallStatus::Running;
+                if let Some(
                     OutputItem::Bash { done, .. }
                     | OutputItem::Terminal { done, .. }
-                    | OutputItem::SubAgentActivity { done, .. } => *done = false,
-                    _ => {}
+                    | OutputItem::SubAgentActivity { done, .. },
+                ) = restored.as_mut()
+                {
+                    *done = call_done;
                 }
-            }
-            self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
-                call.status = if keeps_running {
-                    ToolCallStatus::Running
-                } else if *is_error {
-                    ToolCallStatus::Error
-                } else {
-                    ToolCallStatus::Ok
-                };
-                call.ended_at = (!keeps_running).then(Instant::now);
                 if call.detail.is_none() {
                     call.detail = restored.map(Box::new);
-                } else if !keeps_running && let Some(detail) = call.detail.as_deref_mut() {
-                    match detail {
-                        OutputItem::Bash { done, .. }
-                        | OutputItem::Terminal { done, .. }
-                        | OutputItem::SubAgentActivity { done, .. } => *done = true,
-                        _ => {}
-                    }
+                } else if let Some(
+                    OutputItem::Bash { done, .. }
+                    | OutputItem::Terminal { done, .. }
+                    | OutputItem::SubAgentActivity { done, .. },
+                ) = call.detail.as_deref_mut()
+                {
+                    *done = call_done;
                 }
                 true
             });
@@ -3641,6 +3658,15 @@ impl AppState {
                     matches.then(|| run_id.clone())
                 });
                 if let Some(run_id) = run_id {
+                    let call_status = if status == "ok" {
+                        ToolCallStatus::Ok
+                    } else {
+                        ToolCallStatus::Error
+                    };
+                    let tool_use_id = self
+                        .sub_agent_run_ids
+                        .get(&run_id)
+                        .and_then(|route| route.tool_use_id.clone());
                     self.mutate_routed_sub_agent(&run_id, OutputMutation::Semantic, |item| {
                         let OutputItem::SubAgentActivity {
                             status: current_status,
@@ -3663,6 +3689,9 @@ impl AppState {
                         *done = true;
                         true
                     });
+                    if let Some(tool_use_id) = tool_use_id {
+                        self.finish_streaming_tool_detail(&tool_use_id, call_status);
+                    }
                 }
             }
             StreamFrame::Unknown => {}
@@ -4474,6 +4503,188 @@ mod tests {
         };
         assert_eq!(calls[0].status, ToolCallStatus::Ok);
         assert!(calls[0].ended_at.is_some());
+    }
+
+    #[test]
+    fn late_spawn_results_do_not_revive_exited_tool_calls() {
+        use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+
+        let run = |tool: &str, tool_use_id: &str, result: &str, terminal: bool| {
+            let mut app = AppState::new("s".into(), None);
+            app.apply_stream_frame(StreamFrame::AssistantMsg {
+                flow_run_id: None,
+                message: Message {
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::ToolUse {
+                        id: tool_use_id.into(),
+                        name: tool.into(),
+                        input: serde_json::json!({"cmd": "true"}),
+                        intent: ToolCallIntent::new("运行检查"),
+                    }],
+                    turn_id: atman_runtime::event::TurnId::now(),
+                    origin: MessageOrigin::User,
+                },
+            });
+            if terminal {
+                app.apply_stream_frame(StreamFrame::TerminalExited {
+                    handle: "term_s_1".into(),
+                    tool_use_id: Some(tool_use_id.into()),
+                    exit_code: Some(0),
+                    call_intent: None,
+                    run_id: None,
+                });
+            } else {
+                app.apply_stream_frame(StreamFrame::BashExited {
+                    handle: "bg_s_1".into(),
+                    tool_use_id: Some(tool_use_id.into()),
+                    exit_code: Some(0),
+                    error: None,
+                    call_intent: None,
+                    run_id: None,
+                });
+            }
+            let ended_at = match &app.items[0] {
+                OutputItem::ToolDispatch { calls } => calls[0].ended_at,
+                _ => panic!("expected grouped tool dispatch"),
+            };
+            app.apply_stream_frame(StreamFrame::ToolResultMsg {
+                flow_run_id: None,
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: tool_use_id.into(),
+                        content: result.into(),
+                        is_error: false,
+                    }],
+                    turn_id: atman_runtime::event::TurnId::now(),
+                    origin: MessageOrigin::User,
+                },
+            });
+            let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+                panic!("expected grouped tool dispatch");
+            };
+            assert_eq!(calls[0].status, ToolCallStatus::Ok);
+            assert_eq!(calls[0].ended_at, ended_at);
+            assert!(matches!(
+                calls[0].detail.as_deref(),
+                Some(OutputItem::Bash { done: true, .. })
+                    | Some(OutputItem::Terminal { done: true, .. })
+            ));
+        };
+
+        run(
+            "bash.spawn",
+            "bash-1",
+            r#"{"handle":"bg_s_1","status":"running","output":""}"#,
+            false,
+        );
+        run(
+            "term.spawn",
+            "term-1",
+            r#"{"handle":"term_s_1","state":{"kind":"running"},"rows":24,"cols":80,"text":""}"#,
+            true,
+        );
+    }
+
+    #[test]
+    fn completed_spawn_result_never_enters_running_state() {
+        use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole};
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "bash-1".into(),
+                    name: "bash.spawn".into(),
+                    input: serde_json::json!({"cmd": "true", "block": true}),
+                    intent: None,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+        app.apply_stream_frame(StreamFrame::ToolResultMsg {
+            flow_run_id: None,
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "bash-1".into(),
+                    content: r#"{"handle":"bg_s_1","status":"exited","exit_code":0,"output":""}"#
+                        .into(),
+                    is_error: false,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+            panic!("expected grouped tool dispatch");
+        };
+        assert_eq!(calls[0].status, ToolCallStatus::Ok);
+        assert!(calls[0].ended_at.is_some());
+        assert!(matches!(
+            calls[0].detail.as_deref(),
+            Some(OutputItem::Bash { done: true, .. })
+        ));
+    }
+
+    #[test]
+    fn sub_agent_completion_finishes_its_dispatch_row() {
+        use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole};
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "flow-1".into(),
+                    name: "flow.spawn".into(),
+                    input: serde_json::json!({"goal": "检查实现"}),
+                    intent: None,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "agent_1".into(),
+            goal: "检查实现".into(),
+            child_run_id: "child".into(),
+            model: "model".into(),
+            tool_use_id: Some("flow-1".into()),
+        });
+        app.apply_stream_frame(StreamFrame::ToolResultMsg {
+            flow_run_id: None,
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "flow-1".into(),
+                    content: r#"{"handle":"agent_1","status":"running"}"#.into(),
+                    is_error: false,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+        app.apply_stream_frame(StreamFrame::SubAgentDone {
+            handle: "agent_1".into(),
+            status: "ok".into(),
+            final_text: "完成".into(),
+        });
+
+        let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+            panic!("expected grouped tool dispatch");
+        };
+        assert_eq!(calls[0].status, ToolCallStatus::Ok);
+        assert!(calls[0].ended_at.is_some());
+        assert!(matches!(
+            calls[0].detail.as_deref(),
+            Some(OutputItem::SubAgentActivity { done: true, .. })
+        ));
     }
 
     #[test]

@@ -268,6 +268,23 @@ impl TermEntry {
         }
         Ok(())
     }
+
+    fn stop(&self) -> bool {
+        {
+            let mut state = self.state.lock().expect("state poisoned");
+            if !state.is_running() {
+                return false;
+            }
+            *state = TermState::Killed { ended_at: now_ms() };
+        }
+        let mut child = self.child.lock().expect("child poisoned");
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill();
+        }
+        drop(child);
+        self.profile.lock().expect("profile poisoned").take();
+        true
+    }
 }
 
 #[derive(Default)]
@@ -311,13 +328,15 @@ impl TermRegistry {
     }
 
     pub fn kill_all(&self) {
-        let entries = self.entries.lock().expect("entries poisoned");
-        for (_, entry) in entries.iter() {
-            let mut child = entry.child.lock().expect("child poisoned");
-            if let Some(child) = child.as_mut() {
-                let _ = child.kill();
-            }
-            entry.profile.lock().expect("profile poisoned").take();
+        let entries = self
+            .entries
+            .lock()
+            .expect("entries poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            entry.stop();
         }
     }
 
@@ -485,11 +504,7 @@ impl TermRegistry {
         let kill_entry = entry.clone();
         let task_id = self.task_registry.as_ref().map(|tr| {
             let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
-                let mut child = kill_entry.child.lock().expect("child poisoned");
-                if let Some(child) = child.as_mut() {
-                    let _ = child.kill();
-                }
-                kill_entry.profile.lock().expect("profile poisoned").take();
+                kill_entry.stop();
             });
             tr.register_with_kill_hook(
                 crate::task_registry::TaskKind::Terminal,
@@ -598,18 +613,30 @@ fn run_reader_loop(
         }
     }
 
-    let exit_code = None;
-    {
+    let (exit_code, task_status) = {
         let mut s = state.lock().expect("state poisoned");
-        // Only transition to Exited if not already Killed — term.kill sets
-        // Killed before the reader loop observes the closed PTY.
         if matches!(*s, TermState::Running { .. }) {
             *s = TermState::Exited {
-                exit_code,
+                exit_code: None,
                 ended_at: now_ms(),
             };
         }
-    }
+        let exit_code = match &*s {
+            TermState::Exited { exit_code, .. } => *exit_code,
+            _ => None,
+        };
+        let task_status = match &*s {
+            TermState::Killed { .. } => crate::task_registry::TaskStatus::Killed,
+            TermState::Failed { .. } => crate::task_registry::TaskStatus::Err,
+            TermState::Exited {
+                exit_code: Some(code),
+                ..
+            } if *code != 0 => crate::task_registry::TaskStatus::Err,
+            TermState::Exited { .. } => crate::task_registry::TaskStatus::Ok,
+            TermState::Running { .. } => unreachable!("reader exit must finalize terminal state"),
+        };
+        (exit_code, task_status)
+    };
 
     // Persist the last screen state before notifying exit — restore reads this
     // to recover the full cell grid (with colors) that stream frames never wrote.
@@ -640,7 +667,7 @@ fn run_reader_loop(
 
     profile.lock().expect("profile poisoned").take();
     if let (Some(tr), Some(tid)) = (task_registry, task_id) {
-        tr.finish(&tid, crate::task_registry::TaskStatus::Ok);
+        tr.finish(&tid, task_status);
     }
 }
 
@@ -1843,17 +1870,7 @@ impl Tool for TermKill {
             })?;
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
             let entry = registry.lookup(&handle, &session_id)?;
-            {
-                let mut child = entry.child.lock().expect("child poisoned");
-                if let Some(child) = child.as_mut() {
-                    let _ = child.kill();
-                }
-            }
-            entry.profile.lock().expect("profile poisoned").take();
-            {
-                let mut state = entry.state.lock().expect("state poisoned");
-                *state = TermState::Killed { ended_at: now_ms() };
-            }
+            entry.stop();
             Ok(Value::Struct(vec![
                 ("ok".into(), Value::Bool(true)),
                 ("state".into(), Value::Str("killed".into())),
@@ -2126,6 +2143,64 @@ mod tests {
             .map(|cell| cell.chars.as_str())
             .collect::<String>();
         assert!(first_row.contains("completed output"));
+    }
+
+    #[tokio::test]
+    async fn operator_stop_stays_killed_after_reader_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
+        let (child, kill_calls, _) = recording_child();
+        let (chunks_tx, chunks_rx) = std::sync::mpsc::channel();
+        let pty_result = PtySpawnResult {
+            child: Box::new(child),
+            reader: Box::new(ChannelReader {
+                chunks: chunks_rx,
+                pending: std::io::Cursor::new(Vec::new()),
+            }),
+            writer: Box::new(std::io::sink()),
+            master: Box::new(FailingMaster(PtyIoFailure::Never)),
+            profile: None,
+        };
+        let (handle, entry) = registry
+            .spawn_entry(
+                24,
+                80,
+                "session".into(),
+                root.path().to_path_buf(),
+                pty_result,
+                None,
+                "terminal".into(),
+                "sleep 10".into(),
+                None,
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            tasks.kill_by_handle_from_operator(&handle.to_string(), "session"),
+            crate::task_registry::KillOutcome::Killed { .. }
+        ));
+        assert!(matches!(entry.current_state(), TermState::Killed { .. }));
+        assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+
+        drop(chunks_tx);
+        let reader_task = entry
+            .reader_task
+            .lock()
+            .expect("reader_task poisoned")
+            .take()
+            .unwrap();
+        reader_task.await.unwrap();
+
+        assert_eq!(
+            tasks.lookup_by_handle(&handle.to_string()).unwrap().status,
+            crate::task_registry::TaskStatus::Killed
+        );
+        assert!(matches!(entry.current_state(), TermState::Killed { .. }));
     }
 
     #[test]

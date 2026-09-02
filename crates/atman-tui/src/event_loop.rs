@@ -395,31 +395,45 @@ pub(crate) async fn run_frames(
                                 } else if let Some(close_id) =
                                     app.wm.hit_test_close(me.column, me.row)
                                 {
-                                    let close_label = app.wm.label(close_id).unwrap_or_default().to_string();
-                                    let armed = app.wm.interaction.panel_close_armed_id.as_deref() == Some(close_label.as_str())
-                                        && !app.wm.panel_close_arm_expired();
-                                    if armed {
-                                        let tid = app
-                                            .task_snapshots
-                                            .iter()
-                                            .find(|s| s.source_handle == close_label)
-                                            .map(|s| s.id.clone());
-                                        if let (Some(tr), Some(tid)) = (&app.app.task_registry, tid) {
-                                            let _ = tr.kill_from_operator(&tid);
+                                    let close_handle = app.wm.content_kind(close_id).and_then(|kind| {
+                                        match kind {
+                                            crate::wm::WindowContent::Task { handle, .. } => {
+                                                Some(handle.clone())
+                                            }
+                                            _ => None,
                                         }
-                                        app.wm.clear_panel_close_arm();
-                                    } else {
-                                        let label = app
-                                            .task_snapshots
-                                            .iter()
-                                            .find(|s| s.source_handle == close_label)
-                                            .map(|s| s.label.clone())
-                                            .unwrap_or_default();
-                                        app.wm.arm_panel_close(close_label);
-                                        app.app.push_note(
-                                            format!("press ✕ again to kill {label}"),
-                                            app::NoteLevel::Warn,
-                                        );
+                                    });
+                                    if let (Some(registry), Some(handle)) =
+                                        (&app.app.task_registry, close_handle)
+                                        && let Some(task) = registry.lookup_by_handle_in_session(
+                                            &handle,
+                                            &app.app.session_id,
+                                        )
+                                        && task.is_running()
+                                    {
+                                        let armed = app
+                                            .wm
+                                            .interaction
+                                            .panel_close_armed_id
+                                            .as_deref()
+                                            == Some(handle.as_str())
+                                            && !app.wm.panel_close_arm_expired();
+                                        if armed {
+                                            let _ = registry.kill_by_handle_from_operator(
+                                                &handle,
+                                                &app.app.session_id,
+                                            );
+                                            app.wm.clear_panel_close_arm();
+                                        } else {
+                                            app.wm.arm_panel_close(handle);
+                                            app.app.push_note(
+                                                format!(
+                                                    "press ✕ again to kill {}",
+                                                    task.label
+                                                ),
+                                                app::NoteLevel::Warn,
+                                            );
+                                        }
                                     }
                                 } else if let Some(resize_id) =
                                     app.wm.hit_test_resize(me.column, me.row)
