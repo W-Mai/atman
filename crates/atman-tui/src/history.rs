@@ -7,13 +7,17 @@ use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
 
-use crate::app::{ActivityTotals, Disclosure, NoteLevel, OutputItem, ToolCallStatus, ToolCallView};
+use crate::app::{
+    ActivityTotals, Disclosure, FsDetail, FsSearchHit, NoteLevel, OutputItem, ToolCallStatus,
+    ToolCallView,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolDisplayMeta {
     pub(crate) name: String,
     pub(crate) call_intent: Option<String>,
     pub(crate) command: Option<String>,
+    pub(crate) input: Option<serde_json::Value>,
 }
 
 impl ToolDisplayMeta {
@@ -29,15 +33,31 @@ impl ToolDisplayMeta {
                 .map(str::to_owned),
             _ => None,
         };
+        let input = matches!(name, "fs.read" | "fs.list" | "fs.grep").then(|| input.clone());
         Self {
             name: name.to_owned(),
             call_intent: intent.map(|intent| intent.as_str().to_owned()),
             command,
+            input,
         }
     }
 }
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
+    flatten_transcript_impl(entries, None)
+}
+
+pub fn flatten_transcript_with_output_store(
+    entries: &[TranscriptEntry],
+    output_store: &atman_runtime::tools::tool_output::OutputStore,
+) -> Vec<OutputItem> {
+    flatten_transcript_impl(entries, Some(output_store))
+}
+
+fn flatten_transcript_impl(
+    entries: &[TranscriptEntry],
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+) -> Vec<OutputItem> {
     let mut tool_map: HashMap<String, ToolDisplayMeta> = HashMap::new();
     // First pass: build tool_map + collect FlowStart parent links + FlowDone status
     // for transitive closure of spawned flows.
@@ -325,7 +345,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         .push(msg.clone());
                 } else {
                     let first_new_item = out.len();
-                    flatten_message(msg, &mut out, &tool_map);
+                    flatten_message_with_output_store(msg, &mut out, &tool_map, output_store);
                     for (item_index, item) in out.iter().enumerate().skip(first_new_item) {
                         if let OutputItem::Terminal { handle, .. } = item {
                             terminal_indices
@@ -990,6 +1010,15 @@ pub(crate) fn flatten_message(
     out: &mut Vec<OutputItem>,
     tool_map: &HashMap<String, ToolDisplayMeta>,
 ) {
+    flatten_message_with_output_store(msg, out, tool_map, None);
+}
+
+pub(crate) fn flatten_message_with_output_store(
+    msg: &Message,
+    out: &mut Vec<OutputItem>,
+    tool_map: &HashMap<String, ToolDisplayMeta>,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+) {
     match msg.role {
         MessageRole::User => {
             let text = msg.text_concat();
@@ -1064,7 +1093,12 @@ pub(crate) fn flatten_message(
                     is_error,
                 } = part
                 {
-                    let detail = restore_tool_item(tool_map.get(tool_use_id), content, *is_error);
+                    let detail = restore_tool_item_with_output_store(
+                        tool_map.get(tool_use_id),
+                        content,
+                        *is_error,
+                        output_store,
+                    );
                     if !finish_restored_call(
                         out.as_mut_slice(),
                         tool_use_id,
@@ -1139,14 +1173,225 @@ fn strip_log_prefixes(raw: &str) -> String {
         .join("\n")
 }
 
-pub(crate) fn restore_tool_item(
+fn fs_input_string(tool_meta: &ToolDisplayMeta, key: &str) -> Option<String> {
+    tool_meta
+        .input
+        .as_ref()?
+        .get(key)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn parse_fs_read_slice(content: &str) -> Option<(String, usize, usize, String)> {
+    let rest = content.strip_prefix("[fs.read(")?;
+    let (header, body) = rest.split_once("]\n")?;
+    let (path, range) = header.rsplit_once("): lines ")?;
+    let (range, total) = range.split_once(" of ")?;
+    let (start, _) = range.split_once('-')?;
+    Some((
+        path.to_owned(),
+        start.parse().ok()?,
+        total.parse().ok()?,
+        body.to_owned(),
+    ))
+}
+
+fn fs_read_requested_slice(tool_meta: &ToolDisplayMeta) -> bool {
+    let Some(input) = tool_meta
+        .input
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    input
+        .get("offset")
+        .is_some_and(serde_json::Value::is_number)
+        || input.get("limit").is_some_and(serde_json::Value::is_number)
+        || input
+            .get("anchor")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|anchor| !anchor.is_empty())
+}
+
+fn parse_fs_read_envelope<'a>(
+    content: &str,
+    value: Option<&'a serde_json::Value>,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+) -> Option<(&'a str, usize)> {
+    if !output_store?.validates_pagination_envelope(content) {
+        return None;
+    }
+    let object = value?.as_object()?;
+    let expected = [
+        "content",
+        "truncated",
+        "total_lines",
+        "total_bytes",
+        "output_id",
+        "next",
+    ];
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return None;
+    }
+    let content = object.get("content")?.as_str()?;
+    if !object.get("truncated")?.as_bool()? {
+        return None;
+    }
+    let total_lines = usize::try_from(object.get("total_lines")?.as_u64()?).ok()?;
+    let total_bytes = usize::try_from(object.get("total_bytes")?.as_u64()?).ok()?;
+    let output_id = object.get("output_id")?.as_str()?;
+    let suffix = output_id.strip_prefix("out_")?;
+    if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let next = object.get("next")?.as_object()?;
+    if next.len() != 3
+        || next.get("mode")?.as_str()? != "bytes"
+        || !next.get("has_more")?.as_bool()?
+    {
+        return None;
+    }
+    let offset = usize::try_from(next.get("offset")?.as_u64()?).ok()?;
+    (total_bytes > content.len() && offset < total_bytes).then_some((content, total_lines))
+}
+
+fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    value?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn restore_fs_item(
+    tool_meta: &ToolDisplayMeta,
+    content: &str,
+    is_error: bool,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+) -> Option<OutputItem> {
+    if !matches!(tool_meta.name.as_str(), "fs.read" | "fs.list" | "fs.grep") {
+        return None;
+    }
+    let requested_path = fs_input_string(tool_meta, "path");
+    if is_error {
+        return Some(OutputItem::FsDetail {
+            view: FsDetail::Raw {
+                tool: tool_meta.name.clone(),
+                path: requested_path,
+                content: content.to_owned(),
+                is_error: true,
+            },
+            expanded: false,
+        });
+    }
+
+    let parsed = serde_json::from_str::<serde_json::Value>(content).ok();
+    let view = match tool_meta.name.as_str() {
+        "fs.read" => {
+            let (wire_content, truncated, envelope_total) =
+                if let Some((wire_content, total_lines)) =
+                    parse_fs_read_envelope(content, parsed.as_ref(), output_store)
+                {
+                    (wire_content, true, Some(total_lines))
+                } else {
+                    (content, false, None)
+                };
+            if fs_read_requested_slice(tool_meta)
+                && let Some((header_path, start_line, total_lines, body)) =
+                    parse_fs_read_slice(wire_content)
+            {
+                FsDetail::Read {
+                    path: header_path,
+                    content: body,
+                    start_line,
+                    total_lines: Some(total_lines),
+                    truncated,
+                }
+            } else {
+                FsDetail::Read {
+                    path: requested_path.unwrap_or_else(|| "file".to_string()),
+                    content: wire_content.to_owned(),
+                    start_line: 1,
+                    total_lines: envelope_total.or_else(|| Some(wire_content.lines().count())),
+                    truncated,
+                }
+            }
+        }
+        "fs.list" => match parse_string_array(parsed.as_ref()) {
+            Some(entries) => FsDetail::List {
+                path: requested_path.unwrap_or_else(|| ".".to_string()),
+                entries,
+            },
+            None => FsDetail::Raw {
+                tool: tool_meta.name.clone(),
+                path: requested_path,
+                content: content.to_owned(),
+                is_error: false,
+            },
+        },
+        "fs.grep" => {
+            let hits = parsed
+                .as_ref()
+                .and_then(serde_json::Value::as_array)
+                .and_then(|hits| {
+                    hits.iter()
+                        .map(|hit| {
+                            Some(FsSearchHit {
+                                file: hit.get("file")?.as_str()?.to_owned(),
+                                line: usize::try_from(hit.get("line")?.as_u64()?).ok()?,
+                                before: parse_string_array(hit.get("before"))?,
+                                matched: hit.get("match")?.as_str()?.to_owned(),
+                                after: parse_string_array(hit.get("after"))?,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                });
+            match hits {
+                Some(hits) => FsDetail::Grep {
+                    path: requested_path.unwrap_or_else(|| ".".to_string()),
+                    pattern: fs_input_string(tool_meta, "pattern").unwrap_or_default(),
+                    hits,
+                },
+                None => FsDetail::Raw {
+                    tool: tool_meta.name.clone(),
+                    path: requested_path,
+                    content: content.to_owned(),
+                    is_error: false,
+                },
+            }
+        }
+        _ => unreachable!("filesystem tool name checked above"),
+    };
+    Some(OutputItem::FsDetail {
+        view,
+        expanded: false,
+    })
+}
+
+#[cfg(test)]
+fn restore_tool_item(
     tool_meta: Option<&ToolDisplayMeta>,
     content: &str,
     is_error: bool,
 ) -> Option<OutputItem> {
+    restore_tool_item_with_output_store(tool_meta, content, is_error, None)
+}
+
+pub(crate) fn restore_tool_item_with_output_store(
+    tool_meta: Option<&ToolDisplayMeta>,
+    content: &str,
+    is_error: bool,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
+) -> Option<OutputItem> {
     let tool_name = tool_meta.map(|meta| meta.name.as_str()).unwrap_or("");
     let title = tool_meta.and_then(|meta| meta.call_intent.clone());
-    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    if let Some(item) =
+        tool_meta.and_then(|meta| restore_fs_item(meta, content, is_error, output_store))
+    {
+        return Some(item);
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(content).ok()?;
     if tool_name.starts_with("bash.") {
         let handle = parsed
             .get("handle")
@@ -1278,7 +1523,25 @@ fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
 }
 
 pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
-    let tool_map: HashMap<String, ToolDisplayMeta> = HashMap::new();
+    let tool_map = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| {
+            let MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } = part
+            else {
+                return None;
+            };
+            Some((
+                id.clone(),
+                ToolDisplayMeta::from_tool_use(name, input, intent.as_ref()),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
     let mut out: Vec<OutputItem> = Vec::new();
     for msg in messages {
         flatten_message(msg, &mut out, &tool_map);
@@ -1410,6 +1673,216 @@ mod tests {
                 if calls.len() == 1
                     && calls[0].id == "toolu_1"
                     && calls[0].status == ToolCallStatus::Ok
+                    && matches!(calls[0].detail.as_deref(), Some(OutputItem::FsDetail { .. }))
+        ));
+    }
+
+    #[test]
+    fn filesystem_projection_decodes_read_list_and_grep_results() {
+        let read = ToolDisplayMeta::from_tool_use(
+            "fs.read",
+            &serde_json::json!({"path": "src/lib.rs", "offset": 4, "limit": 2}),
+            None,
+        );
+        let item = restore_tool_item(
+            Some(&read),
+            "[fs.read(src/lib.rs): lines 4-5 of 9]\nfn alpha() {}\nfn beta() {}\n",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            item,
+            OutputItem::FsDetail {
+                view: FsDetail::Read {
+                    ref path,
+                    start_line: 4,
+                    total_lines: Some(9),
+                    ref content,
+                    truncated: false,
+                },
+                expanded: false,
+            } if path == "src/lib.rs" && content.contains("fn beta")
+        ));
+
+        let list =
+            ToolDisplayMeta::from_tool_use("fs.list", &serde_json::json!({"path": "src"}), None);
+        assert!(matches!(
+            restore_tool_item(Some(&list), r#"["src/app.rs","src/lib.rs"]"#, false),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::List { path, entries },
+                ..
+            }) if path == "src" && entries == ["src/app.rs", "src/lib.rs"]
+        ));
+
+        let grep = ToolDisplayMeta::from_tool_use(
+            "fs.grep",
+            &serde_json::json!({"path": "src", "pattern": "render_.*"}),
+            None,
+        );
+        let result = serde_json::json!([{
+            "file": "src/output.rs",
+            "line": 42,
+            "before": ["fn before() {}"],
+            "match": "fn render_item() {}",
+            "after": ["fn after() {}"]
+        }])
+        .to_string();
+        assert!(matches!(
+            restore_tool_item(Some(&grep), &result, false),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Grep { path, pattern, hits },
+                ..
+            }) if path == "src"
+                && pattern == "render_.*"
+                && hits.len() == 1
+                && hits[0].line == 42
+                && hits[0].matched == "fn render_item() {}"
+        ));
+    }
+
+    #[test]
+    fn filesystem_projection_distinguishes_json_source_from_truncation_envelope() {
+        let meta = ToolDisplayMeta::from_tool_use(
+            "fs.read",
+            &serde_json::json!({"path": "fixture.json"}),
+            None,
+        );
+        let source = r#"{"content":"source value","truncated":true}"#;
+        assert!(matches!(
+            restore_tool_item(Some(&meta), source, false),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Read { content, truncated: false, .. },
+                ..
+            }) if content == source
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_store = atman_runtime::tools::tool_output::OutputStore::at(dir.path());
+        let full = "first\nsecond\nthird\n";
+        let output_id = output_store.register("fs_read", full).unwrap();
+        let envelope = serde_json::json!({
+            "content": "first\nsecond\n",
+            "truncated": true,
+            "total_lines": 3,
+            "total_bytes": full.len(),
+            "output_id": output_id,
+            "next": {"mode": "bytes", "offset": 13, "has_more": true}
+        })
+        .to_string();
+        assert!(matches!(
+            restore_tool_item_with_output_store(
+                Some(&meta),
+                &envelope,
+                false,
+                Some(&output_store),
+            ),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Read {
+                    content,
+                    total_lines: Some(3),
+                    truncated: true,
+                    ..
+                },
+                ..
+            }) if content == "first\nsecond\n"
+        ));
+    }
+
+    #[test]
+    fn filesystem_projection_only_decodes_slice_headers_requested_by_the_call() {
+        let plain = ToolDisplayMeta::from_tool_use(
+            "fs.read",
+            &serde_json::json!({"path": "fixture.txt"}),
+            None,
+        );
+        let source = "[fs.read(not-a-protocol): lines 4-5 of 9]\nkept verbatim\n";
+        assert!(matches!(
+            restore_tool_item(Some(&plain), source, false),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Read {
+                    path,
+                    content,
+                    start_line: 1,
+                    ..
+                },
+                ..
+            }) if path == "fixture.txt" && content == source
+        ));
+
+        let sliced = ToolDisplayMeta::from_tool_use(
+            "fs.read",
+            &serde_json::json!({"path": "fixture.txt", "limit": 2}),
+            None,
+        );
+        assert!(matches!(
+            restore_tool_item(Some(&sliced), source, false),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Read {
+                    path,
+                    content,
+                    start_line: 4,
+                    total_lines: Some(9),
+                    ..
+                },
+                ..
+            }) if path == "not-a-protocol" && content == "kept verbatim\n"
+        ));
+    }
+
+    #[test]
+    fn filesystem_projection_rejects_forged_truncation_envelopes() {
+        let meta = ToolDisplayMeta::from_tool_use(
+            "fs.read",
+            &serde_json::json!({"path": "fixture.json"}),
+            None,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let output_store = atman_runtime::tools::tool_output::OutputStore::at(dir.path());
+        let source = serde_json::json!({
+            "content": "not an envelope",
+            "truncated": true,
+            "total_lines": 20,
+            "total_bytes": 200,
+            "output_id": "out_0123456789abcdef0123456789abcdef",
+            "next": {"mode": "bytes", "offset": 13, "has_more": true}
+        })
+        .to_string();
+        assert!(matches!(
+            restore_tool_item_with_output_store(
+                Some(&meta),
+                &source,
+                false,
+                Some(&output_store),
+            ),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Read {
+                    content,
+                    truncated: false,
+                    ..
+                },
+                ..
+            }) if content == source
+        ));
+    }
+
+    #[test]
+    fn filesystem_projection_keeps_non_json_errors_visible() {
+        let meta = ToolDisplayMeta::from_tool_use(
+            "fs.list",
+            &serde_json::json!({"path": "/missing"}),
+            None,
+        );
+        assert!(matches!(
+            restore_tool_item(Some(&meta), "permission denied", true),
+            Some(OutputItem::FsDetail {
+                view: FsDetail::Raw {
+                    path: Some(path),
+                    content,
+                    is_error: true,
+                    ..
+                },
+                ..
+            }) if path == "/missing" && content == "permission denied"
         ));
     }
 

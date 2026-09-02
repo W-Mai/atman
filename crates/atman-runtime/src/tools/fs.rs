@@ -669,7 +669,7 @@ impl Tool for FsList {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("List the entries of a directory. Returns a list of {name, kind} structs.")
+        Some("List a directory. Returns a sorted list of entry paths.")
     }
 
     fn input_schema(&self) -> serde_json::Value {

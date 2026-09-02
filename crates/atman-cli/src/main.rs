@@ -1708,7 +1708,12 @@ async fn cmd_repl_once(
         let sh_tx_for_ctrl = sh_tx_shared.clone();
         session.flush_writer().await;
         initial_transcript.extend(session.transcript_since_open());
-        let mut initial_items = atman_tui::history::flatten_transcript(&initial_transcript);
+        let output_store =
+            atman_runtime::tools::tool_output::OutputStore::at(session.dir().to_path_buf());
+        let mut initial_items = atman_tui::history::flatten_transcript_with_output_store(
+            &initial_transcript,
+            &output_store,
+        );
         if is_fresh_session {
             let recent = build_startup_recent(&root, &session.id().to_string(), 5);
             initial_items.insert(

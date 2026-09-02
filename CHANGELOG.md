@@ -19,6 +19,7 @@ All notable changes to atman are documented in this file.
 - **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.
 - **Tool document rendering** — thinking and nested tool rows fill their surfaces, dispatch sections keep a stable gap from following prose, running rows animate foreground without relayout, edit metrics use semantic colors, and right-side controls keep a fixed alignment slot.
 - **Spawned task completion** — late spawn results cannot revive completed Bash, Terminal, or sub-agent rows; terminal stops update process state before signaling the child and remain stopped through reader shutdown and registry completion.
+- **Filesystem tool output** — file reads, directory listings, searches, and errors share one live/replay projection with structured arguments, returned paths and matches, line numbers, syntax highlighting, bounded disclosure, and fullscreen detail.
 
 ## [1.10.0] — 2026-09-02
 

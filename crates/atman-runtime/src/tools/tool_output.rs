@@ -51,6 +51,10 @@ impl OutputStore {
         Some(output_id)
     }
 
+    pub fn validates_pagination_envelope(&self, content: &str) -> bool {
+        is_live_pagination_envelope(content, Some(self))
+    }
+
     pub fn read_lines(
         &self,
         output_id: &str,

@@ -108,6 +108,7 @@ impl UiState {
         };
         let title = match &item {
             crate::app::OutputItem::DiffPreview { title, .. } => title.clone(),
+            crate::app::OutputItem::FsDetail { view, .. } => view.title(),
             _ => "Tool output".to_string(),
         };
         let item_id = format!("tool-output:{item_idx}:{tool_use_id}");

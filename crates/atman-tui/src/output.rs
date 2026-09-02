@@ -11,7 +11,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::app::{Disclosure, NoteLevel, OutputItem, OutputStore, ToolCallStatus, ToolCallView};
+use crate::app::{
+    Disclosure, FsDetail, FsSearchHit, NoteLevel, OutputItem, OutputStore, ToolCallStatus,
+    ToolCallView,
+};
 
 const RESET: Style = Style::new();
 
@@ -1918,6 +1921,9 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.panel_width,
         ),
+        OutputItem::FsDetail { view, expanded } => {
+            render_fs_detail(view, *expanded, ctx.panel_width)
+        }
         OutputItem::MermaidDiagram { source } => render_mermaid_preview(
             source,
             ctx.panel_width,
@@ -2052,6 +2058,9 @@ fn tool_input_summary(call: &ToolCallView) -> Option<String> {
 }
 
 fn tool_input_body(call: &ToolCallView) -> Option<String> {
+    if let Some(body) = fs_tool_input_body(call) {
+        return Some(body);
+    }
     let canonical = match &call.input {
         serde_json::Value::Null => None,
         serde_json::Value::Object(object) if object.is_empty() => None,
@@ -2061,6 +2070,60 @@ fn tool_input_body(call: &ToolCallView) -> Option<String> {
         let draft = call.draft_preview.arguments().trim();
         (!draft.is_empty()).then(|| draft.to_string())
     })
+}
+
+fn tool_input_scalar(call: &ToolCallView, key: &str) -> Option<String> {
+    call.input
+        .get(key)
+        .and_then(scalar_preview)
+        .or_else(|| decode_partial_json_string(call.draft_preview.arguments(), key))
+}
+
+fn fs_tool_input_body(call: &ToolCallView) -> Option<String> {
+    let has_input = call
+        .input
+        .as_object()
+        .is_some_and(|object| !object.is_empty())
+        || !call.draft_preview.arguments().trim().is_empty();
+    if !has_input {
+        return None;
+    }
+    let path = || tool_input_scalar(call, "path").unwrap_or_else(|| ".".to_string());
+    match call.tool.as_str() {
+        "fs.read" => {
+            let mut lines = vec![format!("file  {}", path())];
+            if let Some(anchor) = tool_input_scalar(call, "anchor") {
+                lines.push(format!("anchor  {anchor}"));
+            } else if let Some(offset) = tool_input_scalar(call, "offset") {
+                let range = tool_input_scalar(call, "limit")
+                    .map(|limit| format!("{offset} + {limit} lines"))
+                    .unwrap_or(offset);
+                lines.push(format!("range  {range}"));
+            }
+            Some(lines.join("\n"))
+        }
+        "fs.list" => Some(format!("directory  {}", path())),
+        "fs.grep" => {
+            let mut lines = vec![format!(
+                "pattern  {}",
+                tool_input_scalar(call, "pattern").unwrap_or_default()
+            )];
+            lines.push(format!("root  {}", path()));
+            let options = [
+                ("context", tool_input_scalar(call, "context_lines")),
+                ("case-sensitive", tool_input_scalar(call, "case_sensitive")),
+                ("limit", tool_input_scalar(call, "limit")),
+            ]
+            .into_iter()
+            .filter_map(|(label, value)| value.map(|value| format!("{label} {value}")))
+            .collect::<Vec<_>>();
+            if !options.is_empty() {
+                lines.push(options.join(" · "));
+            }
+            Some(lines.join("\n"))
+        }
+        _ => None,
+    }
 }
 
 fn tool_input_visual_rows(body: &str, panel_width: u16) -> usize {
@@ -2079,6 +2142,9 @@ fn set_detail_expanded(detail: &mut OutputItem, expanded: bool) {
             expanded: value, ..
         }
         | OutputItem::DiffPreview {
+            expanded: value, ..
+        }
+        | OutputItem::FsDetail {
             expanded: value, ..
         }
         | OutputItem::SubAgentActivity {
@@ -2111,6 +2177,14 @@ fn tool_disclosure_depth(call: &ToolCallView, panel_width: u16) -> ToolDisclosur
             ToolDisclosureDepth::Preview
         };
     };
+
+    if let OutputItem::FsDetail { view, .. } = detail {
+        return if fs_detail_needs_full(view, panel_width.saturating_sub(4)) {
+            ToolDisclosureDepth::Full
+        } else {
+            ToolDisclosureDepth::Preview
+        };
+    }
 
     let mut preview = detail.clone();
     let mut full = detail.clone();
@@ -2430,6 +2504,7 @@ fn render_tool_dispatch(
                     | OutputItem::Bash { .. }
                     | OutputItem::SubAgentActivity { .. }
                     | OutputItem::DiffPreview { .. }
+                    | OutputItem::FsDetail { .. }
             )
         );
         let call_key = format!("{TOOL_CALL_REGION_PREFIX}{}", call.id);
@@ -2771,6 +2846,374 @@ fn render_mermaid_preview(
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
         }
         lines.push(Line::from(spans));
+    }
+    lines.push(blank);
+    lines
+}
+
+const FS_DETAIL_PREVIEW_ROWS: usize = 10;
+
+fn fs_detail_needs_full(view: &FsDetail, panel_width: u16) -> bool {
+    let target = panel_width.max(20) as usize;
+    let background: Color = crate::theme::theme().code_bg.into();
+    render_fs_detail_body(view, target, background, Some(FS_DETAIL_PREVIEW_ROWS + 1)).len()
+        > FS_DETAIL_PREVIEW_ROWS
+}
+
+fn wrap_fs_spans(
+    spans: Vec<Span<'static>>,
+    max_width: usize,
+    background: Color,
+) -> Vec<Vec<Span<'static>>> {
+    if max_width == 0 {
+        return vec![Vec::new()];
+    }
+    let mut rows = vec![Vec::new()];
+    let mut used = 0usize;
+    for span in spans {
+        let mut text = String::new();
+        for (grapheme, width) in crate::width::graphemes(span.content.as_ref()) {
+            if used + width > max_width && used > 0 {
+                push_wrapped_span(&mut rows, &mut text, span.style, background);
+                rows.push(Vec::new());
+                used = 0;
+            }
+            text.push_str(grapheme);
+            used += width;
+        }
+        push_wrapped_span(&mut rows, &mut text, span.style, background);
+    }
+    rows
+}
+
+fn render_fs_source_rows(
+    path: &str,
+    content: &str,
+    start_line: usize,
+    matched_line: Option<usize>,
+    target: usize,
+    background: Color,
+    row_budget: Option<usize>,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let source_line_count = content.lines().count();
+    let max_line = start_line.saturating_add(source_line_count.saturating_sub(1));
+    let digits = max_line.max(1).to_string().len();
+    let prefix_width = digits.saturating_add(6);
+    let body_width = target.saturating_sub(prefix_width).max(1);
+    let selected = match row_budget {
+        Some(limit) => content
+            .split_inclusive('\n')
+            .take(limit.saturating_add(1))
+            .collect::<String>(),
+        None => content.to_owned(),
+    };
+    let lang = language_from_title(path);
+    let mut out = Vec::new();
+    for (index, highlighted) in crate::highlight::highlight_code(&lang, &selected)
+        .into_iter()
+        .enumerate()
+    {
+        let line_number = start_line.saturating_add(index);
+        let is_match = matched_line == Some(line_number);
+        let marker_style = Style::default()
+            .fg(if is_match {
+                t.accent.into()
+            } else {
+                t.meta_fg.into()
+            })
+            .bg(background);
+        let body_rows = wrap_fs_spans(highlighted.spans, body_width, background);
+        for (wrapped_index, body) in body_rows.into_iter().enumerate() {
+            if row_budget.is_some_and(|budget| out.len() >= budget) {
+                return out;
+            }
+            let marker = if is_match { "›" } else { " " };
+            let number = if wrapped_index == 0 {
+                format!("{line_number:>digits$}")
+            } else {
+                " ".repeat(digits)
+            };
+            let mut spans = vec![
+                Span::styled("  ", Style::default().bg(background)),
+                Span::styled(marker.to_string(), marker_style),
+                Span::styled(number, marker_style),
+                Span::styled(" │ ", marker_style),
+            ];
+            spans.extend(body);
+            pad_spans_to_width(&mut spans, target, Style::default().bg(background));
+            out.push(Line::from(spans));
+        }
+    }
+    out
+}
+
+fn render_fs_list_rows(
+    entries: &[String],
+    target: usize,
+    background: Color,
+    row_budget: Option<usize>,
+) -> Vec<Line<'static>> {
+    let style = Style::default().bg(background);
+    let mut out = Vec::new();
+    for entry in entries {
+        for row in wrap_with_prefix(entry, target, "  ", "    ") {
+            if row_budget.is_some_and(|budget| out.len() >= budget) {
+                return out;
+            }
+            out.push(line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                target,
+                style,
+                style,
+            ));
+        }
+    }
+    out
+}
+
+fn render_fs_grep_rows(
+    hits: &[FsSearchHit],
+    target: usize,
+    background: Color,
+    row_budget: Option<usize>,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let file_style = Style::default()
+        .fg(t.accent.into())
+        .bg(background)
+        .add_modifier(Modifier::BOLD);
+    let mut out = Vec::new();
+    let mut previous_file: Option<&str> = None;
+    for hit in hits {
+        if previous_file != Some(hit.file.as_str()) {
+            if row_budget.is_some_and(|budget| out.len() >= budget) {
+                return out;
+            }
+            let label = format!("  {}", hit.file);
+            let label = crate::width::middle_truncate(&label, target);
+            let mut spans = vec![Span::styled(label, file_style)];
+            pad_spans_to_width(&mut spans, target, Style::default().bg(background));
+            out.push(Line::from(spans));
+            previous_file = Some(&hit.file);
+        }
+        let start = hit.line.saturating_sub(hit.before.len());
+        let snippet = hit
+            .before
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(hit.matched.as_str()))
+            .chain(hit.after.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let remaining = row_budget.map(|budget| budget.saturating_sub(out.len()));
+        out.extend(render_fs_source_rows(
+            &hit.file,
+            &snippet,
+            start,
+            Some(hit.line),
+            target,
+            background,
+            remaining,
+        ));
+        if row_budget.is_some_and(|budget| out.len() >= budget) {
+            return out;
+        }
+    }
+    out
+}
+
+fn render_fs_detail_body(
+    view: &FsDetail,
+    target: usize,
+    background: Color,
+    row_budget: Option<usize>,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let meta_style = Style::default().fg(t.meta_fg.into()).bg(background);
+    let error_style = Style::default().fg(t.error.into()).bg(background);
+    match view {
+        FsDetail::Read { content, .. } if content.is_empty() => vec![line_with_right_pad(
+            "  ",
+            "(empty file)",
+            target,
+            meta_style,
+            meta_style,
+        )],
+        FsDetail::Read {
+            path,
+            content,
+            start_line,
+            ..
+        } => render_fs_source_rows(
+            path,
+            content,
+            *start_line,
+            None,
+            target,
+            background,
+            row_budget,
+        ),
+        FsDetail::List { entries, .. } if entries.is_empty() => vec![line_with_right_pad(
+            "  ",
+            "(empty directory)",
+            target,
+            meta_style,
+            meta_style,
+        )],
+        FsDetail::List { entries, .. } => {
+            render_fs_list_rows(entries, target, background, row_budget)
+        }
+        FsDetail::Grep { hits, .. } if hits.is_empty() => vec![line_with_right_pad(
+            "  ",
+            "No matches",
+            target,
+            meta_style,
+            meta_style,
+        )],
+        FsDetail::Grep { hits, .. } => render_fs_grep_rows(hits, target, background, row_budget),
+        FsDetail::Raw {
+            path,
+            content,
+            is_error,
+            ..
+        } => {
+            if content.is_empty() {
+                vec![line_with_right_pad(
+                    "  ",
+                    "(empty output)",
+                    target,
+                    meta_style,
+                    meta_style,
+                )]
+            } else if *is_error {
+                content
+                    .lines()
+                    .flat_map(|line| wrap_with_prefix(line, target, "  ", "  "))
+                    .take(row_budget.unwrap_or(usize::MAX))
+                    .map(|row| {
+                        line_with_right_pad(
+                            &row.prefix,
+                            &row.body,
+                            target,
+                            error_style,
+                            error_style,
+                        )
+                    })
+                    .collect()
+            } else {
+                render_fs_source_rows(
+                    path.as_deref().unwrap_or(""),
+                    content,
+                    1,
+                    None,
+                    target,
+                    background,
+                    row_budget,
+                )
+            }
+        }
+    }
+}
+
+fn render_fs_detail(view: &FsDetail, expanded: bool, panel_width: u16) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let background: Color = t.code_bg.into();
+    let target = panel_width.max(20) as usize;
+    let base = Style::default().bg(background);
+    let label_style = Style::default()
+        .fg(t.accent.into())
+        .bg(background)
+        .add_modifier(Modifier::BOLD);
+    let value_style = Style::default().fg(t.tinted_fg.into()).bg(background);
+    let meta_style = Style::default().fg(t.meta_fg.into()).bg(background);
+    let blank = document_blank(target, base);
+    let (kind, title, metadata) = match view {
+        FsDetail::Read {
+            path,
+            content,
+            start_line,
+            total_lines,
+            truncated,
+        } => {
+            let shown = content.lines().count();
+            let end = start_line.saturating_add(shown.saturating_sub(1));
+            let mut metadata = if shown == 0 {
+                "0 lines".to_string()
+            } else {
+                total_lines
+                    .map(|total| format!("lines {start_line}–{end} / {total}"))
+                    .unwrap_or_else(|| format!("{shown} lines"))
+            };
+            if *truncated {
+                metadata.push_str(" · truncated");
+            }
+            ("read", path.as_str(), metadata)
+        }
+        FsDetail::List { path, entries } => {
+            let unit = if entries.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
+            ("list", path.as_str(), format!("{} {unit}", entries.len()))
+        }
+        FsDetail::Grep {
+            path,
+            pattern,
+            hits,
+        } => {
+            let unit = if hits.len() == 1 { "match" } else { "matches" };
+            (
+                "search",
+                pattern.as_str(),
+                format!("{} {unit} · {path}", hits.len()),
+            )
+        }
+        FsDetail::Raw {
+            tool,
+            path,
+            is_error,
+            ..
+        } => (
+            if *is_error { "error" } else { "output" },
+            path.as_deref().unwrap_or(tool),
+            tool.clone(),
+        ),
+    };
+    let mut lines = vec![blank.clone()];
+    lines.push(aligned_document_row(
+        vec![
+            Span::styled(format!("◇ {kind}  "), label_style),
+            Span::styled(title.to_owned(), value_style),
+        ],
+        vec![Span::styled(metadata, meta_style)],
+        target,
+        background,
+    ));
+    lines.push(blank.clone());
+
+    let needs_full = fs_detail_needs_full(view, panel_width);
+    let budget = (!expanded).then_some(FS_DETAIL_PREVIEW_ROWS);
+    let mut body = render_fs_detail_body(view, target, background, budget);
+    lines.append(&mut body);
+    if !expanded && needs_full {
+        lines.push(line_with_right_pad(
+            "  ",
+            "▼ more output — click to expand",
+            target,
+            meta_style,
+            meta_style,
+        ));
+    } else if expanded && needs_full {
+        lines.push(line_with_right_pad(
+            "  ",
+            "▲ click to collapse",
+            target,
+            meta_style,
+            meta_style,
+        ));
     }
     lines.push(blank);
     lines
@@ -9333,6 +9776,134 @@ mod tests {
         );
         let rendered = flatten_lines(&render_tool_dispatch(&[call], &RenderCtx::empty(), 0).0);
         assert!(rendered.contains("/repo/README.md"));
+    }
+
+    #[test]
+    fn filesystem_input_detail_is_human_readable_instead_of_json() {
+        let call = ToolCallView {
+            id: "grep-1".into(),
+            tool: "fs.grep".into(),
+            intent: "查找渲染入口".into(),
+            input: serde_json::json!({
+                "pattern": "render_.*",
+                "path": "src",
+                "context_lines": 2,
+                "case_sensitive": false,
+                "limit": 20
+            }),
+            status: ToolCallStatus::Running,
+            disclosure: Disclosure::Preview,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: None,
+        };
+
+        let body = tool_input_body(&call).unwrap();
+        assert!(body.contains("pattern  render_.*"));
+        assert!(body.contains("root  src"));
+        assert!(!body.contains('{'));
+        assert!(!body.contains('"'));
+    }
+
+    #[test]
+    fn filesystem_detail_renders_real_content_with_syntax_highlighting() {
+        let item = OutputItem::FsDetail {
+            view: FsDetail::Read {
+                path: "src/lib.rs".into(),
+                content: "fn answer() -> usize { 42 }\n".into(),
+                start_line: 7,
+                total_lines: Some(20),
+                truncated: false,
+            },
+            expanded: false,
+        };
+        let lines = render_item(
+            &item,
+            &RenderCtx {
+                panel_width: 80,
+                ..RenderCtx::empty()
+            },
+        );
+        let text = flatten_lines(&lines);
+        assert!(text.contains("src/lib.rs"));
+        assert!(text.contains("lines 7–7 / 20"));
+        assert!(text.contains("fn answer()"));
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| { span.content.contains("fn") && span.style.fg.is_some() })
+        );
+    }
+
+    #[test]
+    fn filesystem_detail_only_adds_full_disclosure_when_content_overflows() {
+        let now = Instant::now();
+        let mut call = ToolCallView {
+            id: "read-1".into(),
+            tool: "fs.read".into(),
+            intent: "读取配置".into(),
+            input: serde_json::json!({"path": "config.toml"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Preview,
+            detail: Some(Box::new(OutputItem::FsDetail {
+                view: FsDetail::Read {
+                    path: "config.toml".into(),
+                    content: "enabled = true\n".into(),
+                    start_line: 1,
+                    total_lines: Some(1),
+                    truncated: false,
+                },
+                expanded: false,
+            })),
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: now,
+            ended_at: Some(now),
+        };
+        assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Summary);
+
+        call.detail = Some(Box::new(OutputItem::FsDetail {
+            view: FsDetail::Read {
+                path: "config.toml".into(),
+                content: "x".repeat(100),
+                start_line: 1,
+                total_lines: Some(1),
+                truncated: false,
+            },
+            expanded: false,
+        }));
+        assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Summary);
+
+        call.detail = Some(Box::new(OutputItem::FsDetail {
+            view: FsDetail::List {
+                path: "src".into(),
+                entries: (0..20)
+                    .map(|index| format!("src/file-{index}.rs"))
+                    .collect(),
+            },
+            expanded: false,
+        }));
+        assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Full);
+
+        let item = OutputItem::ToolDispatch { calls: vec![call] };
+        let (_, regions) = render_item_with_regions(
+            &item,
+            &RenderCtx {
+                panel_width: 80,
+                ..RenderCtx::empty()
+            },
+            0,
+        );
+        assert!(
+            regions.iter().any(|region| {
+                region.path_key == format!("{TOOL_FULLSCREEN_REGION_PREFIX}read-1")
+            })
+        );
     }
 
     #[test]

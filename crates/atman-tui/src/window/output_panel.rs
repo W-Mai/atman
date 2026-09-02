@@ -20,6 +20,7 @@ impl OutputPanelContent {
             OutputItem::DiffPreview { expanded, .. }
             | OutputItem::Bash { expanded, .. }
             | OutputItem::Terminal { expanded, .. }
+            | OutputItem::FsDetail { expanded, .. }
             | OutputItem::SubAgentActivity { expanded, .. } => *expanded = true,
             OutputItem::Thinking { disclosure, .. }
             | OutputItem::CompactionSummary { disclosure, .. } => {

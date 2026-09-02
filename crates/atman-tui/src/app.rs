@@ -267,6 +267,51 @@ impl ActivityTotals {
 }
 
 #[derive(Debug, Clone)]
+pub struct FsSearchHit {
+    pub file: String,
+    pub line: usize,
+    pub before: Vec<String>,
+    pub matched: String,
+    pub after: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum FsDetail {
+    Read {
+        path: String,
+        content: String,
+        start_line: usize,
+        total_lines: Option<usize>,
+        truncated: bool,
+    },
+    List {
+        path: String,
+        entries: Vec<String>,
+    },
+    Grep {
+        path: String,
+        pattern: String,
+        hits: Vec<FsSearchHit>,
+    },
+    Raw {
+        tool: String,
+        path: Option<String>,
+        content: String,
+        is_error: bool,
+    },
+}
+
+impl FsDetail {
+    pub fn title(&self) -> String {
+        match self {
+            Self::Read { path, .. } | Self::List { path, .. } => path.clone(),
+            Self::Grep { pattern, .. } => format!("Search: {pattern}"),
+            Self::Raw { tool, path, .. } => path.clone().unwrap_or_else(|| tool.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum OutputItem {
     UserTurn {
         text: String,
@@ -331,6 +376,10 @@ pub enum OutputItem {
         old_content: Option<String>,
         new_content: Option<String>,
         unified_diff: Option<String>,
+        expanded: bool,
+    },
+    FsDetail {
+        view: FsDetail,
         expanded: bool,
     },
     CompactionSummary {
@@ -1422,6 +1471,9 @@ impl AppState {
                     handle: handle.to_string(),
                     scroll: 0,
                     render_cache: None,
+                    output_store: (!self.session_dir.is_empty()).then(|| {
+                        atman_runtime::tools::tool_output::OutputStore::at(&self.session_dir)
+                    }),
                 })
             }
         };
@@ -2426,7 +2478,14 @@ impl AppState {
                 && meta
                     .as_ref()
                     .is_some_and(|meta| tool_result_reports_running(&meta.name, content));
-            let mut restored = crate::history::restore_tool_item(meta.as_ref(), content, *is_error);
+            let output_store = (!self.session_dir.is_empty())
+                .then(|| atman_runtime::tools::tool_output::OutputStore::at(&self.session_dir));
+            let mut restored = crate::history::restore_tool_item_with_output_store(
+                meta.as_ref(),
+                content,
+                *is_error,
+                output_store.as_ref(),
+            );
             self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
                 if call.status == ToolCallStatus::Running {
                     call.status = if reports_running {

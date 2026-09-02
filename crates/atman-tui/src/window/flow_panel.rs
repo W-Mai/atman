@@ -20,6 +20,7 @@ pub struct FlowPanelContent {
     pub handle: String,
     pub scroll: u32,
     pub render_cache: Option<PanelRenderCache>,
+    pub output_store: Option<atman_runtime::tools::tool_output::OutputStore>,
 }
 
 impl WindowComponent for FlowPanelContent {
@@ -81,6 +82,7 @@ impl WindowComponent for FlowPanelContent {
                     .unwrap_or_default(),
                 ctx.interaction_revision,
                 &mut self.render_cache,
+                self.output_store.as_ref(),
             );
         } else if let Some(panel_idx) = ctx
             .workflow_run_to_panel
@@ -255,6 +257,7 @@ pub(crate) fn render_sub_agent_panel(
     item_revision: crate::app::OutputRevision,
     interaction_revision: u64,
     render_cache: &mut Option<PanelRenderCache>,
+    output_store: Option<&atman_runtime::tools::tool_output::OutputStore>,
 ) {
     if render_cache.as_ref().is_some_and(|cache| {
         cache.item_id == item_revision.id
@@ -410,7 +413,7 @@ pub(crate) fn render_sub_agent_panel(
     }
     let mut items: Vec<OutputItem> = Vec::new();
     for msg in messages {
-        crate::history::flatten_message(msg, &mut items, &tool_map);
+        crate::history::flatten_message_with_output_store(msg, &mut items, &tool_map, output_store);
     }
     crate::history::dedup_by_handle(&mut items);
 
@@ -603,6 +606,7 @@ mod tests {
                     },
                     1,
                     &mut cache,
+                    None,
                 );
             })
             .unwrap();
@@ -649,6 +653,7 @@ mod tests {
                     },
                     1,
                     &mut cache,
+                    None,
                 );
             })
             .unwrap();
@@ -718,6 +723,7 @@ mod tests {
             handle: run_id,
             scroll: 0,
             render_cache: None,
+            output_store: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let mut cached_lines = None;
