@@ -1621,10 +1621,10 @@ fn render_thinking(
     retried: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
-    let bg = if hovered {
-        t.panel_bg.lerp(t.user_msg_bg, 0.65)
+    let bg: Color = if hovered {
+        t.work_hover_bg.into()
     } else {
-        t.panel_bg.into()
+        t.work_bg.into()
     };
     let header_style = Style::default()
         .fg(t.subtle_fg.into())
@@ -1636,7 +1636,7 @@ fn render_thinking(
         .bg(bg)
         .add_modifier(Modifier::DIM);
     let glyph = if done {
-        if retried { "↻" } else { "✓" }
+        "⣿"
     } else {
         spinner_char(animation_frame)
     };
@@ -1653,8 +1653,39 @@ fn render_thinking(
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    let header_prefix = format!("  {glyph} {label} ");
+    let header_prefix = format!("  {glyph} {label}");
     let header_used = crate::width::width(header_prefix.as_str());
+
+    if disclosure == Disclosure::Summary {
+        let body_width = target.saturating_sub(header_used + 4);
+        let latest = (body_width > 0)
+            .then(|| crate::markdown::render_markdown_with_width(text, body_width as u16))
+            .and_then(|lines| {
+                lines.into_iter().rev().find(|line| {
+                    line.spans
+                        .iter()
+                        .any(|span| !span.content.trim().is_empty())
+                })
+            });
+        let mut spans = vec![Span::styled(header_prefix, header_style)];
+        if let Some(latest) = latest {
+            spans.push(Span::styled("  ", body_style));
+            let body = latest
+                .spans
+                .into_iter()
+                .map(|span| Span::styled(span.content, span.style.patch(body_style)))
+                .collect();
+            spans.extend(crate::width::truncate_spans(body, body_width, Some(bg)));
+        }
+        let used = crate::width::spans_width(spans.iter());
+        if used < target {
+            spans.push(Span::styled(" ".repeat(target - used), body_style));
+        }
+        lines.push(Line::from(spans));
+        lines.push(blank);
+        return lines;
+    }
+
     let header_pad = target.saturating_sub(header_used);
     let mut header_spans = vec![Span::styled(header_prefix, header_style)];
     if header_pad > 0 {
@@ -1666,9 +1697,9 @@ fn render_thinking(
     let all_lines =
         crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4));
     let max_lines = match disclosure {
-        Disclosure::Summary => all_lines.len().min(1),
         Disclosure::Preview => all_lines.len().min(6),
         Disclosure::Full => all_lines.len(),
+        Disclosure::Summary => unreachable!("summary returns above"),
     };
     for md_line in &all_lines[crate::width::tail_row_range(all_lines.len(), max_lines)] {
         let content_w: usize = md_line
@@ -2440,8 +2471,24 @@ fn render_tool_dispatch(
     let panel_bg: Color = t.work_bg.into();
     let header_style = Style::default().fg(t.meta_fg.into()).bg(panel_bg);
     let header_title_style = header_style.add_modifier(Modifier::BOLD);
+    let running = finished < calls.len();
+    let header_glyph = if running {
+        spinner_char(ctx.animation_frame)
+    } else {
+        "⣿"
+    };
+    let header_glyph_color = if running {
+        t.accent
+    } else if calls
+        .iter()
+        .any(|call| call.status == ToolCallStatus::Error)
+    {
+        t.error
+    } else {
+        t.success
+    };
     let header_glyph_style = Style::default()
-        .fg(t.accent.into())
+        .fg(header_glyph_color.into())
         .bg(panel_bg)
         .add_modifier(Modifier::BOLD);
     let mut header_right = vec![Span::styled(
@@ -2459,14 +2506,13 @@ fn render_tool_dispatch(
     let mut lines = vec![document_blank(width, header_style)];
     lines.push(aligned_document_row(
         vec![
-            Span::styled("⠋ ", header_glyph_style),
+            Span::styled(format!("{header_glyph} "), header_glyph_style),
             Span::styled(format!("working · {}", calls.len()), header_title_style),
         ],
         header_right,
         width,
         panel_bg,
     ));
-    lines.push(document_blank(width, header_style));
     let mut regions = Vec::new();
 
     for call in calls {
@@ -2685,7 +2731,6 @@ fn render_tool_dispatch(
         lines.push(document_blank(width, detail_style));
         regions[call_region_index].end_row = lines.len() as u32;
     }
-    lines.push(document_blank(width, header_style));
     (lines, regions)
 }
 
@@ -8643,19 +8688,51 @@ mod tests {
     fn thinking_summary_shows_only_the_latest_visual_line() {
         let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
         let lines = render_thinking(text, true, Disclosure::Summary, false, 0, 60, false);
-        let body_count = lines
-            .iter()
-            .filter(|l| {
-                let s: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                s.trim_start().starts_with("line")
-            })
-            .count();
-        assert_eq!(body_count, 1, "summary should show one body line");
-        assert!(lines.iter().any(|line| {
-            line.spans
+        let middle = plain_line(&lines[1]);
+        let t = crate::theme::theme();
+
+        assert_eq!(lines.len(), 3);
+        assert!(line_is_visually_blank(&lines[0]));
+        assert!(line_is_visually_blank(&lines[2]));
+        assert!(middle.starts_with("  ⣿ thinking  "));
+        assert!(middle.contains("line10"));
+        assert!(!middle.contains("line9"));
+        assert!(
+            lines
                 .iter()
-                .any(|span| span.content.contains("line10"))
-        }));
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg == Some(t.work_bg.into()))
+        );
+    }
+
+    #[test]
+    fn thinking_summary_rotates_then_stops_on_full_braille() {
+        let render = |done, hovered, frame| {
+            render_thinking(
+                "latest thought",
+                done,
+                Disclosure::Summary,
+                hovered,
+                frame,
+                60,
+                false,
+            )
+        };
+        let running_0 = render(false, false, 0);
+        let running_1 = render(false, false, 1);
+        let done = render(true, false, 9);
+        let hovered = render(true, true, 9);
+        let t = crate::theme::theme();
+
+        assert!(plain_line(&running_0[1]).starts_with("  ⠋ thinking…"));
+        assert!(plain_line(&running_1[1]).starts_with("  ⠙ thinking…"));
+        assert!(plain_line(&done[1]).starts_with("  ⣿ thinking"));
+        assert!(
+            hovered
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg == Some(t.work_hover_bg.into()))
+        );
     }
 
     #[test]
@@ -9381,6 +9458,9 @@ mod tests {
             }],
             &ctx,
         );
+        let mut summary_call = call.clone();
+        summary_call.disclosure = Disclosure::Summary;
+        let summary_lines = render_tool_dispatch(&[summary_call], &ctx, 7).0;
         let (lines, regions) = render_tool_dispatch(&[call], &ctx, 7);
         let line_text = |line: &Line<'_>| {
             line.spans
@@ -9389,16 +9469,14 @@ mod tests {
                 .collect::<String>()
         };
 
-        assert!(line_is_visually_blank(&lines[0]));
-        assert!(line_is_visually_blank(lines.last().unwrap()));
-        assert!(line_is_visually_blank(&lines[2]));
-        assert!(line_is_visually_blank(&lines[3]));
-        assert!(line_is_visually_blank(&lines[5]));
-        assert!(line_is_visually_blank(&lines[lines.len() - 2]));
-        assert!(line_text(&lines[1]).starts_with("  ⠋ working · 1"));
-        assert!(line_text(&lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
-        assert!(line_text(&lines[4]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
-        let tool_row = line_text(&lines[4]);
+        assert_eq!(summary_lines.len(), 5);
+        assert!(line_is_visually_blank(&summary_lines[0]));
+        assert!(line_is_visually_blank(summary_lines.last().unwrap()));
+        assert!(line_is_visually_blank(&summary_lines[2]));
+        assert!(line_text(&summary_lines[1]).starts_with("  ⣿ working · 1"));
+        assert!(line_text(&summary_lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
+        assert!(line_text(&summary_lines[3]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
+        let tool_row = line_text(&summary_lines[3]);
         assert!(
             !['›', '⌄', '⌃']
                 .into_iter()
@@ -9413,9 +9491,19 @@ mod tests {
             .iter()
             .find(|region| region.path_key == format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1"))
             .unwrap();
-        assert!(call_region.end_row > call_region.start_row + 1);
+        assert_eq!(call_region.start_row, 2);
+        assert!(call_region.end_row > call_region.start_row + 3);
         assert_eq!(fullscreen_region.start_row, call_region.start_row + 1);
         assert!(fullscreen_region.col_start > call_region.col_start);
+        assert!(line_is_visually_blank(lines.last().unwrap()));
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .spans
+                .iter()
+                .all(|span| { span.style.bg == Some(crate::theme::theme().work_detail_bg.into()) })
+        );
         assert_eq!(
             tool_headers
                 .iter()
@@ -9461,9 +9549,21 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        let header = |status, frame| {
+            let ctx = RenderCtx {
+                panel_width: 60,
+                animation_frame: frame,
+                ..RenderCtx::empty()
+            };
+            plain_line(&render_tool_dispatch(&[make_call(status)], &ctx, 0).0[1])
+        };
 
         let running_0 = colors(ToolCallStatus::Running, 0);
         let running_4 = colors(ToolCallStatus::Running, 4);
+        assert!(header(ToolCallStatus::Running, 0).starts_with("  ⠋ working"));
+        assert!(header(ToolCallStatus::Running, 1).starts_with("  ⠙ working"));
+        assert!(header(ToolCallStatus::Ok, 0).starts_with("  ⣿ working"));
+        assert!(header(ToolCallStatus::Error, 0).starts_with("  ⣿ working"));
         assert_eq!(
             running_0.iter().map(|(_, _, bg)| bg).collect::<Vec<_>>(),
             running_4.iter().map(|(_, _, bg)| bg).collect::<Vec<_>>()

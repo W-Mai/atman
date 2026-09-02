@@ -129,7 +129,7 @@ impl Theme {
         Self {
             mode: ThemeMode::Dark,
             code_bg: ThemeColor(Color::Rgb(22, 24, 28)),
-            work_bg: ThemeColor(Color::Rgb(25, 28, 34)),
+            work_bg: ThemeColor(Color::Rgb(18, 20, 24)),
             work_detail_bg: ThemeColor(Color::Rgb(23, 26, 32)),
             work_output_bg: ThemeColor(Color::Rgb(20, 23, 28)),
             work_hover_bg: ThemeColor(Color::Rgb(34, 39, 48)),
@@ -159,7 +159,7 @@ impl Theme {
         Self {
             mode: ThemeMode::Light,
             code_bg: ThemeColor(Color::Rgb(240, 240, 240)),
-            work_bg: ThemeColor(Color::Rgb(231, 232, 235)),
+            work_bg: ThemeColor(Color::Rgb(218, 221, 226)),
             work_detail_bg: ThemeColor(Color::Rgb(225, 227, 231)),
             work_output_bg: ThemeColor(Color::Rgb(240, 241, 242)),
             work_hover_bg: ThemeColor(Color::Rgb(217, 226, 231)),
