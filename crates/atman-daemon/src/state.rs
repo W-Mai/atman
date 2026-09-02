@@ -205,6 +205,20 @@ impl DaemonState {
         self.authorized_live_session(id, principal).is_some()
     }
 
+    pub fn can_read_session(&self, id: &SessionId, principal: &str) -> bool {
+        let live = self.live.lock().unwrap();
+        match live.get(id) {
+            Some(entry) => {
+                entry.live.is_some() && entry.owner_principal.as_deref() == Some(principal)
+            }
+            None => self
+                .sessions_root()
+                .join(id.to_string())
+                .join("events.jsonl")
+                .is_file(),
+        }
+    }
+
     pub fn deregister_broker(&self, id: &SessionId) {
         if let Some(entry) = self.live.lock().unwrap().get_mut(id) {
             entry.broker = None;

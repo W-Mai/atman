@@ -31,7 +31,7 @@ fn rpc_endpoint() {}
         ("token" = Option<String>, Query, description = "Bearer token fallback for EventSource (query only, GET only)"),
     ),
     responses(
-        (status = 200, description = "SSE stream (text/event-stream). Payload is a JSON-serialized atman_runtime::event::Event per line."),
+        (status = 200, description = "SSE stream (text/event-stream). Each data frame is a ServerEventEnvelope and each SSE id is its cursor."),
         (status = 401, description = "Missing or invalid bearer token"),
         (status = 403, description = "Authenticated principal is not authorized for the session"),
     ),

@@ -145,6 +145,18 @@ fn seed_five_events(tmp: &tempfile::TempDir) -> Uuid {
     sid
 }
 
+fn seed_sparse_events(tmp: &tempfile::TempDir) -> Uuid {
+    let sid = Uuid::now_v7();
+    let sdir = tmp.path().join("sessions").join(sid.to_string());
+    std::fs::create_dir_all(&sdir).unwrap();
+    std::fs::write(
+        sdir.join("events.jsonl"),
+        "{\"type\":\"first\",\"seq\":10}\n{\"type\":\"second\",\"seq\":30}\n",
+    )
+    .unwrap();
+    sid
+}
+
 #[tokio::test]
 async fn sse_honors_last_event_id_header_when_no_since_seq_query() {
     let tmp = tempfile::tempdir().unwrap();
@@ -186,5 +198,42 @@ async fn sse_first_frame_advertises_retry_directive() {
     assert!(
         text.contains("retry: 3000"),
         "expected retry: 3000 directive in {text}"
+    );
+}
+
+#[tokio::test]
+async fn sse_ids_use_persisted_sequences_instead_of_line_numbers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = seed_sparse_events(&tmp);
+    let app = router(build_state(&tmp, Some(sid)));
+    let text = collect_sse_body(
+        app,
+        format!("/events?session_id={sid}"),
+        Some(("Last-Event-ID", "10")),
+    )
+    .await;
+    assert!(
+        !text.contains("\"first\""),
+        "unexpected first event in {text}"
+    );
+    assert!(
+        text.contains("id: 30"),
+        "expected persisted SSE id in {text}"
+    );
+    assert!(
+        text.contains("\"second\""),
+        "expected second event in {text}"
+    );
+}
+
+#[tokio::test]
+async fn sse_reads_finished_session_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = seed_five_events(&tmp);
+    let app = router(build_state(&tmp, None));
+    let text = collect_sse_body(app, format!("/events?session_id={sid}"), None).await;
+    assert!(
+        text.contains("\"evt5\""),
+        "expected historical event in {text}"
     );
 }

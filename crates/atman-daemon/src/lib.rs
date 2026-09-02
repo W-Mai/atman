@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, CreatePermissionGroupResponse,
-    DaemonGeneration, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListSessionsRequest,
-    MethodCapability, PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector, PingResponse,
-    ProtocolLimits, RenameSessionRequest, ResolvePromptResponse, RpcMethod, RunFlowResponse,
-    methods, rpc,
+    DaemonGeneration, EventCursor, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    ListSessionsRequest, MethodCapability, PermissionRpcAction, PermissionRpcScope,
+    PermissionRpcSelector, PingResponse, ProtocolLimits, RenameSessionRequest,
+    ResolvePromptResponse, RpcMethod, RunFlowResponse, methods, rpc,
 };
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
@@ -74,6 +74,7 @@ fn authorized_permission_session(
 
 pub mod bootstrap;
 pub mod config;
+mod events;
 pub mod http;
 pub mod openapi;
 pub mod pidfile;
@@ -124,7 +125,7 @@ pub async fn dispatch_as(
                             })
                             .collect(),
                         limits: ProtocolLimits {
-                            max_event_page_size: 1_000,
+                            max_event_page_size: events::MAX_EVENT_PAGE_SIZE,
                             subscriber_buffer: 2_048,
                         },
                     },
@@ -173,6 +174,31 @@ pub async fn dispatch_as(
                 let cancelled = state.cancel_run(&p.run_id);
                 method_response::<rpc::CancelRun>(id, CancelRunResponse { cancelled })
             }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::GET_EVENTS => match parse_params::<rpc::GetEvents>(req.params) {
+            Ok(p) if state.can_read_session(&p.session_id, principal_id) => {
+                let path = state
+                    .sessions_root()
+                    .join(p.session_id.to_string())
+                    .join("events.jsonl");
+                match events::read_event_page(
+                    &path,
+                    EventCursor(p.since_seq.unwrap_or_default()),
+                    events::MAX_EVENT_PAGE_SIZE,
+                )
+                .await
+                {
+                    Ok(page) => method_response::<rpc::GetEvents>(id, page),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                }
+            }
+            Ok(_) => JsonRpcResponse::err(
+                id,
+                JsonRpcError::application("permission denied for session"),
+            ),
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::RESOLVE_PROMPT => match parse_params::<rpc::ResolvePrompt>(req.params) {

@@ -72,3 +72,34 @@ async fn list_sessions_reads_directory() {
     assert_eq!(arr[0]["event_count"], 1);
     assert_eq!(arr[0]["status"], "finished");
 }
+
+#[tokio::test]
+async fn get_events_reads_finished_sessions_by_persisted_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = uuid::Uuid::now_v7();
+    let sdir = tmp.path().join("sessions").join(sid.to_string());
+    std::fs::create_dir_all(&sdir).unwrap();
+    std::fs::write(
+        sdir.join("events.jsonl"),
+        "{\"type\":\"one\",\"seq\":10}\n{\"type\":\"two\",\"seq\":20}\n",
+    )
+    .unwrap();
+
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let request = JsonRpcRequest::for_method::<atman_proto::rpc::GetEvents>(
+        4,
+        &atman_proto::GetEventsRequest {
+            session_id: atman_proto::SessionId(sid),
+            since_seq: Some(10),
+        },
+    )
+    .unwrap();
+    let page = dispatch(state, request)
+        .await
+        .into_method_output::<atman_proto::rpc::GetEvents>()
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].cursor, atman_proto::EventCursor(20));
+    assert_eq!(page.next_cursor, atman_proto::EventCursor(20));
+    assert!(!page.has_more);
+}

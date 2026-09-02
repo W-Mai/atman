@@ -14,9 +14,8 @@ use axum::{
 };
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
-use atman_proto::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
+use atman_proto::{EventCursor, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SessionId};
 
 use crate::DaemonState;
 
@@ -73,7 +72,7 @@ async fn sse_handler(
     Query(q): Query<SseQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
-    if !state.daemon.owns_live_session(&q.session_id, &principal_id) {
+    if !state.daemon.can_read_session(&q.session_id, &principal_id) {
         return Err((
             StatusCode::FORBIDDEN,
             "permission denied for session".into(),
@@ -100,37 +99,32 @@ fn last_event_id(headers: &HeaderMap) -> Option<u64> {
 
 fn tail_events_stream(
     path: std::path::PathBuf,
-    start_line: u64,
+    start_cursor: u64,
 ) -> impl Stream<Item = Result<Event, std::io::Error>> {
     async_stream::stream! {
-        let mut sent: u64 = 0;
-        let mut reader: Option<BufReader<tokio::fs::File>> = None;
+        let mut reader: Option<crate::events::EventLogReader> = None;
         loop {
             if reader.is_none() && path.exists() {
-                if let Ok(f) = tokio::fs::File::open(&path).await {
-                    reader = Some(BufReader::new(f));
+                if let Ok(opened) = crate::events::EventLogReader::open(&path).await {
+                    reader = Some(opened);
                 }
             }
             let Some(rd) = reader.as_mut() else {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             };
-            let mut line = String::new();
             loop {
-                line.clear();
-                match rd.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if !line.ends_with('\n') {
-                            break;
-                        }
-                        let trimmed = line.trim_end();
-                        sent += 1;
-                        if sent > start_line && !trimmed.is_empty() {
+                match rd.next().await {
+                    Ok(None) => break,
+                    Ok(Some(envelope)) => {
+                        if envelope.cursor > EventCursor(start_cursor) {
+                            let data = serde_json::to_string(&envelope).map_err(|error| {
+                                std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                            })?;
                             let ev = Event::default()
                                 .event("event")
-                                .id(sent.to_string())
-                                .data(trimmed);
+                                .id(envelope.cursor.0.to_string())
+                                .data(data);
                             yield Ok(ev);
                         }
                     }
