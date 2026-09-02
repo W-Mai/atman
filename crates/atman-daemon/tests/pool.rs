@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atman_daemon::{DaemonState, LiveSession, dispatch};
+use atman_daemon::{DaemonState, LiveRun, dispatch};
 use atman_proto::{FlowRunId, JsonRpcRequest, SessionId, methods};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -10,18 +10,23 @@ async fn cancel_run_hits_matching_live_session() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
 
-    let sid = SessionId(Uuid::now_v7());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
     let run_id = FlowRunId(Uuid::now_v7());
     let cancel = CancellationToken::new();
-    state.register_live(
-        sid,
-        LiveSession {
-            run_id: run_id.clone(),
-            flow_name: "hello".into(),
-            cancel: cancel.clone(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    state
+        .register_session_run(
+            sid,
+            session,
+            LiveRun {
+                run_id: run_id.clone(),
+                flow_name: "hello".into(),
+                cancel: cancel.clone(),
+                started_at: chrono::Utc::now(),
+            },
+            "local-daemon",
+        )
+        .unwrap();
 
     let req = JsonRpcRequest::new(
         1,
@@ -35,25 +40,26 @@ async fn cancel_run_hits_matching_live_session() {
 }
 
 #[test]
-fn live_session_requires_both_live_and_broker_registration() {
+fn finished_run_keeps_the_owned_session_attachable() {
     let tmp = tempfile::tempdir().unwrap();
     let state = DaemonState::new(tmp.path().to_path_buf());
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
     let sid = SessionId(session.id().0);
 
-    state.register_broker(sid.clone(), session.clone(), "alice");
-    assert!(state.live_session(&sid).is_none());
-    assert!(state.authorized_live_session(&sid, "alice").is_none());
-
-    state.register_live(
-        sid.clone(),
-        LiveSession {
-            run_id: FlowRunId(Uuid::now_v7()),
-            flow_name: "hello".into(),
-            cancel: CancellationToken::new(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    let run_id = FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: run_id.clone(),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .unwrap();
     assert!(Arc::ptr_eq(&state.live_session(&sid).unwrap(), &session));
     assert!(state.authorized_live_session(&sid, "mallory").is_none());
     assert!(Arc::ptr_eq(
@@ -61,9 +67,46 @@ fn live_session_requires_both_live_and_broker_registration() {
         &session
     ));
 
-    state.deregister_broker(&sid);
+    assert!(state.finish_run(&sid, &run_id));
     assert!(state.live_session(&sid).is_none());
     assert!(state.authorized_live_session(&sid, "alice").is_none());
+    assert!(Arc::ptr_eq(
+        &state.authorized_session(&sid, "alice").unwrap(),
+        &session
+    ));
+}
+
+#[test]
+fn finishing_one_run_preserves_other_runs_in_the_same_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    let first = FlowRunId(Uuid::now_v7());
+    let second = FlowRunId(Uuid::now_v7());
+    for run_id in [first.clone(), second.clone()] {
+        state
+            .register_session_run(
+                sid.clone(),
+                session.clone(),
+                LiveRun {
+                    run_id,
+                    flow_name: "hello".into(),
+                    cancel: CancellationToken::new(),
+                    started_at: chrono::Utc::now(),
+                },
+                "alice",
+            )
+            .unwrap();
+    }
+
+    assert!(state.finish_run(&sid, &first));
+    assert!(state.live_session(&sid).is_some());
+    assert!(!state.cancel_run(&first));
+    assert!(state.cancel_run(&second));
+    assert!(state.finish_run(&sid, &second));
+    assert!(state.live_session(&sid).is_none());
+    assert!(state.authorized_session(&sid, "alice").is_some());
 }
 
 #[tokio::test]
@@ -99,16 +142,21 @@ async fn list_sessions_includes_live_only_entry_as_running() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
 
-    let sid = SessionId(Uuid::now_v7());
-    state.register_live(
-        sid.clone(),
-        LiveSession {
-            run_id: FlowRunId(Uuid::now_v7()),
-            flow_name: "hello".into(),
-            cancel: CancellationToken::new(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    state
+        .register_session_run(
+            sid.clone(),
+            session,
+            LiveRun {
+                run_id: FlowRunId(Uuid::now_v7()),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "local-daemon",
+        )
+        .unwrap();
 
     let req = JsonRpcRequest::new(1, methods::LIST_SESSIONS, serde_json::json!({}));
     let resp = dispatch(state, req).await;

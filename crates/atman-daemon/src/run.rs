@@ -6,7 +6,7 @@ use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
 
 use atman_runtime::event::FlowRunId as RuntimeRunId;
 
-use crate::state::{DaemonState, LiveSession};
+use crate::state::{DaemonState, LiveRun};
 
 fn render_value(v: &atman_runtime::Value) -> String {
     match v {
@@ -114,6 +114,7 @@ fn queue_run_images(
 struct RegistryCleanup {
     state: Arc<DaemonState>,
     session_id: ProtoSessionId,
+    run_id: ProtoRunId,
 }
 
 fn spawn_with_provider_lifecycle(
@@ -130,8 +131,7 @@ fn spawn_with_provider_lifecycle(
 
 impl Drop for RegistryCleanup {
     fn drop(&mut self) {
-        self.state.deregister_broker(&self.session_id);
-        self.state.deregister_live(&self.session_id);
+        self.state.finish_run(&self.session_id, &self.run_id);
     }
 }
 
@@ -265,22 +265,24 @@ impl RunLauncher {
         let run_id_proto = ProtoRunId(run_id_runtime.0);
 
         let cancel = session.flow_cancel_token();
-        state.register_broker(sid_proto.clone(), session.clone(), owner_principal);
-        state.register_live(
+        state.register_session_run(
             sid_proto.clone(),
-            LiveSession {
+            session.clone(),
+            LiveRun {
                 run_id: run_id_proto.clone(),
                 flow_name: String::new(),
                 cancel,
                 started_at: chrono::Utc::now(),
             },
-        );
+            owner_principal,
+        )?;
 
         let project_root = self.project_root.clone();
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
         let sid_for_task = sid_proto.clone();
+        let run_id_for_task = run_id_proto.clone();
 
         let spawn_result = spawn_with_provider_lifecycle(
             std::thread::Builder::new().name(format!("atman-run-{}", sid_proto)),
@@ -289,6 +291,7 @@ impl RunLauncher {
                 let _cleanup = RegistryCleanup {
                     state: state_for_task.clone(),
                     session_id: sid_for_task.clone(),
+                    run_id: run_id_for_task,
                 };
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -297,8 +300,6 @@ impl RunLauncher {
                     Ok(rt) => rt,
                     Err(error) => {
                         atman_runtime::notify!(error, "build flow runtime failed: {error:#}");
-                        state_for_task.deregister_broker(&sid_for_task);
-                        state_for_task.deregister_live(&sid_for_task);
                         return;
                     }
                 };
@@ -321,23 +322,12 @@ impl RunLauncher {
                     {
                         atman_runtime::notify!(error, "flow run failed: {e:#}");
                     }
-                    state_for_task.deregister_broker(&sid_for_task);
-                    match std::sync::Arc::try_unwrap(session) {
-                        Ok(s) => s.shutdown().await,
-                        Err(_) => atman_runtime::notify!(
-                            warn,
-                            location = Log,
-                            stack = dedupe("session.refs_at_shutdown", 60_000),
-                            "session still had refs at shutdown"
-                        ),
-                    }
-                    state_for_task.deregister_live(&sid_for_task);
+                    session.flush_writer().await;
                 });
             },
         );
         if let Err(error) = spawn_result {
-            state.deregister_broker(&sid_proto);
-            state.deregister_live(&sid_proto);
+            state.remove_session(&sid_proto);
             return Err(error).context("spawn run thread");
         }
 
@@ -575,22 +565,26 @@ mod tests {
     }
 
     #[test]
-    fn registry_cleanup_guard_removes_entries_during_unwind() {
+    fn registry_cleanup_guard_finishes_run_during_unwind() {
         let state = Arc::new(DaemonState::new(
             tempfile::tempdir().unwrap().path().to_path_buf(),
         ));
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let session_id = ProtoSessionId(session.id().0);
-        state.register_broker(session_id.clone(), session, "test-principal");
-        state.register_live(
-            session_id.clone(),
-            LiveSession {
-                run_id: ProtoRunId(uuid::Uuid::now_v7()),
-                flow_name: "panic-test".into(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                started_at: chrono::Utc::now(),
-            },
-        );
+        let run_id = ProtoRunId(uuid::Uuid::now_v7());
+        state
+            .register_session_run(
+                session_id.clone(),
+                session.clone(),
+                LiveRun {
+                    run_id: run_id.clone(),
+                    flow_name: "panic-test".into(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    started_at: chrono::Utc::now(),
+                },
+                "test-principal",
+            )
+            .unwrap();
         assert!(
             state
                 .authorized_live_session(&session_id, "test-principal")
@@ -600,13 +594,25 @@ mod tests {
         let unwind = std::panic::catch_unwind({
             let state = Arc::clone(&state);
             let session_id = session_id.clone();
+            let run_id = run_id.clone();
             move || {
-                let _cleanup = RegistryCleanup { state, session_id };
+                let _cleanup = RegistryCleanup {
+                    state,
+                    session_id,
+                    run_id,
+                };
                 panic!("simulate flow-thread panic");
             }
         });
         assert!(unwind.is_err());
         assert!(state.live_session(&session_id).is_none());
+        assert!(state.can_read_session(&session_id, "test-principal"));
+        assert!(Arc::ptr_eq(
+            &state
+                .authorized_session(&session_id, "test-principal")
+                .unwrap(),
+            &session
+        ));
         assert!(
             state
                 .authorized_live_session(&session_id, "test-principal")

@@ -21,14 +21,22 @@ async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
     let state = Arc::new(DaemonState::new(data_dir.clone()));
     let launcher = RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap();
 
-    launcher
+    let spawned = launcher
         .spawn(
-            state,
+            state.clone(),
             repo_root().join("examples/hello.at").to_str().unwrap(),
             Vec::new(),
         )
         .await
         .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while state.live_session(&spawned.session_id).is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for daemon run to finish"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let scope = data_dir
         .join("projects")
@@ -90,9 +98,11 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
             }
         }
         if std::time::Instant::now() >= deadline {
+            let persisted = std::fs::read_to_string(&events_path).unwrap_or_default();
             panic!(
-                "timed out waiting for flow_end in {}",
-                events_path.display()
+                "timed out waiting for flow_end in {}; persisted events:\n{}",
+                events_path.display(),
+                persisted
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

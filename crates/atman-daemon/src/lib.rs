@@ -83,7 +83,7 @@ pub mod run;
 pub mod state;
 pub mod unix;
 
-pub use state::{DaemonState, LiveSession};
+pub use state::{DaemonState, LiveRun};
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
     dispatch_as(state, req, "local-daemon").await

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use atman_daemon::{DaemonState, LiveSession, dispatch_as};
+use atman_daemon::{DaemonState, LiveRun, dispatch_as};
 use atman_proto::{JsonRpcRequest, SessionId, methods};
 use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::permission::{
@@ -25,16 +25,19 @@ fn register_session(
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
     let stream = session.stream_tx().subscribe();
     let session_id = SessionId(session.id().0);
-    state.register_broker(session_id.clone(), session.clone(), owner);
-    state.register_live(
-        session_id.clone(),
-        LiveSession {
-            run_id: atman_proto::FlowRunId(Uuid::now_v7()),
-            flow_name: "permission-test".into(),
-            cancel: CancellationToken::new(),
-            started_at: Utc::now(),
-        },
-    );
+    state
+        .register_session_run(
+            session_id.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: atman_proto::FlowRunId(Uuid::now_v7()),
+                flow_name: "permission-test".into(),
+                cancel: CancellationToken::new(),
+                started_at: Utc::now(),
+            },
+            owner,
+        )
+        .unwrap();
     (session_id, session, stream)
 }
 
@@ -291,8 +294,21 @@ async fn permission_rpcs_fail_closed_for_wrong_principal_and_cross_session() {
 
     let orphan = Arc::new(atman_runtime::Session::open_ephemeral());
     let orphan_id = SessionId(orphan.id().0);
-    state.register_broker(orphan_id.clone(), orphan, "alice");
-    state.deregister_live(&orphan_id);
+    let orphan_run = atman_proto::FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            orphan_id.clone(),
+            orphan,
+            LiveRun {
+                run_id: orphan_run.clone(),
+                flow_name: "finished".into(),
+                cancel: CancellationToken::new(),
+                started_at: Utc::now(),
+            },
+            "alice",
+        )
+        .unwrap();
+    state.finish_run(&orphan_id, &orphan_run);
     let response = dispatch_as(state, list(&orphan_id), "alice").await;
     assert!(
         response.error.is_some(),

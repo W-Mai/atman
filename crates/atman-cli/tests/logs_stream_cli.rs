@@ -31,16 +31,19 @@ async fn spawn_server(
     let daemon = Arc::new(DaemonState::new(root.to_path_buf()));
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
     let session_id = atman_proto::SessionId(uuid::Uuid::parse_str(session_id).unwrap());
-    daemon.register_broker(session_id.clone(), session, "authenticated-daemon-client");
-    daemon.register_live(
-        session_id,
-        atman_daemon::LiveSession {
-            run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
-            flow_name: "logs-stream-test".into(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            started_at: chrono::Utc::now(),
-        },
-    );
+    daemon
+        .register_session_run(
+            session_id,
+            session,
+            atman_daemon::LiveRun {
+                run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
+                flow_name: "logs-stream-test".into(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "authenticated-daemon-client",
+        )
+        .unwrap();
     let state = Arc::new(HttpState {
         daemon,
         auth_token: token.to_string(),

@@ -16,16 +16,19 @@ fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<HttpSta
     if let Some(session_id) = session_id {
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let id = atman_proto::SessionId(session_id);
-        daemon.register_broker(id.clone(), session, "authenticated-daemon-client");
-        daemon.register_live(
-            id,
-            atman_daemon::LiveSession {
-                run_id: atman_proto::FlowRunId(Uuid::now_v7()),
-                flow_name: "sse-test".into(),
-                cancel: tokio_util::sync::CancellationToken::new(),
-                started_at: chrono::Utc::now(),
-            },
-        );
+        daemon
+            .register_session_run(
+                id,
+                session,
+                atman_daemon::LiveRun {
+                    run_id: atman_proto::FlowRunId(Uuid::now_v7()),
+                    flow_name: "sse-test".into(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    started_at: chrono::Utc::now(),
+                },
+                "authenticated-daemon-client",
+            )
+            .unwrap();
     }
     Arc::new(HttpState {
         daemon,

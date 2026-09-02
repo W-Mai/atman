@@ -16,25 +16,25 @@ struct PendingPrompt {
 pub struct DaemonState {
     data_dir: PathBuf,
     daemon_generation: String,
-    live: Mutex<HashMap<SessionId, LiveSessionEntry>>,
+    sessions: Mutex<HashMap<SessionId, SessionActorEntry>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
 }
 
 #[derive(Clone)]
-pub struct LiveSession {
+pub struct LiveRun {
     pub run_id: FlowRunId,
     pub flow_name: String,
     pub cancel: CancellationToken,
     pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
-struct LiveSessionEntry {
-    live: Option<LiveSession>,
-    broker: Option<std::sync::Arc<atman_runtime::Session>>,
-    permission_client: Option<atman_runtime::permission::PermissionClientGuard>,
-    owner_principal: Option<String>,
+struct SessionActorEntry {
+    session: std::sync::Arc<atman_runtime::Session>,
+    runs: HashMap<FlowRunId, LiveRun>,
+    _permission_client: atman_runtime::permission::PermissionClientGuard,
+    owner_principal: String,
 }
 
 impl DaemonState {
@@ -50,7 +50,7 @@ impl DaemonState {
         Self {
             data_dir,
             daemon_generation,
-            live: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
@@ -158,35 +158,45 @@ impl DaemonState {
         self.data_dir.join("sessions")
     }
 
-    pub fn register_live(&self, id: SessionId, entry: LiveSession) {
-        let mut live = self.live.lock().unwrap();
-        live.entry(id)
-            .and_modify(|current| current.live = Some(entry.clone()))
-            .or_insert(LiveSessionEntry {
-                live: Some(entry),
-                broker: None,
-                permission_client: None,
-                owner_principal: None,
-            });
-    }
-
-    pub fn register_broker(
+    pub fn register_session_run(
         &self,
         id: SessionId,
         session: std::sync::Arc<atman_runtime::Session>,
+        run: LiveRun,
         owner_principal: impl Into<String>,
-    ) {
+    ) -> Result<()> {
+        let owner_principal = owner_principal.into();
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(entry) = sessions.get_mut(&id) {
+            anyhow::ensure!(
+                entry.owner_principal == owner_principal,
+                "session {id} is owned by another principal"
+            );
+            anyhow::ensure!(
+                std::sync::Arc::ptr_eq(&entry.session, &session),
+                "session {id} is already registered with another runtime"
+            );
+            anyhow::ensure!(
+                !entry.runs.contains_key(&run.run_id),
+                "run {} is already registered",
+                run.run_id
+            );
+            entry.runs.insert(run.run_id.clone(), run);
+            return Ok(());
+        }
         let permission_client = session.permission_broker().register_client();
-        let mut live = self.live.lock().unwrap();
-        let entry = live.entry(id).or_insert(LiveSessionEntry {
-            live: None,
-            broker: None,
-            permission_client: None,
-            owner_principal: None,
-        });
-        entry.broker = Some(session);
-        entry.permission_client = Some(permission_client);
-        entry.owner_principal = Some(owner_principal.into());
+        let mut runs = HashMap::new();
+        runs.insert(run.run_id.clone(), run);
+        sessions.insert(
+            id,
+            SessionActorEntry {
+                session,
+                runs,
+                _permission_client: permission_client,
+                owner_principal,
+            },
+        );
+        Ok(())
     }
 
     pub fn authorized_live_session(
@@ -194,11 +204,20 @@ impl DaemonState {
         id: &SessionId,
         principal: &str,
     ) -> Option<std::sync::Arc<atman_runtime::Session>> {
-        let live = self.live.lock().unwrap();
-        let entry = live.get(id)?;
-        (entry.live.is_some() && entry.owner_principal.as_deref() == Some(principal))
-            .then(|| entry.broker.clone())
-            .flatten()
+        let sessions = self.sessions.lock().unwrap();
+        let entry = sessions.get(id)?;
+        (!entry.runs.is_empty() && entry.owner_principal == principal)
+            .then(|| entry.session.clone())
+    }
+
+    pub fn authorized_session(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Option<std::sync::Arc<atman_runtime::Session>> {
+        let sessions = self.sessions.lock().unwrap();
+        let entry = sessions.get(id)?;
+        (entry.owner_principal == principal).then(|| entry.session.clone())
     }
 
     pub fn owns_live_session(&self, id: &SessionId, principal: &str) -> bool {
@@ -206,11 +225,9 @@ impl DaemonState {
     }
 
     pub fn can_read_session(&self, id: &SessionId, principal: &str) -> bool {
-        let live = self.live.lock().unwrap();
-        match live.get(id) {
-            Some(entry) => {
-                entry.live.is_some() && entry.owner_principal.as_deref() == Some(principal)
-            }
+        let sessions = self.sessions.lock().unwrap();
+        match sessions.get(id) {
+            Some(entry) => entry.owner_principal == principal,
             None => self
                 .sessions_root()
                 .join(id.to_string())
@@ -219,36 +236,43 @@ impl DaemonState {
         }
     }
 
-    pub fn deregister_broker(&self, id: &SessionId) {
-        if let Some(entry) = self.live.lock().unwrap().get_mut(id) {
-            entry.broker = None;
-            entry.permission_client = None;
-            entry.owner_principal = None;
-        }
+    pub fn finish_run(&self, session_id: &SessionId, run_id: &FlowRunId) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get_mut(session_id)
+            .is_some_and(|entry| entry.runs.remove(run_id).is_some())
     }
 
-    pub fn deregister_live(&self, id: &SessionId) {
-        self.live.lock().unwrap().remove(id);
+    pub fn remove_session(&self, id: &SessionId) -> bool {
+        let removed = self.sessions.lock().unwrap().remove(id);
+        let existed = removed.is_some();
+        drop(removed);
+        existed
     }
 
     pub fn live_session(&self, id: &SessionId) -> Option<std::sync::Arc<atman_runtime::Session>> {
-        self.live
+        self.sessions
             .lock()
             .unwrap()
             .get(id)
-            .filter(|entry| entry.live.is_some())
-            .and_then(|entry| entry.broker.clone())
+            .filter(|entry| !entry.runs.is_empty())
+            .map(|entry| entry.session.clone())
     }
 
     pub fn cancel_run(&self, run_id: &FlowRunId) -> bool {
-        let live = self.live.lock().unwrap();
-        for entry in live.values().filter_map(|entry| entry.live.as_ref()) {
-            if &entry.run_id == run_id {
-                entry.cancel.cancel();
-                return true;
-            }
+        let cancel = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find_map(|entry| entry.runs.get(run_id).map(|run| run.cancel.clone()));
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+            true
+        } else {
+            false
         }
-        false
     }
 
     pub fn rename_session(&self, sid: &SessionId, title: &str) -> Result<SessionSummary> {
@@ -297,13 +321,16 @@ impl DaemonState {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let live_ids: HashMap<SessionId, chrono::DateTime<chrono::Utc>> = {
-            let live = self.live.lock().unwrap();
-            live.iter()
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .iter()
                 .filter_map(|(sid, entry)| {
                     entry
-                        .live
-                        .as_ref()
-                        .map(|live| (sid.clone(), live.started_at))
+                        .runs
+                        .values()
+                        .map(|run| run.started_at)
+                        .min()
+                        .map(|started_at| (sid.clone(), started_at))
                 })
                 .collect()
         };

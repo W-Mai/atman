@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use atman_daemon::LiveSession;
+use atman_daemon::LiveRun;
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
@@ -37,20 +37,20 @@ async fn sse_accepts_query_string_token_when_authorization_header_absent() {
 
     let state = build_state(&tmp);
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
-    state.daemon.register_broker(
-        atman_proto::SessionId(sid),
-        session,
-        "authenticated-daemon-client",
-    );
-    state.daemon.register_live(
-        atman_proto::SessionId(sid),
-        LiveSession {
-            run_id: atman_proto::FlowRunId(Uuid::now_v7()),
-            flow_name: "sse-query-token-test".into(),
-            cancel: CancellationToken::new(),
-            started_at: Utc::now(),
-        },
-    );
+    state
+        .daemon
+        .register_session_run(
+            atman_proto::SessionId(sid),
+            session,
+            LiveRun {
+                run_id: atman_proto::FlowRunId(Uuid::now_v7()),
+                flow_name: "sse-query-token-test".into(),
+                cancel: CancellationToken::new(),
+                started_at: Utc::now(),
+            },
+            "authenticated-daemon-client",
+        )
+        .unwrap();
     let app = router(state);
     let resp = app
         .oneshot(
