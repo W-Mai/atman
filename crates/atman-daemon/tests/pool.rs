@@ -11,6 +11,12 @@ async fn wait_until_finished(state: &DaemonState, session_id: &SessionId) {
     }
 }
 
+async fn wait_for_runtime_event(state: &DaemonState, session_id: &SessionId, seq: u64) {
+    while state.session_runtime_event_seq(session_id) != Some(seq) {
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test]
 async fn cancel_run_hits_matching_live_session() {
     let tmp = tempfile::tempdir().unwrap();
@@ -118,6 +124,49 @@ async fn finishing_one_run_preserves_other_runs_in_the_same_session() {
     assert!(state.finish_run(&sid, &second));
     wait_until_finished(&state, &sid).await;
     assert!(state.is_authorized_session(&sid, "alice"));
+}
+
+#[tokio::test]
+async fn session_actor_projects_durable_events_and_watch_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    let run_id = FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: run_id.clone(),
+                flow_name: "hello".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .await
+        .unwrap();
+
+    let turn_id = atman_runtime::event::TurnId::now();
+    session
+        .sink()
+        .emit(atman_runtime::event::Event::TurnStart { turn_id });
+    session.sink().emit(atman_runtime::event::Event::FlowStart {
+        run_id: atman_runtime::event::FlowRunId(run_id.0),
+        flow_name: "hello".into(),
+        parent_run_id: None,
+        parent_node_id: None,
+        spawned: false,
+    });
+    wait_for_runtime_event(&state, &sid, 2).await;
+    let event_revision = state.session_projection_revision(&sid).unwrap();
+    assert!(event_revision.0 > 0);
+
+    session.set_goal(Some("Keep clients convergent".into()));
+    while state.session_projection_revision(&sid) == Some(event_revision) {
+        tokio::task::yield_now().await;
+    }
 }
 
 #[tokio::test]

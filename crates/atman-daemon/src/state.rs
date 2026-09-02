@@ -258,6 +258,22 @@ impl DaemonState {
             .map(|entry| entry.view().revision)
     }
 
+    pub fn session_projection_revision(&self, id: &SessionId) -> Option<atman_proto::Revision> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.view().projection_revision)
+    }
+
+    pub fn session_runtime_event_seq(&self, id: &SessionId) -> Option<u64> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.view().runtime_event_seq)
+    }
+
     pub fn is_authorized_session(&self, id: &SessionId, principal: &str) -> bool {
         self.authorized_actor(id, principal).is_some()
     }

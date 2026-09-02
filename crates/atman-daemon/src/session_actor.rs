@@ -7,13 +7,16 @@ use atman_proto::{
     PermissionRequestView, PermissionResolutionView, ResolvePermissionRequestsResponse, SessionId,
     SessionSummary,
 };
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use crate::projection::SessionProjector;
 use crate::state::LiveRun;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionActorView {
     pub revision: u64,
+    pub projection_revision: atman_proto::Revision,
+    pub runtime_event_seq: u64,
     pub runs: HashMap<FlowRunId, LiveRunView>,
 }
 
@@ -47,17 +50,37 @@ impl SessionActorHandle {
         initial_run: LiveRun,
         owner_principal: String,
     ) -> Self {
+        let events_rx = session.sink().subscribe();
+        let goal_rx = session.subscribe_goal();
+        let todos_rx = session.subscribe_todos();
+        let plans_rx = session.subscribe_plans();
+        let context_rx = session.subscribe_context();
+        let mut projection = SessionProjector::from_events(
+            session_id.clone(),
+            session.meta(),
+            &session.sink().snapshot_envelopes(),
+        );
+        projection.set_goal(goal_rx.borrow().clone());
+        projection.set_todos(todos_rx.borrow().clone());
+        projection.set_plans(plans_rx.borrow().clone());
+        projection.set_context(context_rx.borrow().clone());
         let (tx, rx) = mpsc::unbounded_channel();
         let mut runs = HashMap::new();
         runs.insert(initial_run.run_id.clone(), initial_run);
-        let (view_tx, view) = watch::channel(view_for(1, &runs));
+        let (view_tx, view) = watch::channel(view_for(1, &runs, &projection));
         let actor = SessionActor {
             session_id,
             session: session.clone(),
             runs,
             revision: 1,
+            projection,
             view_tx,
             rx,
+            events_rx,
+            goal_rx,
+            todos_rx,
+            plans_rx,
+            context_rx,
             _permission_client: session.permission_broker().register_client(),
         };
         tokio::spawn(actor.run());
@@ -190,63 +213,138 @@ enum Command {
     },
 }
 
+enum ActorInput {
+    Command(Option<Command>),
+    Event(Box<Result<atman_runtime::event::EventEnvelope, broadcast::error::RecvError>>),
+    Goal(Result<(), watch::error::RecvError>),
+    Todos(Result<(), watch::error::RecvError>),
+    Plans(Result<(), watch::error::RecvError>),
+    Context(Result<(), watch::error::RecvError>),
+}
+
 struct SessionActor {
     session_id: SessionId,
     session: Arc<atman_runtime::Session>,
     runs: HashMap<FlowRunId, LiveRun>,
     revision: u64,
+    projection: SessionProjector,
     view_tx: watch::Sender<SessionActorView>,
     rx: mpsc::UnboundedReceiver<Command>,
+    events_rx: broadcast::Receiver<atman_runtime::event::EventEnvelope>,
+    goal_rx: watch::Receiver<Option<String>>,
+    todos_rx: watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>,
+    plans_rx: watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>,
+    context_rx: watch::Receiver<atman_runtime::ContextSnapshot>,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
 }
 
 impl SessionActor {
     async fn run(mut self) {
-        while let Some(command) = self.rx.recv().await {
-            match command {
-                Command::AddRun { run, reply } => {
-                    let result = if self.runs.contains_key(&run.run_id) {
-                        Err(anyhow::anyhow!("run {} is already registered", run.run_id))
-                    } else {
-                        self.runs.insert(run.run_id.clone(), run);
-                        self.publish();
-                        Ok(())
-                    };
-                    let _ = reply.send(result);
-                }
-                Command::FinishRun { run_id } => {
-                    if self.runs.remove(&run_id).is_some() {
+        loop {
+            let input = tokio::select! {
+                command = self.rx.recv() => ActorInput::Command(command),
+                event = self.events_rx.recv() => ActorInput::Event(Box::new(event)),
+                changed = self.goal_rx.changed() => ActorInput::Goal(changed),
+                changed = self.todos_rx.changed() => ActorInput::Todos(changed),
+                changed = self.plans_rx.changed() => ActorInput::Plans(changed),
+                changed = self.context_rx.changed() => ActorInput::Context(changed),
+            };
+            match input {
+                ActorInput::Command(None) => break,
+                ActorInput::Command(Some(command)) => self.handle_command(command),
+                ActorInput::Event(event) => match *event {
+                    Ok(event) => {
+                        if self.projection.apply_envelope(&event).is_some() {
+                            self.publish();
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.rebuild_projection(),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                ActorInput::Goal(Ok(())) => {
+                    let goal = self.goal_rx.borrow_and_update().clone();
+                    if self.projection.set_goal(goal).is_some() {
                         self.publish();
                     }
                 }
-                Command::CancelRun { run_id, reply } => {
-                    let cancelled = self.runs.get(&run_id).is_some_and(|run| {
-                        run.cancel.cancel();
-                        true
-                    });
-                    let _ = reply.send(cancelled);
+                ActorInput::Todos(Ok(())) => {
+                    let todos = self.todos_rx.borrow_and_update().clone();
+                    if self.projection.set_todos(todos).is_some() {
+                        self.publish();
+                    }
                 }
-                Command::Rename { title, reply } => {
-                    let result = self.rename(title);
-                    let _ = reply.send(result);
+                ActorInput::Plans(Ok(())) => {
+                    let plans = self.plans_rx.borrow_and_update().clone();
+                    if self.projection.set_plans(plans).is_some() {
+                        self.publish();
+                    }
                 }
-                Command::ListPermissions { reply } => {
-                    let _ = reply.send(self.list_permissions());
+                ActorInput::Context(Ok(())) => {
+                    let context = self.context_rx.borrow_and_update().clone();
+                    if self.projection.set_context(context).is_some() {
+                        self.publish();
+                    }
                 }
-                Command::CreatePermissionGroup {
-                    request_ids,
-                    expected_request_revisions,
-                    label,
-                    reply,
-                } => {
-                    let result = self.create_permission_group(
-                        request_ids,
-                        expected_request_revisions,
-                        label,
-                    );
-                    let _ = reply.send(result);
+                ActorInput::Goal(Err(_))
+                | ActorInput::Todos(Err(_))
+                | ActorInput::Plans(Err(_))
+                | ActorInput::Context(Err(_)) => break,
+            }
+        }
+    }
+
+    fn handle_command(&mut self, command: Command) {
+        match command {
+            Command::AddRun { run, reply } => {
+                let result = if self.runs.contains_key(&run.run_id) {
+                    Err(anyhow::anyhow!("run {} is already registered", run.run_id))
+                } else {
+                    self.runs.insert(run.run_id.clone(), run);
+                    self.publish();
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            Command::FinishRun { run_id } => {
+                if self.runs.remove(&run_id).is_some() {
+                    self.publish();
                 }
-                Command::ResolvePermissions {
+            }
+            Command::CancelRun { run_id, reply } => {
+                let cancelled = self.runs.get(&run_id).is_some_and(|run| {
+                    run.cancel.cancel();
+                    true
+                });
+                let _ = reply.send(cancelled);
+            }
+            Command::Rename { title, reply } => {
+                let result = self.rename(title);
+                let _ = reply.send(result);
+            }
+            Command::ListPermissions { reply } => {
+                let _ = reply.send(self.list_permissions());
+            }
+            Command::CreatePermissionGroup {
+                request_ids,
+                expected_request_revisions,
+                label,
+                reply,
+            } => {
+                let result =
+                    self.create_permission_group(request_ids, expected_request_revisions, label);
+                let _ = reply.send(result);
+            }
+            Command::ResolvePermissions {
+                request_ids,
+                expected_request_revisions,
+                group,
+                action,
+                scope,
+                reason,
+                principal_id,
+                reply,
+            } => {
+                let result = self.resolve_permissions(
                     request_ids,
                     expected_request_revisions,
                     group,
@@ -254,19 +352,8 @@ impl SessionActor {
                     scope,
                     reason,
                     principal_id,
-                    reply,
-                } => {
-                    let result = self.resolve_permissions(
-                        request_ids,
-                        expected_request_revisions,
-                        group,
-                        action,
-                        scope,
-                        reason,
-                        principal_id,
-                    );
-                    let _ = reply.send(result);
-                }
+                );
+                let _ = reply.send(result);
             }
         }
     }
@@ -274,17 +361,35 @@ impl SessionActor {
     fn publish(&mut self) {
         self.revision = self.revision.saturating_add(1);
         self.view_tx
-            .send_replace(view_for(self.revision, &self.runs));
+            .send_replace(view_for(self.revision, &self.runs, &self.projection));
     }
 
-    fn rename(&self, title: String) -> Result<SessionSummary> {
+    fn rename(&mut self, title: String) -> Result<SessionSummary> {
         atman_runtime::session_meta::SessionMeta::rename(self.session.dir(), title)
             .with_context(|| format!("rename session {}", self.session_id))?;
-        session_summary(
+        let summary = session_summary(
             self.session.dir(),
             self.session_id.clone(),
             self.runs.values(),
-        )
+        )?;
+        if self.projection.set_metadata(self.session.meta()).is_some() {
+            self.publish();
+        }
+        Ok(summary)
+    }
+
+    fn rebuild_projection(&mut self) {
+        let mut projection = SessionProjector::from_events(
+            self.session_id.clone(),
+            self.session.meta(),
+            &self.session.sink().snapshot_envelopes(),
+        );
+        projection.set_goal(self.goal_rx.borrow().clone());
+        projection.set_todos(self.todos_rx.borrow().clone());
+        projection.set_plans(self.plans_rx.borrow().clone());
+        projection.set_context(self.context_rx.borrow().clone());
+        self.projection = projection;
+        self.publish();
     }
 
     fn list_permissions(&self) -> ListPermissionRequestsResponse {
@@ -397,9 +502,15 @@ impl SessionActor {
     }
 }
 
-fn view_for(revision: u64, runs: &HashMap<FlowRunId, LiveRun>) -> SessionActorView {
+fn view_for(
+    revision: u64,
+    runs: &HashMap<FlowRunId, LiveRun>,
+    projection: &SessionProjector,
+) -> SessionActorView {
     SessionActorView {
         revision,
+        projection_revision: projection.projection().revision,
+        runtime_event_seq: projection.last_runtime_seq(),
         runs: runs
             .iter()
             .map(|(id, run)| {

@@ -62,6 +62,7 @@ mod events;
 pub mod http;
 pub mod openapi;
 pub mod pidfile;
+mod projection;
 pub mod prompt_bridge;
 pub mod run;
 mod session_actor;

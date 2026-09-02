@@ -279,6 +279,7 @@ pub enum MessagePart {
 pub enum ImageDetail {
     Low,
     High,
+    Original,
     #[default]
     Auto,
 }
