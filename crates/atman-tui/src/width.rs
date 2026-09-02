@@ -88,6 +88,25 @@ pub fn pad_right(s: &str, target_w: usize) -> String {
     format!("{s}{}", " ".repeat(target_w - w))
 }
 
+pub fn tail_row_range(total_rows: usize, max_rows: usize) -> std::ops::Range<usize> {
+    total_rows.saturating_sub(max_rows)..total_rows
+}
+
+pub fn centered_row_range(
+    total_rows: usize,
+    focus_row: usize,
+    max_rows: usize,
+) -> std::ops::Range<usize> {
+    if max_rows >= total_rows {
+        return 0..total_rows;
+    }
+    let before = max_rows / 2;
+    let start = focus_row
+        .saturating_sub(before)
+        .min(total_rows.saturating_sub(max_rows));
+    start..start.saturating_add(max_rows).min(total_rows)
+}
+
 pub fn spans_width<'a>(spans: impl IntoIterator<Item = &'a Span<'a>>) -> usize {
     spans.into_iter().map(|s| width(s.content.as_ref())).sum()
 }
@@ -252,6 +271,14 @@ mod tests {
     #[test]
     fn width_mixed() {
         assert_eq!(width("aβ中🎉👨‍👩‍👧‍👦"), 8);
+    }
+
+    #[test]
+    fn display_row_windows_are_bounded() {
+        assert_eq!(tail_row_range(12, 4), 8..12);
+        assert_eq!(tail_row_range(3, 8), 0..3);
+        assert_eq!(centered_row_range(20, 10, 5), 8..13);
+        assert_eq!(centered_row_range(3, 5, 8), 0..3);
     }
 
     #[test]

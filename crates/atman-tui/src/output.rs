@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use atman_runtime::message::Message;
 use atman_runtime::projection::workflow::{
@@ -10,7 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::app::{NoteLevel, OutputItem, OutputStore};
+use crate::app::{Disclosure, NoteLevel, OutputItem, OutputStore, ToolCallStatus, ToolCallView};
 
 const RESET: Style = Style::new();
 
@@ -207,6 +208,7 @@ fn tool_block_id(item: &OutputItem) -> Option<String> {
             Some(handle.clone())
         }
         OutputItem::DiffPreview { title, .. } => Some(title.clone()),
+        OutputItem::ToolDispatch { calls } => calls.first().map(|call| call.id.clone()),
         _ => None,
     }
 }
@@ -266,7 +268,7 @@ struct CompactionSummaryRender<'a> {
     before_tokens: u64,
     after_tokens: u64,
     compacted_count: usize,
-    expanded: bool,
+    disclosure: Disclosure,
     animation_frame: u32,
     panel_width: u16,
 }
@@ -419,6 +421,7 @@ enum ItemKind {
     UserTurn,
     Thinking,
     Assistant,
+    ToolDispatch,
     SystemNote,
     Divider,
     WorkflowPanel,
@@ -437,6 +440,7 @@ impl ItemKind {
             OutputItem::UserTurn { .. } => Self::UserTurn,
             OutputItem::Thinking { .. } => Self::Thinking,
             OutputItem::AssistantMd { .. } => Self::Assistant,
+            OutputItem::ToolDispatch { .. } => Self::ToolDispatch,
             OutputItem::SystemNote { .. } => Self::SystemNote,
             OutputItem::Divider => Self::Divider,
             OutputItem::WorkflowPanel { .. } => Self::WorkflowPanel,
@@ -509,6 +513,8 @@ pub fn render_item_with_regions(
             ctx.panel_width,
             MAX_COLLAPSED_BODY_ROWS,
         )
+    } else if let OutputItem::ToolDispatch { calls } = item {
+        render_tool_dispatch(calls, ctx, item_index)
     } else {
         let lines = render_item(item, ctx);
         let regions = match item {
@@ -1634,7 +1640,7 @@ fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
 fn render_thinking(
     text: &str,
     done: bool,
-    expanded: bool,
+    disclosure: Disclosure,
     hovered: bool,
     animation_frame: u32,
     panel_width: u16,
@@ -1642,10 +1648,7 @@ fn render_thinking(
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = if hovered {
-        match t.mode {
-            crate::theme::ThemeMode::Dark => Color::Rgb(32, 34, 40),
-            crate::theme::ThemeMode::Light => Color::Rgb(232, 232, 236),
-        }
+        t.highlight_bg.into()
     } else {
         t.code_bg.into()
     };
@@ -1688,12 +1691,12 @@ fn render_thinking(
 
     let all_lines =
         crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4));
-    let max_lines = if expanded {
-        all_lines.len()
-    } else {
-        6.min(all_lines.len())
+    let max_lines = match disclosure {
+        Disclosure::Summary => all_lines.len().min(1),
+        Disclosure::Preview => all_lines.len().min(6),
+        Disclosure::Full => all_lines.len(),
     };
-    for md_line in all_lines.iter().take(max_lines) {
+    for md_line in &all_lines[crate::width::tail_row_range(all_lines.len(), max_lines)] {
         let content_w: usize = md_line
             .spans
             .iter()
@@ -1711,7 +1714,7 @@ fn render_thinking(
         }
         lines.push(Line::from(spans));
     }
-    if !expanded && all_lines.len() > max_lines {
+    if disclosure != Disclosure::Full && all_lines.len() > max_lines {
         let hint = format!(
             "    ▼ {} more lines — click to expand",
             all_lines.len() - max_lines
@@ -1722,7 +1725,7 @@ fn render_thinking(
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
         }
         lines.push(Line::from(spans));
-    } else if expanded && all_lines.len() > 6 {
+    } else if disclosure == Disclosure::Full && all_lines.len() > 6 {
         let hint = "    ▲ click to collapse".to_string();
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
@@ -1838,14 +1841,14 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::Thinking {
             text,
             done,
-            expanded,
+            disclosure,
             retried,
         } => {
             let hovered = ctx.hovered_thinking_idx.is_some();
             render_thinking(
                 text,
                 *done,
-                *expanded,
+                *disclosure,
                 hovered,
                 ctx.animation_frame,
                 ctx.panel_width,
@@ -1858,6 +1861,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             streaming,
             retried,
         } => render_assistant(md, *streaming, *retried, ctx.panel_width),
+        OutputItem::ToolDispatch { calls } => render_tool_dispatch(calls, ctx, 0).0,
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
         OutputItem::Divider => make_dashed_divider(ctx.panel_width),
         OutputItem::WorkflowPanel {
@@ -1925,7 +1929,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             before_tokens,
             after_tokens,
             compacted_count,
-            expanded,
+            disclosure,
         } => render_compaction_summary(CompactionSummaryRender {
             phase: *phase,
             range_start: *range_start,
@@ -1934,7 +1938,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             before_tokens: *before_tokens,
             after_tokens: *after_tokens,
             compacted_count: *compacted_count,
-            expanded: *expanded,
+            disclosure: *disclosure,
             animation_frame: ctx.animation_frame,
             panel_width: ctx.panel_width,
         }),
@@ -1978,6 +1982,222 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
+}
+
+pub const TOOL_CALL_REGION_PREFIX: &str = "__tool_call__:";
+pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
+
+fn render_tool_dispatch(
+    calls: &[ToolCallView],
+    ctx: &RenderCtx<'_>,
+    item_index: usize,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    let t = crate::theme::theme();
+    let width = ctx.panel_width.max(1) as usize;
+    let finished = calls
+        .iter()
+        .filter(|call| call.status != ToolCallStatus::Running)
+        .count();
+    let edited_files = calls
+        .iter()
+        .filter_map(|call| call.applied_edit.as_ref().map(|(path, _)| path))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let (insertions, deletions) = calls
+        .iter()
+        .filter_map(|call| call.applied_edit.as_ref().map(|(_, metrics)| metrics))
+        .fold((0usize, 0usize), |(insertions, deletions), metrics| {
+            (
+                insertions + metrics.insertions,
+                deletions + metrics.deletions,
+            )
+        });
+    let edit_summary = if edited_files == 0 {
+        String::new()
+    } else {
+        format!("  · {edited_files} files · +{insertions} −{deletions}")
+    };
+    let header = crate::width::truncate(
+        &format!(
+            "working · {}  {finished}/{}{edit_summary}",
+            calls.len(),
+            calls.len()
+        ),
+        width.saturating_sub(1),
+    );
+    let header_style = Style::default().fg(t.meta_fg.into()).bg(t.panel_bg.into());
+    let mut lines = vec![line_with_right_pad(
+        " ",
+        &header,
+        width,
+        header_style,
+        header_style,
+    )];
+    let mut regions = Vec::new();
+
+    for call in calls {
+        let row = lines.len() as u32;
+        let (glyph, color) = match call.status {
+            ToolCallStatus::Running => (spinner_char(ctx.animation_frame), t.accent),
+            ToolCallStatus::Ok => ("✓", t.success),
+            ToolCallStatus::Error => ("✗", t.error),
+        };
+        let affordance = match call.disclosure {
+            Disclosure::Summary => "›",
+            Disclosure::Preview => "⌄",
+            Disclosure::Full => "⌃",
+        };
+        let elapsed = call
+            .ended_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(call.started_at);
+        let elapsed = if elapsed.as_millis() >= 1000 {
+            format!(" · {:.1}s", elapsed.as_secs_f32())
+        } else if call.status == ToolCallStatus::Running {
+            String::new()
+        } else {
+            format!(" · {}ms", elapsed.as_millis())
+        };
+        let draft_tail = call
+            .draft_preview
+            .last_line()
+            .map(|line| format!(" · {line}"))
+            .unwrap_or_default();
+        let edit = call
+            .applied_edit
+            .as_ref()
+            .map(|(path, metrics)| {
+                format!(
+                    " · {} · +{} −{} · {}h",
+                    crate::width::middle_truncate(path, 22),
+                    metrics.insertions,
+                    metrics.deletions,
+                    metrics.hunks
+                )
+            })
+            .unwrap_or_default();
+        let has_fullscreen = matches!(
+            call.detail.as_deref(),
+            Some(
+                OutputItem::Terminal { .. }
+                    | OutputItem::Bash { .. }
+                    | OutputItem::SubAgentActivity { .. }
+                    | OutputItem::DiffPreview { .. }
+            )
+        );
+        let fullscreen_suffix = if has_fullscreen { " ⤢ " } else { "" };
+        let suffix_width = crate::width::width(fullscreen_suffix);
+        let body = crate::width::truncate(
+            &format!("{}{draft_tail}{edit}  {affordance}{elapsed}", call.intent),
+            width.saturating_sub(5 + suffix_width),
+        );
+        let glyph_style = Style::default().fg(color.into()).bg(t.panel_bg.into());
+        let body_style = Style::default()
+            .fg(t.tinted_fg.into())
+            .bg(t.panel_bg.into());
+        let mut summary_line = line_with_right_pad(
+            &format!(" {glyph} "),
+            &body,
+            width.saturating_sub(suffix_width),
+            glyph_style,
+            body_style,
+        );
+        if has_fullscreen {
+            summary_line.spans.push(Span::styled(
+                fullscreen_suffix.to_string(),
+                Style::default().fg(t.accent.into()).bg(t.panel_bg.into()),
+            ));
+        }
+        lines.push(summary_line);
+        regions.push(NodeRegion {
+            panel_item_index: item_index,
+            path_key: format!("{TOOL_CALL_REGION_PREFIX}{}", call.id),
+            start_row: row,
+            end_row: row + 1,
+            col_start: 0,
+            col_end: ctx.panel_width,
+        });
+        if has_fullscreen {
+            regions.push(NodeRegion {
+                panel_item_index: item_index,
+                path_key: format!("{TOOL_FULLSCREEN_REGION_PREFIX}{}", call.id),
+                start_row: row,
+                end_row: row + 1,
+                col_start: ctx.panel_width.saturating_sub(4),
+                col_end: ctx.panel_width,
+            });
+        }
+
+        if call.disclosure == Disclosure::Summary {
+            continue;
+        }
+        let Some(detail) = call.detail.as_deref() else {
+            let detail_style = Style::default().fg(t.subtle_fg.into()).bg(t.code_bg.into());
+            let detail = if call.draft_preview.text().is_empty() {
+                call.input.to_string()
+            } else {
+                call.draft_preview.text().to_string()
+            };
+            lines.push(line_with_right_pad(
+                "    ",
+                &crate::width::truncate(&detail, width.saturating_sub(4)),
+                width,
+                detail_style,
+                detail_style,
+            ));
+            continue;
+        };
+
+        let mut detail = detail.clone();
+        let expanded = call.disclosure == Disclosure::Full;
+        match &mut detail {
+            OutputItem::Terminal {
+                expanded: value, ..
+            }
+            | OutputItem::Bash {
+                expanded: value, ..
+            }
+            | OutputItem::DiffPreview {
+                expanded: value, ..
+            }
+            | OutputItem::SubAgentActivity {
+                expanded: value, ..
+            } => *value = expanded,
+            OutputItem::CompactionSummary { disclosure, .. } => {
+                *disclosure = call.disclosure;
+            }
+            _ => {}
+        }
+        let child_ctx = RenderCtx {
+            expanded_tools: ctx.expanded_tools,
+            messages: ctx.messages,
+            animation_frame: ctx.animation_frame,
+            panel_width: ctx.panel_width.saturating_sub(4).max(1),
+            hovered_thinking_idx: None,
+        };
+        let mut detail_lines = render_item(&detail, &child_ctx);
+        if detail_lines
+            .last()
+            .is_some_and(|line| line.spans.is_empty())
+        {
+            detail_lines.pop();
+        }
+        for mut line in detail_lines {
+            line.spans.insert(
+                0,
+                Span::styled("    ".to_string(), Style::default().bg(t.code_bg.into())),
+            );
+            let used = crate::width::spans_width(line.spans.iter());
+            if used < width {
+                line.spans.push(Span::styled(
+                    " ".repeat(width - used),
+                    Style::default().bg(t.code_bg.into()),
+                ));
+            }
+            lines.push(line);
+        }
+    }
+    (lines, regions)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2125,7 +2345,16 @@ fn render_diff_preview(
     }
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
-    if let (Some(old), Some(new)) = (old_content, new_content) {
+    let layout = atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.diff_layout())
+        .unwrap_or_default();
+    let unified_layout =
+        layout == atman_runtime::config_hub::DiffLayout::Unified || panel_width < 72;
+    if unified_layout && let Some(diff) = unified_diff {
+        let (body, total) = render_unified_diff_rows(diff, expanded, target, bg);
+        lines.extend(body);
+        push_diff_fold_hint(&mut lines, expanded, total, 15, target, hint_style);
+    } else if let (Some(old), Some(new)) = (old_content, new_content) {
         let (body, total) = render_dual_diff_rows(title, old, new, expanded, target, bg);
         lines.extend(body);
         push_diff_fold_hint(&mut lines, expanded, total, 15, target, hint_style);
@@ -2133,8 +2362,13 @@ fn render_diff_preview(
         let (cells, lang) = parse_unified_diff_to_dual(diff);
         let total = cells.len();
         let first_change = cells.iter().position(|(l, r)| {
-            !matches!(l.kind, DiffCellKind::Normal | DiffCellKind::Empty)
-                || !matches!(r.kind, DiffCellKind::Normal | DiffCellKind::Empty)
+            !matches!(
+                l.kind,
+                DiffCellKind::Normal | DiffCellKind::Empty | DiffCellKind::Meta
+            ) || !matches!(
+                r.kind,
+                DiffCellKind::Normal | DiffCellKind::Empty | DiffCellKind::Meta
+            )
         });
         let (body, _) = render_diff_cell_rows(&cells, &lang, expanded, target, bg, first_change);
         lines.extend(body);
@@ -2171,6 +2405,111 @@ fn push_diff_fold_hint(
     }
 }
 
+fn render_unified_diff_rows(
+    diff: &str,
+    expanded: bool,
+    target: usize,
+    bg: Color,
+) -> (Vec<Line<'static>>, usize) {
+    let t = crate::theme::theme();
+    let mut rows = Vec::new();
+    let mut change_rows = Vec::new();
+    for source in diff.lines() {
+        let (marker, text, style, is_change) = if source.starts_with("+++")
+            || source.starts_with("---")
+            || source.starts_with("@@")
+            || source.starts_with("diff --git")
+            || source.starts_with("index ")
+        {
+            (
+                "  ",
+                source,
+                Style::default().fg(t.meta_fg.into()).bg(bg),
+                true,
+            )
+        } else if let Some(text) = source.strip_prefix('+') {
+            (
+                "+ ",
+                text,
+                Style::default()
+                    .fg(t.success.into())
+                    .bg(t.note_success_bg.into()),
+                true,
+            )
+        } else if let Some(text) = source.strip_prefix('-') {
+            (
+                "- ",
+                text,
+                Style::default()
+                    .fg(t.error.into())
+                    .bg(t.note_error_bg.into()),
+                true,
+            )
+        } else {
+            (
+                "  ",
+                source.strip_prefix(' ').unwrap_or(source),
+                Style::default().bg(bg),
+                false,
+            )
+        };
+        let wrapped = crate::width::word_wrap(text, target.saturating_sub(2).max(1));
+        for (visual_index, line) in wrapped.into_iter().enumerate() {
+            if is_change {
+                change_rows.push(rows.len());
+            }
+            rows.push(line_with_right_pad(
+                if visual_index == 0 { marker } else { "  " },
+                &line,
+                target,
+                style,
+                style,
+            ));
+        }
+    }
+    let total = rows.len();
+    if expanded || total <= 15 {
+        return (rows, total);
+    }
+    let indices = distributed_preview_indices(total, &change_rows, 15);
+    let visible = indices
+        .into_iter()
+        .filter_map(|index| rows.get(index).cloned())
+        .collect();
+    (visible, total)
+}
+
+fn distributed_preview_indices(total: usize, changes: &[usize], max_rows: usize) -> Vec<usize> {
+    if total <= max_rows {
+        return (0..total).collect();
+    }
+    if changes.is_empty() {
+        return (0..max_rows.min(total)).collect();
+    }
+    let mut groups = vec![vec![changes[0]]];
+    for &index in changes.iter().skip(1) {
+        let last = *groups
+            .last()
+            .and_then(|group| group.last())
+            .unwrap_or(&index);
+        if index.saturating_sub(last) > 3 {
+            groups.push(vec![index]);
+        } else if let Some(group) = groups.last_mut() {
+            group.push(index);
+        }
+    }
+    let per_group = (max_rows / groups.len()).max(1);
+    let mut selected = std::collections::BTreeSet::new();
+    for group in groups {
+        selected.extend(crate::width::centered_row_range(
+            total,
+            group[group.len() / 2],
+            per_group,
+        ));
+    }
+    selected.into_iter().take(max_rows).collect()
+}
+
 #[derive(Clone)]
 struct DiffCell {
     line_no: Option<usize>,
@@ -2186,7 +2525,27 @@ enum DiffCellKind {
     Normal,
     Delete,
     Insert,
+    Meta,
     Empty,
+}
+
+fn diff_preview_indices(rows: &[(DiffCell, DiffCell)], max_rows: usize) -> Vec<usize> {
+    if rows.len() <= max_rows {
+        return (0..rows.len()).collect();
+    }
+    let changes = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (left, right))| {
+            (!matches!(left.kind, DiffCellKind::Normal | DiffCellKind::Empty)
+                || !matches!(right.kind, DiffCellKind::Normal | DiffCellKind::Empty))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if changes.is_empty() {
+        return (0..max_rows.min(rows.len())).collect();
+    }
+    distributed_preview_indices(rows.len(), &changes, max_rows)
 }
 
 fn render_diff_cell_rows(
@@ -2227,11 +2586,9 @@ fn render_diff_cell_rows(
             );
         }
     } else {
-        let fc = first_change.unwrap_or(0);
-        let radius = 7usize;
-        let start = fc.saturating_sub(radius).min(total.saturating_sub(15));
-        let end = (start + 15).min(total);
-        for (left, right) in rows[start..end].iter() {
+        let _ = first_change;
+        for index in diff_preview_indices(rows, 15) {
+            let (left, right) = &rows[index];
             push_diff_visual_rows(
                 &mut out,
                 DiffVisualSpec {
@@ -2456,6 +2813,7 @@ fn parse_unified_diff_to_dual(diff: &str) -> (Vec<(DiffCell, DiffCell)>, String)
 
     for line in diff.lines() {
         if line.starts_with("diff --git ") {
+            flush_pending(&mut rows, &mut pending_deletes, &mut pending_inserts);
             if lang.is_empty() {
                 if let Some(ext) = line
                     .split('.')
@@ -2465,6 +2823,13 @@ fn parse_unified_diff_to_dual(diff: &str) -> (Vec<(DiffCell, DiffCell)>, String)
                     lang = ext_to_lang(ext).to_string();
                 }
             }
+            let cell = DiffCell {
+                line_no: None,
+                text: line.to_string(),
+                kind: DiffCellKind::Meta,
+                char_diff: None,
+            };
+            rows.push((cell.clone(), cell));
             continue;
         }
         if line.starts_with("index ")
@@ -2475,10 +2840,18 @@ fn parse_unified_diff_to_dual(diff: &str) -> (Vec<(DiffCell, DiffCell)>, String)
             continue;
         }
         if line.starts_with("@@") {
+            flush_pending(&mut rows, &mut pending_deletes, &mut pending_inserts);
             if let Some((os, ns)) = parse_hunk_header(line) {
                 old_line = os;
                 new_line = ns;
             }
+            let cell = DiffCell {
+                line_no: None,
+                text: line.to_string(),
+                kind: DiffCellKind::Meta,
+                char_diff: None,
+            };
+            rows.push((cell.clone(), cell));
             continue;
         }
         if line.starts_with(' ') || line.is_empty() {
@@ -2670,6 +3043,7 @@ fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec
         DiffCellKind::Insert => Style::default()
             .fg(t.success.into())
             .bg(t.note_success_bg.into()),
+        DiffCellKind::Meta => Style::default().fg(t.meta_fg.into()).bg(bg),
         DiffCellKind::Normal | DiffCellKind::Empty => Style::default().bg(bg),
     };
     let body_w = width;
@@ -2704,7 +3078,10 @@ fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec
         let mut spans = Vec::new();
         let mut body = body_spans;
         if cell.char_diff.is_none()
-            && !matches!(cell.kind, DiffCellKind::Normal | DiffCellKind::Empty)
+            && !matches!(
+                cell.kind,
+                DiffCellKind::Normal | DiffCellKind::Empty | DiffCellKind::Meta
+            )
         {
             for span in &mut body {
                 span.style.fg = mark_style.fg.or(span.style.fg);
@@ -5580,14 +5957,14 @@ line2
             before_tokens: 100,
             after_tokens: 50,
             compacted_count: 10,
-            expanded: false,
+            disclosure: Disclosure::Summary,
             animation_frame: 0,
             panel_width: 40,
         });
         let rendered = rendered_text(&lines);
 
-        assert_eq!(lines.len(), 17, "header + 12 summary rows + hint + padding");
-        assert!(rendered.contains("3 more lines — click to expand"));
+        assert_eq!(lines.len(), 6, "header + latest row + hint + padding");
+        assert!(rendered.contains("14 more lines — click to expand"));
         assert!(
             lines
                 .iter()
@@ -5868,7 +6245,7 @@ mod tests {
         values.push(OutputItem::Thinking {
             text: "offscreen".into(),
             done: false,
-            expanded: false,
+            disclosure: Disclosure::Summary,
             retried: false,
         });
         let items = OutputStore::from(values);
@@ -6040,6 +6417,7 @@ mod tests {
             kind: "stdout".into(),
             line: chunk.clone(),
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         let source_generation = app.items.revisions()[0].source_generation;
@@ -6063,6 +6441,7 @@ mod tests {
                 kind: "stdout".into(),
                 line: chunk.clone(),
                 call_intent: None,
+                tool_use_id: None,
                 run_id: None,
             });
             let mut cache = std::mem::take(&mut app.layout_cache);
@@ -6088,6 +6467,7 @@ mod tests {
             exit_code: Some(0),
             error: None,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         let mut cache = std::mem::take(&mut app.layout_cache);
@@ -6921,10 +7301,9 @@ mod tests {
         // not split into two separate rows
         let diff = "--- a/test.rs\n+++ b/test.rs\n@@ -1,3 +1,3 @@\n line one\n-old line two\n+new line two\n line three\n";
         let (cells, _lang) = parse_unified_diff_to_dual(diff);
-        // Should be 3 rows: normal, (delete, insert) paired, normal
-        assert_eq!(cells.len(), 3, "should have 3 paired rows");
-        // Middle row should have both Delete (left) and Insert (right)
-        let (left, right) = &cells[1];
+        // Hunk header + normal + paired replacement + normal.
+        assert_eq!(cells.len(), 4, "should retain metadata and pair changes");
+        let (left, right) = &cells[2];
         assert!(
             matches!(left.kind, DiffCellKind::Delete),
             "left should be Delete"
@@ -7237,7 +7616,7 @@ mod tests {
     #[test]
     fn thinking_wraps_long_line() {
         let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk lllll";
-        let lines = render_thinking(text, true, true, false, 0, 30, false);
+        let lines = render_thinking(text, true, Disclosure::Full, false, 0, 30, false);
         assert!(
             lines.len() > 6,
             "should wrap into many rows: {}",
@@ -7254,7 +7633,7 @@ mod tests {
     fn thinking_wraps_cjk_long_line() {
         let text =
             "读取文件内容并做分析的一个非常长的中文标题名称这样会超过宽度必须换行才行测试一下看看";
-        let lines = render_thinking(text, true, true, false, 0, 30, false);
+        let lines = render_thinking(text, true, Disclosure::Full, false, 0, 30, false);
         assert!(lines.len() > 6, "CJK thinking should wrap: {}", lines.len());
         for (i, line) in lines.iter().enumerate() {
             let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -7266,7 +7645,15 @@ mod tests {
     #[test]
     fn thinking_renders_markdown_bold() {
         // **bold** in thinking text should produce a BOLD span, not literal asterisks
-        let lines = render_thinking("this is **bold** text", true, true, false, 0, 60, false);
+        let lines = render_thinking(
+            "this is **bold** text",
+            true,
+            Disclosure::Full,
+            false,
+            0,
+            60,
+            false,
+        );
         let has_bold = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -7275,11 +7662,9 @@ mod tests {
     }
 
     #[test]
-    fn thinking_collapsed_limits_to_six_lines() {
+    fn thinking_summary_shows_only_the_latest_visual_line() {
         let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
-        let lines = render_thinking(text, true, false, false, 0, 60, false);
-        // header(3) + 6 body lines + hint(1) + blank(1) = 11
-        // (blank + header + blank + 6 body + hint + blank)
+        let lines = render_thinking(text, true, Disclosure::Summary, false, 0, 60, false);
         let body_count = lines
             .iter()
             .filter(|l| {
@@ -7287,7 +7672,12 @@ mod tests {
                 s.starts_with("    line")
             })
             .count();
-        assert_eq!(body_count, 6, "collapsed thinking should show 6 body lines");
+        assert_eq!(body_count, 1, "summary should show one body line");
+        assert!(lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("line10"))
+        }));
     }
 
     #[test]
@@ -7980,7 +8370,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         before_tokens,
         after_tokens,
         compacted_count,
-        expanded,
+        disclosure,
         animation_frame,
         panel_width,
     } = render;
@@ -8025,13 +8415,38 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
     lines.push(blank.clone());
 
     if matches!(phase, CompactionPhase::Running) {
-        lines.push(line_with_right_pad(
-            "  ",
-            "summary generation in progress",
-            target,
-            body_style,
-            body_style,
-        ));
+        let rendered =
+            crate::markdown::render_markdown_with_width(summary, panel_width.saturating_sub(4));
+        let visible = match disclosure {
+            Disclosure::Summary => rendered.len().min(1),
+            Disclosure::Preview => rendered.len().min(6),
+            Disclosure::Full => rendered.len(),
+        };
+        if visible == 0 {
+            lines.push(line_with_right_pad(
+                "  ",
+                "summary generation in progress",
+                target,
+                body_style,
+                body_style,
+            ));
+        } else {
+            let range = crate::width::tail_row_range(rendered.len(), visible);
+            for line in rendered[range].iter() {
+                let body = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                lines.push(line_with_right_pad(
+                    "  ",
+                    &crate::width::truncate(&body, target.saturating_sub(2)),
+                    target,
+                    body_style,
+                    body_style,
+                ));
+            }
+        }
         lines.push(blank);
         return lines;
     }
@@ -8039,8 +8454,13 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
     let rendered =
         crate::markdown::render_markdown_with_width(summary, panel_width.saturating_sub(4));
     let total = rendered.len();
-    let visible = if expanded { total } else { total.min(12) };
-    for line in rendered.into_iter().take(visible) {
+    let visible = match disclosure {
+        Disclosure::Summary => total.min(1),
+        Disclosure::Preview => total.min(12),
+        Disclosure::Full => total,
+    };
+    let range = crate::width::tail_row_range(rendered.len(), visible);
+    for line in rendered[range].iter() {
         let body = line
             .spans
             .iter()
@@ -8058,7 +8478,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
             ));
         }
     }
-    if !expanded && total > visible {
+    if disclosure != Disclosure::Full && total > visible {
         let hint = format!("  ▼ {} more lines — click to expand", total - visible);
         let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
@@ -8066,7 +8486,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
             spans.push(Span::styled(" ".repeat(pad), hint_style));
         }
         lines.push(Line::from(spans));
-    } else if expanded && total > 12 {
+    } else if disclosure == Disclosure::Full && total > 12 {
         let hint = "  ▲ click to collapse".to_string();
         let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];

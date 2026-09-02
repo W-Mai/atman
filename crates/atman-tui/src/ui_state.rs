@@ -101,4 +101,40 @@ impl UiState {
             ));
         }
     }
+
+    pub fn open_tool_output_panel(&mut self, item_idx: usize, tool_use_id: &str) -> bool {
+        let Some(item) = self.app.tool_call_detail(item_idx, tool_use_id) else {
+            return false;
+        };
+        let title = match &item {
+            crate::app::OutputItem::DiffPreview { title, .. } => title.clone(),
+            _ => "Tool output".to_string(),
+        };
+        let item_id = format!("tool-output:{item_idx}:{tool_use_id}");
+        let canvas = self.app.maximized_canvas();
+        let window_id = self.wm.open_with_size(
+            &item_id,
+            crate::wm::ContentKey::Output(item_id.clone()),
+            crate::wm::OpenPolicy::ReuseExisting,
+            crate::wm::WindowContent::Output {
+                item_id: item_id.clone(),
+            },
+            &title,
+            canvas,
+            canvas.width,
+            canvas.height,
+            true,
+        );
+        if let Some(panel) = self
+            .wm
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == window_id)
+        {
+            panel.content = Some(Box::new(
+                crate::window::output_panel::OutputPanelContent::new(item),
+            ));
+        }
+        true
+    }
 }

@@ -21,6 +21,7 @@ pub enum ContentKey {
     History,
     Activity(String),
     Mermaid(String),
+    Output(String),
     Cheatsheet,
     Mcp,
 }
@@ -57,6 +58,9 @@ pub enum WindowContent {
     Mermaid {
         item_id: String,
     },
+    Output {
+        item_id: String,
+    },
     Cheatsheet,
     Mcp,
 }
@@ -68,6 +72,7 @@ impl WindowContent {
             WindowContent::History => ContentKey::History,
             WindowContent::Activity { run_id } => ContentKey::Activity(run_id.clone()),
             WindowContent::Mermaid { item_id } => ContentKey::Mermaid(item_id.clone()),
+            WindowContent::Output { item_id } => ContentKey::Output(item_id.clone()),
             WindowContent::Cheatsheet => ContentKey::Cheatsheet,
             WindowContent::Mcp => ContentKey::Mcp,
         }
@@ -83,6 +88,7 @@ impl WindowContent {
             WindowContent::History => "⊞",
             WindowContent::Activity { .. } => "▸",
             WindowContent::Mermaid { .. } => "◇",
+            WindowContent::Output { .. } => "≡",
             WindowContent::Cheatsheet => "?",
             WindowContent::Mcp => "⚡",
         }

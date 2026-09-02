@@ -773,7 +773,31 @@ pub(crate) async fn run_frames(
                                 } else if let Some((panel_idx, node_id)) =
                                     app.app.hit_test_node(me.column, me.row)
                                 {
-                                    if node_id
+                                    if let Some(tool_use_id) = node_id
+                                        .strip_prefix(crate::output::TOOL_CALL_REGION_PREFIX)
+                                    {
+                                        app.app.cycle_tool_call_disclosure(
+                                            panel_idx,
+                                            tool_use_id,
+                                        );
+                                    } else if let Some(tool_use_id) = node_id.strip_prefix(
+                                        crate::output::TOOL_FULLSCREEN_REGION_PREFIX,
+                                    ) {
+                                        if let Some(handle) = app
+                                            .app
+                                            .tool_call_detail_handle(panel_idx, tool_use_id)
+                                        {
+                                            app.open_task_panel_maximized(&handle);
+                                        } else if !app.open_tool_output_panel(
+                                            panel_idx,
+                                            tool_use_id,
+                                        ) {
+                                            app.app.cycle_tool_call_disclosure(
+                                                panel_idx,
+                                                tool_use_id,
+                                            );
+                                        }
+                                    } else if node_id
                                         == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
                                     {
                                         if let Some(handle) =
@@ -820,7 +844,7 @@ pub(crate) async fn run_frames(
                                     && let Some(crate::app::OutputItem::Thinking { .. }) =
                                         app.app.items.get(idx)
                                 {
-                                    app.app.toggle_thinking_expanded(idx);
+                                    app.app.cycle_thinking_disclosure(idx);
                                 } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.app.items.get(idx)
@@ -856,7 +880,7 @@ pub(crate) async fn run_frames(
                                     && let Some(crate::app::OutputItem::CompactionSummary { .. }) =
                                         app.app.items.get(idx)
                                 {
-                                    app.app.toggle_compaction_summary_expand(idx);
+                                    app.app.cycle_compaction_summary_disclosure(idx);
                                 }
                                 }
                             } else if let MouseEventKind::Drag(MouseButton::Left) = me.kind {
