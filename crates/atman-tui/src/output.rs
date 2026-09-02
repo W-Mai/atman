@@ -1134,7 +1134,9 @@ fn user_message_bg() -> Color {
     crate::theme::theme().user_msg_bg.into()
 }
 
-const RIGHT_PAD: usize = 2;
+const DOCUMENT_PAD: &str = "  ";
+const DOCUMENT_PAD_X: usize = DOCUMENT_PAD.len();
+const RIGHT_PAD: usize = DOCUMENT_PAD_X;
 
 pub struct PaddedRow {
     pub prefix: String,
@@ -1229,11 +1231,17 @@ pub fn line_with_right_pad(
     prefix_style: Style,
     body_style: Style,
 ) -> Line<'static> {
-    let used = crate::width::width(prefix) + crate::width::width(body);
+    let body = crate::width::truncate(
+        body,
+        target
+            .saturating_sub(crate::width::width(prefix))
+            .saturating_sub(RIGHT_PAD),
+    );
+    let used = crate::width::width(prefix) + crate::width::width(&body);
     let fill = target.saturating_sub(used);
     let mut spans = vec![
         Span::styled(prefix.to_string(), prefix_style),
-        Span::styled(body.to_string(), body_style),
+        Span::styled(body, body_style),
     ];
     if fill > 0 {
         spans.push(Span::styled(" ".repeat(fill), body_style));
@@ -1653,11 +1661,14 @@ fn render_thinking(
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    let header_prefix = format!("  {glyph} {label}");
+    let header_prefix = crate::width::truncate(
+        &format!("{DOCUMENT_PAD}{glyph}{DOCUMENT_PAD}{label}"),
+        target.saturating_sub(RIGHT_PAD),
+    );
     let header_used = crate::width::width(header_prefix.as_str());
 
     if disclosure == Disclosure::Summary {
-        let body_width = target.saturating_sub(header_used + 4);
+        let body_width = target.saturating_sub(header_used + DOCUMENT_PAD_X * 2);
         let latest = (body_width > 0)
             .then(|| crate::markdown::render_markdown_with_width(text, body_width as u16))
             .and_then(|lines| {
@@ -1669,7 +1680,7 @@ fn render_thinking(
             });
         let mut spans = vec![Span::styled(header_prefix, header_style)];
         if let Some(latest) = latest {
-            spans.push(Span::styled("  ", body_style));
+            spans.push(Span::styled(DOCUMENT_PAD, body_style));
             let body = latest
                 .spans
                 .into_iter()
@@ -1686,12 +1697,13 @@ fn render_thinking(
         return lines;
     }
 
-    let header_pad = target.saturating_sub(header_used);
-    let mut header_spans = vec![Span::styled(header_prefix, header_style)];
-    if header_pad > 0 {
-        header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
-    }
-    lines.push(Line::from(header_spans));
+    lines.push(line_with_right_pad(
+        "",
+        &header_prefix,
+        target,
+        header_style,
+        header_style,
+    ));
     lines.push(blank.clone());
 
     let all_lines =
@@ -1709,7 +1721,7 @@ fn render_thinking(
             .sum();
         let used = content_w + 2;
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 2);
-        spans.push(Span::styled("  ", body_style));
+        spans.push(Span::styled(DOCUMENT_PAD, body_style));
         for src in &md_line.spans {
             let style = src.style.patch(body_style);
             spans.push(Span::styled(src.content.clone(), style));
@@ -1721,23 +1733,17 @@ fn render_thinking(
     }
     if disclosure != Disclosure::Full && all_lines.len() > max_lines {
         let hint = format!(
-            "  ▼ {} more lines — click to expand",
+            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
             all_lines.len() - max_lines
         );
-        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if hint_pad > 0 {
-            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     } else if disclosure == Disclosure::Full && all_lines.len() > 6 {
-        let hint = "  ▲ click to collapse".to_string();
-        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if hint_pad > 0 {
-            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     }
     lines.push(blank);
     lines
@@ -1755,13 +1761,11 @@ fn render_assistant(
         let retry_style = Style::default()
             .fg(t.warn.into())
             .add_modifier(Modifier::DIM);
-        let mut header = vec![Span::styled(" ↻ retry".to_string(), retry_style)];
-        let w = crate::width::width(" ↻ retry");
-        let pad = (panel_width as usize).saturating_sub(w);
-        if pad > 0 {
-            header.push(Span::styled(" ".repeat(pad), retry_style));
-        }
-        lines.insert(0, Line::from(header));
+        let retry = format!("{DOCUMENT_PAD}↻{DOCUMENT_PAD}retry");
+        lines.insert(
+            0,
+            line_with_right_pad("", &retry, panel_width as usize, retry_style, retry_style),
+        );
     }
     if streaming {
         let cursor = Span::styled(
@@ -1799,8 +1803,9 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    let first = format!(" {glyph} ");
-    let rows = wrap_with_prefix(cleaned, target, &first, "   ");
+    let first = format!("{DOCUMENT_PAD}{glyph}{DOCUMENT_PAD}");
+    let continuation = " ".repeat(crate::width::width(&first));
+    let rows = wrap_with_prefix(cleaned, target, &first, &continuation);
     for row in rows {
         lines.push(line_with_right_pad(
             &row.prefix,
@@ -1826,7 +1831,9 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    let rows = wrap_with_prefix(text, target, " ❯ ", "   ");
+    let first = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
+    let continuation = " ".repeat(crate::width::width(&first));
+    let rows = wrap_with_prefix(text, target, &first, &continuation);
     for row in rows {
         lines.push(line_with_right_pad(
             &row.prefix,
@@ -2002,7 +2009,6 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
 pub const TOOL_CALL_REGION_PREFIX: &str = "__tool_call__:";
 pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
 pub const TOOL_DETAIL_FULLSCREEN_REGION_PREFIX: &str = "__tool_detail_fullscreen__:";
-const DOCUMENT_PAD_X: usize = 2;
 const TOOL_CONTROL_WIDTH: usize = 3;
 const TOOL_INPUT_PREVIEW_ROWS: usize = 8;
 
@@ -2271,15 +2277,18 @@ fn render_tool_input_detail(
     };
     let mut lines = vec![document_blank(width, style)];
     for row in rows.iter().take(visible) {
-        lines.push(line_with_right_pad("  ", row, width, style, style));
+        lines.push(line_with_right_pad(DOCUMENT_PAD, row, width, style, style));
     }
     if visible < rows.len() {
-        let hint = format!("  ▼ {} more lines — click to expand", rows.len() - visible);
+        let hint = format!(
+            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
+            rows.len() - visible
+        );
         lines.push(line_with_right_pad("", &hint, width, style, style));
     } else if disclosure == Disclosure::Full && rows.len() > TOOL_INPUT_PREVIEW_ROWS {
         lines.push(line_with_right_pad(
             "",
-            "  ▲ click to collapse",
+            &format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse"),
             width,
             style,
             style,
@@ -2506,7 +2515,7 @@ fn render_tool_dispatch(
     let mut lines = vec![document_blank(width, header_style)];
     lines.push(aligned_document_row(
         vec![
-            Span::styled(format!("{header_glyph} "), header_glyph_style),
+            Span::styled(format!("{header_glyph}{DOCUMENT_PAD}"), header_glyph_style),
             Span::styled(format!("working · {}", calls.len()), header_title_style),
         ],
         header_right,
@@ -2575,7 +2584,7 @@ fn render_tool_dispatch(
         let body_style = Style::default().fg(t.tinted_fg.into()).bg(row_bg);
         let meta_style = Style::default().fg(t.meta_fg.into()).bg(row_bg);
         let mut left = vec![
-            Span::styled(format!("{glyph} "), glyph_style),
+            Span::styled(format!("{glyph}{DOCUMENT_PAD}"), glyph_style),
             Span::styled(call.intent.clone(), body_style),
         ];
         if !input_tail.is_empty() || !draft_tail.is_empty() || !edit_path.is_empty() {
@@ -2720,7 +2729,12 @@ fn render_tool_dispatch(
                 }
             }
             line.spans
-                .insert(0, Span::styled("  ".to_string(), detail_style));
+                .insert(0, Span::styled(DOCUMENT_PAD.to_string(), detail_style));
+            line.spans = crate::width::truncate_spans(
+                line.spans,
+                width.saturating_sub(RIGHT_PAD),
+                Some(nested_bg),
+            );
             let used = crate::width::spans_width(line.spans.iter());
             if used < width {
                 line.spans
@@ -2848,14 +2862,14 @@ fn render_mermaid_preview(
         .add_modifier(Modifier::DIM);
     let fs_btn = "⤢";
     let fs_btn_used = crate::width::width(fs_btn);
-    let gap = 1;
+    let gap = DOCUMENT_PAD_X;
 
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
 
-    let header_prefix = "  ◇ mermaid ";
-    let header_used = crate::width::width(header_prefix);
+    let header_prefix = format!("{DOCUMENT_PAD}◇{DOCUMENT_PAD}mermaid");
+    let header_used = crate::width::width(&header_prefix);
     let header_pad = target
         .saturating_sub(header_used)
         .saturating_sub(fs_btn_used)
@@ -2886,8 +2900,8 @@ fn render_mermaid_preview(
     let visible = total.min(max_preview);
     for ml in mermaid_lines.iter().take(visible) {
         let line_w = crate::width::spans_width(&ml.spans);
-        let pad = target.saturating_sub(line_w + 2);
-        let mut spans = vec![Span::styled("  ", body_style)];
+        let pad = target.saturating_sub(line_w + DOCUMENT_PAD_X);
+        let mut spans = vec![Span::styled(DOCUMENT_PAD, body_style)];
         for s in &ml.spans {
             spans.push(Span::styled(
                 s.content.clone(),
@@ -2899,13 +2913,13 @@ fn render_mermaid_preview(
     }
 
     if total > max_preview {
-        let hint = format!("  ▼ {} more rows — click ⤢ to expand", total - max_preview);
-        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if hint_pad > 0 {
-            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!(
+            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more rows — click ⤢ to expand",
+            total - max_preview
+        );
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     }
     lines.push(blank);
     lines
@@ -2960,7 +2974,10 @@ fn render_fs_source_rows(
     let max_line = start_line.saturating_add(source_line_count.saturating_sub(1));
     let digits = max_line.max(1).to_string().len();
     let prefix_width = digits.saturating_add(6);
-    let body_width = target.saturating_sub(prefix_width).max(1);
+    let body_width = target
+        .saturating_sub(prefix_width)
+        .saturating_sub(RIGHT_PAD)
+        .max(1);
     let selected = match row_budget {
         Some(limit) => content
             .split_inclusive('\n')
@@ -2995,7 +3012,7 @@ fn render_fs_source_rows(
                 " ".repeat(digits)
             };
             let mut spans = vec![
-                Span::styled("  ", Style::default().bg(background)),
+                Span::styled(DOCUMENT_PAD, Style::default().bg(background)),
                 Span::styled(marker.to_string(), marker_style),
                 Span::styled(number, marker_style),
                 Span::styled(" │ ", marker_style),
@@ -3017,7 +3034,7 @@ fn render_fs_list_rows(
     let style = Style::default().bg(background);
     let mut out = Vec::new();
     for entry in entries {
-        for row in wrap_with_prefix(entry, target, "  ", "    ") {
+        for row in wrap_with_prefix(entry, target, DOCUMENT_PAD, DOCUMENT_PAD) {
             if row_budget.is_some_and(|budget| out.len() >= budget) {
                 return out;
             }
@@ -3051,11 +3068,17 @@ fn render_fs_grep_rows(
             if row_budget.is_some_and(|budget| out.len() >= budget) {
                 return out;
             }
-            let label = format!("  {}", hit.file);
-            let label = crate::width::middle_truncate(&label, target);
-            let mut spans = vec![Span::styled(label, file_style)];
-            pad_spans_to_width(&mut spans, target, Style::default().bg(background));
-            out.push(Line::from(spans));
+            let body = crate::width::middle_truncate(
+                &hit.file,
+                target.saturating_sub(DOCUMENT_PAD_X + RIGHT_PAD),
+            );
+            out.push(line_with_right_pad(
+                DOCUMENT_PAD,
+                &body,
+                target,
+                file_style,
+                file_style,
+            ));
             previous_file = Some(&hit.file);
         }
         let start = hit.line.saturating_sub(hit.before.len());
@@ -3095,7 +3118,7 @@ fn render_fs_detail_body(
     let error_style = Style::default().fg(t.error.into()).bg(background);
     match view {
         FsDetail::Read { content, .. } if content.is_empty() => vec![line_with_right_pad(
-            "  ",
+            DOCUMENT_PAD,
             "(empty file)",
             target,
             meta_style,
@@ -3116,7 +3139,7 @@ fn render_fs_detail_body(
             row_budget,
         ),
         FsDetail::List { entries, .. } if entries.is_empty() => vec![line_with_right_pad(
-            "  ",
+            DOCUMENT_PAD,
             "(empty directory)",
             target,
             meta_style,
@@ -3126,7 +3149,7 @@ fn render_fs_detail_body(
             render_fs_list_rows(entries, target, background, row_budget)
         }
         FsDetail::Grep { hits, .. } if hits.is_empty() => vec![line_with_right_pad(
-            "  ",
+            DOCUMENT_PAD,
             "No matches",
             target,
             meta_style,
@@ -3141,7 +3164,7 @@ fn render_fs_detail_body(
         } => {
             if content.is_empty() {
                 vec![line_with_right_pad(
-                    "  ",
+                    DOCUMENT_PAD,
                     "(empty output)",
                     target,
                     meta_style,
@@ -3150,7 +3173,7 @@ fn render_fs_detail_body(
             } else if *is_error {
                 content
                     .lines()
-                    .flat_map(|line| wrap_with_prefix(line, target, "  ", "  "))
+                    .flat_map(|line| wrap_with_prefix(line, target, DOCUMENT_PAD, DOCUMENT_PAD))
                     .take(row_budget.unwrap_or(usize::MAX))
                     .map(|row| {
                         line_with_right_pad(
@@ -3245,7 +3268,7 @@ fn render_fs_detail(view: &FsDetail, expanded: bool, panel_width: u16) -> Vec<Li
     let mut lines = vec![blank.clone()];
     lines.push(aligned_document_row(
         vec![
-            Span::styled(format!("◇ {kind}  "), label_style),
+            Span::styled(format!("◇{DOCUMENT_PAD}{kind}{DOCUMENT_PAD}"), label_style),
             Span::styled(title.to_owned(), value_style),
         ],
         vec![Span::styled(metadata, meta_style)],
@@ -3260,16 +3283,16 @@ fn render_fs_detail(view: &FsDetail, expanded: bool, panel_width: u16) -> Vec<Li
     lines.append(&mut body);
     if !expanded && needs_full {
         lines.push(line_with_right_pad(
-            "  ",
-            "▼ more output — click to expand",
+            DOCUMENT_PAD,
+            &format!("▼{DOCUMENT_PAD}more output — click to expand"),
             target,
             meta_style,
             meta_style,
         ));
     } else if expanded && needs_full {
         lines.push(line_with_right_pad(
-            "  ",
-            "▲ click to collapse",
+            DOCUMENT_PAD,
+            &format!("▲{DOCUMENT_PAD}click to collapse"),
             target,
             meta_style,
             meta_style,
@@ -3301,13 +3324,14 @@ fn render_diff_preview(
         .add_modifier(Modifier::DIM);
     let blank = Line::from(Span::styled(" ".repeat(target), base_style));
     let mut lines = vec![blank.clone()];
-    let header = format!("  ✎ {title}");
-    let header_w = crate::width::width(header.as_str());
-    let mut header_spans = vec![Span::styled(header, header_style)];
-    if target > header_w {
-        header_spans.push(Span::styled(" ".repeat(target - header_w), base_style));
-    }
-    lines.push(Line::from(header_spans));
+    let header = format!("{DOCUMENT_PAD}✎{DOCUMENT_PAD}{title}");
+    lines.push(line_with_right_pad(
+        "",
+        &header,
+        target,
+        header_style,
+        base_style,
+    ));
     lines.push(blank.clone());
     let layout = atman_runtime::config_hub::ConfigHub::global()
         .and_then(|hub| hub.diff_layout())
@@ -3351,21 +3375,14 @@ fn push_diff_fold_hint(
     style: Style,
 ) {
     if !expanded && total > folded {
-        let hint = format!("  ▼ {} more lines — click to expand", total - folded);
-        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, style)];
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!(
+            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
+            total - folded
+        );
+        lines.push(line_with_right_pad("", &hint, target, style, style));
     } else if expanded && total > folded {
-        let hint = "  ▲ click to collapse".to_string();
-        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, style)];
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+        lines.push(line_with_right_pad("", &hint, target, style, style));
     }
 }
 
@@ -3386,14 +3403,14 @@ fn render_unified_diff_rows(
             || source.starts_with("index ")
         {
             (
-                "  ",
+                "   ",
                 source,
                 Style::default().fg(t.meta_fg.into()).bg(bg),
                 true,
             )
         } else if let Some(text) = source.strip_prefix('+') {
             (
-                "+ ",
+                "+  ",
                 text,
                 Style::default()
                     .fg(t.success.into())
@@ -3402,7 +3419,7 @@ fn render_unified_diff_rows(
             )
         } else if let Some(text) = source.strip_prefix('-') {
             (
-                "- ",
+                "-  ",
                 text,
                 Style::default()
                     .fg(t.error.into())
@@ -3411,19 +3428,31 @@ fn render_unified_diff_rows(
             )
         } else {
             (
-                "  ",
+                "   ",
                 source.strip_prefix(' ').unwrap_or(source),
                 Style::default().bg(bg),
                 false,
             )
         };
-        let wrapped = crate::width::word_wrap(text, target.saturating_sub(2).max(1));
+        let prefix = format!("{DOCUMENT_PAD}{marker}");
+        let continuation = " ".repeat(crate::width::width(&prefix));
+        let wrapped = crate::width::word_wrap(
+            text,
+            target
+                .saturating_sub(crate::width::width(&prefix))
+                .saturating_sub(RIGHT_PAD)
+                .max(1),
+        );
         for (visual_index, line) in wrapped.into_iter().enumerate() {
             if is_change {
                 change_rows.push(rows.len());
             }
             rows.push(line_with_right_pad(
-                if visual_index == 0 { marker } else { "  " },
+                if visual_index == 0 {
+                    &prefix
+                } else {
+                    &continuation
+                },
                 &line,
                 target,
                 style,
@@ -3524,7 +3553,7 @@ fn render_diff_cell_rows(
     let total = rows.len();
     // Line number column in the center: " 1234 1234 " (10 chars wide)
     let line_no_w = 10usize;
-    let margin_w = 1usize;
+    let margin_w = DOCUMENT_PAD_X;
     let panes_w = target.saturating_sub(line_no_w + margin_w * 2);
     let left_w = panes_w / 2;
     let right_w = panes_w.saturating_sub(left_w);
@@ -6117,7 +6146,9 @@ fn append_command_lines(
         return;
     };
     if expanded {
-        for row in wrap_with_prefix(command, target, "  $ ", "    ") {
+        let prefix = format!("{DOCUMENT_PAD}${DOCUMENT_PAD}");
+        let continuation = " ".repeat(crate::width::width(&prefix));
+        for row in wrap_with_prefix(command, target, &prefix, &continuation) {
             lines.push(line_with_right_pad(
                 &row.prefix,
                 &row.body,
@@ -6133,13 +6164,14 @@ fn append_command_lines(
         } else {
             ""
         };
-        let prefix = "  $ ";
+        let prefix = format!("{DOCUMENT_PAD}${DOCUMENT_PAD}");
         let budget = target
-            .saturating_sub(crate::width::width(prefix))
-            .saturating_sub(crate::width::width(suffix));
+            .saturating_sub(crate::width::width(&prefix))
+            .saturating_sub(crate::width::width(suffix))
+            .saturating_sub(RIGHT_PAD);
         let preview = crate::width::middle_truncate(first, budget);
         lines.push(line_with_right_pad(
-            prefix,
+            &prefix,
             &format!("{preview}{suffix}"),
             target,
             hint_style,
@@ -6177,17 +6209,17 @@ fn render_output_block(
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
 
-    let header_lead = format!("  {glyph} ");
-    let header_trailing = " ⤢ ";
+    let header_lead = format!("{DOCUMENT_PAD}{glyph}{DOCUMENT_PAD}");
+    let header_trailing = format!("{DOCUMENT_PAD}⤢{DOCUMENT_PAD}");
     let label_budget = target
         .saturating_sub(crate::width::width(header_lead.as_str()))
-        .saturating_sub(crate::width::width(header_trailing));
+        .saturating_sub(crate::width::width(&header_trailing));
     let label = compact_header_label(title, metadata, label_budget);
     let header_prefix = format!("{header_lead}{label}");
     let header_used = crate::width::width(header_prefix.as_str());
     let fs_btn = "⤢";
     let fs_btn_used = crate::width::width(fs_btn);
-    let gap = 1;
+    let gap = DOCUMENT_PAD_X;
     let header_pad = target
         .saturating_sub(header_used)
         .saturating_sub(fs_btn_used)
@@ -6219,11 +6251,11 @@ fn render_output_block(
     let (total_rows, output_rows) = if expanded {
         let rows = output
             .lines()
-            .flat_map(|line| wrap_with_prefix(line, target, "  ", "  "))
+            .flat_map(|line| wrap_with_prefix(line, target, DOCUMENT_PAD, DOCUMENT_PAD))
             .collect::<Vec<_>>();
         (rows.len(), rows)
     } else {
-        wrap_tail_with_prefix(output, target, "  ", 8)
+        wrap_tail_with_prefix(output, target, DOCUMENT_PAD, 8)
     };
     let hidden_rows = total_rows.saturating_sub(output_rows.len());
     for row in output_rows {
@@ -6237,21 +6269,16 @@ fn render_output_block(
     }
     if !expanded && hidden_rows > 0 {
         let unit = if hidden_rows == 1 { "line" } else { "lines" };
-        let hint = format!("  ▼ {hidden_rows} more {unit} — click to expand");
-        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if hint_pad > 0 {
-            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        let hint =
+            format!("{DOCUMENT_PAD}▼{DOCUMENT_PAD}{hidden_rows} more {unit} — click to expand");
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     } else if expanded && total_rows > 8 {
-        let hint = "  ▲ click to collapse".to_string();
-        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if hint_pad > 0 {
-            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     }
     lines.push(blank);
     lines
@@ -6304,7 +6331,7 @@ impl Default for BashOutputProjection {
 
 impl BashOutputProjection {
     const COLLAPSED_ROWS: usize = 8;
-    const OUTPUT_PREFIX: &'static str = "  ";
+    const OUTPUT_PREFIX: &'static str = DOCUMENT_PAD;
 
     fn update(&mut self, input: BashProjectionInput<'_>) -> usize {
         let t = crate::theme::theme();
@@ -6361,11 +6388,11 @@ impl BashOutputProjection {
                 "lines"
             };
             Some(format!(
-                "  ▼ {} more {unit} — click to expand",
+                "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more {unit} — click to expand",
                 self.output_start
             ))
         } else if input.expanded && total_output_rows > Self::COLLAPSED_ROWS {
-            Some("  ▲ click to collapse".to_string())
+            Some(format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse"))
         } else {
             None
         };
@@ -6374,14 +6401,13 @@ impl BashOutputProjection {
                 .fg(t.meta_fg.into())
                 .bg(bg)
                 .add_modifier(Modifier::DIM);
-            let hint_pad = self
-                .target
-                .saturating_sub(crate::width::width(hint.as_str()));
-            let mut spans = vec![Span::styled(hint, hint_style)];
-            if hint_pad > 0 {
-                spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-            }
-            after_output.push(Line::from(spans));
+            after_output.push(line_with_right_pad(
+                "",
+                &hint,
+                self.target,
+                hint_style,
+                hint_style,
+            ));
         }
         after_output.push(blank);
         after_output.push(Line::from(Span::styled(String::new(), RESET)));
@@ -6528,19 +6554,19 @@ fn render_terminal(
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
 
-    let header_lead = format!("  {glyph} ");
+    let header_lead = format!("{DOCUMENT_PAD}{glyph}{DOCUMENT_PAD}");
     let dims = format!("{}×{}", screen.cols, screen.rows);
     let metadata = format!("terminal[{handle}] {mode_label} · {dims}");
-    let header_trailing = " ⤢ ";
+    let header_trailing = format!("{DOCUMENT_PAD}⤢{DOCUMENT_PAD}");
     let label_budget = target
         .saturating_sub(crate::width::width(header_lead.as_str()))
-        .saturating_sub(crate::width::width(header_trailing));
+        .saturating_sub(crate::width::width(&header_trailing));
     let label = compact_header_label(title.unwrap_or("terminal"), Some(&metadata), label_budget);
     let header_prefix = format!("{header_lead}{label}");
     let header_used = crate::width::width(header_prefix.as_str());
     let fs_btn = "⤢";
     let fs_btn_used = crate::width::width(fs_btn);
-    let gap = 1;
+    let gap = DOCUMENT_PAD_X;
     let header_pad = target
         .saturating_sub(header_used)
         .saturating_sub(fs_btn_used)
@@ -6578,8 +6604,7 @@ fn render_terminal(
             };
             let cols = screen.cols as usize;
             for row in 0..max_rows.min(screen.rows as usize) {
-                let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", body_style)];
-                let mut row_width = 0usize;
+                let mut body: Vec<Span<'static>> = Vec::new();
                 for col in 0..cols {
                     let idx = row * cols + col;
                     if idx >= screen.cells.len() {
@@ -6595,35 +6620,28 @@ fn render_terminal(
                     } else {
                         &cell.chars
                     };
-                    let cw = crate::width::width(chars);
-                    row_width += cw;
-                    spans.push(Span::styled(chars.to_string(), cs));
+                    body.push(Span::styled(chars.to_string(), cs));
                 }
-                let pad = target
-                    .saturating_sub(2)
-                    .saturating_sub(row_width)
-                    .saturating_add(RIGHT_PAD);
-                if pad > 0 {
-                    spans.push(Span::styled(" ".repeat(pad), body_style));
-                }
+                let body = crate::width::truncate_spans(
+                    body,
+                    target.saturating_sub(DOCUMENT_PAD_X + RIGHT_PAD),
+                    Some(bg),
+                );
+                let mut spans = vec![Span::styled(DOCUMENT_PAD, body_style)];
+                spans.extend(body);
+                pad_spans_to_width(&mut spans, target, body_style);
                 lines.push(Line::from(spans));
             }
             if !expanded && screen.rows as usize > 12 {
-                let hint = "  ▼ click to expand";
-                let hint_pad = target.saturating_sub(crate::width::width(hint));
-                let mut spans = vec![Span::styled(hint, hint_style)];
-                if hint_pad > 0 {
-                    spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-                }
-                lines.push(Line::from(spans));
+                let hint = format!("{DOCUMENT_PAD}▼{DOCUMENT_PAD}click to expand");
+                lines.push(line_with_right_pad(
+                    "", &hint, target, hint_style, hint_style,
+                ));
             } else if expanded && screen.rows as usize > 12 {
-                let hint = "  ▲ click to collapse";
-                let hint_pad = target.saturating_sub(crate::width::width(hint));
-                let mut spans = vec![Span::styled(hint, hint_style)];
-                if hint_pad > 0 {
-                    spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-                }
-                lines.push(Line::from(spans));
+                let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+                lines.push(line_with_right_pad(
+                    "", &hint, target, hint_style, hint_style,
+                ));
             }
         }
         crate::app::TerminalViewMode::Stream => {
@@ -6631,11 +6649,11 @@ fn render_terminal(
             let (total_rows, output_rows) = if expanded {
                 let rows = text
                     .lines()
-                    .flat_map(|line| wrap_with_prefix(line, target, "  ", "  "))
+                    .flat_map(|line| wrap_with_prefix(line, target, DOCUMENT_PAD, DOCUMENT_PAD))
                     .collect::<Vec<_>>();
                 (rows.len(), rows)
             } else {
-                wrap_tail_with_prefix(&text, target, "  ", 6)
+                wrap_tail_with_prefix(&text, target, DOCUMENT_PAD, 6)
             };
             let hidden_rows = total_rows.saturating_sub(output_rows.len());
             for row in output_rows {
@@ -6649,21 +6667,17 @@ fn render_terminal(
             }
             if !expanded && hidden_rows > 0 {
                 let unit = if hidden_rows == 1 { "line" } else { "lines" };
-                let hint = format!("  ▼ {hidden_rows} more {unit} — click to expand");
-                let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-                let mut spans = vec![Span::styled(hint, hint_style)];
-                if hint_pad > 0 {
-                    spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-                }
-                lines.push(Line::from(spans));
+                let hint = format!(
+                    "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{hidden_rows} more {unit} — click to expand"
+                );
+                lines.push(line_with_right_pad(
+                    "", &hint, target, hint_style, hint_style,
+                ));
             } else if expanded && total_rows > 6 {
-                let hint = "  ▲ click to collapse".to_string();
-                let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
-                let mut spans = vec![Span::styled(hint, hint_style)];
-                if hint_pad > 0 {
-                    spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
-                }
-                lines.push(Line::from(spans));
+                let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+                lines.push(line_with_right_pad(
+                    "", &hint, target, hint_style, hint_style,
+                ));
             }
         }
     }
@@ -8694,7 +8708,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(line_is_visually_blank(&lines[0]));
         assert!(line_is_visually_blank(&lines[2]));
-        assert!(middle.starts_with("  ⣿ thinking  "));
+        assert!(middle.starts_with("  ⣿  thinking  "));
         assert!(middle.contains("line10"));
         assert!(!middle.contains("line9"));
         assert!(
@@ -8724,9 +8738,9 @@ mod tests {
         let hovered = render(true, true, 9);
         let t = crate::theme::theme();
 
-        assert!(plain_line(&running_0[1]).starts_with("  ⠋ thinking…"));
-        assert!(plain_line(&running_1[1]).starts_with("  ⠙ thinking…"));
-        assert!(plain_line(&done[1]).starts_with("  ⣿ thinking"));
+        assert!(plain_line(&running_0[1]).starts_with("  ⠋  thinking…"));
+        assert!(plain_line(&running_1[1]).starts_with("  ⠙  thinking…"));
+        assert!(plain_line(&done[1]).starts_with("  ⣿  thinking"));
         assert!(
             hovered
                 .iter()
@@ -8758,10 +8772,79 @@ mod tests {
         let s: String = body_line.spans.iter().map(|s| s.content.as_ref()).collect();
         let w = crate::width::width(s.as_str());
         assert_eq!(w, 40, "line should fill to target 40: {s:?}");
+        assert!(s.starts_with("  ❯  short"));
         assert!(
             s.ends_with("  "),
             "line should end with >=2 trailing spaces (right pad): {s:?}"
         );
+    }
+
+    #[test]
+    fn document_surfaces_share_two_column_gutters() {
+        let target = 48;
+        let rendered = [
+            (
+                plain_line(&render_system_note("note", NoteLevel::Info, target)[1]),
+                "  ·  note",
+            ),
+            (
+                plain_line(
+                    &render_output_block("bash", None, "✓", None, "", false, target, false)[1],
+                ),
+                "  ✓  bash",
+            ),
+            (
+                plain_line(&render_mermaid_preview("graph TD\nA-->B", target, 0, false)[1]),
+                "  ◇  mermaid",
+            ),
+            (
+                plain_line(
+                    &render_diff_preview("src/lib.rs", None, None, Some("+line"), false, target)[1],
+                ),
+                "  ✎  src/lib.rs",
+            ),
+            (
+                plain_line(
+                    &render_compaction_summary(CompactionSummaryRender {
+                        phase: CompactionPhase::Finished,
+                        range_start: 0,
+                        range_end: 4,
+                        summary: "summary",
+                        before_tokens: 100,
+                        after_tokens: 50,
+                        compacted_count: 4,
+                        disclosure: Disclosure::Summary,
+                        animation_frame: 0,
+                        panel_width: target,
+                    })[1],
+                ),
+                "  ✓  compacted",
+            ),
+        ];
+
+        for (line, prefix) in rendered {
+            assert!(
+                line.starts_with(prefix),
+                "missing document prefix: {line:?}"
+            );
+            assert!(
+                line.ends_with(DOCUMENT_PAD),
+                "missing right gutter: {line:?}"
+            );
+            assert_eq!(crate::width::width(&line), target as usize);
+        }
+
+        let content = line_with_right_pad(
+            DOCUMENT_PAD,
+            &"x".repeat(80),
+            target as usize,
+            Style::default(),
+            Style::default(),
+        );
+        let content = plain_line(&content);
+        assert!(content.starts_with(DOCUMENT_PAD));
+        assert!(content.ends_with(DOCUMENT_PAD));
+        assert_eq!(crate::width::width(&content), target as usize);
     }
 
     #[test]
@@ -9473,7 +9556,7 @@ mod tests {
         assert!(line_is_visually_blank(&summary_lines[0]));
         assert!(line_is_visually_blank(summary_lines.last().unwrap()));
         assert!(line_is_visually_blank(&summary_lines[2]));
-        assert!(line_text(&summary_lines[1]).starts_with("  ⣿ working · 1"));
+        assert!(line_text(&summary_lines[1]).starts_with("  ⣿  working · 1"));
         assert!(line_text(&summary_lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
         assert!(line_text(&summary_lines[3]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
         let tool_row = line_text(&summary_lines[3]);
@@ -9560,10 +9643,10 @@ mod tests {
 
         let running_0 = colors(ToolCallStatus::Running, 0);
         let running_4 = colors(ToolCallStatus::Running, 4);
-        assert!(header(ToolCallStatus::Running, 0).starts_with("  ⠋ working"));
-        assert!(header(ToolCallStatus::Running, 1).starts_with("  ⠙ working"));
-        assert!(header(ToolCallStatus::Ok, 0).starts_with("  ⣿ working"));
-        assert!(header(ToolCallStatus::Error, 0).starts_with("  ⣿ working"));
+        assert!(header(ToolCallStatus::Running, 0).starts_with("  ⠋  working"));
+        assert!(header(ToolCallStatus::Running, 1).starts_with("  ⠙  working"));
+        assert!(header(ToolCallStatus::Ok, 0).starts_with("  ⣿  working"));
+        assert!(header(ToolCallStatus::Error, 0).starts_with("  ⣿  working"));
         assert_eq!(
             running_0.iter().map(|(_, _, bg)| bg).collect::<Vec<_>>(),
             running_4.iter().map(|(_, _, bg)| bg).collect::<Vec<_>>()
@@ -10172,25 +10255,23 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
 
     let stats = match phase {
         CompactionPhase::Running => format!(
-            " {} compacting {range_start}..{range_end}... ",
+            "{DOCUMENT_PAD}{}{DOCUMENT_PAD}compacting {range_start}..{range_end}...",
             spinner_char(animation_frame)
         ),
-        CompactionPhase::Finished => {
-            format!(
-                " ✓ compacted {compacted_count} msgs · {before_tokens} → {after_tokens} tokens "
-            )
-        }
+        CompactionPhase::Finished => format!(
+            "{DOCUMENT_PAD}✓{DOCUMENT_PAD}compacted {compacted_count} msgs · {before_tokens} → {after_tokens} tokens"
+        ),
         CompactionPhase::Failed => {
-            format!(" ✗ compaction failed · {summary} ")
+            format!("{DOCUMENT_PAD}✗{DOCUMENT_PAD}compaction failed · {summary}")
         }
     };
-    let stats_used = crate::width::width(stats.as_str());
-    let stats_pad = target.saturating_sub(stats_used);
-    let mut header_spans = vec![Span::styled(stats, header_style)];
-    if stats_pad > 0 {
-        header_spans.push(Span::styled(" ".repeat(stats_pad), header_style));
-    }
-    lines.push(Line::from(header_spans));
+    lines.push(line_with_right_pad(
+        "",
+        &stats,
+        target,
+        header_style,
+        header_style,
+    ));
     lines.push(blank.clone());
 
     if matches!(phase, CompactionPhase::Running) {
@@ -10203,7 +10284,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         };
         if visible == 0 {
             lines.push(line_with_right_pad(
-                "  ",
+                DOCUMENT_PAD,
                 "summary generation in progress",
                 target,
                 body_style,
@@ -10218,8 +10299,11 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
                     .map(|span| span.content.as_ref())
                     .collect::<String>();
                 lines.push(line_with_right_pad(
-                    "  ",
-                    &crate::width::truncate(&body, target.saturating_sub(2)),
+                    DOCUMENT_PAD,
+                    &crate::width::truncate(
+                        &body,
+                        target.saturating_sub(DOCUMENT_PAD_X + RIGHT_PAD),
+                    ),
                     target,
                     body_style,
                     body_style,
@@ -10246,7 +10330,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
             .join("");
-        let rows = wrap_with_prefix(&body, target, "  ", "  ");
+        let rows = wrap_with_prefix(&body, target, DOCUMENT_PAD, DOCUMENT_PAD);
         for row in rows {
             lines.push(line_with_right_pad(
                 &row.prefix,
@@ -10258,21 +10342,18 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         }
     }
     if disclosure != Disclosure::Full && total > visible {
-        let hint = format!("  ▼ {} more lines — click to expand", total - visible);
-        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!(
+            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
+            total - visible
+        );
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     } else if disclosure == Disclosure::Full && total > 12 {
-        let hint = "  ▲ click to collapse".to_string();
-        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
-        let mut spans = vec![Span::styled(hint, hint_style)];
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), hint_style));
-        }
-        lines.push(Line::from(spans));
+        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
     }
     lines.push(blank);
     lines
