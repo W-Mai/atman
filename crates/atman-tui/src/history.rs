@@ -7,7 +7,7 @@ use atman_runtime::projection::workflow::WorkflowProjection;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::workflow::{WorkflowPermissionIdentity, WorkflowPermissionState};
 
-use crate::app::{NoteLevel, OutputItem};
+use crate::app::{Disclosure, NoteLevel, OutputItem, ToolCallStatus, ToolCallView};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolDisplayMeta {
@@ -337,19 +337,43 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 }
             }
             TranscriptEntry::DiffPreview {
+                tool_use_id,
                 title,
                 old_content,
                 new_content,
                 unified_diff,
             } => {
-                out.push(OutputItem::DiffPreview {
+                let detail = OutputItem::DiffPreview {
                     title: title.clone(),
                     old_content: old_content.clone(),
                     new_content: new_content.clone(),
                     unified_diff: unified_diff.clone(),
                     expanded: false,
-                });
+                };
+                if tool_use_id
+                    .as_deref()
+                    .is_none_or(|id| !attach_detail(out.as_mut_slice(), id, detail.clone()))
+                {
+                    out.push(detail);
+                }
             }
+            TranscriptEntry::FileEditApplied {
+                tool_use_id: Some(tool_use_id),
+                path,
+                metrics,
+                ..
+            } => {
+                for item in out.iter_mut().rev() {
+                    let OutputItem::ToolDispatch { calls } = item else {
+                        continue;
+                    };
+                    if let Some(call) = calls.iter_mut().find(|call| call.id == *tool_use_id) {
+                        call.applied_edit = Some((path.clone(), *metrics));
+                        break;
+                    }
+                }
+            }
+            TranscriptEntry::FileEditApplied { .. } => {}
             TranscriptEntry::CompactionSummary {
                 range_start,
                 range_end,
@@ -381,7 +405,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     before_tokens: *before_tokens,
                     after_tokens: *after_tokens,
                     compacted_count: *compacted_count,
-                    expanded: false,
+                    disclosure: Disclosure::Summary,
                 });
             }
             TranscriptEntry::FlowGraph {
@@ -941,6 +965,38 @@ pub(crate) fn flatten_message(
             }
         }
         MessageRole::Assistant => {
+            let calls = msg
+                .parts
+                .iter()
+                .filter_map(|part| {
+                    let MessagePart::ToolUse {
+                        id,
+                        name,
+                        input,
+                        intent,
+                    } = part
+                    else {
+                        return None;
+                    };
+                    Some(ToolCallView {
+                        id: id.clone(),
+                        tool: name.clone(),
+                        intent: intent
+                            .as_ref()
+                            .map(|intent| intent.as_str().to_owned())
+                            .unwrap_or_else(|| name.clone()),
+                        input: input.clone(),
+                        status: ToolCallStatus::Running,
+                        disclosure: Disclosure::Summary,
+                        detail: None,
+                        draft_index: None,
+                        draft_preview: Default::default(),
+                        applied_edit: None,
+                        started_at: Instant::now(),
+                        ended_at: None,
+                    })
+                })
+                .collect::<Vec<_>>();
             for part in &msg.parts {
                 match part {
                     MessagePart::Thinking { thinking, .. } => {
@@ -948,7 +1004,7 @@ pub(crate) fn flatten_message(
                             out.push(OutputItem::Thinking {
                                 text: thinking.clone(),
                                 done: true,
-                                expanded: false,
+                                disclosure: Disclosure::Summary,
                                 retried: false,
                             });
                         }
@@ -963,6 +1019,9 @@ pub(crate) fn flatten_message(
                     _ => {}
                 }
             }
+            if !calls.is_empty() {
+                out.push(OutputItem::ToolDispatch { calls });
+            }
         }
         MessageRole::Tool => {
             for part in &msg.parts {
@@ -972,8 +1031,13 @@ pub(crate) fn flatten_message(
                     is_error,
                 } = part
                 {
-                    if let Some(item) =
-                        restore_tool_item(tool_map.get(tool_use_id), content, *is_error)
+                    let detail = restore_tool_item(tool_map.get(tool_use_id), content, *is_error);
+                    if !finish_restored_call(
+                        out.as_mut_slice(),
+                        tool_use_id,
+                        *is_error,
+                        detail.clone(),
+                    ) && let Some(item) = detail
                     {
                         out.push(item);
                     }
@@ -986,6 +1050,45 @@ pub(crate) fn flatten_message(
             }
         }
     }
+}
+
+fn attach_detail(items: &mut [OutputItem], tool_use_id: &str, detail: OutputItem) -> bool {
+    for item in items.iter_mut().rev() {
+        let OutputItem::ToolDispatch { calls } = item else {
+            continue;
+        };
+        if let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) {
+            call.detail = Some(Box::new(detail));
+            return true;
+        }
+    }
+    false
+}
+
+fn finish_restored_call(
+    items: &mut [OutputItem],
+    tool_use_id: &str,
+    is_error: bool,
+    detail: Option<OutputItem>,
+) -> bool {
+    for item in items.iter_mut().rev() {
+        let OutputItem::ToolDispatch { calls } = item else {
+            continue;
+        };
+        if let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) {
+            call.status = if is_error {
+                ToolCallStatus::Error
+            } else {
+                ToolCallStatus::Ok
+            };
+            call.ended_at = Some(Instant::now());
+            if call.detail.is_none() {
+                call.detail = detail.map(Box::new);
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn strip_log_prefixes(raw: &str) -> String {
@@ -1003,7 +1106,7 @@ fn strip_log_prefixes(raw: &str) -> String {
         .join("\n")
 }
 
-fn restore_tool_item(
+pub(crate) fn restore_tool_item(
     tool_meta: Option<&ToolDisplayMeta>,
     content: &str,
     is_error: bool,
@@ -1137,7 +1240,7 @@ fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
         before_tokens: 0,
         after_tokens: 0,
         compacted_count: footer.count,
-        expanded: false,
+        disclosure: Disclosure::Summary,
     })
 }
 
@@ -1217,6 +1320,18 @@ mod tests {
         Message::user_text(TurnId::now(), text)
     }
 
+    fn tool_detail<'a>(items: &'a [OutputItem], tool_use_id: &str) -> Option<&'a OutputItem> {
+        items.iter().find_map(|item| {
+            let OutputItem::ToolDispatch { calls } = item else {
+                return None;
+            };
+            calls
+                .iter()
+                .find(|call| call.id == tool_use_id)
+                .and_then(|call| call.detail.as_deref())
+        })
+    }
+
     #[test]
     fn user_message_becomes_turn() {
         let out = flatten_messages(&[user("hi")]);
@@ -1235,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_and_tool_result_parts_do_not_produce_items() {
+    fn tool_use_and_tool_result_parts_form_one_dispatch_item() {
         use serde_json::json;
         let msgs = vec![
             assistant(vec![MessagePart::ToolUse {
@@ -1256,10 +1371,13 @@ mod tests {
             },
         ];
         let out = flatten_messages(&msgs);
-        assert!(
-            out.is_empty(),
-            "tool traffic now flows through workflow panel, not messages: {out:?}"
-        );
+        assert!(matches!(
+            out.as_slice(),
+            [OutputItem::ToolDispatch { calls }]
+                if calls.len() == 1
+                    && calls[0].id == "toolu_1"
+                    && calls[0].status == ToolCallStatus::Ok
+        ));
     }
 
     #[test]
@@ -1352,11 +1470,24 @@ mod tests {
             },
         });
         let out = flatten_transcript(&entries);
-        let terminals: Vec<_> = out
+        let terminals = out
             .iter()
-            .filter(|it| matches!(it, OutputItem::Terminal { .. }))
-            .collect();
-        assert_eq!(terminals.len(), 1, "should dedup to 1 Terminal item");
+            .filter_map(|item| match item {
+                OutputItem::ToolDispatch { calls } => Some(
+                    calls
+                        .iter()
+                        .filter(|call| {
+                            matches!(call.detail.as_deref(), Some(OutputItem::Terminal { .. }))
+                        })
+                        .count(),
+                ),
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(
+            terminals, 3,
+            "each capture remains attached to its invocation"
+        );
     }
 
     #[test]
@@ -1618,7 +1749,7 @@ mod tests {
             },
         ];
         let out = flatten_transcript(&entries);
-        let bash = out.iter().find_map(|it| match it {
+        let bash = tool_detail(&out, tool_use_id).and_then(|it| match it {
             OutputItem::Bash {
                 title,
                 command,
@@ -1746,7 +1877,7 @@ mod tests {
             },
         ];
         let out = flatten_transcript(&entries);
-        let bash = out.iter().find_map(|it| match it {
+        let bash = tool_detail(&out, tool_use_id).and_then(|it| match it {
             OutputItem::Bash { output, .. } => Some(output.clone()),
             _ => None,
         });
@@ -1792,7 +1923,7 @@ mod tests {
             },
         ];
         let out = flatten_transcript(&entries);
-        let bash = out.iter().find_map(|it| match it {
+        let bash = tool_detail(&out, tool_use_id).and_then(|it| match it {
             OutputItem::Bash { output, .. } => Some(output.clone()),
             _ => None,
         });
@@ -1841,7 +1972,7 @@ mod tests {
             },
         ];
         let out = flatten_transcript(&entries);
-        let diff_item = out.iter().find_map(|it| match it {
+        let diff_item = tool_detail(&out, tool_use_id).and_then(|it| match it {
             OutputItem::DiffPreview { unified_diff, .. } => unified_diff.clone(),
             _ => None,
         });

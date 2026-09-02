@@ -15,6 +15,212 @@ pub enum TerminalViewMode {
     Capture,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Disclosure {
+    #[default]
+    Summary,
+    Preview,
+    Full,
+}
+
+impl Disclosure {
+    fn next(self) -> Self {
+        match self {
+            Self::Summary => Self::Preview,
+            Self::Preview => Self::Full,
+            Self::Full => Self::Summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallStatus {
+    Running,
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolDraftPreview {
+    target: Option<&'static str>,
+    probe: String,
+    active: bool,
+    escaped: bool,
+    unicode: Option<(u32, u8)>,
+    tail: String,
+}
+
+impl ToolDraftPreview {
+    fn push(&mut self, tool: &str, delta: &str) {
+        if self.target.is_none() {
+            self.target = match tool {
+                "fs.write" => Some("content"),
+                "fs.edit" => Some("new_string"),
+                _ => None,
+            };
+        }
+        let Some(target) = self.target else {
+            return;
+        };
+        if !self.active {
+            self.probe.push_str(delta);
+            let marker = format!("\"{target}\"");
+            let Some(key_start) = self.probe.find(&marker) else {
+                let mut keep_from = self.probe.len().saturating_sub(marker.len() + 8);
+                while !self.probe.is_char_boundary(keep_from) {
+                    keep_from += 1;
+                }
+                self.probe.drain(..keep_from);
+                return;
+            };
+            let after_key = key_start + marker.len();
+            let Some(colon) = self.probe[after_key..].find(':') else {
+                return;
+            };
+            let after_colon = after_key + colon + 1;
+            let Some(quote) = self.probe[after_colon..].find('"') else {
+                return;
+            };
+            let content_start = after_colon + quote + 1;
+            let content = self.probe[content_start..].to_string();
+            self.probe.clear();
+            self.active = true;
+            self.decode(&content);
+            return;
+        }
+        self.decode(delta);
+    }
+
+    fn decode(&mut self, text: &str) {
+        for ch in text.chars() {
+            if let Some((mut value, mut digits)) = self.unicode.take() {
+                if let Some(digit) = ch.to_digit(16) {
+                    value = value.saturating_mul(16).saturating_add(digit);
+                    digits += 1;
+                    if digits == 4 {
+                        if let Some(decoded) = char::from_u32(value) {
+                            self.tail.push(decoded);
+                        }
+                    } else {
+                        self.unicode = Some((value, digits));
+                    }
+                }
+                continue;
+            }
+            if self.escaped {
+                self.escaped = false;
+                match ch {
+                    'n' => self.tail.push('\n'),
+                    'r' => self.tail.push('\r'),
+                    't' => self.tail.push('\t'),
+                    'b' => self.tail.push('\u{0008}'),
+                    'f' => self.tail.push('\u{000c}'),
+                    'u' => self.unicode = Some((0, 0)),
+                    other => self.tail.push(other),
+                }
+            } else if ch == '\\' {
+                self.escaped = true;
+            } else if ch == '"' {
+                self.active = false;
+                break;
+            } else {
+                self.tail.push(ch);
+            }
+        }
+        if self.tail.len() > 8192 {
+            let mut keep_from = self.tail.len() - 8192;
+            while !self.tail.is_char_boundary(keep_from) {
+                keep_from += 1;
+            }
+            self.tail.drain(..keep_from);
+        }
+    }
+
+    pub fn last_line(&self) -> Option<&str> {
+        self.tail
+            .lines()
+            .next_back()
+            .filter(|line| !line.is_empty())
+    }
+
+    pub fn text(&self) -> &str {
+        &self.tail
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallView {
+    pub id: String,
+    pub tool: String,
+    pub intent: String,
+    pub input: serde_json::Value,
+    pub status: ToolCallStatus,
+    pub disclosure: Disclosure,
+    pub detail: Option<Box<OutputItem>>,
+    pub draft_index: Option<usize>,
+    pub draft_preview: ToolDraftPreview,
+    pub applied_edit: Option<(String, atman_runtime::activity::EditMetrics)>,
+    pub started_at: Instant,
+    pub ended_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubAgentRoute {
+    pub item_index: usize,
+    pub tool_use_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ActivityTotals {
+    pub attempted_calls: usize,
+    pub completed_calls: usize,
+    pub failed_calls: usize,
+    pub applied_edits: usize,
+    pub hunks: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    files: HashSet<String>,
+    attempted_ids: HashSet<String>,
+    completed_ids: HashSet<String>,
+}
+
+impl ActivityTotals {
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    fn observe_call(&mut self, id: &str) {
+        if self.attempted_ids.insert(id.to_string()) {
+            self.attempted_calls += 1;
+        }
+    }
+
+    fn observe_result(&mut self, id: &str, failed: bool) {
+        if self.completed_ids.insert(id.to_string()) {
+            self.completed_calls += 1;
+            self.failed_calls += usize::from(failed);
+        }
+    }
+
+    fn observe_edit(&mut self, path: &str, metrics: atman_runtime::activity::EditMetrics) {
+        self.files.insert(path.to_string());
+        self.applied_edits += 1;
+        self.hunks += metrics.hunks;
+        self.insertions += metrics.insertions;
+        self.deletions += metrics.deletions;
+    }
+
+    pub fn compact_label(&self) -> String {
+        format!(
+            "{} tools · {} files · +{} −{}",
+            self.attempted_calls,
+            self.file_count(),
+            self.insertions,
+            self.deletions
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum OutputItem {
     UserTurn {
@@ -23,13 +229,16 @@ pub enum OutputItem {
     Thinking {
         text: String,
         done: bool,
-        expanded: bool,
+        disclosure: Disclosure,
         retried: bool,
     },
     AssistantMd {
         md: String,
         streaming: bool,
         retried: bool,
+    },
+    ToolDispatch {
+        calls: Vec<ToolCallView>,
     },
     SystemNote {
         text: String,
@@ -83,7 +292,7 @@ pub enum OutputItem {
         before_tokens: u64,
         after_tokens: u64,
         compacted_count: usize,
-        expanded: bool,
+        disclosure: Disclosure,
     },
     MermaidDiagram {
         source: String,
@@ -126,6 +335,13 @@ impl OutputItem {
             Self::CompactionSummary { phase, .. } => {
                 matches!(phase, CompactionPhase::Running)
             }
+            Self::ToolDispatch { calls } => calls.iter().any(|call| {
+                call.status == ToolCallStatus::Running
+                    || call
+                        .detail
+                        .as_deref()
+                        .is_some_and(OutputItem::has_dynamic_paint)
+            }),
             _ => false,
         }
     }
@@ -382,6 +598,8 @@ pub struct AppState {
     pub was_streaming: bool,
     pub border_fade_at: Option<std::time::Instant>,
     pub waiting_for_llm: bool,
+    pub session_activity: ActivityTotals,
+    pub turn_activity: ActivityTotals,
     pub goal: Option<String>,
     pub session_id: String,
     pub session_dir: String,
@@ -459,7 +677,7 @@ pub struct AppState {
     pub last_workflow_panel_idx: Option<usize>,
     pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
     pub top_level_run_ids: std::collections::HashSet<String>,
-    pub sub_agent_run_ids: std::collections::HashMap<String, usize>,
+    pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -745,6 +963,8 @@ impl AppState {
         self.handle_index.clear();
         self.workflow_run_to_panel.clear();
         self.sub_agent_run_ids.clear();
+        self.session_activity = ActivityTotals::default();
+        self.turn_activity = ActivityTotals::default();
         self.last_workflow_panel_idx = None;
         for (index, item) in self.items.iter().enumerate() {
             if let Some(handle) = item.handle() {
@@ -764,8 +984,51 @@ impl AppState {
                     workflow_graph,
                     ..
                 } => {
-                    self.sub_agent_run_ids.insert(child_run_id.clone(), index);
+                    self.sub_agent_run_ids.insert(
+                        child_run_id.clone(),
+                        SubAgentRoute {
+                            item_index: index,
+                            tool_use_id: None,
+                        },
+                    );
                     (Some(workflow_graph), true)
+                }
+                OutputItem::ToolDispatch { calls } => {
+                    for call in calls {
+                        self.session_activity.observe_call(&call.id);
+                        if call.status != ToolCallStatus::Running {
+                            self.session_activity
+                                .observe_result(&call.id, call.status == ToolCallStatus::Error);
+                        }
+                        if let Some((path, metrics)) = &call.applied_edit {
+                            self.session_activity.observe_edit(path, *metrics);
+                        }
+                        if let Some(OutputItem::SubAgentActivity {
+                            child_run_id,
+                            workflow_graph,
+                            ..
+                        }) = call.detail.as_deref()
+                        {
+                            let route = SubAgentRoute {
+                                item_index: index,
+                                tool_use_id: Some(call.id.clone()),
+                            };
+                            self.sub_agent_run_ids
+                                .insert(child_run_id.clone(), route.clone());
+                            let mut nodes = workflow_graph.root.iter().collect::<Vec<_>>();
+                            while let Some(node) = nodes.pop() {
+                                if let atman_runtime::workflow::WorkflowNodeKind::Flow {
+                                    run_id,
+                                    ..
+                                } = &node.kind
+                                {
+                                    self.sub_agent_run_ids.insert(run_id.clone(), route.clone());
+                                }
+                                nodes.extend(node.children.iter());
+                            }
+                        }
+                    }
+                    (None, false)
                 }
                 _ => (None, false),
             };
@@ -776,7 +1039,13 @@ impl AppState {
                         &node.kind
                     {
                         if subagent {
-                            self.sub_agent_run_ids.insert(run_id.clone(), index);
+                            self.sub_agent_run_ids.insert(
+                                run_id.clone(),
+                                SubAgentRoute {
+                                    item_index: index,
+                                    tool_use_id: None,
+                                },
+                            );
                         } else {
                             self.workflow_run_to_panel.insert(run_id.clone(), index);
                         }
@@ -872,6 +1141,35 @@ impl AppState {
             return Some(handle.clone());
         }
         None
+    }
+
+    pub fn tool_call_detail_handle(&self, idx: usize, tool_use_id: &str) -> Option<String> {
+        let OutputItem::ToolDispatch { calls } = self.items.get(idx)? else {
+            return None;
+        };
+        let detail = calls
+            .iter()
+            .find(|call| call.id == tool_use_id)?
+            .detail
+            .as_deref()?;
+        match detail {
+            OutputItem::Terminal { handle, .. }
+            | OutputItem::Bash { handle, .. }
+            | OutputItem::SubAgentActivity { handle, .. } => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn tool_call_detail(&self, idx: usize, tool_use_id: &str) -> Option<OutputItem> {
+        let OutputItem::ToolDispatch { calls } = self.items.get(idx)? else {
+            return None;
+        };
+        calls
+            .iter()
+            .find(|call| call.id == tool_use_id)?
+            .detail
+            .as_deref()
+            .cloned()
     }
 
     fn task_command(&self, handle: &str) -> Option<String> {
@@ -976,12 +1274,20 @@ impl AppState {
         maximized: bool,
         background: bool,
     ) -> bool {
-        let item = self
-            .items
-            .iter()
-            .rev()
-            .find(|it| it.handle() == Some(handle))
-            .cloned();
+        let item = self.items.iter().rev().find_map(|item| {
+            if item.handle() == Some(handle) {
+                return Some(item.clone());
+            }
+            let OutputItem::ToolDispatch { calls } = item else {
+                return None;
+            };
+            calls.iter().find_map(|call| {
+                call.detail
+                    .as_deref()
+                    .filter(|detail| detail.handle() == Some(handle))
+                    .cloned()
+            })
+        });
         let snap = self
             .task_snapshots
             .iter()
@@ -1119,12 +1425,12 @@ impl AppState {
         });
     }
 
-    pub fn toggle_thinking_expanded(&mut self, item_idx: usize) {
+    pub fn cycle_thinking_disclosure(&mut self, item_idx: usize) {
         self.mutate_item(item_idx, OutputMutation::Interaction, |item| {
-            let OutputItem::Thinking { expanded, .. } = item else {
+            let OutputItem::Thinking { disclosure, .. } = item else {
                 return false;
             };
-            *expanded = !*expanded;
+            *disclosure = disclosure.next();
             true
         });
     }
@@ -1355,12 +1661,12 @@ impl AppState {
         });
     }
 
-    pub fn toggle_compaction_summary_expand(&mut self, item_index: usize) {
+    pub fn cycle_compaction_summary_disclosure(&mut self, item_index: usize) {
         self.mutate_item(item_index, OutputMutation::Interaction, |item| {
-            let OutputItem::CompactionSummary { expanded, .. } = item else {
+            let OutputItem::CompactionSummary { disclosure, .. } = item else {
                 return false;
             };
-            *expanded = !*expanded;
+            *disclosure = disclosure.next();
             true
         });
     }
@@ -1546,12 +1852,12 @@ impl AppState {
         for run_id in removed_run_ids {
             self.top_level_run_ids.remove(&run_id);
         }
-        self.sub_agent_run_ids.retain(|_, item_index| {
-            if *item_index == index {
+        self.sub_agent_run_ids.retain(|_, route| {
+            if route.item_index == index {
                 false
             } else {
-                if *item_index > index {
-                    *item_index -= 1;
+                if route.item_index > index {
+                    route.item_index -= 1;
                 }
                 true
             }
@@ -1821,9 +2127,467 @@ impl AppState {
         }
     }
 
+    fn append_tool_dispatch(&mut self, message: &Message) {
+        let calls = message
+            .parts
+            .iter()
+            .filter_map(|part| {
+                let atman_runtime::message::MessagePart::ToolUse {
+                    id,
+                    name,
+                    input,
+                    intent,
+                } = part
+                else {
+                    return None;
+                };
+                Some(ToolCallView {
+                    id: id.clone(),
+                    tool: name.clone(),
+                    intent: intent
+                        .as_ref()
+                        .map(|intent| intent.as_str().to_owned())
+                        .unwrap_or_else(|| name.clone()),
+                    input: input.clone(),
+                    status: ToolCallStatus::Running,
+                    disclosure: Disclosure::Summary,
+                    detail: None,
+                    draft_index: None,
+                    draft_preview: ToolDraftPreview::default(),
+                    applied_edit: None,
+                    started_at: Instant::now(),
+                    ended_at: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        if calls.is_empty() {
+            return;
+        }
+        let can_reconcile = self.items.last().is_some_and(|item| {
+            matches!(item, OutputItem::ToolDispatch { calls } if !calls.is_empty() && calls.iter().all(|call| call.draft_index.is_some()))
+        });
+        if can_reconcile {
+            let index = self.items.len() - 1;
+            self.mutate_item(index, OutputMutation::Semantic, |item| {
+                let OutputItem::ToolDispatch {
+                    calls: current_calls,
+                } = item
+                else {
+                    return false;
+                };
+                for (index, mut final_call) in calls.into_iter().enumerate() {
+                    if let Some(current) = current_calls
+                        .iter_mut()
+                        .find(|call| call.id == final_call.id || call.draft_index == Some(index))
+                    {
+                        final_call.disclosure = current.disclosure;
+                        final_call.detail = current.detail.take();
+                        final_call.started_at = current.started_at;
+                        final_call.draft_preview = current.draft_preview.clone();
+                        *current = final_call;
+                    } else {
+                        current_calls.push(final_call);
+                    }
+                }
+                true
+            });
+        } else {
+            self.push_item(OutputItem::ToolDispatch { calls });
+        }
+    }
+
+    fn apply_tool_call_draft(
+        &mut self,
+        run_id: Option<&str>,
+        index: usize,
+        call_id: String,
+        name: String,
+        arguments_delta: String,
+    ) {
+        if run_id.is_some_and(|run_id| self.sub_agent_run_ids.contains_key(run_id)) {
+            return;
+        }
+        let fallback_id = format!("draft:{}:{index}", run_id.unwrap_or("root"));
+        let key = if call_id.is_empty() {
+            fallback_id
+        } else {
+            call_id
+        };
+        let existing = self
+            .items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(item_index, item)| {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    return None;
+                };
+                calls
+                    .iter()
+                    .position(|call| call.id == key || call.draft_index == Some(index))
+                    .map(|call_index| (item_index, call_index))
+            });
+        if let Some((item_index, call_index)) = existing {
+            self.mutate_item(item_index, OutputMutation::SemanticPreserveSource, |item| {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    return false;
+                };
+                let call = &mut calls[call_index];
+                if !key.starts_with("draft:") {
+                    call.id = key;
+                }
+                if !name.is_empty() {
+                    call.tool = name.clone();
+                    if call.intent.starts_with("draft:") || call.intent.is_empty() {
+                        call.intent = name.clone();
+                    }
+                }
+                call.draft_preview.push(&call.tool, &arguments_delta);
+                true
+            });
+            return;
+        }
+        let mut draft_preview = ToolDraftPreview::default();
+        draft_preview.push(&name, &arguments_delta);
+        let call = ToolCallView {
+            id: key.clone(),
+            tool: name.clone(),
+            intent: if name.is_empty() { key } else { name },
+            input: serde_json::Value::Null,
+            status: ToolCallStatus::Running,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: Some(index),
+            draft_preview,
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: None,
+        };
+        if let Some(last_index) = self.items.len().checked_sub(1)
+            && matches!(self.items[last_index], OutputItem::ToolDispatch { ref calls } if calls.iter().all(|call| call.draft_index.is_some()))
+        {
+            self.mutate_item(last_index, OutputMutation::Semantic, |item| {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    return false;
+                };
+                calls.push(call);
+                true
+            });
+        } else {
+            self.push_item(OutputItem::ToolDispatch { calls: vec![call] });
+        }
+    }
+
+    fn mutate_tool_call(
+        &mut self,
+        tool_use_id: &str,
+        mutation: OutputMutation,
+        update: impl FnOnce(&mut ToolCallView) -> bool,
+    ) -> bool {
+        let Some((item_index, call_index)) =
+            self.items
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(item_index, item)| {
+                    let OutputItem::ToolDispatch { calls } = item else {
+                        return None;
+                    };
+                    calls
+                        .iter()
+                        .position(|call| call.id == tool_use_id)
+                        .map(|call_index| (item_index, call_index))
+                })
+        else {
+            return false;
+        };
+        self.mutate_item(item_index, mutation, |item| {
+            let OutputItem::ToolDispatch { calls } = item else {
+                return false;
+            };
+            update(&mut calls[call_index])
+        });
+        true
+    }
+
+    fn apply_tool_result_to_dispatch(&mut self, message: &Message) {
+        for part in &message.parts {
+            let atman_runtime::message::MessagePart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = part
+            else {
+                continue;
+            };
+            let meta = self.items.iter().rev().find_map(|item| {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    return None;
+                };
+                calls
+                    .iter()
+                    .find(|call| call.id == *tool_use_id)
+                    .map(|call| {
+                        crate::history::ToolDisplayMeta::from_tool_use(
+                            &call.tool,
+                            &call.input,
+                            None,
+                        )
+                    })
+            });
+            let keeps_running = !*is_error
+                && meta.as_ref().is_some_and(|meta| {
+                    matches!(
+                        meta.name.as_str(),
+                        "bash.spawn" | "term.spawn" | "flow.spawn"
+                    )
+                });
+            let mut restored = crate::history::restore_tool_item(meta.as_ref(), content, *is_error);
+            if keeps_running && let Some(detail) = restored.as_mut() {
+                match detail {
+                    OutputItem::Bash { done, .. }
+                    | OutputItem::Terminal { done, .. }
+                    | OutputItem::SubAgentActivity { done, .. } => *done = false,
+                    _ => {}
+                }
+            }
+            self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
+                call.status = if keeps_running {
+                    ToolCallStatus::Running
+                } else if *is_error {
+                    ToolCallStatus::Error
+                } else {
+                    ToolCallStatus::Ok
+                };
+                call.ended_at = (!keeps_running).then(Instant::now);
+                if call.detail.is_none() {
+                    call.detail = restored.map(Box::new);
+                } else if !keeps_running && let Some(detail) = call.detail.as_deref_mut() {
+                    match detail {
+                        OutputItem::Bash { done, .. }
+                        | OutputItem::Terminal { done, .. }
+                        | OutputItem::SubAgentActivity { done, .. } => *done = true,
+                        _ => {}
+                    }
+                }
+                true
+            });
+        }
+    }
+
+    pub fn cycle_tool_call_disclosure(&mut self, item_index: usize, tool_use_id: &str) {
+        self.mutate_item(item_index, OutputMutation::Interaction, |item| {
+            let OutputItem::ToolDispatch { calls } = item else {
+                return false;
+            };
+            let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) else {
+                return false;
+            };
+            call.disclosure = call.disclosure.next();
+            true
+        });
+    }
+
+    fn apply_terminal_chunk_to_dispatch(
+        &mut self,
+        tool_use_id: &str,
+        handle: String,
+        bytes: Vec<u8>,
+        screen: Option<TerminalScreen>,
+        title: Option<String>,
+        command: Option<String>,
+    ) -> bool {
+        self.mutate_tool_call(
+            tool_use_id,
+            OutputMutation::SemanticPreserveSource,
+            move |call| {
+                if let Some(OutputItem::Terminal {
+                    title: current_title,
+                    command: current_command,
+                    screen: current_screen,
+                    accumulated_bytes,
+                    ..
+                }) = call.detail.as_deref_mut()
+                {
+                    if current_title.is_none() {
+                        *current_title = title;
+                    }
+                    if current_command.is_none() {
+                        *current_command = command;
+                    }
+                    if let Some(screen) = screen {
+                        *current_screen = screen;
+                    }
+                    accumulated_bytes.extend_from_slice(&bytes);
+                } else {
+                    call.detail = Some(Box::new(OutputItem::Terminal {
+                        handle,
+                        title,
+                        command,
+                        screen: screen.unwrap_or_else(|| TerminalScreen {
+                            rows: 0,
+                            cols: 0,
+                            cells: Vec::new(),
+                            cursor: None,
+                            alt_screen: false,
+                        }),
+                        accumulated_bytes: bytes,
+                        mode: TerminalViewMode::Capture,
+                        done: false,
+                        expanded: false,
+                        scroll_offset: None,
+                    }));
+                }
+                true
+            },
+        )
+    }
+
+    fn apply_bash_chunk_to_dispatch(
+        &mut self,
+        tool_use_id: &str,
+        handle: String,
+        text: String,
+        title: Option<String>,
+        command: Option<String>,
+    ) -> bool {
+        self.mutate_tool_call(
+            tool_use_id,
+            OutputMutation::SemanticPreserveSource,
+            move |call| {
+                if let Some(OutputItem::Bash {
+                    title: current_title,
+                    command: current_command,
+                    output,
+                    ..
+                }) = call.detail.as_deref_mut()
+                {
+                    if current_title.is_none() {
+                        *current_title = title;
+                    }
+                    if current_command.is_none() {
+                        *current_command = command;
+                    }
+                    output.push_str(&text);
+                } else {
+                    call.detail = Some(Box::new(OutputItem::Bash {
+                        handle,
+                        title,
+                        command,
+                        output: text,
+                        done: false,
+                        expanded: false,
+                    }));
+                }
+                true
+            },
+        )
+    }
+
+    fn finish_streaming_tool_detail(&mut self, tool_use_id: &str, status: ToolCallStatus) -> bool {
+        self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, |call| {
+            call.status = status;
+            call.ended_at = Some(Instant::now());
+            if let Some(
+                OutputItem::Terminal { done, .. }
+                | OutputItem::Bash { done, .. }
+                | OutputItem::SubAgentActivity { done, .. },
+            ) = call.detail.as_deref_mut()
+            {
+                *done = true;
+            }
+            true
+        })
+    }
+
+    fn apply_diff_to_dispatch(
+        &mut self,
+        tool_use_id: &str,
+        title: String,
+        old_content: Option<String>,
+        new_content: Option<String>,
+        unified_diff: Option<String>,
+    ) -> bool {
+        self.mutate_tool_call(tool_use_id, OutputMutation::Semantic, move |call| {
+            call.detail = Some(Box::new(OutputItem::DiffPreview {
+                title,
+                old_content,
+                new_content,
+                unified_diff,
+                expanded: false,
+            }));
+            true
+        })
+    }
+
+    fn mutate_routed_sub_agent(
+        &mut self,
+        run_id: &str,
+        mutation: OutputMutation,
+        update: impl FnOnce(&mut OutputItem) -> bool,
+    ) -> bool {
+        let Some(route) = self.sub_agent_run_ids.get(run_id).cloned() else {
+            return false;
+        };
+        let mut update = Some(update);
+        self.mutate_item(route.item_index, mutation, |item| {
+            let target = if let Some(tool_use_id) = route.tool_use_id.as_deref() {
+                let OutputItem::ToolDispatch { calls } = item else {
+                    return false;
+                };
+                let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) else {
+                    return false;
+                };
+                let Some(detail) = call.detail.as_deref_mut() else {
+                    return false;
+                };
+                detail
+            } else {
+                item
+            };
+            update.take().is_some_and(|update| update(target))
+        });
+        true
+    }
+
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         self.apply_permission_projection(&frame);
+        match &frame {
+            StreamFrame::ToolNode { tool_use_id, .. } => {
+                self.session_activity.observe_call(tool_use_id);
+                self.turn_activity.observe_call(tool_use_id);
+            }
+            StreamFrame::ToolResultMsg { message, .. } => {
+                for part in &message.parts {
+                    if let atman_runtime::message::MessagePart::ToolResult {
+                        tool_use_id,
+                        is_error,
+                        ..
+                    } = part
+                    {
+                        self.session_activity.observe_result(tool_use_id, *is_error);
+                        self.turn_activity.observe_result(tool_use_id, *is_error);
+                    }
+                }
+            }
+            StreamFrame::FileEditApplied { path, metrics, .. } => {
+                self.session_activity.observe_edit(path, *metrics);
+                self.turn_activity.observe_edit(path, *metrics);
+            }
+            _ => {}
+        }
         match frame {
+            StreamFrame::TurnStarted { .. } => {
+                self.turn_activity = ActivityTotals::default();
+            }
+            StreamFrame::TurnEnded { .. } => {
+                if self.turn_activity.attempted_calls > 0 || self.turn_activity.applied_edits > 0 {
+                    self.push_item(OutputItem::SystemNote {
+                        text: format!("turn · {}", self.turn_activity.compact_label()),
+                        level: NoteLevel::Info,
+                    });
+                }
+            }
             StreamFrame::ThinkingChunk { text, run_id, .. } => {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -1851,7 +2615,7 @@ impl AppState {
                     self.push_item(OutputItem::Thinking {
                         text,
                         done: false,
-                        expanded: false,
+                        disclosure: Disclosure::Summary,
                         retried: false,
                     });
                     self.streaming = true;
@@ -1863,9 +2627,9 @@ impl AppState {
                 run_id,
             } => {
                 if let Some(rid) = &run_id
-                    && let Some(&idx) = self.sub_agent_run_ids.get(rid)
+                    && self.sub_agent_run_ids.contains_key(rid)
                 {
-                    self.mutate_item(idx, OutputMutation::Semantic, |item| {
+                    self.mutate_routed_sub_agent(rid, OutputMutation::Semantic, |item| {
                         let OutputItem::SubAgentActivity { model, output, .. } = item else {
                             return false;
                         };
@@ -1931,13 +2695,22 @@ impl AppState {
                 }
             }
             StreamFrame::LlmRetry => {
+                while self.items.last().is_some_and(|item| {
+                    matches!(item, OutputItem::ToolDispatch { calls } if calls.iter().all(|call| call.draft_index.is_some()))
+                }) {
+                    let index = self.items.len() - 1;
+                    self.remove_item(index);
+                }
                 let indices = self
                     .items
                     .iter()
                     .enumerate()
                     .rev()
                     .take_while(|(_, item)| {
-                        matches!(item, OutputItem::Thinking { .. } | OutputItem::AssistantMd { .. })
+                        matches!(
+                            item,
+                            OutputItem::Thinking { .. } | OutputItem::AssistantMd { .. }
+                        )
                     })
                     .map(|(index, _)| index)
                     .collect::<Vec<_>>();
@@ -2001,6 +2774,36 @@ impl AppState {
                 self.streaming = false;
                 self.reset_lag_state();
             }
+            StreamFrame::ToolCallDraft {
+                index,
+                call_id,
+                name,
+                arguments_delta,
+                run_id,
+            } => {
+                self.apply_tool_call_draft(
+                    run_id.as_deref(),
+                    index,
+                    call_id,
+                    name,
+                    arguments_delta,
+                );
+                self.streaming = true;
+                self.reset_lag_state();
+            }
+            StreamFrame::FileEditApplied {
+                tool_use_id,
+                path,
+                metrics,
+                ..
+            } => {
+                if let Some(tool_use_id) = tool_use_id {
+                    self.mutate_tool_call(&tool_use_id, OutputMutation::Semantic, |call| {
+                        call.applied_edit = Some((path, metrics));
+                        true
+                    });
+                }
+            }
             StreamFrame::ToolUseStart { .. } => {}
             StreamFrame::ToolUseDone { id, ok, .. } => {
                 let status = if ok {
@@ -2060,25 +2863,21 @@ impl AppState {
                             && let Some(index) = self.inline_note_indices.get(key).copied()
                             && matches!(self.items.get(index), Some(OutputItem::SystemNote { .. }))
                         {
-                            self.mutate_item(
-                                index,
-                                OutputMutation::Semantic,
-                                |item| {
-                                    let OutputItem::SystemNote {
-                                        text: current_text,
-                                        level: current_level,
-                                    } = item
-                                    else {
-                                        return false;
-                                    };
-                                    if *current_text == text && *current_level == level {
-                                        return false;
-                                    }
-                                    *current_text = text;
-                                    *current_level = level;
-                                    true
-                                },
-                            );
+                            self.mutate_item(index, OutputMutation::Semantic, |item| {
+                                let OutputItem::SystemNote {
+                                    text: current_text,
+                                    level: current_level,
+                                } = item
+                                else {
+                                    return false;
+                                };
+                                if *current_text == text && *current_level == level {
+                                    return false;
+                                }
+                                *current_text = text;
+                                *current_level = level;
+                                true
+                            });
                             self.reset_lag_state();
                         } else {
                             let index = self.items.len();
@@ -2118,6 +2917,20 @@ impl AppState {
             | StreamFrame::PermissionGrantCreated { .. }
             | StreamFrame::PermissionGrantExpired { .. }
             | StreamFrame::UnrestrictedExecution { .. }) => {
+                if let StreamFrame::AssistantMsg {
+                    flow_run_id: None,
+                    message,
+                } = &frame
+                {
+                    self.append_tool_dispatch(message);
+                }
+                if let StreamFrame::ToolResultMsg {
+                    flow_run_id: None,
+                    message,
+                } = &frame
+                {
+                    self.apply_tool_result_to_dispatch(message);
+                }
                 match &frame {
                     StreamFrame::FlowNodeStart {
                         run_id,
@@ -2251,6 +3064,7 @@ impl AppState {
             }
             StreamFrame::TerminalChunk {
                 handle,
+                tool_use_id,
                 bytes,
                 screen,
                 state: _,
@@ -2263,16 +3077,32 @@ impl AppState {
                     return;
                 }
                 let task_command = self.task_command(&handle);
+                if let Some(tool_use_id) = tool_use_id
+                    && self.apply_terminal_chunk_to_dispatch(
+                        &tool_use_id,
+                        handle.clone(),
+                        bytes.clone(),
+                        screen.clone(),
+                        call_intent
+                            .as_ref()
+                            .map(|intent| intent.as_str().to_owned()),
+                        task_command.clone(),
+                    )
+                {
+                    self.waiting_for_llm = false;
+                    self.reset_lag_state();
+                    return;
+                }
                 self.waiting_for_llm = false;
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
                 }
-                let existing_index = self
-                    .find_item_by_handle(&handle)
-                    .and_then(|idx| match &self.items[idx] {
-                        OutputItem::Terminal { done: false, .. } => Some(idx),
-                        _ => None,
-                    });
+                let existing_index = self.find_item_by_handle(&handle).and_then(|idx| match &self
+                    .items[idx]
+                {
+                    OutputItem::Terminal { done: false, .. } => Some(idx),
+                    _ => None,
+                });
                 if let Some(index) = existing_index {
                     let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
                     self.mutate_item(index, OutputMutation::Semantic, |item| {
@@ -2333,9 +3163,10 @@ impl AppState {
             }
             StreamFrame::TerminalExited {
                 handle,
+                tool_use_id,
+                exit_code,
                 call_intent,
                 run_id,
-                ..
             } => {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -2343,6 +3174,18 @@ impl AppState {
                     return;
                 }
                 let task_command = self.task_command(&handle);
+                if let Some(tool_use_id) = tool_use_id
+                    && self.finish_streaming_tool_detail(
+                        &tool_use_id,
+                        if exit_code == Some(0) {
+                            ToolCallStatus::Ok
+                        } else {
+                            ToolCallStatus::Error
+                        },
+                    )
+                {
+                    return;
+                }
                 if let Some(idx) = self.find_item_by_handle(&handle) {
                     let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
                     self.mutate_item(idx, OutputMutation::Semantic, |item| {
@@ -2392,6 +3235,7 @@ impl AppState {
             }
             StreamFrame::BashChunk {
                 handle,
+                tool_use_id,
                 kind,
                 line,
                 call_intent,
@@ -2403,17 +3247,32 @@ impl AppState {
                     return;
                 }
                 let task_command = self.task_command(&handle);
+                let prefix = if kind == "stderr" { "[err] " } else { "" };
+                if let Some(tool_use_id) = tool_use_id
+                    && self.apply_bash_chunk_to_dispatch(
+                        &tool_use_id,
+                        handle.clone(),
+                        format!("{prefix}{line}"),
+                        call_intent
+                            .as_ref()
+                            .map(|intent| intent.as_str().to_owned()),
+                        task_command.clone(),
+                    )
+                {
+                    self.waiting_for_llm = false;
+                    self.reset_lag_state();
+                    return;
+                }
                 self.waiting_for_llm = false;
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
                 }
-                let existing_index = self
-                    .find_item_by_handle(&handle)
-                    .and_then(|idx| match &self.items[idx] {
-                        OutputItem::Bash { done: false, .. } => Some(idx),
-                        _ => None,
-                    });
-                let prefix = if kind == "stderr" { "[err] " } else { "" };
+                let existing_index = self.find_item_by_handle(&handle).and_then(|idx| match &self
+                    .items[idx]
+                {
+                    OutputItem::Bash { done: false, .. } => Some(idx),
+                    _ => None,
+                });
                 if let Some(index) = existing_index {
                     let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
                     self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
@@ -2460,9 +3319,11 @@ impl AppState {
             }
             StreamFrame::BashExited {
                 handle,
+                tool_use_id,
+                exit_code,
+                error,
                 call_intent,
                 run_id,
-                ..
             } => {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -2470,6 +3331,18 @@ impl AppState {
                     return;
                 }
                 let task_command = self.task_command(&handle);
+                if let Some(tool_use_id) = tool_use_id
+                    && self.finish_streaming_tool_detail(
+                        &tool_use_id,
+                        if exit_code == Some(0) && error.is_none() {
+                            ToolCallStatus::Ok
+                        } else {
+                            ToolCallStatus::Error
+                        },
+                    )
+                {
+                    return;
+                }
                 if let Some(idx) = self.find_item_by_handle(&handle) {
                     let proposed_title = call_intent.map(|intent| intent.as_str().to_owned());
                     self.mutate_item(idx, OutputMutation::SemanticPreserveSource, |item| {
@@ -2510,6 +3383,7 @@ impl AppState {
             }
             StreamFrame::DiffPreview {
                 title,
+                tool_use_id,
                 old_content,
                 new_content,
                 unified_diff,
@@ -2517,6 +3391,17 @@ impl AppState {
             } => {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
+                if let Some(tool_use_id) = tool_use_id
+                    && self.apply_diff_to_dispatch(
+                        &tool_use_id,
+                        title.clone(),
+                        old_content.clone(),
+                        new_content.clone(),
+                        unified_diff.clone(),
+                    )
                 {
                     return;
                 }
@@ -2555,23 +3440,17 @@ impl AppState {
                             before_tokens: current_before,
                             after_tokens: current_after,
                             compacted_count: current_count,
-                            expanded,
+                            disclosure: _,
                             ..
                         } = item
                         else {
                             return false;
-                        };
-                        let next_expanded = if matches!(phase, CompactionPhase::Finished) {
-                            false
-                        } else {
-                            *expanded
                         };
                         if *current_phase == phase
                             && *current_summary == summary
                             && *current_before == before_tokens
                             && *current_after == after_tokens
                             && *current_count == compacted_count
-                            && *expanded == next_expanded
                         {
                             return false;
                         }
@@ -2580,7 +3459,6 @@ impl AppState {
                         *current_before = before_tokens;
                         *current_after = after_tokens;
                         *current_count = compacted_count;
-                        *expanded = next_expanded;
                         true
                     });
                 } else {
@@ -2592,7 +3470,32 @@ impl AppState {
                         before_tokens,
                         after_tokens,
                         compacted_count,
-                        expanded: false,
+                        disclosure: Disclosure::Summary,
+                    });
+                }
+            }
+            StreamFrame::CompactionDelta {
+                range_start,
+                range_end,
+                text,
+            } => {
+                if let Some(index) = self.items.iter().rposition(|item| {
+                    matches!(item, OutputItem::CompactionSummary {
+                        phase: CompactionPhase::Running,
+                        range_start: current_start,
+                        range_end: current_end,
+                        ..
+                    } if *current_start == range_start && *current_end == range_end)
+                }) {
+                    self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
+                        let OutputItem::CompactionSummary { summary, .. } = item else {
+                            return false;
+                        };
+                        if text.is_empty() {
+                            return false;
+                        }
+                        summary.push_str(&text);
+                        true
                     });
                 }
             }
@@ -2602,12 +3505,12 @@ impl AppState {
             }
             StreamFrame::SubAgentStarted {
                 handle,
+                tool_use_id,
                 goal,
                 child_run_id,
                 model,
             } => {
-                let idx = self.items.len();
-                self.push_item(OutputItem::SubAgentActivity {
+                let detail = OutputItem::SubAgentActivity {
                     handle: handle.clone(),
                     goal,
                     child_run_id: child_run_id.clone(),
@@ -2621,18 +3524,49 @@ impl AppState {
                     workflow_graph: WorkflowProjection::new(atman_runtime::event::TurnId::now()),
                     expanded_nodes: HashSet::new(),
                     workflow_expanded: false,
-                });
-                self.sub_agent_run_ids.insert(child_run_id, idx);
+                };
+                let route = if let Some(tool_use_id) = tool_use_id
+                    && self.mutate_tool_call(&tool_use_id, OutputMutation::Semantic, |call| {
+                        call.detail = Some(Box::new(detail.clone()));
+                        true
+                    }) {
+                    let item_index = self.items.iter().rposition(|item| {
+                        matches!(item, OutputItem::ToolDispatch { calls } if calls.iter().any(|call| call.id == tool_use_id))
+                    }).unwrap_or_else(|| self.items.len().saturating_sub(1));
+                    SubAgentRoute {
+                        item_index,
+                        tool_use_id: Some(tool_use_id),
+                    }
+                } else {
+                    let item_index = self.items.len();
+                    self.push_item(detail);
+                    SubAgentRoute {
+                        item_index,
+                        tool_use_id: None,
+                    }
+                };
+                self.sub_agent_run_ids.insert(child_run_id, route);
             }
             StreamFrame::SubAgentDone {
                 handle,
                 status,
                 final_text,
             } => {
-                if let Some(index) = self.items.iter().position(|item| {
-                    matches!(item, OutputItem::SubAgentActivity { handle: current, .. } if current == &handle)
-                }) {
-                    self.mutate_item(index, OutputMutation::Semantic, |item| {
+                let run_id = self.sub_agent_run_ids.iter().find_map(|(run_id, route)| {
+                    let item = self.items.get(route.item_index)?;
+                    let matches = if let Some(tool_use_id) = route.tool_use_id.as_deref() {
+                        let OutputItem::ToolDispatch { calls } = item else { return None; };
+                        calls.iter().any(|call| {
+                            call.id == tool_use_id
+                                && matches!(call.detail.as_deref(), Some(OutputItem::SubAgentActivity { handle: current, .. }) if current == &handle)
+                        })
+                    } else {
+                        matches!(item, OutputItem::SubAgentActivity { handle: current, .. } if current == &handle)
+                    };
+                    matches.then(|| run_id.clone())
+                });
+                if let Some(run_id) = run_id {
+                    self.mutate_routed_sub_agent(&run_id, OutputMutation::Semantic, |item| {
                         let OutputItem::SubAgentActivity {
                             status: current_status,
                             output,
@@ -2692,18 +3626,15 @@ impl AppState {
         {
             if self.sub_agent_run_ids.contains_key(run_id) {
                 // already mapped (e.g. subagent flow's own FlowStart)
-            } else if let Some(&idx) = self.sub_agent_run_ids.get(parent_rid) {
-                self.sub_agent_run_ids.insert(run_id.clone(), idx);
+            } else if let Some(route) = self.sub_agent_run_ids.get(parent_rid).cloned() {
+                self.sub_agent_run_ids.insert(run_id.clone(), route);
             }
         }
         if let Some(rid) = frame_run_id(frame)
-            && let Some(&idx) = self.sub_agent_run_ids.get(rid)
+            && let Some(route) = self.sub_agent_run_ids.get(rid).cloned()
         {
-            let routed = matches!(
-                self.items.get(idx),
-                Some(OutputItem::SubAgentActivity { .. })
-            );
-            self.mutate_item(idx, OutputMutation::Semantic, |item| {
+            let routed = self.items.get(route.item_index).is_some();
+            self.mutate_routed_sub_agent(rid, OutputMutation::Semantic, |item| {
                 let OutputItem::SubAgentActivity {
                     workflow_graph,
                     messages,
@@ -3205,6 +4136,7 @@ mod tests {
             goal: "research".into(),
             child_run_id: spawned.clone(),
             model: "model".into(),
+            tool_use_id: None,
         });
         app.apply_stream_frame(StreamFrame::FlowStart {
             run_id: descendant.clone(),
@@ -3321,6 +4253,76 @@ mod tests {
     }
 
     #[test]
+    fn tool_dispatch_reconciles_drafts_and_routes_output_by_identity() {
+        use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "write".into(),
+            name: "fs.write".into(),
+            arguments_delta: r#"{"content":"alpha\nbe"#.into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "write".into(),
+            name: "fs.write".into(),
+            arguments_delta: r#"ta"}"#.into(),
+            run_id: None,
+        });
+        let assistant = Message {
+            role: MessageRole::Assistant,
+            parts: vec![
+                MessagePart::ToolUse {
+                    id: "write".into(),
+                    name: "fs.write".into(),
+                    input: serde_json::json!({"content": "alpha\nbeta"}),
+                    intent: ToolCallIntent::new("写入文件"),
+                },
+                MessagePart::ToolUse {
+                    id: "shell".into(),
+                    name: "bash.spawn".into(),
+                    input: serde_json::json!({"cmd": "printf ok"}),
+                    intent: ToolCallIntent::new("检查结果"),
+                },
+            ],
+            turn_id: atman_runtime::event::TurnId::now(),
+            origin: MessageOrigin::User,
+        };
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message: assistant,
+        });
+        app.apply_stream_frame(StreamFrame::BashChunk {
+            handle: "bg_s_0".into(),
+            tool_use_id: Some("shell".into()),
+            kind: "stdout".into(),
+            line: "ok\n".into(),
+            call_intent: ToolCallIntent::new("检查结果"),
+            run_id: None,
+        });
+
+        let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+            panic!("expected grouped tool dispatch");
+        };
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].draft_preview.last_line(), Some("beta"));
+        assert!(calls[0].detail.is_none());
+        assert!(
+            matches!(calls[1].detail.as_deref(), Some(OutputItem::Bash { output, .. }) if output == "ok\n")
+        );
+    }
+
+    #[test]
+    fn tool_draft_probe_trims_only_at_utf8_boundaries() {
+        let mut preview = ToolDraftPreview::default();
+        preview.push("fs.write", &"界".repeat(64));
+        preview.push("fs.write", r#"{"content":"完成"}"#);
+        assert_eq!(preview.last_line(), Some("完成"));
+    }
+
+    #[test]
     fn sub_agent_uses_first_observed_llm_model_when_start_model_is_empty() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::SubAgentStarted {
@@ -3328,6 +4330,7 @@ mod tests {
             goal: "research".into(),
             child_run_id: "spawned".into(),
             model: String::new(),
+            tool_use_id: None,
         });
         app.apply_stream_frame(StreamFrame::FlowStart {
             run_id: "worker".into(),
@@ -4117,7 +5120,7 @@ mod tests {
         store.push(OutputItem::Thinking {
             text: "working".into(),
             done: false,
-            expanded: false,
+            disclosure: Disclosure::Summary,
             retried: false,
         });
         let thinking_id = store.revisions()[0].id;
@@ -4213,6 +5216,7 @@ mod tests {
             handle: "term_s_0".into(),
             exit_code: Some(0),
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         };
         app.apply_stream_frame(frame.clone());
@@ -4686,6 +5690,7 @@ mod terminal_stream_tests {
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
             call_intent: atman_runtime::message::ToolCallIntent::new("检查终端状态"),
+            tool_use_id: None,
             run_id: None,
         });
         assert_eq!(app.items.len(), 1);
@@ -4726,6 +5731,7 @@ mod terminal_stream_tests {
             screen: Some(dummy_screen()),
             state: TermStateSnapshot::Running,
             call_intent: atman_runtime::message::ToolCallIntent::new("检查系统负载"),
+            tool_use_id: None,
             run_id: None,
         });
         let OutputItem::Terminal { title, command, .. } = &app.items[0] else {
@@ -4745,6 +5751,7 @@ mod terminal_stream_tests {
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalChunk {
@@ -4753,6 +5760,7 @@ mod terminal_stream_tests {
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         assert_eq!(app.items.len(), 1, "should update existing, not create new");
@@ -4776,12 +5784,14 @@ mod terminal_stream_tests {
             screen: Some(screen),
             state: TermStateSnapshot::Running,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalExited {
             handle: "term_s_0".into(),
             exit_code: Some(0),
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         match &app.items[0] {
@@ -4798,6 +5808,7 @@ mod terminal_stream_tests {
             exit_code: Some(0),
             error: None,
             call_intent: atman_runtime::message::ToolCallIntent::new("检查构建结果"),
+            tool_use_id: None,
             run_id: None,
         });
 
@@ -4821,6 +5832,7 @@ mod terminal_stream_tests {
             goal: "check".into(),
             child_run_id: "child_run".into(),
             model: "m".into(),
+            tool_use_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
@@ -4828,6 +5840,7 @@ mod terminal_stream_tests {
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
@@ -4835,6 +5848,7 @@ mod terminal_stream_tests {
             kind: "stdout".into(),
             line: "main\n".into(),
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
 
@@ -4845,12 +5859,14 @@ mod terminal_stream_tests {
             screen: Some(screen),
             state: TermStateSnapshot::Running,
             call_intent: None,
+            tool_use_id: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::TerminalExited {
             handle: "term_s_0".into(),
             exit_code: Some(0),
             call_intent: None,
+            tool_use_id: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::BashChunk {
@@ -4858,6 +5874,7 @@ mod terminal_stream_tests {
             kind: "stdout".into(),
             line: "sub\n".into(),
             call_intent: None,
+            tool_use_id: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::BashExited {
@@ -4865,6 +5882,7 @@ mod terminal_stream_tests {
             exit_code: Some(0),
             error: None,
             call_intent: None,
+            tool_use_id: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::DiffPreview {
@@ -4872,6 +5890,7 @@ mod terminal_stream_tests {
             old_content: None,
             new_content: None,
             unified_diff: Some("diff".into()),
+            tool_use_id: None,
             run_id: Some("child_run".into()),
         });
 
@@ -4904,6 +5923,7 @@ mod terminal_stream_tests {
             goal: "check".into(),
             child_run_id: "child_run".into(),
             model: "m".into(),
+            tool_use_id: None,
         });
         let frame = StreamFrame::FlowStart {
             run_id: "child_run".into(),
@@ -5061,6 +6081,7 @@ mod terminal_e2e_tests {
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
 
@@ -5116,6 +6137,7 @@ mod terminal_e2e_tests {
             kind: "stdout".into(),
             line: "hello from bash\n".into(),
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         app.apply_stream_frame(StreamFrame::BashExited {
@@ -5123,6 +6145,7 @@ mod terminal_e2e_tests {
             exit_code: Some(0),
             error: None,
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         });
         app.apply_task_event(atman_runtime::TaskEvent::Registered(
