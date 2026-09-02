@@ -2071,6 +2071,55 @@ fn aligned_document_row(
     Line::from(spans)
 }
 
+fn running_wave(
+    line: Line<'static>,
+    target: usize,
+    animation_frame: u32,
+    base: crate::theme::ThemeColor,
+    accent: crate::theme::ThemeColor,
+) -> Line<'static> {
+    const HALF_WIDTH: isize = 10;
+    const STEP: usize = 2;
+
+    let travel = target.saturating_add(HALF_WIDTH as usize * 2).max(1);
+    let head = ((animation_frame as usize * STEP) % travel) as isize - HALF_WIDTH;
+    let mut column = 0usize;
+    let mut out = Vec::new();
+    let mut current_style = None;
+    let mut current_text = String::new();
+
+    let flush = |out: &mut Vec<Span<'static>>,
+                 current_style: &mut Option<Style>,
+                 current_text: &mut String| {
+        if let Some(style) = current_style.take()
+            && !current_text.is_empty()
+        {
+            out.push(Span::styled(std::mem::take(current_text), style));
+        }
+    };
+
+    for span in line.spans {
+        for (grapheme, grapheme_width) in crate::width::graphemes(span.content.as_ref()) {
+            let center = column.saturating_add(grapheme_width / 2) as isize;
+            let distance = (center - head).abs();
+            let level = if distance >= HALF_WIDTH {
+                0
+            } else {
+                ((HALF_WIDTH - distance + 1) / 2) as u8
+            };
+            let style = span.style.bg(base.lerp(accent, f64::from(level) * 0.035));
+            if current_style != Some(style) {
+                flush(&mut out, &mut current_style, &mut current_text);
+                current_style = Some(style);
+            }
+            current_text.push_str(grapheme);
+            column = column.saturating_add(grapheme_width);
+        }
+    }
+    flush(&mut out, &mut current_style, &mut current_text);
+    Line::from(out)
+}
+
 fn render_tool_dispatch(
     calls: &[ToolCallView],
     ctx: &RenderCtx<'_>,
@@ -2119,6 +2168,7 @@ fn render_tool_dispatch(
         width,
         panel_bg,
     ));
+    lines.push(document_blank(width, header_style));
     let mut regions = Vec::new();
 
     for call in calls {
@@ -2216,7 +2266,18 @@ fn render_tool_dispatch(
                 });
             right.push(Span::styled("  ⤢".to_string(), fullscreen_style));
         }
-        lines.push(aligned_document_row(left, right, width, row_bg));
+        let summary_line = aligned_document_row(left, right, width, row_bg);
+        lines.push(if call.status == ToolCallStatus::Running && !row_hovered {
+            running_wave(
+                summary_line,
+                width,
+                ctx.animation_frame,
+                t.panel_bg,
+                t.accent,
+            )
+        } else {
+            summary_line
+        });
         regions.push(NodeRegion {
             panel_item_index: item_index,
             path_key: call_key,
@@ -2340,6 +2401,7 @@ fn render_tool_dispatch(
         regions[call_region_index].end_row = lines.len() as u32;
     }
     lines.push(document_blank(width, header_style));
+    lines.push(Line::default());
     (lines, regions)
 }
 
@@ -8590,9 +8652,11 @@ mod tests {
 
         assert!(line_is_visually_blank(&lines[0]));
         assert!(line_is_visually_blank(lines.last().unwrap()));
+        assert!(line_is_visually_blank(&lines[2]));
+        assert!(line_is_visually_blank(&lines[lines.len() - 2]));
         assert!(line_text(&lines[1]).starts_with("  working · 1"));
         assert!(line_text(&lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
-        assert!(line_text(&lines[2]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
+        assert!(line_text(&lines[3]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
 
         let call_region = regions
             .iter()
@@ -8605,6 +8669,45 @@ mod tests {
         assert!(call_region.end_row > call_region.start_row + 1);
         assert_eq!(fullscreen_region.start_row, call_region.start_row);
         assert!(fullscreen_region.col_start > call_region.col_start);
+    }
+
+    #[test]
+    fn running_tool_row_has_a_moving_theme_wave() {
+        let make_call = |status| ToolCallView {
+            id: "read-1".into(),
+            tool: "fs.read".into(),
+            intent: "读取项目文档".into(),
+            input: serde_json::json!({"path": "README.md"}),
+            status,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: None,
+        };
+        let backgrounds = |status, frame| {
+            let ctx = RenderCtx {
+                panel_width: 60,
+                animation_frame: frame,
+                ..RenderCtx::empty()
+            };
+            render_tool_dispatch(&[make_call(status)], &ctx, 0).0[3]
+                .spans
+                .iter()
+                .map(|span| span.style.bg)
+                .collect::<Vec<_>>()
+        };
+
+        assert_ne!(
+            backgrounds(ToolCallStatus::Running, 0),
+            backgrounds(ToolCallStatus::Running, 4)
+        );
+        assert_eq!(
+            backgrounds(ToolCallStatus::Ok, 0),
+            backgrounds(ToolCallStatus::Ok, 4)
+        );
     }
 
     #[test]
