@@ -71,6 +71,7 @@ pub struct RenderCtx<'a> {
     pub animation_frame: u32,
     pub panel_width: u16,
     pub hovered_thinking_idx: Option<usize>,
+    pub hovered_output_node: Option<&'a (usize, String)>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -83,6 +84,7 @@ impl<'a> RenderCtx<'a> {
             animation_frame: 0,
             panel_width: 80,
             hovered_thinking_idx: None,
+            hovered_output_node: None,
         }
     }
 }
@@ -389,6 +391,9 @@ pub fn build_lines_with_ranges(
             } else {
                 None
             },
+            hovered_output_node: ctx
+                .hovered_output_node
+                .filter(|(item_index, _)| *item_index == idx),
         };
         let (item_lines, mut item_regions) = render_item_with_regions(item, &item_ctx, idx);
         let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
@@ -978,6 +983,10 @@ impl LayoutCache {
                 done: *done,
                 expanded: *expanded,
                 panel_width: ctx.panel_width,
+                fullscreen_hovered: ctx.hovered_output_node.is_some_and(|(_, key)| {
+                    key == BASH_FULLSCREEN_KEY
+                        || key.starts_with(TOOL_DETAIL_FULLSCREEN_REGION_PREFIX)
+                }),
             });
             #[cfg(test)]
             update_perf_counters(|counters| {
@@ -1027,6 +1036,9 @@ impl LayoutCache {
             panel_width: ctx.panel_width,
             hovered_thinking_idx: (hovered && matches!(item, OutputItem::Thinking { .. }))
                 .then_some(idx),
+            hovered_output_node: ctx
+                .hovered_output_node
+                .filter(|(item_index, _)| *item_index == idx),
         };
         let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
         let rows = lines.len().min(u32::MAX as usize) as u32;
@@ -1648,9 +1660,9 @@ fn render_thinking(
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = if hovered {
-        t.highlight_bg.into()
+        t.panel_bg.lerp(t.user_msg_bg, 0.65)
     } else {
-        t.code_bg.into()
+        t.panel_bg.into()
     };
     let header_style = Style::default()
         .fg(t.subtle_fg.into())
@@ -1704,7 +1716,7 @@ fn render_thinking(
             .sum();
         let used = content_w + 4;
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 2);
-        spans.push(Span::styled("    ", body_style));
+        spans.push(Span::styled("  ", body_style));
         for src in &md_line.spans {
             let style = src.style.patch(body_style);
             spans.push(Span::styled(src.content.clone(), style));
@@ -1716,7 +1728,7 @@ fn render_thinking(
     }
     if disclosure != Disclosure::Full && all_lines.len() > max_lines {
         let hint = format!(
-            "    ▼ {} more lines — click to expand",
+            "  ▼ {} more lines — click to expand",
             all_lines.len() - max_lines
         );
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
@@ -1726,7 +1738,7 @@ fn render_thinking(
         }
         lines.push(Line::from(spans));
     } else if disclosure == Disclosure::Full && all_lines.len() > 6 {
-        let hint = "    ▲ click to collapse".to_string();
+        let hint = "  ▲ click to collapse".to_string();
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
@@ -1903,6 +1915,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.animation_frame,
             ctx.panel_width,
+            output_fullscreen_hovered(ctx),
         ),
         OutputItem::Bash {
             handle,
@@ -1920,6 +1933,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.animation_frame,
             ctx.panel_width,
+            output_fullscreen_hovered(ctx),
         ),
         OutputItem::CompactionSummary {
             phase,
@@ -1956,9 +1970,12 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.panel_width,
         ),
-        OutputItem::MermaidDiagram { source } => {
-            render_mermaid_preview(source, ctx.panel_width, ctx.animation_frame)
-        }
+        OutputItem::MermaidDiagram { source } => render_mermaid_preview(
+            source,
+            ctx.panel_width,
+            ctx.animation_frame,
+            output_fullscreen_hovered(ctx),
+        ),
         OutputItem::SubAgentActivity {
             handle,
             goal,
@@ -1978,6 +1995,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.panel_width,
             ctx.animation_frame,
+            output_fullscreen_hovered(ctx),
         ),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
@@ -1986,6 +2004,72 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
 
 pub const TOOL_CALL_REGION_PREFIX: &str = "__tool_call__:";
 pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
+pub const TOOL_DETAIL_FULLSCREEN_REGION_PREFIX: &str = "__tool_detail_fullscreen__:";
+const DOCUMENT_PAD_X: usize = 2;
+
+fn output_fullscreen_hovered(ctx: &RenderCtx<'_>) -> bool {
+    ctx.hovered_output_node.is_some_and(|(_, key)| {
+        key.starts_with(TOOL_DETAIL_FULLSCREEN_REGION_PREFIX)
+            || matches!(
+                key.as_str(),
+                COLLAPSED_CARD_FULLSCREEN_KEY
+                    | TERMINAL_FULLSCREEN_KEY
+                    | BASH_FULLSCREEN_KEY
+                    | MERMAID_FULLSCREEN_KEY
+                    | SUB_AGENT_FULLSCREEN_KEY
+            )
+    })
+}
+
+fn document_blank(width: usize, style: Style) -> Line<'static> {
+    Line::from(Span::styled(" ".repeat(width), style))
+}
+
+fn line_is_visually_blank(line: &Line<'_>) -> bool {
+    line.spans
+        .iter()
+        .all(|span| span.content.chars().all(char::is_whitespace))
+}
+
+fn aligned_document_row(
+    mut left: Vec<Span<'static>>,
+    mut right: Vec<Span<'static>>,
+    target: usize,
+    background: Color,
+) -> Line<'static> {
+    let horizontal_pad = DOCUMENT_PAD_X.min(target / 2);
+    let inner = target.saturating_sub(horizontal_pad * 2);
+    let min_left = 3.min(inner);
+    let right_width = crate::width::spans_width(right.iter());
+    let right_budget = right_width.min(inner.saturating_sub(min_left.saturating_add(1)));
+    right = crate::width::truncate_spans(right, right_budget, Some(background));
+    let right_width = crate::width::spans_width(right.iter());
+    let left_budget = inner
+        .saturating_sub(right_width)
+        .saturating_sub(usize::from(!right.is_empty()));
+    left = crate::width::truncate_spans(left, left_budget, Some(background));
+    let left_width = crate::width::spans_width(left.iter());
+    let gap = inner.saturating_sub(left_width + right_width);
+
+    let mut spans = Vec::with_capacity(left.len() + right.len() + 3);
+    spans.push(Span::styled(
+        " ".repeat(horizontal_pad),
+        Style::default().bg(background),
+    ));
+    spans.extend(left);
+    if gap > 0 {
+        spans.push(Span::styled(
+            " ".repeat(gap),
+            Style::default().bg(background),
+        ));
+    }
+    spans.extend(right);
+    spans.push(Span::styled(
+        " ".repeat(horizontal_pad),
+        Style::default().bg(background),
+    ));
+    Line::from(spans)
+}
 
 fn render_tool_dispatch(
     calls: &[ToolCallView],
@@ -2015,28 +2099,31 @@ fn render_tool_dispatch(
     let edit_summary = if edited_files == 0 {
         String::new()
     } else {
-        format!("  · {edited_files} files · +{insertions} −{deletions}")
+        let noun = if edited_files == 1 { "file" } else { "files" };
+        format!("{edited_files} {noun} · +{insertions} −{deletions}")
     };
-    let header = crate::width::truncate(
-        &format!(
-            "working · {}  {finished}/{}{edit_summary}",
-            calls.len(),
-            calls.len()
-        ),
-        width.saturating_sub(1),
-    );
     let header_style = Style::default().fg(t.meta_fg.into()).bg(t.panel_bg.into());
-    let mut lines = vec![line_with_right_pad(
-        " ",
-        &header,
+    let panel_bg: Color = t.panel_bg.into();
+    let mut header_right = format!("{finished}/{}", calls.len());
+    if !edit_summary.is_empty() {
+        header_right.push_str(" · ");
+        header_right.push_str(&edit_summary);
+    }
+    let mut lines = vec![document_blank(width, header_style)];
+    lines.push(aligned_document_row(
+        vec![Span::styled(
+            format!("working · {}", calls.len()),
+            header_style,
+        )],
+        vec![Span::styled(header_right, header_style)],
         width,
-        header_style,
-        header_style,
-    )];
+        panel_bg,
+    ));
     let mut regions = Vec::new();
 
     for call in calls {
         let row = lines.len() as u32;
+        let call_region_index = regions.len();
         let (glyph, color) = match call.status {
             ToolCallStatus::Running => (spinner_char(ctx.animation_frame), t.accent),
             ToolCallStatus::Ok => ("✓", t.success),
@@ -2052,30 +2139,28 @@ fn render_tool_dispatch(
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(call.started_at);
         let elapsed = if elapsed.as_millis() >= 1000 {
-            format!(" · {:.1}s", elapsed.as_secs_f32())
+            format!("{:.1}s", elapsed.as_secs_f32())
         } else if call.status == ToolCallStatus::Running {
             String::new()
         } else {
-            format!(" · {}ms", elapsed.as_millis())
+            format!("{}ms", elapsed.as_millis())
         };
         let draft_tail = call
             .draft_preview
             .last_line()
             .map(|line| format!(" · {line}"))
             .unwrap_or_default();
-        let edit = call
+        let edit_path = call
             .applied_edit
             .as_ref()
-            .map(|(path, metrics)| {
-                format!(
-                    " · {} · +{} −{} · {}h",
-                    crate::width::middle_truncate(path, 22),
-                    metrics.insertions,
-                    metrics.deletions,
-                    metrics.hunks
-                )
-            })
+            .map(|(path, _)| format!(" · {}", crate::width::middle_truncate(path, 22)))
             .unwrap_or_default();
+        let edit_metrics = call.applied_edit.as_ref().map(|(_, metrics)| {
+            format!(
+                "+{} −{} · {}h",
+                metrics.insertions, metrics.deletions, metrics.hunks
+            )
+        });
         let has_fullscreen = matches!(
             call.detail.as_deref(),
             Some(
@@ -2085,33 +2170,56 @@ fn render_tool_dispatch(
                     | OutputItem::DiffPreview { .. }
             )
         );
-        let fullscreen_suffix = if has_fullscreen { " ⤢ " } else { "" };
-        let suffix_width = crate::width::width(fullscreen_suffix);
-        let body = crate::width::truncate(
-            &format!("{}{draft_tail}{edit}  {affordance}{elapsed}", call.intent),
-            width.saturating_sub(5 + suffix_width),
-        );
-        let glyph_style = Style::default().fg(color.into()).bg(t.panel_bg.into());
-        let body_style = Style::default()
-            .fg(t.tinted_fg.into())
-            .bg(t.panel_bg.into());
-        let mut summary_line = line_with_right_pad(
-            &format!(" {glyph} "),
-            &body,
-            width.saturating_sub(suffix_width),
-            glyph_style,
-            body_style,
-        );
-        if has_fullscreen {
-            summary_line.spans.push(Span::styled(
-                fullscreen_suffix.to_string(),
-                Style::default().fg(t.accent.into()).bg(t.panel_bg.into()),
-            ));
+        let call_key = format!("{TOOL_CALL_REGION_PREFIX}{}", call.id);
+        let fullscreen_key = format!("{TOOL_FULLSCREEN_REGION_PREFIX}{}", call.id);
+        let hovered_key = ctx.hovered_output_node.map(|(_, key)| key.as_str());
+        let fullscreen_hovered = hovered_key == Some(fullscreen_key.as_str());
+        let row_hovered = fullscreen_hovered || hovered_key == Some(call_key.as_str());
+        let row_bg = if row_hovered {
+            t.panel_bg.lerp(t.user_msg_bg, 0.65)
+        } else {
+            panel_bg
+        };
+        let glyph_style = Style::default().fg(color.into()).bg(row_bg);
+        let body_style = Style::default().fg(t.tinted_fg.into()).bg(row_bg);
+        let meta_style = Style::default().fg(t.meta_fg.into()).bg(row_bg);
+        let mut left = vec![
+            Span::styled(format!("{glyph} "), glyph_style),
+            Span::styled(format!("{}  {affordance}", call.intent), body_style),
+        ];
+        if !draft_tail.is_empty() || !edit_path.is_empty() {
+            left.push(Span::styled(format!("{draft_tail}{edit_path}"), meta_style));
         }
-        lines.push(summary_line);
+        let mut right_text = Vec::new();
+        if let Some(edit_metrics) = edit_metrics {
+            right_text.push(edit_metrics);
+        }
+        if !elapsed.is_empty() {
+            right_text.push(elapsed);
+        }
+        let mut right = Vec::new();
+        if !right_text.is_empty() {
+            right.push(Span::styled(right_text.join(" · "), meta_style));
+        }
+        if has_fullscreen {
+            let fullscreen_style = Style::default()
+                .fg(if fullscreen_hovered {
+                    t.accent.into()
+                } else {
+                    t.meta_fg.into()
+                })
+                .bg(row_bg)
+                .add_modifier(if fullscreen_hovered {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            right.push(Span::styled("  ⤢".to_string(), fullscreen_style));
+        }
+        lines.push(aligned_document_row(left, right, width, row_bg));
         regions.push(NodeRegion {
             panel_item_index: item_index,
-            path_key: format!("{TOOL_CALL_REGION_PREFIX}{}", call.id),
+            path_key: call_key,
             start_row: row,
             end_row: row + 1,
             col_start: 0,
@@ -2120,11 +2228,11 @@ fn render_tool_dispatch(
         if has_fullscreen {
             regions.push(NodeRegion {
                 panel_item_index: item_index,
-                path_key: format!("{TOOL_FULLSCREEN_REGION_PREFIX}{}", call.id),
+                path_key: fullscreen_key,
                 start_row: row,
                 end_row: row + 1,
-                col_start: ctx.panel_width.saturating_sub(4),
-                col_end: ctx.panel_width,
+                col_start: ctx.panel_width.saturating_sub((DOCUMENT_PAD_X + 2) as u16),
+                col_end: ctx.panel_width.saturating_sub(DOCUMENT_PAD_X as u16),
             });
         }
 
@@ -2138,13 +2246,16 @@ fn render_tool_dispatch(
             } else {
                 call.draft_preview.text().to_string()
             };
+            lines.push(document_blank(width, detail_style));
             lines.push(line_with_right_pad(
-                "    ",
+                "  ",
                 &crate::width::truncate(&detail, width.saturating_sub(4)),
                 width,
                 detail_style,
                 detail_style,
             ));
+            lines.push(document_blank(width, detail_style));
+            regions[call_region_index].end_row = lines.len() as u32;
             continue;
         };
 
@@ -2168,12 +2279,23 @@ fn render_tool_dispatch(
             }
             _ => {}
         }
+        let detail_has_inline_fullscreen = matches!(
+            &detail,
+            OutputItem::Terminal { .. }
+                | OutputItem::Bash { .. }
+                | OutputItem::SubAgentActivity { .. }
+        );
+        let detail_fullscreen_key = format!("{TOOL_DETAIL_FULLSCREEN_REGION_PREFIX}{}", call.id);
+        let child_hovered_output_node = ctx
+            .hovered_output_node
+            .filter(|(_, key)| key == &detail_fullscreen_key);
         let child_ctx = RenderCtx {
             expanded_tools: ctx.expanded_tools,
             messages: ctx.messages,
             animation_frame: ctx.animation_frame,
             panel_width: ctx.panel_width.saturating_sub(4).max(1),
             hovered_thinking_idx: None,
+            hovered_output_node: child_hovered_output_node,
         };
         let mut detail_lines = render_item(&detail, &child_ctx);
         if detail_lines
@@ -2182,11 +2304,30 @@ fn render_tool_dispatch(
         {
             detail_lines.pop();
         }
-        for mut line in detail_lines {
-            line.spans.insert(
+        let detail_style = Style::default().bg(t.code_bg.into());
+        if !detail_lines.first().is_some_and(line_is_visually_blank) {
+            detail_lines.insert(
                 0,
-                Span::styled("    ".to_string(), Style::default().bg(t.code_bg.into())),
+                document_blank(child_ctx.panel_width as usize, detail_style),
             );
+        }
+        if !detail_lines.last().is_some_and(line_is_visually_blank) {
+            detail_lines.push(document_blank(child_ctx.panel_width as usize, detail_style));
+        }
+        let detail_start = lines.len() as u32;
+        if detail_has_inline_fullscreen && detail_lines.len() > 1 {
+            regions.push(NodeRegion {
+                panel_item_index: item_index,
+                path_key: detail_fullscreen_key,
+                start_row: detail_start + 1,
+                end_row: detail_start + 2,
+                col_start: ctx.panel_width.saturating_sub(6),
+                col_end: ctx.panel_width.saturating_sub(2),
+            });
+        }
+        for mut line in detail_lines {
+            line.spans
+                .insert(0, Span::styled("  ".to_string(), detail_style));
             let used = crate::width::spans_width(line.spans.iter());
             if used < width {
                 line.spans.push(Span::styled(
@@ -2196,7 +2337,9 @@ fn render_tool_dispatch(
             }
             lines.push(line);
         }
+        regions[call_region_index].end_row = lines.len() as u32;
     }
+    lines.push(document_blank(width, header_style));
     (lines, regions)
 }
 
@@ -2211,6 +2354,7 @@ fn render_sub_agent_activity(
     expanded: bool,
     panel_width: u16,
     animation_frame: u32,
+    fullscreen_hovered: bool,
 ) -> Vec<Line<'static>> {
     let glyph = match status {
         "ok" => "✓",
@@ -2234,6 +2378,7 @@ fn render_sub_agent_activity(
         output,
         expanded,
         panel_width,
+        fullscreen_hovered,
     )
 }
 
@@ -2241,6 +2386,7 @@ fn render_mermaid_preview(
     source: &str,
     panel_width: u16,
     _animation_frame: u32,
+    fullscreen_hovered: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
@@ -2275,7 +2421,14 @@ fn render_mermaid_preview(
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     header_spans.push(Span::styled(
         fs_btn.to_string(),
-        hint_style.add_modifier(Modifier::BOLD),
+        if fullscreen_hovered {
+            Style::default()
+                .fg(t.accent.into())
+                .bg(t.panel_bg.lerp(t.user_msg_bg, 0.65))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            hint_style
+        },
     ));
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     lines.push(Line::from(header_spans));
@@ -2300,10 +2453,7 @@ fn render_mermaid_preview(
     }
 
     if total > max_preview {
-        let hint = format!(
-            "    ▼ {} more rows — click ⤢ to expand",
-            total - max_preview
-        );
+        let hint = format!("  ▼ {} more rows — click ⤢ to expand", total - max_preview);
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
@@ -2387,7 +2537,7 @@ fn push_diff_fold_hint(
     style: Style,
 ) {
     if !expanded && total > folded {
-        let hint = format!("    ▼ {} more lines — click to expand", total - folded);
+        let hint = format!("  ▼ {} more lines — click to expand", total - folded);
         let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, style)];
         if pad > 0 {
@@ -2395,7 +2545,7 @@ fn push_diff_fold_hint(
         }
         lines.push(Line::from(spans));
     } else if expanded && total > folded {
-        let hint = "    ▲ click to collapse".to_string();
+        let hint = "  ▲ click to collapse".to_string();
         let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, style)];
         if pad > 0 {
@@ -5132,7 +5282,7 @@ fn append_command_lines(
         return;
     };
     if expanded {
-        for row in wrap_with_prefix(command, target, "    $ ", "      ") {
+        for row in wrap_with_prefix(command, target, "  $ ", "    ") {
             lines.push(line_with_right_pad(
                 &row.prefix,
                 &row.body,
@@ -5148,7 +5298,7 @@ fn append_command_lines(
         } else {
             ""
         };
-        let prefix = "    $ ";
+        let prefix = "  $ ";
         let budget = target
             .saturating_sub(crate::width::width(prefix))
             .saturating_sub(crate::width::width(suffix));
@@ -5164,6 +5314,7 @@ fn append_command_lines(
     lines.push(Line::from(Span::styled(" ".repeat(target), command_style)));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_output_block(
     title: &str,
     metadata: Option<&str>,
@@ -5172,6 +5323,7 @@ fn render_output_block(
     output: &str,
     expanded: bool,
     panel_width: u16,
+    fullscreen_hovered: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
@@ -5212,7 +5364,14 @@ fn render_output_block(
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     header_spans.push(Span::styled(
         fs_btn.to_string(),
-        hint_style.add_modifier(Modifier::BOLD),
+        if fullscreen_hovered {
+            Style::default()
+                .fg(t.accent.into())
+                .bg(t.panel_bg.lerp(t.user_msg_bg, 0.65))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            hint_style
+        },
     ));
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     lines.push(Line::from(header_spans));
@@ -5225,11 +5384,11 @@ fn render_output_block(
     let (total_rows, output_rows) = if expanded {
         let rows = output
             .lines()
-            .flat_map(|line| wrap_with_prefix(line, target, "    ", "    "))
+            .flat_map(|line| wrap_with_prefix(line, target, "  ", "  "))
             .collect::<Vec<_>>();
         (rows.len(), rows)
     } else {
-        wrap_tail_with_prefix(output, target, "    ", 8)
+        wrap_tail_with_prefix(output, target, "  ", 8)
     };
     let hidden_rows = total_rows.saturating_sub(output_rows.len());
     for row in output_rows {
@@ -5243,7 +5402,7 @@ fn render_output_block(
     }
     if !expanded && hidden_rows > 0 {
         let unit = if hidden_rows == 1 { "line" } else { "lines" };
-        let hint = format!("    ▼ {hidden_rows} more {unit} — click to expand");
+        let hint = format!("  ▼ {hidden_rows} more {unit} — click to expand");
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
@@ -5251,7 +5410,7 @@ fn render_output_block(
         }
         lines.push(Line::from(spans));
     } else if expanded && total_rows > 8 {
-        let hint = "    ▲ click to collapse".to_string();
+        let hint = "  ▲ click to collapse".to_string();
         let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
@@ -5272,6 +5431,7 @@ struct BashProjectionInput<'a> {
     done: bool,
     expanded: bool,
     panel_width: u16,
+    fullscreen_hovered: bool,
 }
 
 #[derive(Clone)]
@@ -5309,7 +5469,7 @@ impl Default for BashOutputProjection {
 
 impl BashOutputProjection {
     const COLLAPSED_ROWS: usize = 8;
-    const OUTPUT_PREFIX: &'static str = "    ";
+    const OUTPUT_PREFIX: &'static str = "  ";
 
     fn update(&mut self, input: BashProjectionInput<'_>) -> usize {
         let t = crate::theme::theme();
@@ -5345,6 +5505,7 @@ impl BashOutputProjection {
             "",
             input.expanded,
             input.panel_width,
+            input.fullscreen_hovered,
         );
         let blank = before_output
             .pop()
@@ -5365,11 +5526,11 @@ impl BashOutputProjection {
                 "lines"
             };
             Some(format!(
-                "    ▼ {} more {unit} — click to expand",
+                "  ▼ {} more {unit} — click to expand",
                 self.output_start
             ))
         } else if input.expanded && total_output_rows > Self::COLLAPSED_ROWS {
-            Some("    ▲ click to collapse".to_string())
+            Some("  ▲ click to collapse".to_string())
         } else {
             None
         };
@@ -5472,6 +5633,7 @@ fn render_bash(
     expanded: bool,
     animation_frame: u32,
     panel_width: u16,
+    fullscreen_hovered: bool,
 ) -> Vec<Line<'static>> {
     let glyph = if done {
         "✓"
@@ -5487,6 +5649,7 @@ fn render_bash(
         output,
         expanded,
         panel_width,
+        fullscreen_hovered,
     )
 }
 
@@ -5502,6 +5665,7 @@ fn render_terminal(
     expanded: bool,
     animation_frame: u32,
     panel_width: u16,
+    fullscreen_hovered: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
@@ -5553,7 +5717,14 @@ fn render_terminal(
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     header_spans.push(Span::styled(
         fs_btn.to_string(),
-        hint_style.add_modifier(Modifier::BOLD),
+        if fullscreen_hovered {
+            Style::default()
+                .fg(t.accent.into())
+                .bg(t.panel_bg.lerp(t.user_msg_bg, 0.65))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            hint_style
+        },
     ));
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     lines.push(Line::from(header_spans));
@@ -5572,7 +5743,7 @@ fn render_terminal(
             };
             let cols = screen.cols as usize;
             for row in 0..max_rows.min(screen.rows as usize) {
-                let mut spans: Vec<Span<'static>> = vec![Span::styled("    ", body_style)];
+                let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", body_style)];
                 let mut row_width = 0usize;
                 for col in 0..cols {
                     let idx = row * cols + col;
@@ -5594,7 +5765,7 @@ fn render_terminal(
                     spans.push(Span::styled(chars.to_string(), cs));
                 }
                 let pad = target
-                    .saturating_sub(4)
+                    .saturating_sub(2)
                     .saturating_sub(row_width)
                     .saturating_add(RIGHT_PAD);
                 if pad > 0 {
@@ -5603,7 +5774,7 @@ fn render_terminal(
                 lines.push(Line::from(spans));
             }
             if !expanded && screen.rows as usize > 12 {
-                let hint = "    ▼ click to expand";
+                let hint = "  ▼ click to expand";
                 let hint_pad = target.saturating_sub(crate::width::width(hint));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
@@ -5611,7 +5782,7 @@ fn render_terminal(
                 }
                 lines.push(Line::from(spans));
             } else if expanded && screen.rows as usize > 12 {
-                let hint = "    ▲ click to collapse";
+                let hint = "  ▲ click to collapse";
                 let hint_pad = target.saturating_sub(crate::width::width(hint));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
@@ -5625,11 +5796,11 @@ fn render_terminal(
             let (total_rows, output_rows) = if expanded {
                 let rows = text
                     .lines()
-                    .flat_map(|line| wrap_with_prefix(line, target, "    ", "    "))
+                    .flat_map(|line| wrap_with_prefix(line, target, "  ", "  "))
                     .collect::<Vec<_>>();
                 (rows.len(), rows)
             } else {
-                wrap_tail_with_prefix(&text, target, "    ", 6)
+                wrap_tail_with_prefix(&text, target, "  ", 6)
             };
             let hidden_rows = total_rows.saturating_sub(output_rows.len());
             for row in output_rows {
@@ -5643,7 +5814,7 @@ fn render_terminal(
             }
             if !expanded && hidden_rows > 0 {
                 let unit = if hidden_rows == 1 { "line" } else { "lines" };
-                let hint = format!("    ▼ {hidden_rows} more {unit} — click to expand");
+                let hint = format!("  ▼ {hidden_rows} more {unit} — click to expand");
                 let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
@@ -5651,7 +5822,7 @@ fn render_terminal(
                 }
                 lines.push(Line::from(spans));
             } else if expanded && total_rows > 6 {
-                let hint = "    ▲ click to collapse".to_string();
+                let hint = "  ▲ click to collapse".to_string();
                 let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
@@ -5757,6 +5928,7 @@ mod terminal_render_tests {
             false,
             0,
             80,
+            false,
         );
         assert!(
             lines.len() >= 3,
@@ -5794,6 +5966,7 @@ line2
             false,
             0,
             80,
+            false,
         );
         let rendered: String = lines
             .iter()
@@ -5823,6 +5996,7 @@ line2
             false,
             0,
             32,
+            false,
         );
         let header = &lines[1];
         let rendered = header
@@ -5845,6 +6019,7 @@ line2
             true,
             0,
             80,
+            false,
         );
         let rendered = rendered_text(&lines);
         assert!(rendered.contains("cargo test --workspace"));
@@ -5854,7 +6029,7 @@ line2
     #[test]
     fn collapsed_bash_limits_wrapped_visual_rows() {
         let output = format!("{}{}", "A".repeat(68), "B".repeat(272));
-        let lines = render_bash("bg_s_0", None, None, &output, true, false, 0, 40);
+        let lines = render_bash("bg_s_0", None, None, &output, true, false, 0, 40, false);
         let rendered = rendered_text(&lines);
 
         assert_eq!(lines.len(), 13, "header + 8 output rows + hint + padding");
@@ -5893,6 +6068,7 @@ line2
                         done: true,
                         expanded,
                         panel_width,
+                        fullscreen_hovered: false,
                     });
                     projection.prepare_range(output, 0, projection.rows());
                     let mut projected = Vec::new();
@@ -5906,6 +6082,7 @@ line2
                         expanded,
                         0,
                         panel_width,
+                        false,
                     );
                     expected.push(Line::from(Span::styled(String::new(), RESET)));
                     assert_eq!(
@@ -5932,6 +6109,7 @@ line2
             false,
             0,
             40,
+            false,
         );
         let rendered = rendered_text(&lines);
 
@@ -5986,6 +6164,7 @@ line2
             true,
             0,
             80,
+            false,
         );
         let rendered = rendered_text(&lines);
         assert!(rendered.contains("ps -axo pid,command | sort -n"));
@@ -6189,6 +6368,7 @@ mod tests {
             animation_frame: 0,
             panel_width: 120,
             hovered_thinking_idx: None,
+            hovered_output_node: None,
         };
         let key = LayoutKey {
             width: 120,
@@ -6358,6 +6538,7 @@ mod tests {
             animation_frame: 0,
             panel_width: 120,
             hovered_thinking_idx: None,
+            hovered_output_node: None,
         };
         let request = LayoutRequest {
             scroll_offset: 0,
@@ -6624,6 +6805,7 @@ mod tests {
             done: false,
             expanded: false,
             panel_width: 80,
+            fullscreen_hovered: false,
         });
         projection.prepare_range(&source, 0, projection.rows());
         let cold = started.elapsed();
@@ -6641,6 +6823,7 @@ mod tests {
                     done: false,
                     expanded: false,
                     panel_width: 80,
+                    fullscreen_hovered: false,
                 }),
                 0
             );
@@ -6664,6 +6847,7 @@ mod tests {
                     done: false,
                     expanded: false,
                     panel_width: 80,
+                    fullscreen_hovered: false,
                 },
             ));
             append_projection.prepare_range(&appended, 0, append_projection.rows());
@@ -6680,6 +6864,7 @@ mod tests {
             done: true,
             expanded: true,
             panel_width: 80,
+            fullscreen_hovered: false,
         });
         let viewport_rows = 40;
         let starts = [
@@ -8145,6 +8330,7 @@ mod tests {
             false,
             80,
             0,
+            false,
         );
         let rendered = flatten_lines(&lines);
         let goal = rendered.find("审计上下文缓存").unwrap();
@@ -8358,6 +8544,124 @@ mod tests {
         let old_pos = flat.find("old_tool").unwrap_or(usize::MAX);
         let new_pos = flat.find("new_tool").unwrap_or(0);
         assert!(new_pos > old_pos, "newest node should be below older node");
+    }
+
+    #[test]
+    fn tool_dispatch_uses_document_padding_and_clickable_detail_region() {
+        let now = Instant::now();
+        let call = ToolCallView {
+            id: "edit-1".into(),
+            tool: "fs.edit".into(),
+            intent: "更新工具调用文档流".into(),
+            input: serde_json::json!({"path": "src/output.rs"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Preview,
+            detail: Some(Box::new(OutputItem::DiffPreview {
+                title: "src/output.rs".into(),
+                old_content: Some("old".into()),
+                new_content: Some("new".into()),
+                unified_diff: None,
+                expanded: false,
+            })),
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: Some((
+                "src/output.rs".into(),
+                atman_runtime::activity::EditMetrics {
+                    hunks: 1,
+                    insertions: 4,
+                    deletions: 1,
+                },
+            )),
+            started_at: now - std::time::Duration::from_millis(42),
+            ended_at: Some(now),
+        };
+        let ctx = RenderCtx {
+            panel_width: 80,
+            ..RenderCtx::empty()
+        };
+        let (lines, regions) = render_tool_dispatch(&[call], &ctx, 7);
+        let line_text = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        assert!(line_is_visually_blank(&lines[0]));
+        assert!(line_is_visually_blank(lines.last().unwrap()));
+        assert!(line_text(&lines[1]).starts_with("  working · 1"));
+        assert!(line_text(&lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
+        assert!(line_text(&lines[2]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
+
+        let call_region = regions
+            .iter()
+            .find(|region| region.path_key == format!("{TOOL_CALL_REGION_PREFIX}edit-1"))
+            .unwrap();
+        let fullscreen_region = regions
+            .iter()
+            .find(|region| region.path_key == format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1"))
+            .unwrap();
+        assert!(call_region.end_row > call_region.start_row + 1);
+        assert_eq!(fullscreen_region.start_row, call_region.start_row);
+        assert!(fullscreen_region.col_start > call_region.col_start);
+    }
+
+    #[test]
+    fn tool_fullscreen_hover_uses_accent_without_highlight_background() {
+        let call = ToolCallView {
+            id: "shell-1".into(),
+            tool: "bash.spawn".into(),
+            intent: "运行检查".into(),
+            input: serde_json::json!({"cmd": "true"}),
+            status: ToolCallStatus::Running,
+            disclosure: Disclosure::Preview,
+            detail: Some(Box::new(OutputItem::Bash {
+                handle: "bg-1".into(),
+                title: None,
+                command: Some("true".into()),
+                output: String::new(),
+                done: false,
+                expanded: false,
+            })),
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: None,
+        };
+        let mut other_call = call.clone();
+        other_call.id = "shell-2".into();
+        let hovered = (0, format!("{TOOL_DETAIL_FULLSCREEN_REGION_PREFIX}shell-1"));
+        let ctx = RenderCtx {
+            panel_width: 80,
+            hovered_output_node: Some(&hovered),
+            ..RenderCtx::empty()
+        };
+        let (lines, regions) = render_tool_dispatch(&[call, other_call], &ctx, 0);
+        let fullscreen = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.content.contains('⤢'))
+            .collect::<Vec<_>>();
+        let theme = crate::theme::theme();
+
+        assert_eq!(fullscreen.len(), 4);
+        assert_eq!(
+            fullscreen
+                .iter()
+                .filter(|span| span.style.fg == Some(theme.accent.into()))
+                .count(),
+            1
+        );
+        let hovered = fullscreen
+            .into_iter()
+            .find(|span| span.style.fg == Some(theme.accent.into()))
+            .unwrap();
+        assert_ne!(hovered.style.bg, Some(theme.highlight_bg.into()));
+        assert!(regions.iter().any(|region| {
+            region.path_key == format!("{TOOL_DETAIL_FULLSCREEN_REGION_PREFIX}shell-1")
+        }));
     }
 }
 

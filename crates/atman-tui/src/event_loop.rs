@@ -780,9 +780,14 @@ pub(crate) async fn run_frames(
                                             panel_idx,
                                             tool_use_id,
                                         );
-                                    } else if let Some(tool_use_id) = node_id.strip_prefix(
-                                        crate::output::TOOL_FULLSCREEN_REGION_PREFIX,
-                                    ) {
+                                    } else if let Some(tool_use_id) = node_id
+                                        .strip_prefix(crate::output::TOOL_FULLSCREEN_REGION_PREFIX)
+                                        .or_else(|| {
+                                            node_id.strip_prefix(
+                                                crate::output::TOOL_DETAIL_FULLSCREEN_REGION_PREFIX,
+                                            )
+                                        })
+                                    {
                                         if let Some(handle) = app
                                             .app
                                             .tool_call_detail_handle(panel_idx, tool_use_id)
@@ -1024,6 +1029,7 @@ pub(crate) async fn run_frames(
                                     app.app.hovered_sidebar_lower = false;
                                     app.app.hovered_sidebar_more = false;
                                     app.app.set_hovered_thinking(None);
+                                    app.app.set_hovered_output_node(None);
                                     app.app.set_hovered_kill(None);
                                     app.app.set_hovered_task(None);
                                     app.app.set_hovered_insert(None);
@@ -1089,6 +1095,9 @@ pub(crate) async fn run_frames(
                                 } else {
                                     app.app.set_hovered_thinking(None);
                                 }
+                                let hovered_output_node =
+                                    app.app.hit_test_node(me.column, me.row);
+                                app.app.set_hovered_output_node(hovered_output_node);
                                 let hm = &app.app.last_task_panel_hitmap;
                                 if let Some(kr) = hm
                                     .kill_rects

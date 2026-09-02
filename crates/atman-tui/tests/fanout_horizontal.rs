@@ -89,6 +89,7 @@ fn build_panel(
         animation_frame: 0,
         panel_width: width,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     // SAFETY: env-var mutation guarded by LEGACY_LOCK across parallel tests.
     unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
@@ -127,6 +128,7 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
         animation_frame: 0,
         panel_width: 200,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], 200, &ctx);
     let flat: Vec<String> = lines
@@ -178,6 +180,7 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
         animation_frame: 0,
         panel_width: 80,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let (lines, _ranges, _regions, _rows) = build_lines_with_ranges(&[item], 80, &ctx);
     let flat: Vec<String> = lines
@@ -309,6 +312,7 @@ fn layout_cache_still_composes_valid_regions() {
         animation_frame: 0,
         panel_width: 200,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let mut cache = LayoutCache::default();
     let key = LayoutKey {

@@ -302,6 +302,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             animation_frame: app.animation_frame,
             panel_width: transcript_area.width,
             hovered_thinking_idx: app.hovered_thinking_idx,
+            hovered_output_node: app.hovered_output_node.as_ref(),
         };
         let cache_key = output::LayoutKey {
             width: transcript_area.width,

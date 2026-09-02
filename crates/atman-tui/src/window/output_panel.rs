@@ -50,6 +50,7 @@ impl WindowComponent for OutputPanelContent {
             messages: &[],
             panel_width: area.width,
             hovered_thinking_idx: None,
+            hovered_output_node: None,
             animation_frame: 0,
         };
         let lines = crate::output::render_item(&self.item, &render_ctx);

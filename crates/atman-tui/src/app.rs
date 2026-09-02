@@ -645,6 +645,7 @@ pub struct AppState {
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
     pub hovered_thinking_idx: Option<usize>,
+    pub hovered_output_node: Option<(usize, String)>,
     pub hovered_task_id: Option<atman_runtime::TaskId>,
     pub hovered_kill_id: Option<atman_runtime::TaskId>,
     pub hovered_insert_handle: Option<String>,
@@ -1448,6 +1449,23 @@ impl AppState {
         }
     }
 
+    pub fn set_hovered_output_node(&mut self, node: Option<(usize, String)>) {
+        if self.hovered_output_node == node {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.hovered_output_node, node);
+        if let Some((item_index, _)) = previous {
+            self.touch_item(item_index, OutputMutation::Paint);
+        }
+        if let Some(item_index) = self
+            .hovered_output_node
+            .as_ref()
+            .map(|(item_index, _)| *item_index)
+        {
+            self.touch_item(item_index, OutputMutation::Paint);
+        }
+    }
+
     pub fn set_hovered_task(&mut self, id: Option<atman_runtime::TaskId>) {
         if self.hovered_task_id != id {
             self.hovered_task_id = id;
@@ -1686,7 +1704,22 @@ impl AppState {
             .iter()
             .filter(|r| rel >= r.start_row && rel < r.end_row)
             .filter(|r| rel_col >= r.col_start && rel_col < r.col_end)
-            .max_by_key(|r| r.path_key.len())
+            .max_by_key(|r| {
+                let fullscreen = r
+                    .path_key
+                    .starts_with(crate::output::TOOL_FULLSCREEN_REGION_PREFIX)
+                    || r.path_key
+                        .starts_with(crate::output::TOOL_DETAIL_FULLSCREEN_REGION_PREFIX)
+                    || matches!(
+                        r.path_key.as_str(),
+                        crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
+                            | crate::output::TERMINAL_FULLSCREEN_KEY
+                            | crate::output::BASH_FULLSCREEN_KEY
+                            | crate::output::MERMAID_FULLSCREEN_KEY
+                            | crate::output::SUB_AGENT_FULLSCREEN_KEY
+                    );
+                (fullscreen, r.path_key.len())
+            })
             .map(|r| (r.panel_item_index, r.path_key.clone()))
     }
 
@@ -4837,6 +4870,57 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_node_prioritizes_fullscreen_and_keeps_tool_detail_clickable() {
+        use crate::output::{
+            NodeRegion, TOOL_CALL_REGION_PREFIX, TOOL_DETAIL_FULLSCREEN_REGION_PREFIX,
+            TOOL_FULLSCREEN_REGION_PREFIX,
+        };
+        use ratatui::layout::Rect;
+
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(Rect::new(0, 2, 80, 20));
+        app.last_node_regions = vec![
+            NodeRegion {
+                panel_item_index: 4,
+                path_key: format!("{TOOL_CALL_REGION_PREFIX}edit-1"),
+                start_row: 1,
+                end_row: 8,
+                col_start: 0,
+                col_end: 80,
+            },
+            NodeRegion {
+                panel_item_index: 4,
+                path_key: format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1"),
+                start_row: 1,
+                end_row: 2,
+                col_start: 76,
+                col_end: 78,
+            },
+            NodeRegion {
+                panel_item_index: 4,
+                path_key: format!("{TOOL_DETAIL_FULLSCREEN_REGION_PREFIX}edit-1"),
+                start_row: 4,
+                end_row: 5,
+                col_start: 74,
+                col_end: 78,
+            },
+        ];
+
+        assert_eq!(
+            app.hit_test_node(77, 3),
+            Some((4, format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1")))
+        );
+        assert_eq!(
+            app.hit_test_node(10, 6),
+            Some((4, format!("{TOOL_CALL_REGION_PREFIX}edit-1")))
+        );
+        assert_eq!(
+            app.hit_test_node(77, 6),
+            Some((4, format!("{TOOL_DETAIL_FULLSCREEN_REGION_PREFIX}edit-1")))
+        );
+    }
+
+    #[test]
     fn hit_test_returns_none_outside_transcript() {
         use crate::output::ItemRange;
         use ratatui::layout::Rect;
@@ -6132,6 +6216,7 @@ mod terminal_e2e_tests {
             messages: &[],
             panel_width: 80,
             hovered_thinking_idx: None,
+            hovered_output_node: None,
             animation_frame: 0,
         };
         let mut cache = LayoutCache::default();

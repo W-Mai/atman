@@ -130,6 +130,7 @@ fn run_bench(node_count: usize, iterations: u32) -> (f64, usize) {
         animation_frame: 0,
         panel_width: 120,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let (lines, _, _, _) = build_lines_with_ranges(&items, 120, &ctx);
     let line_count = lines.len();

@@ -420,6 +420,7 @@ pub(crate) fn render_sub_agent_panel(
         animation_frame: render_frame,
         panel_width: area.width,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let (doc_lines, tool_headers) =
         crate::output::build_lines_with_tool_headers(&items, &render_ctx);

@@ -36,6 +36,7 @@ fn measure_layout(items: &[OutputItem]) -> LayoutBaseline {
         animation_frame: 0,
         panel_width: 120,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let cold_key = LayoutKey {
         width: 120,
@@ -245,6 +246,7 @@ fn incident_session_animation_stays_within_frame_budget() {
         animation_frame: 0,
         panel_width: 120,
         hovered_thinking_idx: None,
+        hovered_output_node: None,
     };
     let key = LayoutKey {
         width: 120,
