@@ -11,6 +11,7 @@ use atman_runtime::event::{Event, EventSink};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::idempotency::IdempotencyRegistry;
 use crate::session_actor::SessionActorHandle;
 
 struct PendingPrompt {
@@ -25,6 +26,7 @@ pub struct DaemonState {
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
+    pub(crate) idempotency: IdempotencyRegistry,
 }
 
 #[derive(Clone)]
@@ -52,6 +54,7 @@ impl DaemonState {
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
+            idempotency: IdempotencyRegistry::default(),
         }
     }
 

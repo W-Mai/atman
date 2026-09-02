@@ -380,6 +380,8 @@ pub struct ListSessionsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RenameSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub title: String,
 }

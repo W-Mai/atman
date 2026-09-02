@@ -207,3 +207,70 @@ async fn get_snapshot_replays_idle_sessions_and_marks_interrupted_runs_lost() {
     .unwrap();
     assert!(gap.resync_required.is_some());
 }
+
+#[tokio::test]
+async fn rename_session_retries_return_the_original_committed_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = uuid::Uuid::now_v7();
+    let session_dir = tmp.path().join("sessions").join(sid.to_string());
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("events.jsonl"), "").unwrap();
+    atman_runtime::session_meta::SessionMeta::default()
+        .save(&session_dir)
+        .unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let request_id = atman_proto::RequestId::now();
+    let request = atman_proto::RenameSessionRequest {
+        request_id: Some(request_id.clone()),
+        session_id: atman_proto::SessionId(sid),
+        title: "Committed title".into(),
+    };
+
+    let first = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::RenameSession>(1, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::RenameSession>()
+    .unwrap();
+    assert_eq!(first.title, "Committed title");
+
+    atman_runtime::session_meta::SessionMeta::set_title(
+        &session_dir,
+        Some("External change".into()),
+    )
+    .unwrap();
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::RenameSession>(2, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::RenameSession>()
+    .unwrap();
+    assert_eq!(retry.title, "Committed title");
+    assert_eq!(
+        atman_runtime::session_meta::SessionMeta::load(&session_dir)
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("External change")
+    );
+
+    let conflict = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::RenameSession>(
+            3,
+            &atman_proto::RenameSessionRequest {
+                request_id: Some(request_id),
+                session_id: atman_proto::SessionId(sid),
+                title: "Different command".into(),
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        conflict.error.unwrap().code,
+        atman_proto::JsonRpcError::INVALID_PARAMS
+    );
+}

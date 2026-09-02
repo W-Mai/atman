@@ -2,8 +2,8 @@ use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
-    PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionRequest, ResolvePromptResponse,
-    RpcMethod, RpcMethodDescriptor, RunFlowResponse, method_descriptor, methods, rpc,
+    PermissionRpcScope, PingResponse, ProtocolLimits, ResolvePromptResponse, RpcMethod,
+    RpcMethodDescriptor, RunFlowResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -60,6 +60,7 @@ pub mod bootstrap;
 pub mod config;
 mod events;
 pub mod http;
+mod idempotency;
 pub mod openapi;
 pub mod pidfile;
 mod projection;
@@ -158,15 +159,51 @@ pub async fn dispatch_as(
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
-            Ok(RenameSessionRequest { session_id, title }) if !title.trim().is_empty() => {
-                match state
-                    .rename_session(&session_id, &title, principal_id)
-                    .await
-                {
-                    Ok(summary) => method_response::<rpc::RenameSession>(id, summary),
+            Ok(params) if !params.title.trim().is_empty() => {
+                let request_id = params
+                    .request_id
+                    .clone()
+                    .unwrap_or_else(atman_proto::RequestId::now);
+                let fingerprint = match serde_json::to_value(&params) {
+                    Ok(value) => value,
                     Err(error) => {
-                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                        return JsonRpcResponse::err(
+                            id,
+                            JsonRpcError::internal(format!(
+                                "could not encode rename_session command: {error}"
+                            )),
+                        );
                     }
+                };
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let outcome = state
+                    .idempotency
+                    .execute(
+                        principal_id,
+                        request_id,
+                        methods::RENAME_SESSION,
+                        fingerprint,
+                        async move {
+                            let summary = operation_state
+                                .rename_session(
+                                    &params.session_id,
+                                    &params.title,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            serde_json::to_value(summary).map_err(|error| {
+                                JsonRpcError::internal(format!(
+                                    "could not encode rename_session result: {error}"
+                                ))
+                            })
+                        },
+                    )
+                    .await;
+                match outcome {
+                    Ok(result) => JsonRpcResponse::ok(id, result),
+                    Err(error) => JsonRpcResponse::err(id, error),
                 }
             }
             Ok(_) => {
