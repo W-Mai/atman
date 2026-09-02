@@ -535,6 +535,15 @@ impl Provider for OpenAiProvider {
                                 tc.pointer("/function/arguments").and_then(|v| v.as_str())
                             {
                                 slot.arguments.push_str(args);
+                                let _ = tx.send(NodeEvent::ToolCallDraft {
+                                    index: idx,
+                                    call_id: slot.id.clone(),
+                                    name: crate::tool_naming::from_wire(
+                                        &slot.name,
+                                        &streaming_tools,
+                                    ),
+                                    arguments_delta: args.to_string(),
+                                });
                             }
                         }
                     }

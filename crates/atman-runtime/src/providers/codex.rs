@@ -695,6 +695,16 @@ impl Provider for CodexProvider {
                             }
                             if let Some(delta) = parsed["delta"].as_str() {
                                 partial_tool_calls[idx].arguments.push_str(delta);
+                                let slot = &partial_tool_calls[idx];
+                                let _ = tx.send(NodeEvent::ToolCallDraft {
+                                    index: idx,
+                                    call_id: slot.id.clone(),
+                                    name: crate::tool_naming::from_wire(
+                                        &slot.name,
+                                        &streaming_tools,
+                                    ),
+                                    arguments_delta: delta.to_string(),
+                                });
                             }
                         }
 

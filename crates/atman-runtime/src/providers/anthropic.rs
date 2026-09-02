@@ -477,9 +477,17 @@ impl Provider for AnthropicProvider {
                                 } else if delta_ty == "input_json_delta"
                                     && let Some(partial) =
                                         delta.get("partial_json").and_then(|v| v.as_str())
-                                    && let Some(last) = tool_use_partial.last_mut()
                                 {
-                                    last.input_json.push_str(partial);
+                                    let index = tool_use_partial.len().saturating_sub(1);
+                                    if let Some(last) = tool_use_partial.last_mut() {
+                                        last.input_json.push_str(partial);
+                                        let _ = tx.send(NodeEvent::ToolCallDraft {
+                                            index,
+                                            call_id: last.id.clone(),
+                                            name: crate::tool_naming::from_wire(&last.name, &tools),
+                                            arguments_delta: partial.to_string(),
+                                        });
+                                    }
                                 }
                             }
                         }
