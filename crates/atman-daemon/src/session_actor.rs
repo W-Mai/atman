@@ -52,7 +52,7 @@ impl SessionActorHandle {
     pub fn spawn(
         session_id: SessionId,
         session: Arc<atman_runtime::Session>,
-        initial_run: LiveRun,
+        initial_runs: Vec<LiveRun>,
         owner_principal: String,
         daemon_generation: DaemonGeneration,
     ) -> Self {
@@ -70,16 +70,16 @@ impl SessionActorHandle {
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
-        projection.register_run(
-            initial_run.run_id.clone(),
-            initial_run.flow_name.clone(),
-            initial_run.started_at,
-        );
+        for run in &initial_runs {
+            projection.register_run(run.run_id.clone(), run.flow_name.clone(), run.started_at);
+        }
         let event_cursor = EventCursor(projection.projection().revision.0);
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
-        let mut runs = HashMap::new();
-        runs.insert(initial_run.run_id.clone(), initial_run);
+        let runs = initial_runs
+            .into_iter()
+            .map(|run| (run.run_id.clone(), run))
+            .collect();
         let (view_tx, view) = watch::channel(view_for(1, &runs, &projection));
         let actor = SessionActor {
             session_id,

@@ -288,6 +288,7 @@ pub mod methods {
     pub const DAEMON_CAPABILITIES: &str = "daemon.capabilities";
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
+    pub const CREATE_SESSION: &str = "session.create";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
@@ -302,6 +303,7 @@ pub mod methods {
     pub const ALL: &[super::RpcMethodDescriptor] = &[
         super::method_descriptor::<super::rpc::DaemonCapabilities>(),
         super::method_descriptor::<super::rpc::Ping>(),
+        super::method_descriptor::<super::rpc::CreateSession>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
         super::method_descriptor::<super::rpc::RunFlow>(),
@@ -376,6 +378,16 @@ pub struct ListSessionsRequest {
     pub search: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct CreateSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -626,6 +638,13 @@ pub mod rpc {
         CapabilitiesResponse
     );
     method!(Ping, methods::PING, Query, EmptyParams, PingResponse);
+    method!(
+        CreateSession,
+        methods::CREATE_SESSION,
+        Command,
+        CreateSessionRequest,
+        SessionSnapshot
+    );
     method!(
         ListSessions,
         methods::LIST_SESSIONS,

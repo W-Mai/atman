@@ -112,6 +112,7 @@ pub use state::{DaemonState, LiveRun};
 pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::DaemonCapabilities>(),
     method_descriptor::<rpc::Ping>(),
+    method_descriptor::<rpc::CreateSession>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
     method_descriptor::<rpc::RunFlow>(),
@@ -180,6 +181,48 @@ pub async fn dispatch_as(
                 version: env!("CARGO_PKG_VERSION").into(),
             },
         ),
+        methods::CREATE_SESSION => {
+            let Some(launcher) = state.launcher() else {
+                return JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a session launcher"),
+                );
+            };
+            match parse_params::<rpc::CreateSession>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::CreateSession, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let session_id = launcher
+                                .create_session(
+                                    operation_state.clone(),
+                                    operation_params.project_root.as_deref(),
+                                    operation_params.title.as_deref(),
+                                    &operation_principal,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            operation_state
+                                .session_snapshot(&session_id, &operation_principal)
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await
+                    {
+                        Ok(snapshot) => method_response::<rpc::CreateSession>(id, snapshot),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::LIST_SESSIONS => match parse_params::<rpc::ListSessions>(req.params) {
             Ok(ListSessionsRequest {
                 project_root,

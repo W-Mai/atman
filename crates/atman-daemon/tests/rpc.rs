@@ -46,6 +46,64 @@ async fn ping_returns_pong() {
 }
 
 #[tokio::test]
+async fn create_session_returns_an_idle_snapshot_and_replays_retries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap(),
+    ));
+    let command = atman_proto::CreateSessionRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        project_root: Some(project_root.to_string_lossy().into_owned()),
+        title: Some("Remote session".into()),
+    };
+
+    let first = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(1, &command).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(2, &command).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+
+    assert_eq!(retry.projection.metadata.id, first.projection.metadata.id);
+    assert_eq!(
+        first.projection.lifecycle,
+        atman_proto::SessionLifecycle::Idle
+    );
+    assert_eq!(first.projection.metadata.title, "Remote session");
+    let canonical_project_root = std::fs::canonicalize(&project_root).unwrap();
+    assert_eq!(
+        first.projection.metadata.project_root.as_deref(),
+        Some(canonical_project_root.to_string_lossy().as_ref())
+    );
+    assert!(first.projection.runs.is_empty());
+    assert!(
+        state
+            .sessions_root()
+            .join(first.projection.metadata.id.to_string())
+            .join("events.jsonl")
+            .is_file()
+    );
+}
+
+#[tokio::test]
 async fn method_not_found_returns_jsonrpc_error() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

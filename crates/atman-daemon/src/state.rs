@@ -166,7 +166,27 @@ impl DaemonState {
         run: LiveRun,
         owner_principal: impl Into<String>,
     ) -> Result<()> {
-        let owner_principal = owner_principal.into();
+        self.register_session_with_runs(id, session, vec![run], owner_principal.into())
+            .await
+    }
+
+    pub async fn register_session(
+        &self,
+        id: SessionId,
+        session: std::sync::Arc<atman_runtime::Session>,
+        owner_principal: impl Into<String>,
+    ) -> Result<()> {
+        self.register_session_with_runs(id, session, Vec::new(), owner_principal.into())
+            .await
+    }
+
+    async fn register_session_with_runs(
+        &self,
+        id: SessionId,
+        session: std::sync::Arc<atman_runtime::Session>,
+        initial_runs: Vec<LiveRun>,
+        owner_principal: String,
+    ) -> Result<()> {
         let existing = {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(entry) = sessions.get(&id) {
@@ -177,7 +197,7 @@ impl DaemonState {
                     SessionActorHandle::spawn(
                         id.clone(),
                         session.clone(),
-                        run.clone(),
+                        initial_runs.clone(),
                         owner_principal.clone(),
                         DaemonGeneration(self.daemon_generation.clone()),
                     ),
@@ -194,7 +214,9 @@ impl DaemonState {
                 entry.owns_session(&session),
                 "session {id} is already registered with another runtime"
             );
-            entry.add_run(run).await?;
+            for run in initial_runs {
+                entry.add_run(run).await?;
+            }
         }
         Ok(())
     }

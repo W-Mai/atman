@@ -181,6 +181,94 @@ impl RunLauncher {
         Ok(())
     }
 
+    pub async fn create_session(
+        &self,
+        state: Arc<DaemonState>,
+        project_root: Option<&str>,
+        title: Option<&str>,
+        owner_principal: &str,
+    ) -> Result<ProtoSessionId> {
+        let project_root = self.resolve_project_root(project_root)?;
+        let (session, _) = self.open_new_session(&state, &project_root)?;
+        if let Some(title) = title {
+            let title = title.trim();
+            anyhow::ensure!(!title.is_empty(), "session title must not be empty");
+            atman_runtime::session_meta::SessionMeta::set_title(
+                session.dir(),
+                Some(title.to_owned()),
+            )?;
+        }
+        let session_id = ProtoSessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session, owner_principal.to_owned())
+            .await?;
+        Ok(session_id)
+    }
+
+    fn resolve_project_root(&self, requested: Option<&str>) -> Result<PathBuf> {
+        let root = match requested {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                anyhow::ensure!(path.is_absolute(), "project_root must be an absolute path");
+                path
+            }
+            None => self.project_root.clone(),
+        };
+        let root = std::fs::canonicalize(&root)
+            .with_context(|| format!("resolve project root {}", root.display()))?;
+        anyhow::ensure!(
+            root.is_dir(),
+            "project root is not a directory: {}",
+            root.display()
+        );
+        Ok(root)
+    }
+
+    fn open_new_session(
+        &self,
+        state: &DaemonState,
+        project_root: &Path,
+    ) -> Result<(Arc<atman_runtime::Session>, PathBuf)> {
+        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
+        let hub = match &self.config_dir {
+            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
+            None => atman_runtime::config_hub::ConfigHub::global()
+                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
+        };
+        let scope_root = atman_runtime::storage::resolve_project_scope_with(
+            &hub,
+            project_root,
+            state.data_dir(),
+        )?;
+        let project_index = match atman_runtime::index::AnchorIndex::open_project(&scope_root) {
+            Ok(index) => Some(Arc::new(index)),
+            Err(error) => {
+                atman_runtime::notify!(
+                    warn,
+                    "project index unavailable at {}: {error}",
+                    scope_root.display()
+                );
+                None
+            }
+        };
+        let trust = hub.trust_config().context("load global trust config")?;
+        let session = Arc::new(
+            atman_runtime::Session::open_with_context_and_trust(
+                state.data_dir(),
+                redactor,
+                project_index,
+                trust,
+            )
+            .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
+        );
+        let mut metadata = session.meta().unwrap_or_default();
+        metadata.rebase(project_root);
+        metadata
+            .save(session.dir())
+            .context("persist session project metadata")?;
+        Ok((session, scope_root))
+    }
+
     pub async fn spawn(
         &self,
         state: Arc<DaemonState>,
@@ -227,38 +315,8 @@ impl RunLauncher {
             lifecycle: provider_lifecycle.clone(),
         };
 
-        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let hub = match &self.config_dir {
-            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
-            None => atman_runtime::config_hub::ConfigHub::global()
-                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
-        };
-        let scope_root = atman_runtime::storage::resolve_project_scope_with(
-            &hub,
-            &self.project_root,
-            state.data_dir(),
-        )?;
-        let project_index = match atman_runtime::index::AnchorIndex::open_project(&scope_root) {
-            Ok(idx) => Some(std::sync::Arc::new(idx)),
-            Err(e) => {
-                atman_runtime::notify!(
-                    warn,
-                    "project index unavailable at {}: {e}",
-                    scope_root.display()
-                );
-                None
-            }
-        };
-        let trust = hub.trust_config().context("load global trust config")?;
-        let session = std::sync::Arc::new(
-            atman_runtime::Session::open_with_context_and_trust(
-                state.data_dir(),
-                redactor,
-                project_index,
-                trust,
-            )
-            .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
-        );
+        let project_root = self.resolve_project_root(None)?;
+        let (session, scope_root) = self.open_new_session(&state, &project_root)?;
         queue_run_images(&session, images)?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
@@ -279,7 +337,6 @@ impl RunLauncher {
             )
             .await?;
 
-        let project_root = self.project_root.clone();
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
