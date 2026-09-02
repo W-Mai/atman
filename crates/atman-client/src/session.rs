@@ -92,6 +92,12 @@ impl SessionState {
         &mut self,
         response: &GetSessionUpdatesResponse,
     ) -> Result<AppliedUpdates, ReconcileError> {
+        if response.daemon_generation != self.snapshot.daemon_generation {
+            return Err(ReconcileError::DaemonGeneration {
+                expected: self.snapshot.daemon_generation.clone(),
+                received: response.daemon_generation.clone(),
+            });
+        }
         if let Some(gap) = &response.resync_required {
             return Err(ReconcileError::ResyncRequired(gap.clone()));
         }
@@ -491,6 +497,7 @@ mod tests {
     fn exact_delta_applies_transactionally() {
         let mut state = state();
         let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![envelope(
                 &state,
                 8,
@@ -519,6 +526,7 @@ mod tests {
         let mut state = state();
         let original = state.clone();
         let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![
                 envelope(
                     &state,
@@ -567,6 +575,7 @@ mod tests {
             },
         );
         let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![event.clone()],
             next_cursor: EventCursor(9),
             has_more: false,
@@ -581,6 +590,7 @@ mod tests {
         event.cursor = EventCursor(8);
         event.daemon_generation = DaemonGeneration("generation-b".into());
         let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![event],
             next_cursor: EventCursor(8),
             has_more: false,
@@ -597,6 +607,7 @@ mod tests {
     fn duplicate_page_is_idempotent() {
         let mut state = state();
         let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![envelope(
                 &state,
                 8,
@@ -615,6 +626,25 @@ mod tests {
         let applied = state.apply_updates(&response).unwrap();
         assert_eq!(applied.applied, 0);
         assert_eq!(state, after_first);
+    }
+
+    #[test]
+    fn empty_page_still_detects_daemon_generation_change() {
+        let mut state = state();
+        let original = state.clone();
+        let response = GetSessionUpdatesResponse {
+            daemon_generation: DaemonGeneration("generation-b".into()),
+            events: Vec::new(),
+            next_cursor: state.cursor(),
+            has_more: false,
+            resync_required: None,
+        };
+
+        assert!(matches!(
+            state.apply_updates(&response),
+            Err(ReconcileError::DaemonGeneration { .. })
+        ));
+        assert_eq!(state, original);
     }
 
     #[test]
@@ -641,6 +671,7 @@ mod tests {
         };
         let applied = state
             .apply_updates(&GetSessionUpdatesResponse {
+                daemon_generation: state.snapshot.daemon_generation.clone(),
                 events: vec![event],
                 next_cursor: EventCursor(8),
                 has_more: false,
@@ -703,6 +734,7 @@ mod tests {
                     }
                     methods::GET_SESSION_UPDATES => {
                         serde_json::to_value(GetSessionUpdatesResponse {
+                            daemon_generation: DaemonGeneration("generation-a".into()),
                             events: Vec::new(),
                             next_cursor: EventCursor(2),
                             has_more: false,

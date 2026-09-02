@@ -273,6 +273,7 @@ impl DaemonState {
         let snapshot = self.session_snapshot(id, principal).await?;
         if after_cursor == snapshot.cursor {
             return Ok(GetSessionUpdatesResponse {
+                daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
                 events: Vec::new(),
                 next_cursor: snapshot.cursor,
                 has_more: false,
@@ -280,6 +281,7 @@ impl DaemonState {
             });
         }
         Ok(GetSessionUpdatesResponse {
+            daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
             events: Vec::new(),
             next_cursor: snapshot.cursor,
             has_more: false,

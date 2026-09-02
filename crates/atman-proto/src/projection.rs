@@ -724,6 +724,7 @@ pub struct GetSessionUpdatesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct GetSessionUpdatesResponse {
+    pub daemon_generation: DaemonGeneration,
     pub events: Vec<ProjectionEventEnvelope>,
     pub next_cursor: EventCursor,
     pub has_more: bool,

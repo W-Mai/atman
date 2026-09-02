@@ -493,6 +493,7 @@ impl SessionActor {
             .unwrap_or(self.event_cursor);
         if after_cursor > self.event_cursor || after_cursor < coverage_start {
             return GetSessionUpdatesResponse {
+                daemon_generation: self.daemon_generation.clone(),
                 events: Vec::new(),
                 next_cursor: self.event_cursor,
                 has_more: false,
@@ -524,6 +525,7 @@ impl SessionActor {
             .map(|event| event.cursor)
             .unwrap_or(after_cursor);
         GetSessionUpdatesResponse {
+            daemon_generation: self.daemon_generation.clone(),
             has_more: self
                 .updates
                 .back()
