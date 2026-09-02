@@ -296,6 +296,13 @@ impl Tool for FsWrite {
                 .map_err(|e| {
                     RuntimeError::ToolFailed(format!("fs.write({}): {e}", path.display()))
                 })?;
+            crate::activity::emit_file_edit_applied(
+                ctx,
+                self.name(),
+                &path,
+                old_content.as_deref().unwrap_or_default(),
+                &content,
+            );
             let canonical = canonicalize_or_owned(&path);
             ctx.note_read(&canonical);
             let path_str = path.display().to_string();
@@ -306,6 +313,7 @@ impl Tool for FsWrite {
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
                     title: path_str,
+                    tool_use_id: ctx.tool_use_id.clone(),
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(diff_patch.clone()),
@@ -518,11 +526,13 @@ impl Tool for FsEdit {
                         path.display()
                     ))
                 })?;
+            crate::activity::emit_file_edit_applied(ctx, self.name(), &path, &content, &updated);
             let path_str = path.display().to_string();
             let diff_patch = unified_diff_preview(&path_str, &content, &updated);
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
                     title: path_str,
+                    tool_use_id: ctx.tool_use_id.clone(),
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(diff_patch.clone()),

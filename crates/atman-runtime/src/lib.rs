@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod approval;
 pub mod attachment_store;
 pub mod auth_store;

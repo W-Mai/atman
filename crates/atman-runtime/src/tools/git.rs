@@ -133,6 +133,7 @@ impl Tool for GitDiff {
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
                     title: format!("git diff {range}"),
+                    tool_use_id: ctx.tool_use_id.clone(),
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(out.body.clone()),

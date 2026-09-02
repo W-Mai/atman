@@ -391,6 +391,7 @@ impl BgRegistry {
         let task_id_for_spawn = task_id.clone();
         let flow_run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
         let call_intent = ctx.call_intent.clone();
+        let tool_use_id = ctx.tool_use_id.clone();
         tokio::spawn(async move {
             run_bg_process(
                 child,
@@ -408,6 +409,7 @@ impl BgRegistry {
                 task_id_for_spawn,
                 flow_run_id,
                 call_intent,
+                tool_use_id,
             )
             .await;
         });
@@ -743,6 +745,7 @@ async fn run_bg_process(
     task_id: Option<crate::task_registry::TaskId>,
     flow_run_id: Option<String>,
     call_intent: Option<crate::message::ToolCallIntent>,
+    tool_use_id: Option<String>,
 ) {
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
@@ -759,6 +762,7 @@ async fn run_bg_process(
             handle: handle_for_stream.clone(),
             flow_run_id: flow_run_id.clone(),
             call_intent: call_intent.clone(),
+            tool_use_id: tool_use_id.clone(),
         };
         tokio::spawn(read_stream(BufReader::new(s), ctx))
     });
@@ -772,6 +776,7 @@ async fn run_bg_process(
             handle: handle_for_stream.clone(),
             flow_run_id: flow_run_id.clone(),
             call_intent: call_intent.clone(),
+            tool_use_id: tool_use_id.clone(),
         };
         tokio::spawn(read_stream(BufReader::new(s), ctx))
     });
@@ -891,6 +896,7 @@ async fn run_bg_process(
     if let Some(tx) = &stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::BashExited {
             handle: handle_for_stream,
+            tool_use_id,
             exit_code,
             error: final_status.error().map(str::to_owned),
             call_intent,
@@ -936,6 +942,7 @@ struct ReadStreamCtx {
     handle: String,
     flow_run_id: Option<String>,
     call_intent: Option<crate::message::ToolCallIntent>,
+    tool_use_id: Option<String>,
 }
 
 async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
@@ -958,6 +965,7 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: Rea
                 if let Some(tx) = &ctx.stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::BashChunk {
                         handle: ctx.handle.clone(),
+                        tool_use_id: ctx.tool_use_id.clone(),
                         kind: kind_str.to_string(),
                         line: buf.clone(),
                         call_intent: ctx.call_intent.clone(),
@@ -2431,6 +2439,7 @@ mod tests {
                 handle: "test".into(),
                 flow_run_id: None,
                 call_intent: crate::message::ToolCallIntent::new("检查命令输出"),
+                tool_use_id: None,
             },
         )
         .await;

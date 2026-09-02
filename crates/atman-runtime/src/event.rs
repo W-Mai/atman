@@ -183,6 +183,8 @@ pub enum Event {
         turn_id: Option<TurnId>,
         #[serde(default)]
         flow_run_id: Option<FlowRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         title: String,
         #[serde(default)]
         old_content: Option<String>,
@@ -190,6 +192,17 @@ pub enum Event {
         new_content: Option<String>,
         #[serde(default)]
         unified_diff: Option<String>,
+    },
+    FileEditApplied {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<TurnId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        tool_name: String,
+        path: String,
+        metrics: crate::activity::EditMetrics,
     },
     CompactionSummary {
         session_id: String,
@@ -434,6 +447,12 @@ pub enum NodeEvent {
     },
     ThinkingChunk {
         text: String,
+    },
+    ToolCallDraft {
+        index: usize,
+        call_id: String,
+        name: String,
+        arguments_delta: String,
     },
     LlmDone {
         total_tokens: u64,

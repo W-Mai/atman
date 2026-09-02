@@ -1056,6 +1056,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let ctx_clone = ctx.clone();
     let parent_stream_tx = ctx.stream_tx.clone();
     let child_run_id_str = child_run_id.0.to_string();
+    let tool_use_id = ctx.tool_use_id.clone();
     tokio::spawn(async move {
         let _lifecycle_guard = lifecycle_guard;
         let _workspace_guard = workspace_guard;
@@ -1064,6 +1065,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         if let Some(tx) = &parent_stream_tx {
             let _ = tx.send(crate::stream::StreamFrame::SubAgentStarted {
                 handle: entry_clone.handle.clone(),
+                tool_use_id,
                 goal: entry_clone.display_label.clone(),
                 child_run_id: child_run_id_str.clone(),
                 model: entry_clone.model.clone(),

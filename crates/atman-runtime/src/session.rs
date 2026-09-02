@@ -1376,6 +1376,10 @@ impl Session {
             .map(|w| w.events_path().to_path_buf())
     }
 
+    pub fn activity_summary(&self) -> crate::activity::ActivitySummary {
+        crate::activity::summarize_events(&self.sink.snapshot_envelopes())
+    }
+
     pub async fn plan_system_prompt(&self) -> Option<String> {
         let store = crate::memory::plan::PlanStore::at(&self.dir);
         let plan = store.latest().await.ok().flatten()?;
@@ -2300,7 +2304,14 @@ impl Session {
                 }
             }
             drop(q);
-            self.sink.emit(Event::TurnEnd { turn_id });
+            self.sink.emit(Event::TurnEnd {
+                turn_id: turn_id.clone(),
+            });
+            let _ = self
+                .stream_tx()
+                .send(crate::stream::StreamFrame::TurnEnded {
+                    turn_id: turn_id.to_string(),
+                });
         }
     }
 
@@ -2541,6 +2552,11 @@ impl BeginTurnCommand {
         session.sink.emit(Event::TurnStart {
             turn_id: turn_id.clone(),
         });
+        let _ = session
+            .stream_tx()
+            .send(crate::stream::StreamFrame::TurnStarted {
+                turn_id: turn_id.to_string(),
+            });
         AppendMessageCommand {
             msg: self.user_msg.clone(),
             flow_run_id: None,

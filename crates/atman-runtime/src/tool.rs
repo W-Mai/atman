@@ -142,6 +142,7 @@ pub struct ToolCtx {
     pub safety: Option<crate::safety::SafetyConfig>,
     pub current_model: Option<String>,
     pub call_intent: Option<crate::message::ToolCallIntent>,
+    pub tool_use_id: Option<String>,
     pub(crate) model_tool_exposures: Option<ToolExposureRegistry>,
     pub(crate) invocation_env: crate::invocation_env::InvocationEnv,
     pub watch_rules: Option<crate::streaming::WatchRules>,
@@ -250,6 +251,11 @@ impl ToolCtx {
 
     pub fn with_call_intent(mut self, call_intent: Option<crate::message::ToolCallIntent>) -> Self {
         self.call_intent = call_intent;
+        self
+    }
+
+    pub fn with_tool_use_id(mut self, tool_use_id: impl Into<String>) -> Self {
+        self.tool_use_id = Some(tool_use_id.into());
         self
     }
 

@@ -282,6 +282,23 @@ impl<'a> StreamingLlmStream<'a> {
                         Ok(NodeEvent::ThinkingChunk { text }) => {
                             self.on_thinking(&model_name, run_id.as_deref(), text);
                         }
+                        Ok(NodeEvent::ToolCallDraft {
+                            index,
+                            call_id,
+                            name,
+                            arguments_delta,
+                        }) => emit_stream_event(
+                            NodeEvent::ToolCallDraft {
+                                index,
+                                call_id,
+                                name,
+                                arguments_delta,
+                            },
+                            &model_name,
+                            run_id.as_deref(),
+                            Some(&self.stream_tx),
+                            self.frame_tx.as_ref(),
+                        ),
                         Ok(NodeEvent::LlmDone { total_tokens }) => {
                             self.on_done(&model_name, run_id.as_deref(), total_tokens);
                             state.on_done(total_tokens, self.base.request_start, self.watch_rules.as_ref());
@@ -322,6 +339,23 @@ impl<'a> StreamingLlmStream<'a> {
                 NodeEvent::ThinkingChunk { text } => {
                     self.on_thinking(&model_name, run_id.as_deref(), text)
                 }
+                NodeEvent::ToolCallDraft {
+                    index,
+                    call_id,
+                    name,
+                    arguments_delta,
+                } => emit_stream_event(
+                    NodeEvent::ToolCallDraft {
+                        index,
+                        call_id,
+                        name,
+                        arguments_delta,
+                    },
+                    &model_name,
+                    run_id.as_deref(),
+                    Some(&self.stream_tx),
+                    self.frame_tx.as_ref(),
+                ),
                 NodeEvent::LlmDone { total_tokens } => {
                     self.on_done(&model_name, run_id.as_deref(), total_tokens);
                     state.on_done(
@@ -664,6 +698,24 @@ pub(crate) fn emit_stream_event(
                 fallback,
                 StreamFrame::ThinkingChunk {
                     text: text.clone(),
+                    run_id: run_id.map(std::borrow::ToOwned::to_owned),
+                },
+            );
+        }
+        NodeEvent::ToolCallDraft {
+            index,
+            call_id,
+            name,
+            arguments_delta,
+        } => {
+            emit_frame(
+                primary,
+                fallback,
+                StreamFrame::ToolCallDraft {
+                    index,
+                    call_id,
+                    name,
+                    arguments_delta,
                     run_id: run_id.map(std::borrow::ToOwned::to_owned),
                 },
             );

@@ -32,6 +32,12 @@ pub enum CompactionPhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamFrame {
+    TurnStarted {
+        turn_id: String,
+    },
+    TurnEnded {
+        turn_id: String,
+    },
     LlmChunk {
         text: String,
         model: String,
@@ -40,6 +46,14 @@ pub enum StreamFrame {
     },
     ThinkingChunk {
         text: String,
+        #[serde(default)]
+        run_id: Option<String>,
+    },
+    ToolCallDraft {
+        index: usize,
+        call_id: String,
+        name: String,
+        arguments_delta: String,
         #[serde(default)]
         run_id: Option<String>,
     },
@@ -205,6 +219,8 @@ pub enum StreamFrame {
     },
     TerminalChunk {
         handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         bytes: Vec<u8>,
         screen: Option<crate::tools::term::TerminalScreen>,
         state: crate::tools::term::TermStateSnapshot,
@@ -215,6 +231,8 @@ pub enum StreamFrame {
     },
     TerminalExited {
         handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         exit_code: Option<i32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_intent: Option<crate::message::ToolCallIntent>,
@@ -223,6 +241,8 @@ pub enum StreamFrame {
     },
     BashChunk {
         handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         kind: String,
         line: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,6 +252,8 @@ pub enum StreamFrame {
     },
     BashExited {
         handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         exit_code: Option<i32>,
         #[serde(default)]
         error: Option<String>,
@@ -242,11 +264,24 @@ pub enum StreamFrame {
     },
     DiffPreview {
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         old_content: Option<String>,
         new_content: Option<String>,
         unified_diff: Option<String>,
         #[serde(default)]
         run_id: Option<String>,
+    },
+    FileEditApplied {
+        #[serde(default)]
+        turn_id: Option<String>,
+        #[serde(default)]
+        run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        tool_name: String,
+        path: String,
+        metrics: crate::activity::EditMetrics,
     },
     CompactionSummary {
         phase: CompactionPhase,
@@ -257,11 +292,18 @@ pub enum StreamFrame {
         after_tokens: u64,
         compacted_count: usize,
     },
+    CompactionDelta {
+        range_start: usize,
+        range_end: usize,
+        text: String,
+    },
     MermaidDiagram {
         source: String,
     },
     SubAgentStarted {
         handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         goal: String,
         child_run_id: String,
         model: String,
@@ -317,6 +359,9 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
         | StreamFrame::ThinkingChunk {
             run_id: Some(rid), ..
         }
+        | StreamFrame::ToolCallDraft {
+            run_id: Some(rid), ..
+        }
         | StreamFrame::LlmDone {
             run_id: Some(rid), ..
         }
@@ -333,6 +378,9 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
             run_id: Some(rid), ..
         }
         | StreamFrame::DiffPreview {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::FileEditApplied {
             run_id: Some(rid), ..
         } => Some(rid.as_str()),
         _ => None,
@@ -425,6 +473,7 @@ mod tests {
             screen: Some(screen),
             state: crate::tools::term::TermStateSnapshot::Running,
             call_intent: crate::message::ToolCallIntent::new("Inspect terminal output"),
+            tool_use_id: None,
             run_id: None,
         };
         let json = serde_json::to_string(&f).unwrap();
@@ -437,6 +486,7 @@ mod tests {
                 state,
                 call_intent,
                 run_id,
+                ..
             } => {
                 assert_eq!(handle, "term_s_0");
                 assert_eq!(bytes, b"hi");
@@ -466,6 +516,7 @@ mod tests {
             exit_code: None,
             error: Some("open log: permission denied".into()),
             call_intent: crate::message::ToolCallIntent::new("Run verification"),
+            tool_use_id: None,
             run_id: None,
         };
         let json = serde_json::to_string(&frame).unwrap();
@@ -502,6 +553,7 @@ mod tests {
             handle: "term_s_1".into(),
             exit_code: Some(0),
             call_intent: None,
+            tool_use_id: None,
             run_id: None,
         };
         let json = serde_json::to_string(&f).unwrap();

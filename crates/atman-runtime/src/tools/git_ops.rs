@@ -78,6 +78,7 @@ impl Tool for GitLog {
             {
                 let _ = tx.send(StreamFrame::DiffPreview {
                     title: "git log HEAD".into(),
+                    tool_use_id: ctx.tool_use_id.clone(),
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(preview_diff.clone()),
@@ -140,6 +141,7 @@ impl Tool for GitShow {
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
                     title: format!("git show {sha}"),
+                    tool_use_id: ctx.tool_use_id.clone(),
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(body.clone()),

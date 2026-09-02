@@ -26,10 +26,19 @@ pub enum TranscriptEntry {
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     DiffPreview {
+        tool_use_id: Option<String>,
         title: String,
         old_content: Option<String>,
         new_content: Option<String>,
         unified_diff: Option<String>,
+    },
+    FileEditApplied {
+        turn_id: Option<String>,
+        flow_run_id: Option<String>,
+        tool_use_id: Option<String>,
+        tool_name: String,
+        path: String,
+        metrics: crate::activity::EditMetrics,
     },
     FlowGraph {
         run_id: String,
@@ -568,6 +577,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             }
             "diff_preview" => {
                 out.push(TranscriptEntry::DiffPreview {
+                    tool_use_id: v["tool_use_id"].as_str().map(String::from),
                     title: v["title"].as_str().unwrap_or("").to_string(),
                     old_content: v["old_content"].as_str().map(String::from),
                     new_content: v["new_content"].as_str().map(String::from),
@@ -1052,16 +1062,33 @@ pub(crate) fn project_transcript_records(
                 });
             }
             crate::event::Event::DiffPreview {
+                tool_use_id,
                 title,
                 old_content,
                 new_content,
                 unified_diff,
                 ..
             } => out.push(TranscriptEntry::DiffPreview {
+                tool_use_id: tool_use_id.clone(),
                 title: title.clone(),
                 old_content: old_content.clone(),
                 new_content: new_content.clone(),
                 unified_diff: unified_diff.clone(),
+            }),
+            crate::event::Event::FileEditApplied {
+                turn_id,
+                flow_run_id,
+                tool_use_id,
+                tool_name,
+                path,
+                metrics,
+            } => out.push(TranscriptEntry::FileEditApplied {
+                turn_id: turn_id.as_ref().map(ToString::to_string),
+                flow_run_id: flow_run_id.as_ref().map(ToString::to_string),
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                path: path.clone(),
+                metrics: *metrics,
             }),
             crate::event::Event::FlowGraph { run_id, graph } => {
                 out.push(TranscriptEntry::FlowGraph {

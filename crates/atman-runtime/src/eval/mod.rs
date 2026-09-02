@@ -894,8 +894,9 @@ async fn dispatch_tool_call<'a>(
     }
     let call_args = ToolArgs { positional, named };
     let diff_preview = prepare_diff_preview(&name, &call_args);
+    let invocation_ctx = ctx_with_anchors.with_tool_use_id(tool_call_id.clone());
     let outcome = match crate::approval::authorize_tool_invocation(
-        &ctx_with_anchors,
+        &invocation_ctx,
         &tool_call_id,
         &name,
         &call_args,
@@ -917,7 +918,7 @@ async fn dispatch_tool_call<'a>(
             tool: name.clone(),
             ok,
             preview,
-            id: tool_call_id,
+            id: tool_call_id.clone(),
         });
     }
     if let Some(session) = ctx.session_runtime.as_ref()
@@ -937,6 +938,7 @@ async fn dispatch_tool_call<'a>(
             sink.emit(crate::event::Event::DiffPreview {
                 turn_id: ctx.turn_id.clone(),
                 flow_run_id: ctx.flow_run_id.clone(),
+                tool_use_id: Some(tool_call_id.clone()),
                 title,
                 old_content,
                 new_content,

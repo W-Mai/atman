@@ -1097,6 +1097,7 @@ async fn partition_and_gate(
                 let invocation_ctx = ctx
                     .clone()
                     .for_tool_invocation(tool.tier())
+                    .with_tool_use_id(id.clone())
                     .with_call_intent(call_intent);
                 let level = tool.approval_level(&call_args, &invocation_ctx);
                 ready.push(ReadyEntry {
@@ -1246,6 +1247,7 @@ fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) 
         sink.emit(crate::event::Event::DiffPreview {
             turn_id: ctx.turn_id.clone(),
             flow_run_id: ctx.flow_run_id.clone(),
+            tool_use_id: ctx.tool_use_id.clone(),
             title,
             old_content,
             new_content,

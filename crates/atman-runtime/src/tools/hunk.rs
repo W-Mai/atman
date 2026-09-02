@@ -273,6 +273,13 @@ impl Tool for HunkApply {
                         proposal.path.display()
                     ))
                 })?;
+            crate::activity::emit_file_edit_applied(
+                ctx,
+                self.name(),
+                &proposal.path,
+                &proposal.original,
+                &applied,
+            );
             let all_ids: Vec<u32> = proposal.hunks.iter().map(|h| h.id).collect();
             let skipped: Vec<Value> = all_ids
                 .iter()

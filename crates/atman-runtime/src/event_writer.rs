@@ -473,6 +473,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::ToolResultMsg { .. } => "tool_result_msg",
         Event::ToolResultMetrics { .. } => "tool_result_metrics",
         Event::DiffPreview { .. } => "diff_preview",
+        Event::FileEditApplied { .. } => "file_edit_applied",
         Event::CompactionSummary { .. } => "compaction_summary",
         Event::SystemMsg { .. } => "system_msg",
         Event::UserInject { .. } => "user_inject",
@@ -547,6 +548,14 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             flow_run_id.as_ref().map(|r| r.0.to_string()),
         ),
         Event::DiffPreview {
+            turn_id,
+            flow_run_id,
+            ..
+        } => (
+            turn_id.as_ref().map(|t| t.0.to_string()),
+            flow_run_id.as_ref().map(|r| r.0.to_string()),
+        ),
+        Event::FileEditApplied {
             turn_id,
             flow_run_id,
             ..

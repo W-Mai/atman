@@ -379,6 +379,7 @@ impl TermRegistry {
         label: String,
         command: String,
         call_intent: Option<crate::message::ToolCallIntent>,
+        tool_use_id: Option<String>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
         flow_run_id: Option<String>,
@@ -393,6 +394,7 @@ impl TermRegistry {
             label,
             command,
             call_intent,
+            tool_use_id,
             cancel,
             events,
             flow_run_id,
@@ -412,6 +414,7 @@ impl TermRegistry {
         label: String,
         command: String,
         call_intent: Option<crate::message::ToolCallIntent>,
+        tool_use_id: Option<String>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
         flow_run_id: Option<String>,
@@ -518,6 +521,7 @@ impl TermRegistry {
                 events,
                 flow_run_id,
                 call_intent,
+                tool_use_id,
                 profile,
             );
         });
@@ -548,6 +552,7 @@ fn run_reader_loop(
     events_sink: Option<crate::event::EventSink>,
     flow_run_id: Option<String>,
     call_intent: Option<crate::message::ToolCallIntent>,
+    tool_use_id: Option<String>,
     profile: Arc<Mutex<Option<crate::sandbox::TempProfile>>>,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
@@ -579,6 +584,7 @@ fn run_reader_loop(
                     };
                     let _ = tx.send(crate::stream::StreamFrame::TerminalChunk {
                         handle: handle.clone(),
+                        tool_use_id: tool_use_id.clone(),
                         bytes: chunk.to_vec(),
                         screen: tui_screen,
                         state: st.to_snapshot(),
@@ -625,6 +631,7 @@ fn run_reader_loop(
     if let Some(tx) = &tui_stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::TerminalExited {
             handle,
+            tool_use_id,
             exit_code,
             call_intent,
             run_id: flow_run_id,
@@ -817,6 +824,7 @@ async fn spawn_impl(
             .unwrap_or_else(|| "terminal".into()),
         command,
         ctx.call_intent.clone(),
+        ctx.tool_use_id.clone(),
         {
             let tc = ctx.cancel.clone();
             tc.child_token()
@@ -2091,6 +2099,7 @@ mod tests {
                 "success".into(),
                 "printf success".into(),
                 None,
+                None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,
@@ -2176,6 +2185,7 @@ mod tests {
                 "terminal".into(),
                 "sh".into(),
                 None,
+                None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,
@@ -2214,6 +2224,7 @@ mod tests {
                 None,
                 "terminal".into(),
                 "sh".into(),
+                None,
                 None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
