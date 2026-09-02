@@ -2006,6 +2006,222 @@ pub const TOOL_CALL_REGION_PREFIX: &str = "__tool_call__:";
 pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
 pub const TOOL_DETAIL_FULLSCREEN_REGION_PREFIX: &str = "__tool_detail_fullscreen__:";
 const DOCUMENT_PAD_X: usize = 2;
+const TOOL_INPUT_PREVIEW_ROWS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ToolDisclosureDepth {
+    Summary,
+    Preview,
+    Full,
+}
+
+fn preferred_tool_input_fields(tool: &str) -> &'static [&'static str] {
+    if tool.starts_with("fs.") || tool.starts_with("hunk.") {
+        &["path", "file", "target"]
+    } else if tool.starts_with("bash.") || tool.starts_with("term.") || tool == "terminal" {
+        &["cmd", "cwd"]
+    } else if tool.starts_with("flow.") || tool.starts_with("agent.") {
+        &["goal", "handle", "flow", "name"]
+    } else if tool.starts_with("web.") || tool.starts_with("search.") {
+        &["url", "query"]
+    } else {
+        &[
+            "path", "cmd", "query", "url", "handle", "name", "id", "key", "target",
+        ]
+    }
+}
+
+fn scalar_preview(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn decode_partial_json_string(raw: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\"");
+    let key_end = raw.find(&marker)?.saturating_add(marker.len());
+    let value = raw[key_end..].split_once(':')?.1.trim_start();
+    let mut chars = value.strip_prefix('"')?.chars();
+    let mut out = String::new();
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            escaped = false;
+            match ch {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'b' => out.push('\u{0008}'),
+                'f' => out.push('\u{000c}'),
+                'u' => {
+                    let digits = chars.by_ref().take(4).collect::<String>();
+                    if digits.len() == 4
+                        && let Ok(value) = u32::from_str_radix(&digits, 16)
+                        && let Some(decoded) = char::from_u32(value)
+                    {
+                        out.push(decoded);
+                    }
+                }
+                other => out.push(other),
+            }
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            break;
+        } else {
+            out.push(ch);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn tool_input_summary(call: &ToolCallView) -> Option<String> {
+    if let Some(object) = call.input.as_object() {
+        for field in preferred_tool_input_fields(&call.tool) {
+            if let Some(value) = object.get(*field).and_then(scalar_preview) {
+                return Some(value);
+            }
+        }
+        let mut scalar_fields = object
+            .iter()
+            .filter_map(|(key, value)| scalar_preview(value).map(|value| (key, value)))
+            .collect::<Vec<_>>();
+        scalar_fields.sort_by_key(|(key, _)| *key);
+        if let Some((_, value)) = scalar_fields.into_iter().next() {
+            return Some(value);
+        }
+    }
+    for field in preferred_tool_input_fields(&call.tool) {
+        if let Some(value) = decode_partial_json_string(call.draft_preview.arguments(), field) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn tool_input_body(call: &ToolCallView) -> Option<String> {
+    let canonical = match &call.input {
+        serde_json::Value::Null => None,
+        serde_json::Value::Object(object) if object.is_empty() => None,
+        value => serde_json::to_string_pretty(value).ok(),
+    };
+    canonical.or_else(|| {
+        let draft = call.draft_preview.arguments().trim();
+        (!draft.is_empty()).then(|| draft.to_string())
+    })
+}
+
+fn tool_input_visual_rows(body: &str, panel_width: u16) -> usize {
+    let target = panel_width.max(20) as usize;
+    body.lines()
+        .map(|line| crate::width::word_wrap(line, target.saturating_sub(4)).len())
+        .sum()
+}
+
+fn set_detail_expanded(detail: &mut OutputItem, expanded: bool) {
+    match detail {
+        OutputItem::Terminal {
+            expanded: value, ..
+        }
+        | OutputItem::Bash {
+            expanded: value, ..
+        }
+        | OutputItem::DiffPreview {
+            expanded: value, ..
+        }
+        | OutputItem::SubAgentActivity {
+            expanded: value, ..
+        } => *value = expanded,
+        OutputItem::CompactionSummary {
+            disclosure: value, ..
+        }
+        | OutputItem::Thinking {
+            disclosure: value, ..
+        } => {
+            *value = if expanded {
+                Disclosure::Full
+            } else {
+                Disclosure::Preview
+            };
+        }
+        _ => {}
+    }
+}
+
+fn tool_disclosure_depth(call: &ToolCallView, panel_width: u16) -> ToolDisclosureDepth {
+    let Some(detail) = call.detail.as_deref() else {
+        let Some(body) = tool_input_body(call) else {
+            return ToolDisclosureDepth::Summary;
+        };
+        return if tool_input_visual_rows(&body, panel_width) > TOOL_INPUT_PREVIEW_ROWS {
+            ToolDisclosureDepth::Full
+        } else {
+            ToolDisclosureDepth::Preview
+        };
+    };
+
+    let mut preview = detail.clone();
+    let mut full = detail.clone();
+    set_detail_expanded(&mut preview, false);
+    set_detail_expanded(&mut full, true);
+    let ctx = RenderCtx {
+        panel_width: panel_width.saturating_sub(4).max(1),
+        ..RenderCtx::empty()
+    };
+    if render_item(&preview, &ctx) == render_item(&full, &ctx) {
+        ToolDisclosureDepth::Preview
+    } else {
+        ToolDisclosureDepth::Full
+    }
+}
+
+pub(crate) fn next_tool_call_disclosure(call: &ToolCallView, panel_width: u16) -> Disclosure {
+    match (call.disclosure, tool_disclosure_depth(call, panel_width)) {
+        (Disclosure::Summary, ToolDisclosureDepth::Summary) => Disclosure::Summary,
+        (Disclosure::Summary, _) => Disclosure::Preview,
+        (Disclosure::Preview, ToolDisclosureDepth::Full) => Disclosure::Full,
+        (Disclosure::Preview | Disclosure::Full, _) => Disclosure::Summary,
+    }
+}
+
+fn render_tool_input_detail(
+    body: &str,
+    disclosure: Disclosure,
+    width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let target = width.saturating_sub(4).max(1);
+    let rows = body
+        .lines()
+        .flat_map(|line| crate::width::word_wrap(line, target))
+        .collect::<Vec<_>>();
+    let visible = if disclosure == Disclosure::Full {
+        rows.len()
+    } else {
+        rows.len().min(TOOL_INPUT_PREVIEW_ROWS)
+    };
+    let mut lines = vec![document_blank(width, style)];
+    for row in rows.iter().take(visible) {
+        lines.push(line_with_right_pad("  ", row, width, style, style));
+    }
+    if visible < rows.len() {
+        let hint = format!("  ▼ {} more lines — click to expand", rows.len() - visible);
+        lines.push(line_with_right_pad("", &hint, width, style, style));
+    } else if disclosure == Disclosure::Full && rows.len() > TOOL_INPUT_PREVIEW_ROWS {
+        lines.push(line_with_right_pad(
+            "",
+            "  ▲ click to collapse",
+            width,
+            style,
+            style,
+        ));
+    }
+    lines.push(document_blank(width, style));
+    lines
+}
 
 fn output_fullscreen_hovered(ctx: &RenderCtx<'_>) -> bool {
     ctx.hovered_output_node.is_some_and(|(_, key)| {
@@ -2179,10 +2395,12 @@ fn render_tool_dispatch(
             ToolCallStatus::Ok => ("✓", t.success),
             ToolCallStatus::Error => ("✗", t.error),
         };
-        let affordance = match call.disclosure {
-            Disclosure::Summary => "›",
-            Disclosure::Preview => "⌄",
-            Disclosure::Full => "⌃",
+        let disclosure_depth = tool_disclosure_depth(call, ctx.panel_width);
+        let affordance = match (call.disclosure, disclosure_depth) {
+            (_, ToolDisclosureDepth::Summary) => "",
+            (Disclosure::Summary, _) => "›",
+            (Disclosure::Preview, ToolDisclosureDepth::Full) => "⌄",
+            (Disclosure::Preview | Disclosure::Full, _) => "⌃",
         };
         let elapsed = call
             .ended_at
@@ -2195,10 +2413,18 @@ fn render_tool_dispatch(
         } else {
             format!("{}ms", elapsed.as_millis())
         };
+        let input_tail = if call.applied_edit.is_none() {
+            tool_input_summary(call)
+                .map(|value| format!(" · {}", crate::width::middle_truncate(&value, 32)))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let draft_tail = call
             .draft_preview
             .last_line()
-            .map(|line| format!(" · {line}"))
+            .filter(|line| !input_tail.contains(*line))
+            .map(|line| format!(" · {}", crate::width::truncate(line, 28)))
             .unwrap_or_default();
         let edit_path = call
             .applied_edit
@@ -2235,10 +2461,20 @@ fn render_tool_dispatch(
         let meta_style = Style::default().fg(t.meta_fg.into()).bg(row_bg);
         let mut left = vec![
             Span::styled(format!("{glyph} "), glyph_style),
-            Span::styled(format!("{}  {affordance}", call.intent), body_style),
+            Span::styled(
+                if affordance.is_empty() {
+                    call.intent.clone()
+                } else {
+                    format!("{}  {affordance}", call.intent)
+                },
+                body_style,
+            ),
         ];
-        if !draft_tail.is_empty() || !edit_path.is_empty() {
-            left.push(Span::styled(format!("{draft_tail}{edit_path}"), meta_style));
+        if !input_tail.is_empty() || !draft_tail.is_empty() || !edit_path.is_empty() {
+            left.push(Span::styled(
+                format!("{input_tail}{draft_tail}{edit_path}"),
+                meta_style,
+            ));
         }
         let mut right_text = Vec::new();
         if let Some(edit_metrics) = edit_metrics {
@@ -2302,44 +2538,22 @@ fn render_tool_dispatch(
         }
         let Some(detail) = call.detail.as_deref() else {
             let detail_style = Style::default().fg(t.subtle_fg.into()).bg(t.code_bg.into());
-            let detail = if call.draft_preview.text().is_empty() {
-                call.input.to_string()
-            } else {
-                call.draft_preview.text().to_string()
+            let Some(detail) = tool_input_body(call) else {
+                continue;
             };
-            lines.push(document_blank(width, detail_style));
-            lines.push(line_with_right_pad(
-                "  ",
-                &crate::width::truncate(&detail, width.saturating_sub(4)),
+            lines.extend(render_tool_input_detail(
+                &detail,
+                call.disclosure,
                 width,
                 detail_style,
-                detail_style,
             ));
-            lines.push(document_blank(width, detail_style));
             regions[call_region_index].end_row = lines.len() as u32;
             continue;
         };
 
         let mut detail = detail.clone();
         let expanded = call.disclosure == Disclosure::Full;
-        match &mut detail {
-            OutputItem::Terminal {
-                expanded: value, ..
-            }
-            | OutputItem::Bash {
-                expanded: value, ..
-            }
-            | OutputItem::DiffPreview {
-                expanded: value, ..
-            }
-            | OutputItem::SubAgentActivity {
-                expanded: value, ..
-            } => *value = expanded,
-            OutputItem::CompactionSummary { disclosure, .. } => {
-                *disclosure = call.disclosure;
-            }
-            _ => {}
-        }
+        set_detail_expanded(&mut detail, expanded);
         let detail_has_inline_fullscreen = matches!(
             &detail,
             OutputItem::Terminal { .. }
@@ -8708,6 +8922,75 @@ mod tests {
             backgrounds(ToolCallStatus::Ok, 0),
             backgrounds(ToolCallStatus::Ok, 4)
         );
+    }
+
+    #[test]
+    fn tool_disclosure_skips_indistinguishable_states() {
+        let base = ToolCallView {
+            id: "read-1".into(),
+            tool: "fs.read".into(),
+            intent: "读取项目文档".into(),
+            input: serde_json::Value::Null,
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: Some(Instant::now()),
+        };
+
+        assert_eq!(next_tool_call_disclosure(&base, 80), Disclosure::Summary);
+
+        let mut short = base.clone();
+        short.input = serde_json::json!({"path": "README.md"});
+        assert_eq!(next_tool_call_disclosure(&short, 80), Disclosure::Preview);
+        short.disclosure = Disclosure::Preview;
+        assert_eq!(next_tool_call_disclosure(&short, 80), Disclosure::Summary);
+
+        let mut long = base;
+        long.detail = Some(Box::new(OutputItem::Bash {
+            handle: "bg-1".into(),
+            title: None,
+            command: Some("printf test".into()),
+            output: (0..20)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            done: true,
+            expanded: false,
+        }));
+        assert_eq!(next_tool_call_disclosure(&long, 80), Disclosure::Preview);
+        long.disclosure = Disclosure::Preview;
+        assert_eq!(next_tool_call_disclosure(&long, 80), Disclosure::Full);
+        long.disclosure = Disclosure::Full;
+        assert_eq!(next_tool_call_disclosure(&long, 80), Disclosure::Summary);
+    }
+
+    #[test]
+    fn tool_input_summary_prefers_auditable_target_fields() {
+        let call = ToolCallView {
+            id: "read-1".into(),
+            tool: "fs.read".into(),
+            intent: "读取项目文档".into(),
+            input: serde_json::json!({"limit": 80, "path": "/repo/README.md", "offset": 1}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: Some(Instant::now()),
+        };
+
+        assert_eq!(
+            tool_input_summary(&call).as_deref(),
+            Some("/repo/README.md")
+        );
+        let rendered = flatten_lines(&render_tool_dispatch(&[call], &RenderCtx::empty(), 0).0);
+        assert!(rendered.contains("/repo/README.md"));
     }
 
     #[test]

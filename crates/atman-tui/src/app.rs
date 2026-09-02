@@ -44,6 +44,7 @@ pub enum ToolCallStatus {
 pub struct ToolDraftPreview {
     target: Option<&'static str>,
     probe: String,
+    arguments: String,
     active: bool,
     escaped: bool,
     unicode: Option<(u32, u8)>,
@@ -52,6 +53,13 @@ pub struct ToolDraftPreview {
 
 impl ToolDraftPreview {
     fn push(&mut self, tool: &str, delta: &str) {
+        if self.arguments.len() < 16_384 {
+            let mut take = delta.len().min(16_384 - self.arguments.len());
+            while !delta.is_char_boundary(take) {
+                take -= 1;
+            }
+            self.arguments.push_str(&delta[..take]);
+        }
         if self.target.is_none() {
             self.target = match tool {
                 "fs.write" => Some("content"),
@@ -145,6 +153,10 @@ impl ToolDraftPreview {
 
     pub fn text(&self) -> &str {
         &self.tail
+    }
+
+    pub fn arguments(&self) -> &str {
+        &self.arguments
     }
 }
 
@@ -2409,6 +2421,10 @@ impl AppState {
     }
 
     pub fn cycle_tool_call_disclosure(&mut self, item_index: usize, tool_use_id: &str) {
+        let panel_width = self
+            .last_transcript_rect
+            .map(|area| area.width)
+            .unwrap_or(80);
         self.mutate_item(item_index, OutputMutation::Interaction, |item| {
             let OutputItem::ToolDispatch { calls } = item else {
                 return false;
@@ -2416,7 +2432,7 @@ impl AppState {
             let Some(call) = calls.iter_mut().find(|call| call.id == tool_use_id) else {
                 return false;
             };
-            call.disclosure = call.disclosure.next();
+            call.disclosure = crate::output::next_tool_call_disclosure(call, panel_width);
             true
         });
     }
@@ -2951,9 +2967,12 @@ impl AppState {
             | StreamFrame::PermissionGrantExpired { .. }
             | StreamFrame::UnrestrictedExecution { .. }) => {
                 if let StreamFrame::AssistantMsg {
-                    flow_run_id: None,
+                    flow_run_id,
                     message,
                 } = &frame
+                    && flow_run_id
+                        .as_ref()
+                        .is_none_or(|run_id| !self.sub_agent_run_ids.contains_key(run_id))
                 {
                     self.append_tool_dispatch(message);
                 }
@@ -4340,6 +4359,44 @@ mod tests {
         assert!(calls[0].detail.is_none());
         assert!(
             matches!(calls[1].detail.as_deref(), Some(OutputItem::Bash { output, .. }) if output == "ok\n")
+        );
+    }
+
+    #[test]
+    fn scoped_root_assistant_reconciles_canonical_tool_input() {
+        use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "read".into(),
+            name: "fs.read".into(),
+            arguments_delta: r#"{"path":"README.md"}"#.into(),
+            run_id: Some("root-flow".into()),
+        });
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: Some("root-flow".into()),
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "read".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path": "README.md", "offset": 1, "limit": 80}),
+                    intent: ToolCallIntent::new("读取项目说明"),
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        let OutputItem::ToolDispatch { calls } = &app.items[0] else {
+            panic!("expected grouped tool dispatch");
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input["path"], "README.md");
+        assert_eq!(
+            calls[0].draft_preview.arguments(),
+            r#"{"path":"README.md"}"#
         );
     }
 
