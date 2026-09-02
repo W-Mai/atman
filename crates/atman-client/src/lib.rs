@@ -1,6 +1,7 @@
 //! Typed transports for the atman daemon protocol.
 
 mod http;
+mod session;
 #[cfg(unix)]
 mod unix;
 
@@ -16,6 +17,9 @@ use atman_proto::{
 use futures::future::BoxFuture;
 
 pub use http::HttpTransport;
+pub use session::{
+    AppliedUpdates, ReconcileError, RefreshOutcome, SessionClient, SessionClientError, SessionState,
+};
 #[cfg(unix)]
 pub use unix::UnixTransport;
 
@@ -135,6 +139,13 @@ impl Client {
         }
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         invoke::<M>(self.inner.transport.as_ref(), request_id, params).await
+    }
+
+    pub async fn attach_session(
+        &self,
+        session_id: atman_proto::SessionId,
+    ) -> Result<SessionClient, SessionClientError> {
+        SessionClient::attach(self.clone(), session_id).await
     }
 }
 
