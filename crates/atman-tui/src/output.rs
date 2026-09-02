@@ -2691,11 +2691,7 @@ fn render_activity_summary(
     let t = crate::theme::theme();
     let width = panel_width.max(1) as usize;
     let bg: Color = t.activity_bg.into();
-    let base = Style::default().bg(bg);
-    let title = Style::default()
-        .fg(t.success.into())
-        .bg(bg)
-        .add_modifier(Modifier::BOLD);
+    let title = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let meta = Style::default().fg(t.meta_fg.into()).bg(bg);
     let file_label = if activity.file_count() == 1 {
         "file"
@@ -2707,26 +2703,43 @@ fn render_activity_summary(
     } else {
         "edits"
     };
-    let left = vec![Span::styled("changes · turn", title)];
-    let mut right = vec![Span::styled(
-        format!(
-            "{} {file_label} · {} {edit_label} · {}h · ",
-            activity.file_count(),
-            activity.applied_edits,
-            activity.hunks
-        ),
-        meta,
-    )];
-    right.extend(edit_metric_spans(
+    let mut descriptor = format!(
+        "  · turn · {} {file_label} · {} {edit_label} · {}h · ",
+        activity.file_count(),
+        activity.applied_edits,
+        activity.hunks
+    );
+    let metric_width = crate::width::width(&format!(
+        "+{} −{} ·  ",
+        activity.insertions, activity.deletions
+    ));
+    if crate::width::width(&descriptor).saturating_add(metric_width) > width {
+        descriptor = format!("  · turn · {} {file_label} · ", activity.file_count());
+    }
+    if crate::width::width(&descriptor).saturating_add(metric_width) > width {
+        descriptor = "  · turn · ".into();
+    }
+    if crate::width::width(&descriptor).saturating_add(metric_width) > width {
+        descriptor = "· ".into();
+    }
+
+    let mut body = vec![Span::styled(descriptor, title)];
+    body.extend(edit_metric_spans(
         activity.insertions,
         activity.deletions,
         bg,
     ));
-    vec![
-        document_blank(width, base),
-        aligned_document_row(left, right, width, bg),
-        document_blank(width, base),
-    ]
+    body.push(Span::styled(" ·  ", meta));
+    body = crate::width::truncate_spans(body, width, Some(bg));
+
+    let body_width = crate::width::spans_width(body.iter());
+    let left_pad = width.saturating_sub(body_width) / 2;
+    let right_pad = width.saturating_sub(body_width + left_pad);
+    let mut spans = Vec::with_capacity(body.len() + 2);
+    spans.push(Span::raw(" ".repeat(left_pad)));
+    spans.extend(body);
+    spans.push(Span::raw(" ".repeat(right_pad)));
+    vec![Line::from(spans)]
 }
 
 #[allow(clippy::too_many_arguments)]
