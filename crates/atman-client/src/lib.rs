@@ -11,10 +11,10 @@ use std::sync::{
 };
 
 use atman_proto::{
-    CapabilitiesRequest, CapabilitiesResponse, ClientId, JsonRpcRequest, JsonRpcResponse,
-    PROTOCOL_VERSION, RpcMethod, rpc,
+    CapabilitiesRequest, CapabilitiesResponse, ClientId, EventCursor, JsonRpcRequest,
+    JsonRpcResponse, PROTOCOL_VERSION, ProjectionEventEnvelope, RpcMethod, SessionId, rpc,
 };
-use futures::future::BoxFuture;
+use futures::{future::BoxFuture, stream::BoxStream};
 
 pub use http::HttpTransport;
 pub use session::{
@@ -37,13 +37,25 @@ pub enum TransportError {
     Closed,
     #[error("invalid daemon response: {0}")]
     InvalidResponse(#[from] serde_json::Error),
+    #[error("invalid session event stream: {0}")]
+    InvalidEventStream(String),
 }
+
+pub type SessionEventStream = BoxStream<'static, Result<ProjectionEventEnvelope, TransportError>>;
 
 pub trait RpcTransport: Send + Sync {
     fn send(
         &self,
         request: JsonRpcRequest,
     ) -> BoxFuture<'_, Result<JsonRpcResponse, TransportError>>;
+
+    fn session_events(
+        &self,
+        _session_id: SessionId,
+        _after_cursor: EventCursor,
+    ) -> BoxFuture<'_, Result<Option<SessionEventStream>, TransportError>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -174,6 +186,17 @@ impl Client {
         session_id: atman_proto::SessionId,
     ) -> Result<SessionClient, SessionClientError> {
         SessionClient::attach(self.clone(), session_id).await
+    }
+
+    pub async fn session_events(
+        &self,
+        session_id: SessionId,
+        after_cursor: EventCursor,
+    ) -> Result<Option<SessionEventStream>, TransportError> {
+        self.inner
+            .transport
+            .session_events(session_id, after_cursor)
+            .await
     }
 }
 
