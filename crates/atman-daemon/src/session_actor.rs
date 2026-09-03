@@ -22,7 +22,8 @@ const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
 const PROMPT_TERMINAL_RETENTION: usize = 256;
 const FORM_TERMINAL_RETENTION: usize = 256;
 const COMPACT_REVIEW_TERMINAL_RETENTION: usize = 256;
-const LEASES_CLOSED: usize = usize::MAX;
+const LEASES_CLOSING: usize = 1 << (usize::BITS - 1);
+const LEASE_COUNT_MASK: usize = !LEASES_CLOSING;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunAdmission {
@@ -142,7 +143,7 @@ impl std::ops::Deref for SessionActorLease {
 impl Drop for SessionActorLease {
     fn drop(&mut self) {
         let previous = self.handle.leases.fetch_sub(1, Ordering::Release);
-        debug_assert!(previous != 0 && previous != LEASES_CLOSED);
+        debug_assert!(previous & LEASE_COUNT_MASK != 0);
     }
 }
 
@@ -259,12 +260,14 @@ impl SessionActorHandle {
     pub fn lease(&self) -> Result<SessionActorLease> {
         let mut current = self.leases.load(Ordering::Acquire);
         loop {
-            if current == LEASES_CLOSED {
+            if current & LEASES_CLOSING != 0 {
                 anyhow::bail!("session actor is closing");
             }
-            let next = current
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("session actor lease count overflow"))?;
+            anyhow::ensure!(
+                current & LEASE_COUNT_MASK != LEASE_COUNT_MASK,
+                "session actor lease count overflow"
+            );
+            let next = current + 1;
             match self.leases.compare_exchange_weak(
                 current,
                 next,
@@ -426,6 +429,14 @@ impl SessionActorHandle {
         request(&self.tx, |reply| Command::TryUnload { reply }).await?
     }
 
+    pub async fn begin_shutdown(&self) -> Result<()> {
+        request(&self.tx, |reply| Command::BeginShutdown { reply }).await?
+    }
+
+    pub async fn force_shutdown(&self) -> Result<()> {
+        request(&self.tx, |reply| Command::ForceShutdown { reply }).await?
+    }
+
     pub async fn snapshot(&self) -> Result<(EventCursor, SessionProjection)> {
         let (cursor, projection) = request(&self.tx, |reply| Command::Snapshot { reply }).await??;
         let redactor = self.session.sink().redactor();
@@ -580,6 +591,12 @@ enum Command {
     TryUnload {
         reply: oneshot::Sender<Result<bool>>,
     },
+    BeginShutdown {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ForceShutdown {
+        reply: oneshot::Sender<Result<()>>,
+    },
     WorkspaceMutationFinished {
         action: WorkspaceMutationAction,
         resource_id: ResourceId,
@@ -690,6 +707,14 @@ impl SessionActor {
                     if should_stop {
                         break;
                     }
+                }
+                ActorInput::Command(Some(Command::ForceShutdown { reply })) => {
+                    let result = self.prepare_forced_shutdown();
+                    self.session.shutdown().await;
+                    self.task_registry
+                        .unbind_session(&self.session_id.to_string());
+                    let _ = reply.send(result);
+                    break;
                 }
                 ActorInput::Command(Some(command)) => self.handle_command(command),
                 ActorInput::Event(event) => match *event {
@@ -846,6 +871,13 @@ impl SessionActor {
                 let _ = reply.send(result);
             }
             Command::TryUnload { .. } => unreachable!("try_unload is handled by the actor loop"),
+            Command::BeginShutdown { reply } => {
+                let result = self.begin_shutdown();
+                let _ = reply.send(result);
+            }
+            Command::ForceShutdown { .. } => {
+                unreachable!("force_shutdown is handled by the actor loop")
+            }
             Command::Snapshot { reply } => {
                 let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
                 let result = self
@@ -954,19 +986,71 @@ impl SessionActor {
         {
             return Ok(false);
         }
-        if self
-            .leases
-            .compare_exchange(0, LEASES_CLOSED, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
+        let leases = self.leases.load(Ordering::Acquire);
+        if leases != LEASES_CLOSING
+            && self
+                .leases
+                .compare_exchange(0, LEASES_CLOSING, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
         {
             return Ok(false);
         }
         let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
         if let Err(error) = self.catch_up_through(target_seq) {
-            self.leases.store(0, Ordering::Release);
+            if leases == 0 {
+                self.leases.store(0, Ordering::Release);
+            }
             return Err(error);
         }
         Ok(true)
+    }
+
+    fn begin_shutdown(&mut self) -> Result<()> {
+        self.leases.fetch_or(LEASES_CLOSING, Ordering::AcqRel);
+        if let Some(delta) = self
+            .projection
+            .set_lifecycle(atman_proto::SessionLifecycle::Closing)
+        {
+            self.publish_projection_delta(delta);
+        }
+
+        for run in self.runs.values() {
+            run.cancel.cancel();
+        }
+        let task_filter = atman_runtime::TaskFilter {
+            session_id: Some(self.session_id.to_string()),
+            ..Default::default()
+        };
+        for task in self.task_registry.list(&task_filter) {
+            if task.is_running() {
+                self.task_registry.kill_from_operator(&task.id);
+            }
+        }
+        let prompt_ids = self.prompts.keys().cloned().collect::<Vec<_>>();
+        for prompt_id in prompt_ids {
+            self.drop_prompt(prompt_id);
+        }
+        self.session.forms().cancel_all();
+        if let Some(review) = self.session.compact_reviews().list_pending() {
+            self.session.compact_reviews().decide(
+                &review.review_id,
+                atman_runtime::session::CompactReviewDecision::Reject,
+            );
+        }
+        let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(target_seq)
+    }
+
+    fn prepare_forced_shutdown(&mut self) -> Result<()> {
+        self.begin_shutdown()?;
+        if let Some(delta) = self
+            .projection
+            .set_lifecycle(atman_proto::SessionLifecycle::Closed)
+        {
+            self.publish_projection_delta(delta);
+        }
+        let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(target_seq)
     }
 
     fn interject(

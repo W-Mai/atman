@@ -26,6 +26,13 @@ pub struct DaemonState {
     pub(crate) idempotency: IdempotencyRegistry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonShutdownReport {
+    pub graceful: usize,
+    pub forced: usize,
+    pub remaining: usize,
+}
+
 pub(crate) struct LoadedSession {
     pub session: std::sync::Arc<atman_runtime::Session>,
     pub projection: SessionProjector,
@@ -534,6 +541,102 @@ impl DaemonState {
         }
     }
 
+    pub async fn shutdown(
+        self: &std::sync::Arc<Self>,
+        timeout: std::time::Duration,
+    ) -> DaemonShutdownReport {
+        self.begin_shutdown();
+        let started_at = tokio::time::Instant::now();
+        let force_budget = std::cmp::min(timeout / 4, std::time::Duration::from_secs(1));
+        let graceful_deadline = started_at + timeout.saturating_sub(force_budget);
+
+        let actors = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut beginnings = tokio::task::JoinSet::new();
+        for actor in actors {
+            beginnings.spawn(async move { actor.begin_shutdown().await });
+        }
+        let begin_budget = graceful_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let _ = tokio::time::timeout(begin_budget, async {
+            while beginnings.join_next().await.is_some() {}
+        })
+        .await;
+
+        let mut graceful = 0;
+        loop {
+            let session_ids = self
+                .sessions
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            if session_ids.is_empty() || tokio::time::Instant::now() >= graceful_deadline {
+                break;
+            }
+            let mut unloads = tokio::task::JoinSet::new();
+            for session_id in session_ids {
+                let state = self.clone();
+                unloads.spawn(async move { state.unload_session_if_idle(&session_id).await });
+            }
+            let remaining =
+                graceful_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let _ = tokio::time::timeout(remaining, async {
+                while let Some(result) = unloads.join_next().await {
+                    if matches!(result, Ok(Ok(true))) {
+                        graceful += 1;
+                    }
+                }
+            })
+            .await;
+            if !self.sessions.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        let remaining_actors = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, actor)| (id.clone(), actor.clone()))
+            .collect::<Vec<_>>();
+        let mut forced_shutdowns = tokio::task::JoinSet::new();
+        for (session_id, actor) in remaining_actors {
+            forced_shutdowns.spawn(async move {
+                let result = actor.force_shutdown().await;
+                (session_id, actor, result)
+            });
+        }
+        let mut forced = 0;
+        let _ = tokio::time::timeout(force_budget, async {
+            while let Some(result) = forced_shutdowns.join_next().await {
+                if let Ok((session_id, actor, Ok(()))) = result {
+                    let mut sessions = self.sessions.lock().unwrap();
+                    if sessions
+                        .get(&session_id)
+                        .is_some_and(|registered| registered.is_same_actor(&actor))
+                    {
+                        sessions.remove(&session_id);
+                        forced += 1;
+                    }
+                }
+            }
+        })
+        .await;
+
+        DaemonShutdownReport {
+            graceful,
+            forced,
+            remaining: self.sessions.lock().unwrap().len(),
+        }
+    }
+
     pub fn has_live_runs(&self, id: &SessionId) -> bool {
         self.sessions
             .lock()
@@ -995,5 +1098,44 @@ mod tests {
             1
         );
         assert!(state.session_revision(&attached_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_idle_actors_and_forces_stuck_runs() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let idle = Arc::new(atman_runtime::Session::open_ephemeral());
+        let idle_id = SessionId(idle.id().0);
+        state
+            .register_session(idle_id, idle, "owner")
+            .await
+            .unwrap();
+
+        let active = Arc::new(atman_runtime::Session::open_ephemeral());
+        let active_id = SessionId(active.id().0);
+        let cancel = CancellationToken::new();
+        state
+            .register_session_run(
+                active_id,
+                active,
+                LiveRun {
+                    run_id: FlowRunId(uuid::Uuid::now_v7()),
+                    flow_name: "stuck".into(),
+                    cancel: cancel.clone(),
+                    started_at: chrono::Utc::now(),
+                },
+                "owner",
+            )
+            .await
+            .unwrap();
+
+        let report = state.shutdown(std::time::Duration::from_millis(400)).await;
+
+        assert!(!state.is_accepting_commands());
+        assert!(cancel.is_cancelled());
+        assert_eq!(report.graceful, 1);
+        assert_eq!(report.forced, 1);
+        assert_eq!(report.remaining, 0);
     }
 }

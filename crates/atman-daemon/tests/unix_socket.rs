@@ -43,9 +43,13 @@ async fn unix_socket_ping_round_trip() {
     let result = resp.result.expect("expect ok");
     assert_eq!(result["pong"], serde_json::json!(true));
 
-    drop(wr);
     shutdown.cancel();
-    let _ = server_task.await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+        .await
+        .expect("open unix connection blocked server shutdown")
+        .unwrap()
+        .unwrap();
+    drop(wr);
 }
 
 #[tokio::test]

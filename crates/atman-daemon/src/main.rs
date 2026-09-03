@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const SESSION_IDLE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const DAEMON_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -110,6 +111,13 @@ async fn main() -> Result<()> {
     serve.await?;
     let _ = unix_task.await;
     let _ = idle_eviction_task.await;
+    let drain = state.shutdown(DAEMON_DRAIN_TIMEOUT).await;
+    if drain.forced != 0 || drain.remaining != 0 {
+        eprintln!(
+            "[atman-daemon] shutdown drained {} session(s), forced {}, remaining {}",
+            drain.graceful, drain.forced, drain.remaining
+        );
+    }
     pidfile::remove_pid(&pid_path);
     Ok(())
 }

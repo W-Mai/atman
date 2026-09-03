@@ -82,6 +82,14 @@ impl SessionProjector {
         self.projection.revision = Revision(previous_revision.0.saturating_add(1));
     }
 
+    pub(crate) fn set_lifecycle(&mut self, lifecycle: SessionLifecycle) -> Option<ProjectionDelta> {
+        if self.projection.lifecycle == lifecycle {
+            return None;
+        }
+        self.projection.lifecycle = lifecycle;
+        self.commit(vec![ProjectionChange::LifecycleSet { lifecycle }])
+    }
+
     pub(crate) fn reconcile_disconnected(&mut self) -> Option<ProjectionDelta> {
         let mut changes = Vec::new();
         for run in &mut self.projection.runs {

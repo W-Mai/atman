@@ -37,29 +37,48 @@ impl UnixServer {
     }
 
     pub async fn serve(self, state: Arc<DaemonState>, shutdown: CancellationToken) -> Result<()> {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
+                Some(result) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(error) = result {
+                        atman_runtime::notify!(warn, location = Log, stack = merge_count("daemon.unix_conn_join_error", 60_000), "unix connection task failed: {error}");
+                    }
+                }
                 accepted = self.listener.accept() => {
                     let (stream, _addr) = accepted?;
                     let state = state.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, state).await {
+                    let connection_shutdown = shutdown.clone();
+                    connections.spawn(async move {
+                        if let Err(e) = handle_conn(stream, state, connection_shutdown).await {
                             atman_runtime::notify!(warn, location = Log, stack = merge_count("daemon.unix_conn_error", 60_000), "unix conn error: {e}");
                         }
                     });
                 }
             }
         }
+        while connections.join_next().await.is_some() {}
         let _ = tokio::fs::remove_file(&self.path).await;
         Ok(())
     }
 }
 
-async fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
+async fn handle_conn(
+    stream: UnixStream,
+    state: Arc<DaemonState>,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd).lines();
-    while let Some(line) = reader.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            _ = shutdown.cancelled() => break,
+            line = reader.next_line() => line?,
+        };
+        let Some(line) = line else {
+            break;
+        };
         if line.trim().is_empty() {
             continue;
         }
