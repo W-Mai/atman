@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    CancelRunRequest, CancelRunResponse, DaemonGeneration, EventCursor, FlowRunId, FormSubmission,
-    GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
-    InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
-    PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
-    RenameSessionRequest, RenameSessionResponse, RequestId, Revision, SNAPSHOT_SCHEMA_VERSION,
+    CancelRunRequest, CancelRunResponse, CompactReviewDecision, DaemonGeneration, EventCursor,
+    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
+    GetSessionUpdatesResponse, InlineImage, InterjectSessionRequest, InterjectSessionResponse,
+    InterjectionLevel, PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta,
+    ProjectionEventEnvelope, RenameSessionRequest, RenameSessionResponse, RequestId,
+    ResolveCompactReviewRequest, ResolveCompactReviewResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
     SessionSignal, SessionSnapshot, SubmitFormRequest, SubmitFormResponse, rpc,
 };
@@ -181,6 +182,8 @@ pub enum SessionClientError {
     },
     #[error("command result belongs to form {received}, expected {expected}")]
     CommandForm { expected: String, received: String },
+    #[error("command result belongs to compact review {received}, expected {expected}")]
+    CommandCompactReview { expected: String, received: String },
 }
 
 impl SessionClientError {
@@ -190,9 +193,10 @@ impl SessionClientError {
             Self::Transport(error) => error.is_retryable(),
             Self::Reconcile(_) => false,
             Self::CommittedCursorUnavailable { .. } => false,
-            Self::CommandSession { .. } | Self::CommandRun { .. } | Self::CommandForm { .. } => {
-                false
-            }
+            Self::CommandSession { .. }
+            | Self::CommandRun { .. }
+            | Self::CommandForm { .. }
+            | Self::CommandCompactReview { .. } => false,
         }
     }
 }
@@ -476,6 +480,32 @@ impl SessionClient {
             return Err(SessionClientError::CommandForm {
                 expected: form_id,
                 received: response.form_id,
+            });
+        }
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn resolve_compact_review(
+        &self,
+        review_id: impl Into<String>,
+        decision: CompactReviewDecision,
+    ) -> Result<ResolveCompactReviewResponse, SessionClientError> {
+        let review_id = review_id.into();
+        let response = self
+            .client
+            .command::<rpc::ResolveCompactReview>(&ResolveCompactReviewRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                review_id: review_id.clone(),
+                decision,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        if response.review_id != review_id {
+            return Err(SessionClientError::CommandCompactReview {
+                expected: review_id,
+                received: response.review_id,
             });
         }
         self.refresh_through(response.cursor).await?;
@@ -1372,6 +1402,7 @@ mod tests {
                         for method in [
                             method_descriptor::<rpc::SendMessage>(),
                             method_descriptor::<rpc::SubmitForm>(),
+                            method_descriptor::<rpc::ResolveCompactReview>(),
                             method_descriptor::<rpc::RenameSession>(),
                         ] {
                             capabilities.methods.push(MethodCapability {
@@ -1403,6 +1434,17 @@ mod tests {
                             status: atman_proto::FormResolutionStatus::Resolved,
                             session_id: self.session_id.clone(),
                             form_id: params["form_id"].as_str().unwrap().into(),
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::RESOLVE_COMPACT_REVIEW => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(ResolveCompactReviewResponse {
+                            resolved: true,
+                            status: atman_proto::CompactReviewResolutionStatus::Resolved,
+                            session_id: self.session_id.clone(),
+                            review_id: params["review_id"].as_str().unwrap().into(),
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?
@@ -1517,6 +1559,13 @@ mod tests {
             .unwrap();
         assert_eq!(form.form_id, "form-1");
         assert_eq!(form.cursor, EventCursor(2));
+
+        let review = session
+            .resolve_compact_review("review-1", CompactReviewDecision::AcceptAsIs)
+            .await
+            .unwrap();
+        assert_eq!(review.review_id, "review-1");
+        assert_eq!(review.cursor, EventCursor(2));
 
         let renamed = session.rename("Renamed").await.unwrap();
         assert_eq!(renamed.session.title, "Renamed");
