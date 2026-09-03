@@ -403,8 +403,16 @@ impl DaemonState {
             actor.lease()?.snapshot().await?
         } else {
             let session_dir = self.sessions_root().join(id.to_string());
-            let projection =
-                crate::projection::load_historical_projection(id.clone(), &session_dir).await?;
+            let fallback_trust = match self.launcher() {
+                Some(launcher) => launcher.trust_config()?,
+                None => atman_runtime::trust::TrustConfig::default(),
+            };
+            let projection = crate::projection::load_historical_projection(
+                id.clone(),
+                &session_dir,
+                fallback_trust,
+            )
+            .await?;
             let config_dir = self
                 .launcher()
                 .and_then(|launcher| launcher.config_dir.clone());
@@ -1369,6 +1377,34 @@ mod tests {
         let restored = state.session_snapshot(&session_id, "owner").await.unwrap();
         assert_eq!(restored.projection.transcript, live.projection.transcript);
         assert_eq!(restored.projection.usage, live.projection.usage);
+    }
+
+    #[tokio::test]
+    async fn snapshot_observes_a_trust_change_without_waiting_for_the_watch_loop() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session.clone(), "owner")
+            .await
+            .unwrap();
+        session
+            .update_trust(
+                atman_runtime::trust::TrustConfig {
+                    mode: atman_runtime::trust::TrustMode::Reckless,
+                    ..Default::default()
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        let snapshot = state.session_snapshot(&session_id, "owner").await.unwrap();
+        assert_eq!(
+            snapshot.projection.trust.mode,
+            atman_proto::TrustMode::Reckless
+        );
     }
 
     #[tokio::test]

@@ -175,6 +175,7 @@ impl SessionActorHandle {
         let todos_rx = session.subscribe_todos();
         let plans_rx = session.subscribe_plans();
         let context_rx = session.subscribe_context();
+        let trust_rx = session.subscribe_trust();
         let forms_rx = session.forms().subscribe();
         let compact_review_rx = session.compact_reviews().subscribe();
         let mut projection = restored_projection.unwrap_or_else(|| {
@@ -188,6 +189,7 @@ impl SessionActorHandle {
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
+        projection.set_trust(trust_rx.borrow().clone());
         projection.set_forms(forms_rx.borrow().clone());
         projection.set_compact_review(compact_review_rx.borrow().clone());
         for run in &initial_runs {
@@ -225,6 +227,7 @@ impl SessionActorHandle {
             todos_rx,
             plans_rx,
             context_rx,
+            trust_rx,
             forms_rx,
             compact_review_rx,
             task_registry,
@@ -643,6 +646,7 @@ enum ActorInput {
     Todos(Result<(), watch::error::RecvError>),
     Plans(Result<(), watch::error::RecvError>),
     Context(Result<(), watch::error::RecvError>),
+    Trust(Result<(), watch::error::RecvError>),
     Forms(Result<(), watch::error::RecvError>),
     CompactReview(Result<(), watch::error::RecvError>),
 }
@@ -669,6 +673,7 @@ struct SessionActor {
     todos_rx: watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>,
     plans_rx: watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>,
     context_rx: watch::Receiver<atman_runtime::ContextSnapshot>,
+    trust_rx: watch::Receiver<atman_runtime::trust::TrustConfig>,
     forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
     compact_review_rx: watch::Receiver<Option<atman_runtime::session::PendingCompactReview>>,
     task_registry: atman_runtime::TaskRegistry,
@@ -689,6 +694,7 @@ impl SessionActor {
                 changed = self.todos_rx.changed() => ActorInput::Todos(changed),
                 changed = self.plans_rx.changed() => ActorInput::Plans(changed),
                 changed = self.context_rx.changed() => ActorInput::Context(changed),
+                changed = self.trust_rx.changed() => ActorInput::Trust(changed),
                 changed = self.forms_rx.changed() => ActorInput::Forms(changed),
                 changed = self.compact_review_rx.changed() => ActorInput::CompactReview(changed),
             };
@@ -734,46 +740,18 @@ impl SessionActor {
                     Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up_projection(),
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
-                ActorInput::Goal(Ok(())) => {
-                    let goal = self.goal_rx.borrow_and_update().clone();
-                    if let Some(delta) = self.projection.set_goal(goal) {
-                        self.publish_projection_delta(delta);
-                    }
-                }
-                ActorInput::Todos(Ok(())) => {
-                    let todos = self.todos_rx.borrow_and_update().clone();
-                    if let Some(delta) = self.projection.set_todos(todos) {
-                        self.publish_projection_delta(delta);
-                    }
-                }
-                ActorInput::Plans(Ok(())) => {
-                    let plans = self.plans_rx.borrow_and_update().clone();
-                    if let Some(delta) = self.projection.set_plans(plans) {
-                        self.publish_projection_delta(delta);
-                    }
-                }
-                ActorInput::Context(Ok(())) => {
-                    let context = self.context_rx.borrow_and_update().clone();
-                    if let Some(delta) = self.projection.set_context(context) {
-                        self.publish_projection_delta(delta);
-                    }
-                }
-                ActorInput::Forms(Ok(())) => {
-                    let forms = self.forms_rx.borrow_and_update().clone();
-                    if let Some(delta) = self.projection.set_forms(forms) {
-                        self.publish_projection_delta(delta);
-                    }
-                }
-                ActorInput::CompactReview(Ok(())) => {
-                    let review = self.compact_review_rx.borrow_and_update().clone();
-                    if let Some(delta) = self.projection.set_compact_review(review) {
-                        self.publish_projection_delta(delta);
-                    }
-                }
+                ActorInput::Goal(Ok(()))
+                | ActorInput::Todos(Ok(()))
+                | ActorInput::Plans(Ok(()))
+                | ActorInput::Context(Ok(()))
+                | ActorInput::Trust(Ok(()))
+                | ActorInput::Forms(Ok(()))
+                | ActorInput::CompactReview(Ok(())) => self.refresh_watch_projections(),
                 ActorInput::Goal(Err(_))
                 | ActorInput::Todos(Err(_))
                 | ActorInput::Plans(Err(_))
                 | ActorInput::Context(Err(_))
+                | ActorInput::Trust(Err(_))
                 | ActorInput::Forms(Err(_))
                 | ActorInput::CompactReview(Err(_)) => break,
             }
@@ -891,6 +869,7 @@ impl SessionActor {
                 unreachable!("force_shutdown is handled by the actor loop")
             }
             Command::Snapshot { reply } => {
+                self.refresh_watch_projections();
                 let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
                 let result = self
                     .catch_up_through(target_seq)
@@ -902,6 +881,7 @@ impl SessionActor {
                 limit,
                 reply,
             } => {
+                self.refresh_watch_projections();
                 let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
                 let result = self
                     .catch_up_through(target_seq)
@@ -1386,6 +1366,37 @@ impl SessionActor {
         self.publish();
     }
 
+    fn refresh_watch_projections(&mut self) {
+        let goal = self.goal_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_goal(goal) {
+            self.publish_projection_delta(delta);
+        }
+        let todos = self.todos_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_todos(todos) {
+            self.publish_projection_delta(delta);
+        }
+        let plans = self.plans_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_plans(plans) {
+            self.publish_projection_delta(delta);
+        }
+        let context = self.context_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_context(context) {
+            self.publish_projection_delta(delta);
+        }
+        let trust = self.trust_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_trust(trust) {
+            self.publish_projection_delta(delta);
+        }
+        let forms = self.forms_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_forms(forms) {
+            self.publish_projection_delta(delta);
+        }
+        let review = self.compact_review_rx.borrow_and_update().clone();
+        if let Some(delta) = self.projection.set_compact_review(review) {
+            self.publish_projection_delta(delta);
+        }
+    }
+
     fn rename(&mut self, title: String) -> Result<RenameSessionCommit> {
         atman_runtime::session_meta::SessionMeta::rename(self.session.dir(), title)
             .with_context(|| format!("rename session {}", self.session_id))?;
@@ -1611,6 +1622,7 @@ impl SessionActor {
         self.projection.set_plans(self.plans_rx.borrow().clone());
         self.projection
             .set_context(self.context_rx.borrow().clone());
+        self.projection.set_trust(self.trust_rx.borrow().clone());
         self.projection.set_forms(self.forms_rx.borrow().clone());
         self.projection
             .set_compact_review(self.compact_review_rx.borrow().clone());

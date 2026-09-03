@@ -904,6 +904,7 @@ fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
         ProjectionChange::TodosReplace { todos } => projection.todos.clone_from(todos),
         ProjectionChange::PlansReplace { plans } => projection.plans.clone_from(plans),
         ProjectionChange::ContextSet { context } => projection.context.clone_from(context),
+        ProjectionChange::TrustSet { trust } => projection.trust.clone_from(trust),
         ProjectionChange::InteractionsSet { interactions } => {
             projection.interactions.clone_from(interactions)
         }
@@ -974,6 +975,7 @@ mod tests {
             todos: Vec::new(),
             plans: Vec::new(),
             context: Default::default(),
+            trust: Default::default(),
             interactions: Default::default(),
             resources: Vec::new(),
             usage: Default::default(),
@@ -1041,6 +1043,35 @@ mod tests {
         assert_eq!(state.cursor(), EventCursor(8));
         assert_eq!(state.projection().revision, Revision(4));
         assert_eq!(state.projection().goal.as_deref(), Some("Converge"));
+    }
+
+    #[test]
+    fn trust_delta_updates_the_local_session_view() {
+        let mut state = state();
+        let trust = atman_proto::TrustProjection {
+            mode: atman_proto::TrustMode::Reckless,
+            ..Default::default()
+        };
+        let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            events: vec![envelope(
+                &state,
+                8,
+                ProjectionDelta {
+                    base_revision: Revision(3),
+                    revision: Revision(4),
+                    changes: vec![ProjectionChange::TrustSet {
+                        trust: trust.clone(),
+                    }],
+                },
+            )],
+            next_cursor: EventCursor(8),
+            has_more: false,
+            resync_required: None,
+        };
+
+        state.apply_updates(&response).unwrap();
+        assert_eq!(state.projection().trust, trust);
     }
 
     #[test]

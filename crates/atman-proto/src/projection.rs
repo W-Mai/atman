@@ -50,6 +50,8 @@ pub struct SessionProjection {
     #[serde(default)]
     pub context: ContextProjection,
     #[serde(default)]
+    pub trust: TrustProjection,
+    #[serde(default)]
     pub interactions: InteractionProjection,
     #[serde(default)]
     pub resources: Vec<ResourceProjection>,
@@ -462,6 +464,88 @@ pub struct McpServerProjection {
     pub tool_count: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct TrustProjection {
+    #[serde(default)]
+    pub mode: TrustMode,
+    #[serde(default)]
+    pub theme: TrustTheme,
+    #[serde(default)]
+    pub escalation: TrustEscalation,
+    #[serde(default)]
+    pub eager_tiers: TrustTierOverrides,
+    #[serde(default)]
+    pub eager_risks: TrustRiskOverrides,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustMode {
+    Calm,
+    #[default]
+    Steady,
+    Eager,
+    Reckless,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustTheme {
+    #[default]
+    Default,
+    Wuxia,
+    Animal,
+    Weather,
+    Drink,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustEscalation {
+    Deny,
+    #[default]
+    Ask,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustPolicyAction {
+    Auto,
+    Ask,
+    Deny,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct TrustTierOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier0: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier1: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier2: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier3: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier4: Option<TrustPolicyAction>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct TrustRiskOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outside_workspace: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub irreversible: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_write: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_spawn: Option<TrustPolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_mutation: Option<TrustPolicyAction>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct InteractionProjection {
     #[serde(default)]
@@ -675,6 +759,7 @@ pub enum ProjectionChange {
     TodosReplace { todos: Vec<TodoProjection> },
     PlansReplace { plans: Vec<PlanProjection> },
     ContextSet { context: ContextProjection },
+    TrustSet { trust: TrustProjection },
     InteractionsSet { interactions: InteractionProjection },
     ResourceUpsert { resource: ResourceProjection },
     ResourceRemove { resource_id: ResourceId },
@@ -788,6 +873,7 @@ mod tests {
             todos: Vec::new(),
             plans: Vec::new(),
             context: ContextProjection::default(),
+            trust: TrustProjection::default(),
             interactions: InteractionProjection::default(),
             resources: Vec::new(),
             usage: UsageProjection::default(),
@@ -808,6 +894,16 @@ mod tests {
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.projection.metadata.id, session_id);
         assert_eq!(decoded.cursor, EventCursor(42));
+    }
+
+    #[test]
+    fn legacy_projection_without_trust_uses_the_safe_default() {
+        let mut encoded = serde_json::to_value(projection(SessionId(Uuid::now_v7()))).unwrap();
+        encoded.as_object_mut().unwrap().remove("trust");
+        let decoded: SessionProjection = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.trust, TrustProjection::default());
+        assert_eq!(decoded.trust.mode, TrustMode::Steady);
+        assert_eq!(decoded.trust.escalation, TrustEscalation::Ask);
     }
 
     #[test]

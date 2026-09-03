@@ -259,6 +259,12 @@ impl RunLauncher {
         }
     }
 
+    pub(crate) fn trust_config(&self) -> Result<atman_runtime::trust::TrustConfig> {
+        self.config_hub()?
+            .trust_config()
+            .context("load global trust config")
+    }
+
     fn scope_root(&self, state: &DaemonState, project_root: &Path) -> Result<PathBuf> {
         atman_runtime::storage::resolve_project_scope_with(
             &self.config_hub()?,
@@ -347,6 +353,7 @@ impl RunLauncher {
                 )
             });
         projection.set_metadata(restored.session.meta());
+        projection.set_trust(restored.session.trust_config());
         projection.reconcile_disconnected();
         Ok(LoadedSession {
             session: Arc::new(restored.session),

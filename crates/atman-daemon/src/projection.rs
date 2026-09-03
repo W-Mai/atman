@@ -7,8 +7,10 @@ use atman_proto::{
     MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection,
     ProjectionChange, ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState,
     Revision, RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
-    SessionProjection, TodoProjection, TodoState, TranscriptItem, TurnId, UsageProjection,
-    WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState, WorkflowProjection,
+    SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
+    TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
+    UsageProjection, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
+    WorkflowProjection,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -43,6 +45,7 @@ impl SessionProjector {
                 todos: Vec::new(),
                 plans: Vec::new(),
                 context: ContextProjection::default(),
+                trust: TrustProjection::default(),
                 interactions: InteractionProjection::default(),
                 resources: Vec::new(),
                 usage: UsageProjection::default(),
@@ -800,6 +803,18 @@ impl SessionProjector {
         ])
     }
 
+    pub(crate) fn set_trust(
+        &mut self,
+        trust: atman_runtime::trust::TrustConfig,
+    ) -> Option<ProjectionDelta> {
+        let trust = trust_projection(&trust);
+        if self.projection.trust == trust {
+            return None;
+        }
+        self.projection.trust = trust.clone();
+        self.commit(vec![ProjectionChange::TrustSet { trust }])
+    }
+
     pub(crate) fn set_forms(
         &mut self,
         forms: Vec<atman_runtime::form::PendingForm>,
@@ -1087,10 +1102,11 @@ pub(crate) fn redacted_projection_event(
 pub(crate) async fn load_historical_projection(
     session_id: SessionId,
     session_dir: &std::path::Path,
+    fallback_trust: atman_runtime::trust::TrustConfig,
 ) -> anyhow::Result<SessionProjection> {
     let replay_dir = session_dir.to_path_buf();
     let replay_session_id = session_id.clone();
-    let (meta, mut projector, context, goal) = tokio::task::spawn_blocking(move || {
+    let (meta, mut projector, context, goal, trust) = tokio::task::spawn_blocking(move || {
         let events_path = replay_dir.join("events.jsonl");
         anyhow::ensure!(
             events_path.is_file(),
@@ -1116,7 +1132,9 @@ pub(crate) async fn load_historical_projection(
                 }
             };
         let goal = atman_runtime::memory::goal::GoalStore::at(&replay_dir).get()?;
-        Ok::<_, anyhow::Error>((meta, projector, context, goal))
+        let trust =
+            atman_runtime::session::load_session_trust(&replay_dir)?.unwrap_or(fallback_trust);
+        Ok::<_, anyhow::Error>((meta, projector, context, goal, trust))
     })
     .await
     .map_err(|error| anyhow::anyhow!("historical session replay task failed: {error}"))??;
@@ -1128,6 +1146,7 @@ pub(crate) async fn load_historical_projection(
     projector.set_goal((!goal.is_empty()).then_some(goal));
     projector.set_todos(todos?);
     projector.set_plans(plans?);
+    projector.set_trust(trust);
     if let Some(context) = context {
         projector.set_context(context);
     }
@@ -1169,6 +1188,51 @@ fn metadata_projection(
         project_root: meta.project_root.map(|path| path.display().to_string()),
         created_at: meta.created_at,
         updated_at: None,
+    }
+}
+
+fn trust_projection(trust: &atman_runtime::trust::TrustConfig) -> TrustProjection {
+    let action = |action: Option<atman_runtime::trust::PolicyAction>| {
+        action.map(|action| match action {
+            atman_runtime::trust::PolicyAction::Auto => TrustPolicyAction::Auto,
+            atman_runtime::trust::PolicyAction::Ask => TrustPolicyAction::Ask,
+            atman_runtime::trust::PolicyAction::Deny => TrustPolicyAction::Deny,
+        })
+    };
+    TrustProjection {
+        mode: match trust.mode {
+            atman_runtime::trust::TrustMode::Calm => TrustMode::Calm,
+            atman_runtime::trust::TrustMode::Steady => TrustMode::Steady,
+            atman_runtime::trust::TrustMode::Eager => TrustMode::Eager,
+            atman_runtime::trust::TrustMode::Reckless => TrustMode::Reckless,
+        },
+        theme: match trust.theme {
+            atman_runtime::trust::Theme::Default => TrustTheme::Default,
+            atman_runtime::trust::Theme::Wuxia => TrustTheme::Wuxia,
+            atman_runtime::trust::Theme::Animal => TrustTheme::Animal,
+            atman_runtime::trust::Theme::Weather => TrustTheme::Weather,
+            atman_runtime::trust::Theme::Drink => TrustTheme::Drink,
+        },
+        escalation: match trust.escalation {
+            atman_runtime::trust::EscalationPolicy::Deny => TrustEscalation::Deny,
+            atman_runtime::trust::EscalationPolicy::Ask => TrustEscalation::Ask,
+            atman_runtime::trust::EscalationPolicy::Allow => TrustEscalation::Allow,
+        },
+        eager_tiers: TrustTierOverrides {
+            tier0: action(trust.tiers.eager.tier0),
+            tier1: action(trust.tiers.eager.tier1),
+            tier2: action(trust.tiers.eager.tier2),
+            tier3: action(trust.tiers.eager.tier3),
+            tier4: action(trust.tiers.eager.tier4),
+        },
+        eager_risks: TrustRiskOverrides {
+            outside_workspace: action(trust.risks.eager.outside_workspace),
+            network: action(trust.risks.eager.network),
+            irreversible: action(trust.risks.eager.irreversible),
+            filesystem_write: action(trust.risks.eager.filesystem_write),
+            process_spawn: action(trust.risks.eager.process_spawn),
+            repository_mutation: action(trust.risks.eager.repository_mutation),
+        },
     }
 }
 
@@ -1882,6 +1946,49 @@ mod tests {
         assert_eq!(delta.base_revision, Revision(0));
         assert_eq!(delta.revision, Revision(1));
         assert!(projector.set_goal(Some("Ship clients".into())).is_none());
+    }
+
+    #[test]
+    fn trust_watch_projects_the_complete_session_policy() {
+        let mut projector = SessionProjector::new(SessionId(uuid::Uuid::now_v7()), None);
+        let trust = atman_runtime::trust::TrustConfig {
+            mode: atman_runtime::trust::TrustMode::Eager,
+            theme: atman_runtime::trust::Theme::Wuxia,
+            escalation: atman_runtime::trust::EscalationPolicy::Allow,
+            tiers: atman_runtime::trust::TierPolicyConfig {
+                eager: atman_runtime::trust::TierPolicyOverrides {
+                    tier2: Some(atman_runtime::trust::PolicyAction::Deny),
+                    ..Default::default()
+                },
+            },
+            risks: atman_runtime::trust::RiskPolicyConfig {
+                eager: atman_runtime::trust::RiskPolicyOverrides {
+                    network: Some(atman_runtime::trust::PolicyAction::Auto),
+                    ..Default::default()
+                },
+            },
+        };
+
+        let delta = projector.set_trust(trust.clone()).unwrap();
+        assert_eq!(projector.projection().trust.mode, TrustMode::Eager);
+        assert_eq!(projector.projection().trust.theme, TrustTheme::Wuxia);
+        assert_eq!(
+            projector.projection().trust.escalation,
+            TrustEscalation::Allow
+        );
+        assert_eq!(
+            projector.projection().trust.eager_tiers.tier2,
+            Some(TrustPolicyAction::Deny)
+        );
+        assert_eq!(
+            projector.projection().trust.eager_risks.network,
+            Some(TrustPolicyAction::Auto)
+        );
+        assert!(matches!(
+            delta.changes.as_slice(),
+            [ProjectionChange::TrustSet { .. }]
+        ));
+        assert!(projector.set_trust(trust).is_none());
     }
 
     #[test]

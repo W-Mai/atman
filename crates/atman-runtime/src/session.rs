@@ -839,6 +839,16 @@ fn read_trust(dir: &Path) -> std::io::Result<crate::trust::TrustConfig> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+pub fn load_session_trust(
+    dir: impl AsRef<Path>,
+) -> std::io::Result<Option<crate::trust::TrustConfig>> {
+    match read_trust(dir.as_ref()) {
+        Ok(trust) => Ok(Some(trust)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn write_trust(dir: &Path, trust: &crate::trust::TrustConfig) -> std::io::Result<()> {
     if dir.as_os_str().is_empty() {
         return Ok(());
@@ -1156,11 +1166,12 @@ impl Session {
             observer,
         )?;
         let path = trust_path(&restored.session.dir);
-        let trust = if path.exists() {
-            read_trust(&restored.session.dir).map_err(|source| SessionOpenError::Trust {
+        let trust = if let Some(trust) =
+            load_session_trust(&restored.session.dir).map_err(|source| SessionOpenError::Trust {
                 path: path.clone(),
                 source,
-            })?
+            })? {
+            trust
         } else {
             write_trust(&restored.session.dir, &global_trust).map_err(|source| {
                 SessionOpenError::Trust {
