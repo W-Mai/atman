@@ -235,6 +235,7 @@ version = "1.10.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "atman-client",
  "atman-dsl",
  "atman-proto",
  "atman-runtime",

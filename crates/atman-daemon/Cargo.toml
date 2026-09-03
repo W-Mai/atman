@@ -39,6 +39,7 @@ libc = "0.2"
 urlencoding = "2"
 
 [dev-dependencies]
+atman-client = { path = "../atman-client", version = "1.10.0" }
 reqwest.workspace = true
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
