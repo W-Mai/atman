@@ -290,6 +290,7 @@ pub mod methods {
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const CREATE_SESSION: &str = "session.create";
+    pub const SEND_MESSAGE: &str = "session.send_message";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
@@ -305,6 +306,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::DaemonCapabilities>(),
         super::method_descriptor::<super::rpc::Ping>(),
         super::method_descriptor::<super::rpc::CreateSession>(),
+        super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
         super::method_descriptor::<super::rpc::StartRun>(),
@@ -398,6 +400,26 @@ pub struct RenameSessionRequest {
     pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SendMessageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<InlineImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SendMessageResponse {
+    pub session_id: SessionId,
+    pub run_id: FlowRunId,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -669,6 +691,13 @@ pub mod rpc {
         Command,
         CreateSessionRequest,
         SessionSnapshot
+    );
+    method!(
+        SendMessage,
+        methods::SEND_MESSAGE,
+        Command,
+        SendMessageRequest,
+        SendMessageResponse
     );
     method!(
         ListSessions,

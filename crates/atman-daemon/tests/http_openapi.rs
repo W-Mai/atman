@@ -48,6 +48,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
     let description = doc["info"]["description"].as_str().unwrap();
     for method in [
         "daemon.capabilities",
+        "session.send_message",
         "list_permission_requests",
         "create_permission_group",
         "resolve_permission_requests",
@@ -68,6 +69,8 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "MethodCapability",
         "InlineImage",
         "CreateSessionRequest",
+        "SendMessageRequest",
+        "SendMessageResponse",
         "StartRunRequest",
         "StartRunResponse",
         "RunFlowRequest",

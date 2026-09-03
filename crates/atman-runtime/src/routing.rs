@@ -75,6 +75,7 @@ impl RouteProgram {
     }
 }
 
+#[derive(Debug)]
 pub struct ResolvedCommand {
     pub file: File,
     pub flow_name: String,
@@ -93,6 +94,13 @@ pub fn resolve_command_call(hub: &ConfigHub, line: &str) -> Result<ResolvedComma
         bail!("empty slash command");
     }
     let name = name_full.strip_prefix('/').unwrap_or(name_full);
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        bail!("invalid command name: {name}");
+    }
     if name == "agent" {
         crate::templates::ensure_managed_agent_at(hub.config_dir())?;
     }
@@ -280,5 +288,14 @@ mod tests {
                 .resolve("!hello")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn command_resolution_rejects_path_traversal() {
+        let (_dir, hub) = hub_with(None);
+        let error = resolve_command_call(&hub, "/../../outside")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid command name"), "{error}");
     }
 }

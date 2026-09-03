@@ -3,7 +3,8 @@ use atman_proto::{
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
     PermissionRpcScope, PingResponse, ProtocolLimits, RequestId, ResolvePromptResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, StartRunResponse, method_descriptor, methods, rpc,
+    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse, method_descriptor,
+    methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -121,6 +122,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::DaemonCapabilities>(),
     method_descriptor::<rpc::Ping>(),
     method_descriptor::<rpc::CreateSession>(),
+    method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
     method_descriptor::<rpc::StartRun>(),
@@ -247,6 +249,60 @@ pub async fn dispatch_as(
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::SEND_MESSAGE => {
+            let Some(launcher) = state.launcher() else {
+                return JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                );
+            };
+            match parse_params::<rpc::SendMessage>(req.params) {
+                Ok(params) if !params.text.trim().is_empty() => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    let outcome = execute_command::<rpc::SendMessage, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let spawned = launcher
+                                .send_message_as_with_options(
+                                    operation_state.clone(),
+                                    &operation_params.session_id,
+                                    &operation_params.text,
+                                    &operation_principal,
+                                    operation_params.reasoning,
+                                    operation_params.images,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            let snapshot = operation_state
+                                .session_snapshot(&spawned.session_id, &operation_principal)
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(SendMessageResponse {
+                                session_id: spawned.session_id,
+                                run_id: spawned.run_id,
+                                revision: snapshot.projection.revision,
+                                cursor: snapshot.cursor,
+                            })
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(response) => method_response::<rpc::SendMessage>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Ok(_) => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::invalid_params("message text must not be empty"),
+                ),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
             Ok(params) if !params.title.trim().is_empty() => {
                 let operation_state = state.clone();
@@ -490,6 +546,7 @@ pub async fn dispatch_as(
                                     crate::run::RunOptions {
                                         reasoning: operation_params.reasoning,
                                         images: operation_params.images,
+                                        ..Default::default()
                                     },
                                 )
                                 .await
@@ -543,6 +600,7 @@ pub async fn dispatch_as(
                                     crate::run::RunOptions {
                                         reasoning: operation_params.reasoning,
                                         images: operation_params.images,
+                                        ..Default::default()
                                     },
                                 )
                                 .await

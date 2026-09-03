@@ -346,6 +346,105 @@ async fn start_run_reopens_persisted_session_after_daemon_restart() {
     }));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn send_message_routes_once_and_preserves_the_submitted_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(config_dir.join("commands")).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("routes.at"),
+        "default_route { flow: echo }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("commands/echo.at"),
+        "flow helper(message: string) -> string { return \"wrong entry\" }\nflow echo(message: string) -> string { return message }\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(data_dir));
+    state.set_launcher(Arc::new(
+        RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap(),
+    ));
+    let created = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(
+            1,
+            &atman_proto::CreateSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                project_root: Some(project_root.to_string_lossy().into_owned()),
+                title: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let request = atman_proto::SendMessageRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: created.projection.metadata.id,
+        text: "hello from client".into(),
+        reasoning: None,
+        images: Vec::new(),
+    };
+    let sent = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::SendMessage>(2, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::SendMessage>()
+    .unwrap();
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::SendMessage>(3, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::SendMessage>()
+    .unwrap();
+    assert_eq!(retry.run_id, sent.run_id);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while state.has_live_runs(&sent.session_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "message run did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let events = std::fs::read_to_string(
+        state
+            .sessions_root()
+            .join(sent.session_id.to_string())
+            .join("events.jsonl"),
+    )
+    .unwrap()
+    .lines()
+    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    .collect::<Vec<_>>();
+    let user_messages = events
+        .iter()
+        .filter(|event| event["type"] == "user_msg")
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages.len(), 1);
+    assert_eq!(
+        user_messages[0]["message"]["parts"][0]["text"],
+        "hello from client"
+    );
+    assert!(events.iter().any(|event| {
+        event["type"] == "flow_start"
+            && event["run_id"] == sent.run_id.to_string()
+            && event["flow_name"] == "echo"
+    }));
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

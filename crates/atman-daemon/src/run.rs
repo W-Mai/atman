@@ -83,6 +83,18 @@ impl ProviderCatalogRefreshDispatcher {
 pub struct RunOptions {
     pub reasoning: Option<String>,
     pub images: Vec<atman_proto::InlineImage>,
+    pub prepared_flow: Option<PreparedFlow>,
+    pub turn: Option<RunTurn>,
+}
+
+pub struct PreparedFlow {
+    pub file: atman_dsl::ast::File,
+    pub flow_name: String,
+}
+
+pub struct RunTurn {
+    pub text: String,
+    pub origin: atman_runtime::message::MessageOrigin,
 }
 
 fn invocation_env_from_reasoning(
@@ -423,6 +435,77 @@ impl RunLauncher {
         .await
     }
 
+    pub async fn send_message_as_with_options(
+        &self,
+        state: Arc<DaemonState>,
+        session_id: &ProtoSessionId,
+        text: &str,
+        owner_principal: &str,
+        reasoning: Option<String>,
+        images: Vec<atman_proto::InlineImage>,
+    ) -> Result<SpawnedRun> {
+        anyhow::ensure!(!text.trim().is_empty(), "message text must not be empty");
+        let hub = self.config_hub()?;
+        let command_call = if text.trim_start().starts_with('/') {
+            text.trim().to_owned()
+        } else {
+            let route = atman_runtime::routing::RouteProgram::load(&hub)?
+                .resolve(text)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no route matched; add a route to {}/routes.at or send an explicit /command",
+                        hub.config_dir().display()
+                    )
+                })?;
+            route.slash_call()
+        };
+        let resolved = atman_runtime::routing::resolve_command_call(&hub, &command_call)?;
+        self.start_resolved_command(
+            state,
+            session_id,
+            text,
+            owner_principal,
+            reasoning,
+            images,
+            resolved,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_resolved_command(
+        &self,
+        state: Arc<DaemonState>,
+        session_id: &ProtoSessionId,
+        text: &str,
+        owner_principal: &str,
+        reasoning: Option<String>,
+        images: Vec<atman_proto::InlineImage>,
+        resolved: atman_runtime::routing::ResolvedCommand,
+    ) -> Result<SpawnedRun> {
+        let flow_path = resolved.path.to_string_lossy().into_owned();
+        self.start_in_session_as_with_options(
+            state,
+            session_id,
+            &flow_path,
+            resolved.args,
+            owner_principal,
+            RunOptions {
+                reasoning,
+                images,
+                prepared_flow: Some(PreparedFlow {
+                    file: resolved.file,
+                    flow_name: resolved.flow_name,
+                }),
+                turn: Some(RunTurn {
+                    text: text.to_owned(),
+                    origin: atman_runtime::message::MessageOrigin::User,
+                }),
+            },
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn spawn_session_as_with_options(
         &self,
@@ -438,7 +521,12 @@ impl RunLauncher {
     ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
-        let RunOptions { reasoning, images } = options;
+        let RunOptions {
+            reasoning,
+            images,
+            prepared_flow,
+            turn,
+        } = options;
         let invocation_env = invocation_env_from_reasoning(reasoning)?;
 
         reload_model_config(self.config_dir.as_deref());
@@ -452,11 +540,15 @@ impl RunLauncher {
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
+        let flow_name = prepared_flow
+            .as_ref()
+            .map(|prepared| prepared.flow_name.clone())
+            .unwrap_or_default();
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let live_run = LiveRun {
             run_id: run_id_proto.clone(),
-            flow_name: String::new(),
+            flow_name,
             cancel: cancel.clone(),
             started_at: chrono::Utc::now(),
         };
@@ -520,6 +612,8 @@ impl RunLauncher {
                         Some(state_for_run),
                         provider_catalog_refresh,
                         invocation_env,
+                        prepared_flow,
+                        turn,
                         cancel,
                     )
                     .await
@@ -555,6 +649,8 @@ async fn run_flow_inner(
     daemon_state: Option<Arc<crate::DaemonState>>,
     provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
     invocation_env: atman_runtime::InvocationEnv,
+    prepared_flow: Option<PreparedFlow>,
+    turn: Option<RunTurn>,
     flow_cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
@@ -562,14 +658,20 @@ async fn run_flow_inner(
             atman_runtime::templates::ensure_managed_agent_at(dir)?;
         }
     }
-    let source = std::fs::read_to_string(path)
-        .with_context(|| format!("reading flow {}", path.display()))?;
-    let parsed = atman_dsl::parse::parse_file(&source)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let (parsed, requested_flow) = match prepared_flow {
+        Some(prepared) => (prepared.file, Some(prepared.flow_name)),
+        None => {
+            let source = std::fs::read_to_string(path)
+                .with_context(|| format!("reading flow {}", path.display()))?;
+            let parsed = atman_dsl::parse::parse_file(&source)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            (parsed, None)
+        }
+    };
     if parsed.flows.is_empty() {
         anyhow::bail!("{} contains no flows", path.display());
     }
-    let flow_name = parsed.flows[0].name.name.clone();
+    let flow_name = requested_flow.unwrap_or_else(|| parsed.flows[0].name.name.clone());
 
     let workspace_generation = daemon_state
         .as_ref()
@@ -635,14 +737,20 @@ async fn run_flow_inner(
         .await;
 
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_text = if args.is_empty() {
-        flow_name.clone()
-    } else {
-        args.iter()
-            .map(|(k, v)| format!("{k}={}", render_value(v)))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
+    let (user_text, origin) = turn.map_or_else(
+        || {
+            let text = if args.is_empty() {
+                flow_name.clone()
+            } else {
+                args.iter()
+                    .map(|(key, value)| format!("{key}={}", render_value(value)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            (text, atman_runtime::message::MessageOrigin::User)
+        },
+        |turn| (turn.text, turn.origin),
+    );
     let mut parts: Vec<atman_runtime::message::MessagePart> = session
         .take_pending_images()
         .into_iter()
@@ -655,7 +763,7 @@ async fn run_flow_inner(
         role: atman_runtime::message::MessageRole::User,
         parts,
         turn_id: turn_id.clone(),
-        origin: atman_runtime::message::MessageOrigin::User,
+        origin,
     };
     {
         let _compact_guard = session.acquire_compact_lock().await;
