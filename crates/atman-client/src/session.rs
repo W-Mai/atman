@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    CancelRunRequest, CancelRunResponse, DaemonGeneration, EventCursor, FlowRunId,
+    CancelRunRequest, CancelRunResponse, DaemonGeneration, EventCursor, FlowRunId, FormSubmission,
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
     InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
     PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
     RequestId, Revision, SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse,
-    ServerEvent, SessionId, SessionProjection, SessionSignal, SessionSnapshot, rpc,
+    ServerEvent, SessionId, SessionProjection, SessionSignal, SessionSnapshot, SubmitFormRequest,
+    SubmitFormResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -178,6 +179,8 @@ pub enum SessionClientError {
         expected: FlowRunId,
         received: FlowRunId,
     },
+    #[error("command result belongs to form {received}, expected {expected}")]
+    CommandForm { expected: String, received: String },
 }
 
 impl SessionClientError {
@@ -187,7 +190,9 @@ impl SessionClientError {
             Self::Transport(error) => error.is_retryable(),
             Self::Reconcile(_) => false,
             Self::CommittedCursorUnavailable { .. } => false,
-            Self::CommandSession { .. } | Self::CommandRun { .. } => false,
+            Self::CommandSession { .. } | Self::CommandRun { .. } | Self::CommandForm { .. } => {
+                false
+            }
         }
     }
 }
@@ -422,6 +427,32 @@ impl SessionClient {
             })
             .await?;
         self.refresh().await?;
+        Ok(response)
+    }
+
+    pub async fn submit_form(
+        &self,
+        form_id: impl Into<String>,
+        submission: FormSubmission,
+    ) -> Result<SubmitFormResponse, SessionClientError> {
+        let form_id = form_id.into();
+        let response = self
+            .client
+            .command::<rpc::SubmitForm>(&SubmitFormRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                form_id: form_id.clone(),
+                submission,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        if response.form_id != form_id {
+            return Err(SessionClientError::CommandForm {
+                expected: form_id,
+                received: response.form_id,
+            });
+        }
+        self.refresh_through(response.cursor).await?;
         Ok(response)
     }
 
@@ -1312,12 +1343,16 @@ mod tests {
                 let result = match request.method.as_str() {
                     methods::DAEMON_CAPABILITIES => {
                         let mut capabilities = capabilities("generation-a");
-                        let method = method_descriptor::<rpc::SendMessage>();
-                        capabilities.methods.push(MethodCapability {
-                            name: method.name.into(),
-                            kind: method.kind,
-                            revision: method.revision,
-                        });
+                        for method in [
+                            method_descriptor::<rpc::SendMessage>(),
+                            method_descriptor::<rpc::SubmitForm>(),
+                        ] {
+                            capabilities.methods.push(MethodCapability {
+                                name: method.name.into(),
+                                kind: method.kind,
+                                revision: method.revision,
+                            });
+                        }
                         serde_json::to_value(capabilities)?
                     }
                     methods::GET_SESSION_SNAPSHOT => serde_json::to_value(SessionSnapshot {
@@ -1334,6 +1369,17 @@ mod tests {
                         revision: Revision(2),
                         cursor: EventCursor(2),
                     })?,
+                    methods::SUBMIT_FORM => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(SubmitFormResponse {
+                            resolved: true,
+                            status: atman_proto::FormResolutionStatus::Resolved,
+                            session_id: self.session_id.clone(),
+                            form_id: params["form_id"].as_str().unwrap().into(),
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
                     methods::GET_SESSION_UPDATES => {
                         let current = SessionState::new(
                             SessionSnapshot {
@@ -1415,5 +1461,17 @@ mod tests {
         assert_eq!(request_ids.len(), 2);
         assert_eq!(request_ids[0], request_ids[1]);
         assert!(!request_ids[0].is_null());
+
+        let form = session
+            .submit_form(
+                "form-1",
+                FormSubmission::Submitted {
+                    answers: vec![atman_proto::FormAnswer::Confirmed { value: true }],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(form.form_id, "form-1");
+        assert_eq!(form.cursor, EventCursor(2));
     }
 }
