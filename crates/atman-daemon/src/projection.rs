@@ -175,6 +175,8 @@ impl SessionProjector {
         let run = RunProjection {
             id: run_id,
             flow_name,
+            model: None,
+            provider: None,
             parent_run_id: None,
             parent_node_id: None,
             state: RunLifecycle::Starting,
@@ -226,6 +228,8 @@ impl SessionProjector {
                 let run = RunProjection {
                     id: FlowRunId(run_id.0),
                     flow_name: flow_name.clone(),
+                    model: None,
+                    provider: None,
                     parent_run_id: parent_run_id.as_ref().map(|id| FlowRunId(id.0)),
                     parent_node_id: parent_node_id.clone(),
                     state: RunLifecycle::Running,
@@ -266,6 +270,8 @@ impl SessionProjector {
                     let run = RunProjection {
                         id: FlowRunId(run_id.0),
                         flow_name: String::new(),
+                        model: None,
+                        provider: None,
                         parent_run_id: None,
                         parent_node_id: None,
                         state,
@@ -686,11 +692,30 @@ impl SessionProjector {
             Event::LlmCall {
                 model,
                 provider,
+                context_call_purpose,
+                context_call_identity,
+                run_id,
                 usage,
                 ..
             } => {
                 let previous_usage = self.projection.usage.clone();
                 let previous_context = self.projection.context.clone();
+                let purpose = context_call_purpose.unwrap_or_default();
+                let scope =
+                    context_call_identity
+                        .as_ref()
+                        .map(|identity| identity.scope)
+                        .unwrap_or_else(|| match run_id {
+                            None => atman_runtime::context_plan::ContextCallScope::Detached,
+                            Some(run_id)
+                                if self.projection.runs.iter().any(|run| {
+                                    run.id.0 == run_id.0 && run.parent_run_id.is_some()
+                                }) =>
+                            {
+                                atman_runtime::context_plan::ContextCallScope::Child
+                            }
+                            Some(_) => atman_runtime::context_plan::ContextCallScope::Root,
+                        });
                 self.event_usage.input_tokens = self
                     .event_usage
                     .input_tokens
@@ -707,8 +732,25 @@ impl SessionProjector {
                     .saturating_add(usage.cache_write);
                 self.event_usage.llm_calls = self.event_usage.llm_calls.saturating_add(1);
                 self.refresh_usage();
-                self.projection.context.model = model.clone();
-                self.projection.context.provider = provider.clone();
+                if purpose == atman_runtime::context_plan::ContextCallPurpose::General {
+                    if let Some(run_id) = run_id
+                        && let Some(run) = self
+                            .projection
+                            .runs
+                            .iter_mut()
+                            .find(|run| run.id.0 == run_id.0)
+                        && (run.model.as_ref() != Some(model)
+                            || run.provider.as_ref() != Some(provider))
+                    {
+                        run.model = Some(model.clone());
+                        run.provider = Some(provider.clone());
+                        changes.push(ProjectionChange::RunUpsert { run: run.clone() });
+                    }
+                    if scope == atman_runtime::context_plan::ContextCallScope::Root {
+                        self.projection.context.model = model.clone();
+                        self.projection.context.provider = provider.clone();
+                    }
+                }
                 self.projection.context.cache_read_tokens = self.projection.usage.cache_read_tokens;
                 self.projection.context.cache_write_tokens =
                     self.projection.usage.cache_write_tokens;
@@ -2135,6 +2177,133 @@ mod tests {
         assert_eq!(projector.projection().usage.output_tokens, 5);
         assert_eq!(projector.projection().usage.cache_read_tokens, 4);
         assert_eq!(projector.projection().usage.llm_calls, 1);
+    }
+
+    #[test]
+    fn primary_models_are_projected_per_run_without_helper_pollution() {
+        use atman_runtime::context_plan::{
+            ContextCallIdentity, ContextCallPurpose, ContextCallScope,
+        };
+
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let root_run_id = RuntimeRunId::now();
+        let child_run_id = RuntimeRunId::now();
+        let started_at = chrono::Utc::now();
+        let mut projector = SessionProjector::new(session_id, None);
+        projector.apply_envelope(&envelope(
+            1,
+            started_at,
+            Event::FlowStart {
+                run_id: root_run_id.clone(),
+                flow_name: "agent".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+        ));
+        projector.apply_envelope(&envelope(
+            2,
+            started_at,
+            Event::FlowStart {
+                run_id: child_run_id.clone(),
+                flow_name: "subagent".into(),
+                parent_run_id: Some(root_run_id.clone()),
+                parent_node_id: Some("spawn".into()),
+                spawned: true,
+            },
+        ));
+
+        let llm_call = |model: &str,
+                        provider: &str,
+                        purpose: ContextCallPurpose,
+                        scope: ContextCallScope,
+                        run_id: RuntimeRunId| Event::LlmCall {
+            model: model.into(),
+            provider: provider.into(),
+            context_plan_id: None,
+            context_epoch: None,
+            context_tokens: None,
+            usage_source: None,
+            context_call_purpose: Some(purpose),
+            context_call_identity: Some(ContextCallIdentity {
+                scope,
+                session_id: Some("session".into()),
+                flow_run_id: (scope == ContextCallScope::Child).then_some(run_id.clone()),
+            }),
+            context_cache: None,
+            assistant_tool_batch_width: None,
+            usage: Default::default(),
+            wallclock_ms: 1,
+            ttft_ms: None,
+            tokens_per_second: None,
+            status: Default::default(),
+            run_id: Some(run_id),
+            node_id: None,
+        };
+
+        projector.apply_envelope(&envelope(
+            3,
+            started_at,
+            llm_call(
+                "root-model",
+                "root-provider",
+                ContextCallPurpose::General,
+                ContextCallScope::Root,
+                root_run_id.clone(),
+            ),
+        ));
+        projector.apply_envelope(&envelope(
+            4,
+            started_at,
+            llm_call(
+                "child-model",
+                "child-provider",
+                ContextCallPurpose::General,
+                ContextCallScope::Child,
+                child_run_id.clone(),
+            ),
+        ));
+        projector.apply_envelope(&envelope(
+            5,
+            started_at,
+            llm_call(
+                "root-helper",
+                "helper-provider",
+                ContextCallPurpose::Extraction,
+                ContextCallScope::Root,
+                root_run_id.clone(),
+            ),
+        ));
+        projector.apply_envelope(&envelope(
+            6,
+            started_at,
+            llm_call(
+                "child-helper",
+                "helper-provider",
+                ContextCallPurpose::Classification,
+                ContextCallScope::Child,
+                child_run_id.clone(),
+            ),
+        ));
+
+        let root = projector
+            .projection()
+            .runs
+            .iter()
+            .find(|run| run.id.0 == root_run_id.0)
+            .unwrap();
+        assert_eq!(root.model.as_deref(), Some("root-model"));
+        assert_eq!(root.provider.as_deref(), Some("root-provider"));
+        let child = projector
+            .projection()
+            .runs
+            .iter()
+            .find(|run| run.id.0 == child_run_id.0)
+            .unwrap();
+        assert_eq!(child.model.as_deref(), Some("child-model"));
+        assert_eq!(child.provider.as_deref(), Some("child-provider"));
+        assert_eq!(projector.projection().context.model, "root-model");
+        assert_eq!(projector.projection().context.provider, "root-provider");
     }
 
     #[test]

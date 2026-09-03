@@ -90,6 +90,10 @@ pub struct RunProjection {
     pub id: FlowRunId,
     #[serde(default)]
     pub flow_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub parent_run_id: Option<FlowRunId>,
     #[serde(default)]
