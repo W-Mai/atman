@@ -419,14 +419,23 @@ impl SessionClient {
         &self,
         run_id: FlowRunId,
     ) -> Result<CancelRunResponse, SessionClientError> {
+        let expected_run = run_id.clone();
         let response = self
             .client
             .command::<rpc::CancelRun>(&CancelRunRequest {
                 request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
                 run_id,
             })
             .await?;
-        self.refresh().await?;
+        self.validate_command_session(&response.session_id)?;
+        if response.run_id != expected_run {
+            return Err(SessionClientError::CommandRun {
+                expected: expected_run,
+                received: response.run_id,
+            });
+        }
+        self.refresh_through(response.cursor).await?;
         Ok(response)
     }
 

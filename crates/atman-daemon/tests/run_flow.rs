@@ -232,6 +232,7 @@ async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
             5,
             &atman_proto::CancelRunRequest {
                 request_id: Some(atman_proto::RequestId::now()),
+                session_id: running.session_id.clone(),
                 run_id: running.run_id.clone(),
             },
         )

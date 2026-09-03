@@ -41,19 +41,30 @@ async fn cancel_run_hits_matching_live_session() {
         .await
         .unwrap();
 
-    assert!(!state.cancel_run(&run_id, "mallory").await.unwrap());
+    assert!(state.cancel_run(&sid, &run_id, "mallory").await.is_err());
     assert!(!cancel.is_cancelled());
 
     let request_id = atman_proto::RequestId::now();
     let command = atman_proto::CancelRunRequest {
         request_id: Some(request_id),
+        session_id: sid.clone(),
         run_id: run_id.clone(),
     };
     let req = JsonRpcRequest::for_method::<atman_proto::rpc::CancelRun>(1, &command).unwrap();
     let resp = dispatch(state.clone(), req).await;
-    let result = resp.result.expect("cancel_run returns result");
-    assert_eq!(result["cancelled"], serde_json::json!(true));
+    let result: atman_proto::CancelRunResponse =
+        serde_json::from_value(resp.result.expect("cancel_run returns result")).unwrap();
+    assert!(result.cancelled);
+    assert_eq!(result.status, atman_proto::RunCancellationStatus::Accepted);
+    assert_eq!(result.session_id, sid);
     assert!(cancel.is_cancelled());
+    let snapshot = state.session_snapshot(&sid, "local-daemon").await.unwrap();
+    assert_eq!(snapshot.cursor, result.cursor);
+    assert_eq!(snapshot.projection.revision, result.revision);
+    assert_eq!(
+        snapshot.projection.runs[0].state,
+        atman_proto::RunLifecycle::Cancelling
+    );
 
     assert!(state.finish_run(&sid, &run_id));
     wait_until_finished(&state, &sid).await;
@@ -62,7 +73,10 @@ async fn cancel_run_hits_matching_live_session() {
         JsonRpcRequest::for_method::<atman_proto::rpc::CancelRun>(2, &command).unwrap(),
     )
     .await;
-    assert_eq!(retry.result.unwrap()["cancelled"], serde_json::json!(true));
+    let retry: atman_proto::CancelRunResponse =
+        serde_json::from_value(retry.result.unwrap()).unwrap();
+    assert_eq!(retry.status, atman_proto::RunCancellationStatus::Accepted);
+    assert_eq!(retry.cursor, result.cursor);
 }
 
 #[tokio::test]
@@ -129,8 +143,22 @@ async fn finishing_one_run_preserves_other_runs_in_the_same_session() {
         tokio::task::yield_now().await;
     }
     assert!(state.has_live_runs(&sid));
-    assert!(!state.cancel_run(&first, "alice").await.unwrap());
-    assert!(state.cancel_run(&second, "alice").await.unwrap());
+    assert_eq!(
+        state
+            .cancel_run(&sid, &first, "alice")
+            .await
+            .unwrap()
+            .status,
+        atman_proto::RunCancellationStatus::NotFound
+    );
+    assert_eq!(
+        state
+            .cancel_run(&sid, &second, "alice")
+            .await
+            .unwrap()
+            .status,
+        atman_proto::RunCancellationStatus::Accepted
+    );
     assert!(state.finish_run(&sid, &second));
     wait_until_finished(&state, &sid).await;
     assert!(state.is_authorized_session(&sid, "alice"));
@@ -414,17 +442,19 @@ async fn list_sessions_accepts_search_and_limit_query() {
 }
 
 #[tokio::test]
-async fn cancel_run_missing_returns_false() {
+async fn cancel_run_missing_session_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
     let req = JsonRpcRequest::new(
         1,
         methods::CANCEL_RUN,
-        serde_json::json!({"run_id": FlowRunId(Uuid::now_v7())}),
+        serde_json::json!({
+            "session_id": SessionId(Uuid::now_v7()),
+            "run_id": FlowRunId(Uuid::now_v7())
+        }),
     );
     let resp = dispatch(state, req).await;
-    let result = resp.result.expect("returns ok");
-    assert_eq!(result["cancelled"], serde_json::json!(false));
+    assert!(resp.error.is_some());
 }
 
 #[tokio::test]

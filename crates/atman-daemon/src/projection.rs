@@ -261,6 +261,24 @@ impl SessionProjector {
                     });
                 }
             }
+            Event::RunCancelRequested { run_id } => {
+                if let Some(run) = self
+                    .projection
+                    .runs
+                    .iter_mut()
+                    .find(|run| run.id.0 == run_id.0)
+                    && !matches!(
+                        run.state,
+                        RunLifecycle::Cancelled
+                            | RunLifecycle::Succeeded
+                            | RunLifecycle::Failed
+                            | RunLifecycle::Lost
+                    )
+                {
+                    run.state = RunLifecycle::Cancelling;
+                    changes.push(ProjectionChange::RunUpsert { run: run.clone() });
+                }
+            }
             Event::UserMsg {
                 flow_run_id,
                 message,

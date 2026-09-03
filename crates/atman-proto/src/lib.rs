@@ -468,6 +468,19 @@ pub struct InterjectSessionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CancelRunResponse {
     pub cancelled: bool,
+    pub status: RunCancellationStatus,
+    pub session_id: SessionId,
+    pub run_id: FlowRunId,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunCancellationStatus {
+    Accepted,
+    AlreadyRequested,
+    NotFound,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -598,6 +611,7 @@ pub struct StartRunResponse {
 pub struct CancelRunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
     pub run_id: FlowRunId,
 }
 
@@ -863,7 +877,8 @@ pub mod rpc {
         methods::CANCEL_RUN,
         Command,
         CancelRunRequest,
-        CancelRunResponse
+        CancelRunResponse,
+        2
     );
     method!(
         GetEvents,

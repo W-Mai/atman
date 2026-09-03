@@ -133,6 +133,7 @@ mod session_actor;
 pub mod state;
 pub mod unix;
 
+pub use session_actor::RunCancellationCommit;
 pub use state::{DaemonState, LiveRun};
 
 pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
@@ -425,9 +426,24 @@ pub async fn dispatch_as(
                     &params,
                     async move {
                         operation_state
-                            .cancel_run(&operation_params.run_id, &operation_principal)
+                            .cancel_run(
+                                &operation_params.session_id,
+                                &operation_params.run_id,
+                                &operation_principal,
+                            )
                             .await
-                            .map(|cancelled| CancelRunResponse { cancelled })
+                            .map(|commit| CancelRunResponse {
+                                cancelled: matches!(
+                                    commit.status,
+                                    atman_proto::RunCancellationStatus::Accepted
+                                        | atman_proto::RunCancellationStatus::AlreadyRequested
+                                ),
+                                status: commit.status,
+                                session_id: operation_params.session_id,
+                                run_id: operation_params.run_id,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
                             .map_err(|error| JsonRpcError::application(error.to_string()))
                     },
                 )

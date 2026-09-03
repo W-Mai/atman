@@ -464,6 +464,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
     match event {
         Event::FlowStart { .. } => "flow_start",
         Event::FlowEnd { .. } => "flow_end",
+        Event::RunCancelRequested { .. } => "run_cancel_requested",
         Event::WorkspaceLifecycle { .. } => "workspace_lifecycle",
         Event::LlmCall { .. } => "llm_call",
         Event::TurnStart { .. } => "turn_start",
@@ -516,6 +517,7 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
     match event {
         Event::FlowStart { run_id, .. }
         | Event::FlowEnd { run_id, .. }
+        | Event::RunCancelRequested { run_id }
         | Event::WorkspaceLifecycle { run_id, .. } => (None, Some(run_id.0.to_string())),
         Event::TurnStart { turn_id, .. } | Event::TurnEnd { turn_id, .. } => {
             (Some(turn_id.0.to_string()), None)

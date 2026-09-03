@@ -103,6 +103,7 @@ Raw event-log SSE is available at GET /events. Convergent session projection SSE
         StartRunResponse,
         CancelRunRequest,
         CancelRunResponse,
+        atman_proto::RunCancellationStatus,
         ResolvePromptRequest,
         ResolvePromptResponse,
         atman_proto::PromptResolutionStatus,

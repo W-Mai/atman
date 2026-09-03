@@ -482,18 +482,16 @@ impl DaemonState {
         self.authorized_actor(id, principal).is_some()
     }
 
-    pub async fn cancel_run(&self, run_id: &FlowRunId, principal: &str) -> Result<bool> {
+    pub async fn cancel_run(
+        &self,
+        session_id: &SessionId,
+        run_id: &FlowRunId,
+        principal: &str,
+    ) -> Result<crate::RunCancellationCommit> {
         let actor = self
-            .sessions
-            .lock()
-            .unwrap()
-            .values()
-            .find(|entry| entry.owns(principal) && entry.view().runs.contains_key(run_id))
-            .cloned();
-        match actor {
-            Some(actor) => actor.cancel_run(run_id.clone()).await,
-            None => Ok(false),
-        }
+            .authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.cancel_run(run_id.clone()).await
     }
 
     pub(crate) async fn interject_run(

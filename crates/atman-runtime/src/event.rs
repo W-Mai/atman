@@ -103,6 +103,9 @@ pub enum Event {
         flow_name: String,
         status: FlowStatus,
     },
+    RunCancelRequested {
+        run_id: FlowRunId,
+    },
     WorkspaceLifecycle {
         run_id: FlowRunId,
         workspace_id: String,

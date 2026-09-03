@@ -7,8 +7,8 @@ use atman_proto::{
     FormSubmission, GetSessionUpdatesResponse, ListPermissionRequestsResponse,
     PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView, PermissionRequestView,
     PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    PromptResolutionStatus, ResolvePermissionRequestsResponse, ResyncRequired, ServerEvent,
-    SessionId, SessionProjection, SessionSummary,
+    PromptResolutionStatus, ResolvePermissionRequestsResponse, ResyncRequired,
+    RunCancellationStatus, ServerEvent, SessionId, SessionProjection, SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -41,6 +41,12 @@ pub(crate) struct LiveRunView {
 
 pub(crate) struct InterjectionCommit {
     pub injection_id: uuid::Uuid,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub struct RunCancellationCommit {
+    pub status: RunCancellationStatus,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -178,8 +184,8 @@ impl SessionActorHandle {
         self.tx.send(Command::FinishRun { run_id }).is_ok()
     }
 
-    pub async fn cancel_run(&self, run_id: FlowRunId) -> Result<bool> {
-        request(&self.tx, |reply| Command::CancelRun { run_id, reply }).await
+    pub async fn cancel_run(&self, run_id: FlowRunId) -> Result<RunCancellationCommit> {
+        request(&self.tx, |reply| Command::CancelRun { run_id, reply }).await?
     }
 
     pub async fn interject(
@@ -349,7 +355,7 @@ enum Command {
     },
     CancelRun {
         run_id: FlowRunId,
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<RunCancellationCommit>>,
     },
     Interject {
         run_id: FlowRunId,
@@ -542,11 +548,8 @@ impl SessionActor {
                 }
             }
             Command::CancelRun { run_id, reply } => {
-                let cancelled = self.runs.get(&run_id).is_some_and(|run| {
-                    run.cancel.cancel();
-                    true
-                });
-                let _ = reply.send(cancelled);
+                let result = self.cancel_run(run_id);
+                let _ = reply.send(result);
             }
             Command::Interject {
                 run_id,
@@ -663,6 +666,29 @@ impl SessionActor {
         }
         Ok(InterjectionCommit {
             injection_id: injection_id.0,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn cancel_run(&mut self, run_id: FlowRunId) -> Result<RunCancellationCommit> {
+        let status = match self.runs.get(&run_id) {
+            None => RunCancellationStatus::NotFound,
+            Some(run) if run.cancel.is_cancelled() => RunCancellationStatus::AlreadyRequested,
+            Some(run) => {
+                let cancel = run.cancel.clone();
+                let event = self.session.sink().emit_returning_envelope(
+                    atman_runtime::event::Event::RunCancelRequested {
+                        run_id: atman_runtime::event::FlowRunId(run_id.0),
+                    },
+                );
+                self.catch_up_through(event.seq)?;
+                cancel.cancel();
+                RunCancellationStatus::Accepted
+            }
+        };
+        Ok(RunCancellationCommit {
+            status,
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })
