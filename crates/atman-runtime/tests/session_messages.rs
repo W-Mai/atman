@@ -158,6 +158,25 @@ fn drain_injections_marks_pending_as_injected_and_returns_in_order() {
     assert_eq!(drained[1].text, "second");
     assert_eq!(drained[0].state, atman_runtime::InjectionState::Injected);
 
+    let first_states = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            atman_runtime::Event::UserInject { injection, .. } if injection.id == id1 => {
+                Some(injection.state)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_states,
+        vec![
+            atman_runtime::InjectionState::Pending,
+            atman_runtime::InjectionState::Injected,
+        ]
+    );
+
     let second_drain = session.drain_injections(&turn_id);
     assert!(second_drain.is_empty(), "drain twice should be empty");
 }
@@ -167,13 +186,25 @@ fn end_turn_marks_pending_injections_cancelled() {
     let session = Session::open_ephemeral();
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
-    session.enqueue_injection("orphan").unwrap();
+    let injection_id = session.enqueue_injection("orphan").unwrap();
     assert_eq!(session.list_pending_injections().len(), 1);
     session.end_turn();
     assert!(
         session.list_pending_injections().is_empty(),
         "end_turn should cancel pending injections"
     );
+    let final_state = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            atman_runtime::Event::UserInject { injection, .. } if injection.id == injection_id => {
+                Some(injection.state)
+            }
+            _ => None,
+        })
+        .next_back();
+    assert_eq!(final_state, Some(atman_runtime::InjectionState::Cancelled));
 }
 
 #[test]

@@ -260,6 +260,138 @@ async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn interjection_targets_one_run_and_retries_without_duplication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let flow_path = project_root.join("wait.at");
+    std::fs::write(
+        &flow_path,
+        "flow wait() -> string {\n    sleep(ms: 2000)\n    return \"done\"\n}\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(data_dir));
+    state.set_launcher(Arc::new(
+        RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap(),
+    ));
+    let created = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(
+            1,
+            &atman_proto::CreateSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                project_root: Some(project_root.to_string_lossy().into_owned()),
+                title: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let session_id = created.projection.metadata.id;
+    let running = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(
+            2,
+            &atman_proto::StartRunRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: session_id.clone(),
+                flow_path: flow_path.to_string_lossy().into_owned(),
+                args: serde_json::Map::new(),
+                reasoning: None,
+                images: Vec::new(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::StartRun>()
+    .unwrap();
+    let events_path = state
+        .sessions_root()
+        .join(session_id.to_string())
+        .join("events.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::fs::read_to_string(&events_path)
+            .unwrap_or_default()
+            .contains("\"type\":\"turn_start\"")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run did not start its turn"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let request = atman_proto::InterjectSessionRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: session_id.clone(),
+        run_id: running.run_id.clone(),
+        text: "stop this run".into(),
+        level: atman_proto::InterjectionLevel::HardStop,
+        redirect_target: None,
+    };
+    let committed = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(3, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::InterjectSession>()
+    .unwrap();
+    let retried = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(4, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::InterjectSession>()
+    .unwrap();
+    assert_eq!(retried, committed);
+    assert_eq!(committed.run_id, running.run_id);
+    assert_eq!(committed.state, atman_proto::InterjectionState::Pending);
+    assert!(committed.revision.0 > running.revision.0);
+    assert!(committed.cursor.0 > running.cursor.0);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let projection = loop {
+        let snapshot = state
+            .session_snapshot(&session_id, "local-daemon")
+            .await
+            .unwrap();
+        if snapshot
+            .projection
+            .interactions
+            .interjections
+            .iter()
+            .any(|item| item.state == atman_proto::InterjectionState::Cancelled)
+        {
+            break snapshot.projection;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "interjection did not reach a terminal state"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(projection.interactions.interjections.len(), 1);
+    let projected = &projection.interactions.interjections[0];
+    assert_eq!(projected.id, committed.injection_id);
+    assert_eq!(projected.run_id.as_ref(), Some(&running.run_id));
+    assert_eq!(projected.state, atman_proto::InterjectionState::Cancelled);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn start_run_reopens_persisted_session_after_daemon_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");

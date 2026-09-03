@@ -291,6 +291,7 @@ pub mod methods {
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const CREATE_SESSION: &str = "session.create";
     pub const SEND_MESSAGE: &str = "session.send_message";
+    pub const INTERJECT_SESSION: &str = "session.interject";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
@@ -307,6 +308,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::Ping>(),
         super::method_descriptor::<super::rpc::CreateSession>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
+        super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
         super::method_descriptor::<super::rpc::StartRun>(),
@@ -418,6 +420,45 @@ pub struct SendMessageRequest {
 pub struct SendMessageResponse {
     pub session_id: SessionId,
     pub run_id: FlowRunId,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InterjectionLevel {
+    Nudge,
+    CourseCorrect,
+    Redirect,
+    HardStop,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InterjectionState {
+    Pending,
+    Injected,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InterjectSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub run_id: FlowRunId,
+    pub text: String,
+    pub level: InterjectionLevel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InterjectSessionResponse {
+    pub session_id: SessionId,
+    pub run_id: FlowRunId,
+    pub injection_id: Uuid,
+    pub state: InterjectionState,
     pub revision: Revision,
     pub cursor: EventCursor,
 }
@@ -698,6 +739,13 @@ pub mod rpc {
         Command,
         SendMessageRequest,
         SendMessageResponse
+    );
+    method!(
+        InterjectSession,
+        methods::INTERJECT_SESSION,
+        Command,
+        InterjectSessionRequest,
+        InterjectSessionResponse
     );
     method!(
         ListSessions,

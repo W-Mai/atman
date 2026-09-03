@@ -63,6 +63,8 @@ pub struct Injection {
     pub id: InjectionId,
     pub text: String,
     pub turn_id: TurnId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_run_id: Option<crate::event::FlowRunId>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub state: InjectionState,
     #[serde(default = "default_level")]
@@ -88,10 +90,21 @@ impl Injection {
         level: InjectionLevel,
         redirect_target: Option<String>,
     ) -> Self {
+        Self::with_level_for_run(turn_id, text, level, redirect_target, None)
+    }
+
+    pub fn with_level_for_run(
+        turn_id: TurnId,
+        text: impl Into<String>,
+        level: InjectionLevel,
+        redirect_target: Option<String>,
+        flow_run_id: Option<crate::event::FlowRunId>,
+    ) -> Self {
         Self {
             id: InjectionId::now(),
             text: text.into(),
             turn_id,
+            flow_run_id,
             created_at: chrono::Utc::now(),
             state: InjectionState::Pending,
             level,
@@ -164,6 +177,7 @@ mod tests {
             id: InjectionId::now(),
             text: "pattern found".into(),
             turn_id: TurnId::now(),
+            flow_run_id: None,
             created_at: chrono::Utc::now(),
             state: InjectionState::Pending,
             level: crate::injection::InjectionLevel::L1Nudge,

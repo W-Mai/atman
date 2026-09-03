@@ -1,7 +1,7 @@
 use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
-    GetSessionSnapshotRequest, GetSessionUpdatesRequest, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
+    GetSessionSnapshotRequest, GetSessionUpdatesRequest, InterjectSessionResponse, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
     PermissionRpcScope, PingResponse, ProtocolLimits, RequestId, ResolvePromptResponse, RpcMethod,
     RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse, method_descriptor,
     methods, rpc,
@@ -39,6 +39,23 @@ fn permission_scope(
             workspace_relative_path,
         },
     })
+}
+
+fn interjection_level(
+    level: atman_proto::InterjectionLevel,
+) -> atman_runtime::injection::InjectionLevel {
+    match level {
+        atman_proto::InterjectionLevel::Nudge => atman_runtime::injection::InjectionLevel::L1Nudge,
+        atman_proto::InterjectionLevel::CourseCorrect => {
+            atman_runtime::injection::InjectionLevel::L2CourseCorrect
+        }
+        atman_proto::InterjectionLevel::Redirect => {
+            atman_runtime::injection::InjectionLevel::L3Redirect
+        }
+        atman_proto::InterjectionLevel::HardStop => {
+            atman_runtime::injection::InjectionLevel::L4HardStop
+        }
+    }
 }
 
 fn runtime_args(
@@ -123,6 +140,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::Ping>(),
     method_descriptor::<rpc::CreateSession>(),
     method_descriptor::<rpc::SendMessage>(),
+    method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
     method_descriptor::<rpc::StartRun>(),
@@ -303,6 +321,65 @@ pub async fn dispatch_as(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        methods::INTERJECT_SESSION => match parse_params::<rpc::InterjectSession>(req.params) {
+            Ok(params) if !params.text.trim().is_empty() => {
+                let redirect_is_valid = match params.level {
+                    atman_proto::InterjectionLevel::Redirect => params
+                        .redirect_target
+                        .as_deref()
+                        .is_some_and(|target| !target.trim().is_empty()),
+                    _ => params.redirect_target.is_none(),
+                };
+                if !redirect_is_valid {
+                    return JsonRpcResponse::err(
+                        id,
+                        JsonRpcError::invalid_params(
+                            "redirect_target is required only for redirect interjections",
+                        ),
+                    );
+                }
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::InterjectSession, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let commit = operation_state
+                            .interject_run(
+                                &operation_params.session_id,
+                                operation_params.run_id.clone(),
+                                operation_params.text,
+                                interjection_level(operation_params.level),
+                                operation_params.redirect_target,
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(InterjectSessionResponse {
+                            session_id: operation_params.session_id,
+                            run_id: operation_params.run_id,
+                            injection_id: commit.injection_id,
+                            state: atman_proto::InterjectionState::Pending,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
+                        })
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(response) => method_response::<rpc::InterjectSession>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Ok(_) => JsonRpcResponse::err(
+                id,
+                JsonRpcError::invalid_params("interjection text must not be empty"),
+            ),
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
             Ok(params) if !params.title.trim().is_empty() => {
                 let operation_state = state.clone();

@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{DaemonGeneration, EventCursor, FlowRunId, NameSource, Revision, SessionId};
+use crate::{
+    DaemonGeneration, EventCursor, FlowRunId, InterjectionLevel, InterjectionState, NameSource,
+    Revision, SessionId,
+};
 
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const PROJECTION_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -471,6 +474,34 @@ pub struct InteractionProjection {
     pub forms: Vec<PendingFormProjection>,
     #[serde(default)]
     pub compact_review: Option<CompactReviewProjection>,
+    #[serde(default)]
+    pub interjections: Vec<InterjectionProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InterjectionProjection {
+    pub id: Uuid,
+    pub turn_id: TurnId,
+    #[serde(default)]
+    pub run_id: Option<FlowRunId>,
+    pub text: String,
+    pub level: InterjectionLevel,
+    pub state: InterjectionState,
+    #[serde(default)]
+    pub redirect_target: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub source: InterjectionSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InterjectionSource {
+    User,
+    Watcher {
+        watcher_id: String,
+        kind: String,
+        handle: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

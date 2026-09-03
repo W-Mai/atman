@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use atman_proto::{
     ApprovalGroupProjection, ApprovalRequestProjection, ApprovalState, ApprovalTarget,
-    ContextProjection, FlowRunId, ImageDetail, InteractionProjection, LlmUsageProjection,
-    McpServerProjection, MessageOrigin, MessagePart, MessageProjection, MessageRole, NameSource,
-    NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId,
-    ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
-    SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
-    TodoState, TranscriptItem, TurnId, UsageProjection, WorkflowNodeKind, WorkflowNodeProjection,
-    WorkflowNodeState, WorkflowProjection,
+    ContextProjection, FlowRunId, ImageDetail, InteractionProjection, InterjectionProjection,
+    InterjectionSource, LlmUsageProjection, McpServerProjection, MessageOrigin, MessagePart,
+    MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection,
+    ProjectionChange, ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState,
+    Revision, RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
+    SessionProjection, TodoProjection, TodoState, TranscriptItem, TurnId, UsageProjection,
+    WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState, WorkflowProjection,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -113,6 +113,11 @@ impl SessionProjector {
         self.projection.interactions.prompts.clear();
         self.projection.interactions.forms.clear();
         self.projection.interactions.compact_review = None;
+        for interjection in &mut self.projection.interactions.interjections {
+            if interjection.state == atman_proto::InterjectionState::Pending {
+                interjection.state = atman_proto::InterjectionState::Cancelled;
+            }
+        }
         for approval in &mut self.projection.interactions.approvals {
             if matches!(
                 approval.state,
@@ -460,6 +465,24 @@ impl SessionProjector {
                         interactions: self.projection.interactions.clone(),
                     });
                 }
+            }
+            Event::UserInject { injection, .. } => {
+                let interjection = interjection_projection(injection);
+                self.projection
+                    .interactions
+                    .interjections
+                    .retain(|item| item.id != interjection.id);
+                self.projection
+                    .interactions
+                    .interjections
+                    .push(interjection);
+                self.projection
+                    .interactions
+                    .interjections
+                    .sort_by_key(|item| item.created_at);
+                changes.push(ProjectionChange::InteractionsSet {
+                    interactions: self.projection.interactions.clone(),
+                });
             }
             Event::PermissionRequestCreated { payload }
             | Event::PermissionRequestTargeted { payload }
@@ -962,6 +985,59 @@ fn message_projection(message: &atman_runtime::message::Message) -> MessageProje
         },
         turn_id: TurnId(message.turn_id.0),
         parts: message.parts.iter().map(message_part).collect(),
+    }
+}
+
+fn interjection_projection(
+    injection: &atman_runtime::injection::Injection,
+) -> InterjectionProjection {
+    InterjectionProjection {
+        id: injection.id.0,
+        turn_id: TurnId(injection.turn_id.0),
+        run_id: injection
+            .flow_run_id
+            .as_ref()
+            .map(|run_id| FlowRunId(run_id.0)),
+        text: injection.text.clone(),
+        level: match injection.level {
+            atman_runtime::injection::InjectionLevel::L1Nudge => {
+                atman_proto::InterjectionLevel::Nudge
+            }
+            atman_runtime::injection::InjectionLevel::L2CourseCorrect => {
+                atman_proto::InterjectionLevel::CourseCorrect
+            }
+            atman_runtime::injection::InjectionLevel::L3Redirect => {
+                atman_proto::InterjectionLevel::Redirect
+            }
+            atman_runtime::injection::InjectionLevel::L4HardStop => {
+                atman_proto::InterjectionLevel::HardStop
+            }
+        },
+        state: match injection.state {
+            atman_runtime::injection::InjectionState::Pending => {
+                atman_proto::InterjectionState::Pending
+            }
+            atman_runtime::injection::InjectionState::Injected => {
+                atman_proto::InterjectionState::Injected
+            }
+            atman_runtime::injection::InjectionState::Cancelled => {
+                atman_proto::InterjectionState::Cancelled
+            }
+        },
+        redirect_target: injection.redirect_target.clone(),
+        created_at: injection.created_at,
+        source: match &injection.source {
+            atman_runtime::injection::InjectionSource::User => InterjectionSource::User,
+            atman_runtime::injection::InjectionSource::Watcher {
+                watcher_id,
+                kind,
+                handle,
+            } => InterjectionSource::Watcher {
+                watcher_id: watcher_id.clone(),
+                kind: kind.clone(),
+                handle: handle.clone(),
+            },
+        },
     }
 }
 

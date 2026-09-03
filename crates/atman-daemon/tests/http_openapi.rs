@@ -49,6 +49,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
     for method in [
         "daemon.capabilities",
         "session.send_message",
+        "session.interject",
         "list_permission_requests",
         "create_permission_group",
         "resolve_permission_requests",
@@ -71,6 +72,10 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "CreateSessionRequest",
         "SendMessageRequest",
         "SendMessageResponse",
+        "InterjectSessionRequest",
+        "InterjectSessionResponse",
+        "InterjectionLevel",
+        "InterjectionState",
         "StartRunRequest",
         "StartRunResponse",
         "RunFlowRequest",

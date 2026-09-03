@@ -518,6 +518,21 @@ impl DaemonState {
         }
     }
 
+    pub(crate) async fn interject_run(
+        &self,
+        session_id: &SessionId,
+        run_id: FlowRunId,
+        text: String,
+        level: atman_runtime::injection::InjectionLevel,
+        redirect_target: Option<String>,
+        principal: &str,
+    ) -> Result<crate::session_actor::InterjectionCommit> {
+        let actor = self
+            .authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.interject(run_id, text, level, redirect_target).await
+    }
+
     pub async fn rename_session(
         &self,
         sid: &SessionId,

@@ -36,6 +36,12 @@ pub(crate) struct LiveRunView {
     pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub(crate) struct InterjectionCommit {
+    pub injection_id: uuid::Uuid,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
 impl SessionActorView {
     pub fn is_live(&self) -> bool {
         !self.runs.is_empty()
@@ -151,6 +157,23 @@ impl SessionActorHandle {
         request(&self.tx, |reply| Command::CancelRun { run_id, reply }).await
     }
 
+    pub async fn interject(
+        &self,
+        run_id: FlowRunId,
+        text: String,
+        level: atman_runtime::injection::InjectionLevel,
+        redirect_target: Option<String>,
+    ) -> Result<InterjectionCommit> {
+        request(&self.tx, |reply| Command::Interject {
+            run_id,
+            text,
+            level,
+            redirect_target,
+            reply,
+        })
+        .await?
+    }
+
     pub async fn rename(&self, title: String) -> Result<SessionSummary> {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
     }
@@ -257,6 +280,13 @@ enum Command {
     CancelRun {
         run_id: FlowRunId,
         reply: oneshot::Sender<bool>,
+    },
+    Interject {
+        run_id: FlowRunId,
+        text: String,
+        level: atman_runtime::injection::InjectionLevel,
+        redirect_target: Option<String>,
+        reply: oneshot::Sender<Result<InterjectionCommit>>,
     },
     Rename {
         title: String,
@@ -420,6 +450,16 @@ impl SessionActor {
                 });
                 let _ = reply.send(cancelled);
             }
+            Command::Interject {
+                run_id,
+                text,
+                level,
+                redirect_target,
+                reply,
+            } => {
+                let result = self.interject(run_id, text, level, redirect_target);
+                let _ = reply.send(result);
+            }
             Command::Rename { title, reply } => {
                 let result = self.rename(title);
                 let _ = reply.send(result);
@@ -478,6 +518,40 @@ impl SessionActor {
         self.revision = self.revision.saturating_add(1);
         self.view_tx
             .send_replace(view_for(self.revision, &self.runs, &self.projection));
+    }
+
+    fn interject(
+        &mut self,
+        run_id: FlowRunId,
+        text: String,
+        level: atman_runtime::injection::InjectionLevel,
+        redirect_target: Option<String>,
+    ) -> Result<InterjectionCommit> {
+        let run = self.runs.get(&run_id).ok_or_else(|| {
+            anyhow::anyhow!("run {run_id} is not active in session {}", self.session_id)
+        })?;
+        let cancel = run.cancel.clone();
+        let (injection_id, event) = self
+            .session
+            .enqueue_injection_for_run(
+                text,
+                level,
+                redirect_target,
+                Some(atman_runtime::event::FlowRunId(run_id.0)),
+            )
+            .map_err(anyhow::Error::from)?;
+        let delta = self.projection.apply_envelope(&event).ok_or_else(|| {
+            anyhow::anyhow!("interjection event did not advance the session projection")
+        })?;
+        self.publish_projection_delta(delta);
+        if level == atman_runtime::injection::InjectionLevel::L4HardStop {
+            cancel.cancel();
+        }
+        Ok(InterjectionCommit {
+            injection_id: injection_id.0,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
     }
 
     fn publish_projection_delta(&mut self, delta: ProjectionDelta) {

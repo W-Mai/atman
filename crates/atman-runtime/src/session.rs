@@ -2346,13 +2346,17 @@ impl Session {
         let turn_id = self.turn.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
             let mut q = self.injection_queue.lock().unwrap();
+            let mut cancelled = Vec::new();
             for inj in q.iter_mut() {
                 if inj.state == InjectionState::Pending && inj.turn_id == turn_id {
                     inj.state = InjectionState::Cancelled;
-                    let _ = self.injection_tx.send(inj.clone());
+                    cancelled.push(inj.clone());
                 }
             }
             drop(q);
+            for injection in cancelled {
+                self.publish_injection_update(injection);
+            }
             self.sink.emit(Event::TurnEnd {
                 turn_id: turn_id.clone(),
             });
@@ -2378,6 +2382,17 @@ impl Session {
         level: crate::injection::InjectionLevel,
         redirect_target: Option<String>,
     ) -> Result<InjectionId, EnqueueError> {
+        self.enqueue_injection_for_run(text, level, redirect_target, None)
+            .map(|(id, _)| id)
+    }
+
+    pub fn enqueue_injection_for_run(
+        &self,
+        text: impl Into<String>,
+        level: crate::injection::InjectionLevel,
+        redirect_target: Option<String>,
+        flow_run_id: Option<crate::event::FlowRunId>,
+    ) -> Result<(InjectionId, crate::event::EventEnvelope), EnqueueError> {
         let turn_id = self
             .turn
             .current_turn
@@ -2385,15 +2400,21 @@ impl Session {
             .unwrap()
             .clone()
             .ok_or(EnqueueError::NoActiveTurn)?;
-        let inj = Injection::with_level(turn_id.clone(), text, level, redirect_target);
+        let inj = Injection::with_level_for_run(
+            turn_id.clone(),
+            text,
+            level,
+            redirect_target,
+            flow_run_id,
+        );
         let id = inj.id.clone();
-        self.sink.emit(Event::UserInject {
+        let envelope = self.sink.emit_returning_envelope(Event::UserInject {
             turn_id,
             injection: inj.clone(),
         });
         self.injection_queue.lock().unwrap().push(inj.clone());
         let _ = self.injection_tx.send(inj);
-        Ok(id)
+        Ok((id, envelope))
     }
 
     pub fn subscribe_injections(&self) -> broadcast::Receiver<Injection> {
@@ -2402,12 +2423,16 @@ impl Session {
 
     pub fn mark_injection_consumed(&self, id: &InjectionId) {
         let mut q = self.injection_queue.lock().unwrap();
-        for inj in q.iter_mut() {
+        let updated = q.iter_mut().find_map(|inj| {
             if inj.id == *id && inj.state == InjectionState::Pending {
                 inj.state = InjectionState::Injected;
-                let _ = self.injection_tx.send(inj.clone());
-                return;
+                return Some(inj.clone());
             }
+            None
+        });
+        drop(q);
+        if let Some(injection) = updated {
+            self.publish_injection_update(injection);
         }
     }
 
@@ -2430,11 +2455,22 @@ impl Session {
         for inj in q.iter_mut() {
             if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
                 inj.state = InjectionState::Injected;
-                let _ = self.injection_tx.send(inj.clone());
                 out.push(inj.clone());
             }
         }
+        drop(q);
+        for injection in &out {
+            self.publish_injection_update(injection.clone());
+        }
         out
+    }
+
+    fn publish_injection_update(&self, injection: Injection) {
+        self.sink.emit(Event::UserInject {
+            turn_id: injection.turn_id.clone(),
+            injection: injection.clone(),
+        });
+        let _ = self.injection_tx.send(injection);
     }
 
     pub fn list_pending_injections(&self) -> Vec<Injection> {
