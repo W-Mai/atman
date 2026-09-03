@@ -85,6 +85,7 @@ impl SessionActorHandle {
         let todos_rx = session.subscribe_todos();
         let plans_rx = session.subscribe_plans();
         let context_rx = session.subscribe_context();
+        let forms_rx = session.forms().subscribe();
         let mut projection = restored_projection.unwrap_or_else(|| {
             SessionProjector::from_events(
                 session_id.clone(),
@@ -96,6 +97,7 @@ impl SessionActorHandle {
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
+        projection.set_forms(forms_rx.borrow().clone());
         for run in &initial_runs {
             projection.register_run(run.run_id.clone(), run.flow_name.clone(), run.started_at);
         }
@@ -126,6 +128,7 @@ impl SessionActorHandle {
             todos_rx,
             plans_rx,
             context_rx,
+            forms_rx,
             _permission_client: session.permission_broker().register_client(),
         };
         tokio::spawn(actor.run());
@@ -257,7 +260,6 @@ impl SessionActorHandle {
         let receiver = request(&self.tx, |reply| Command::SubscribeUpdates { reply }).await?;
         Ok((receiver, self.session.sink().redactor()))
     }
-
     pub async fn list_permissions(&self) -> Result<ListPermissionRequestsResponse> {
         request(&self.tx, |reply| Command::ListPermissions { reply }).await
     }
@@ -391,6 +393,7 @@ enum ActorInput {
     Todos(Result<(), watch::error::RecvError>),
     Plans(Result<(), watch::error::RecvError>),
     Context(Result<(), watch::error::RecvError>),
+    Forms(Result<(), watch::error::RecvError>),
 }
 
 struct SessionActor {
@@ -412,6 +415,7 @@ struct SessionActor {
     todos_rx: watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>,
     plans_rx: watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>,
     context_rx: watch::Receiver<atman_runtime::ContextSnapshot>,
+    forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
 }
 
@@ -425,6 +429,7 @@ impl SessionActor {
                 changed = self.todos_rx.changed() => ActorInput::Todos(changed),
                 changed = self.plans_rx.changed() => ActorInput::Plans(changed),
                 changed = self.context_rx.changed() => ActorInput::Context(changed),
+                changed = self.forms_rx.changed() => ActorInput::Forms(changed),
             };
             match input {
                 ActorInput::Command(None) => break,
@@ -458,10 +463,17 @@ impl SessionActor {
                         self.publish_projection_delta(delta);
                     }
                 }
+                ActorInput::Forms(Ok(())) => {
+                    let forms = self.forms_rx.borrow_and_update().clone();
+                    if let Some(delta) = self.projection.set_forms(forms) {
+                        self.publish_projection_delta(delta);
+                    }
+                }
                 ActorInput::Goal(Err(_))
                 | ActorInput::Todos(Err(_))
                 | ActorInput::Plans(Err(_))
-                | ActorInput::Context(Err(_)) => break,
+                | ActorInput::Context(Err(_))
+                | ActorInput::Forms(Err(_)) => break,
             }
         }
     }
@@ -768,6 +780,7 @@ impl SessionActor {
         self.projection.set_plans(self.plans_rx.borrow().clone());
         self.projection
             .set_context(self.context_rx.borrow().clone());
+        self.projection.set_forms(self.forms_rx.borrow().clone());
         self.projection.rebase_after_rebuild(previous_revision);
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
         self.updates.clear();

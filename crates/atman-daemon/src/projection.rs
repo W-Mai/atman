@@ -647,6 +647,24 @@ impl SessionProjector {
         ])
     }
 
+    pub(crate) fn set_forms(
+        &mut self,
+        forms: Vec<atman_runtime::form::PendingForm>,
+    ) -> Option<ProjectionDelta> {
+        let mut forms = forms
+            .iter()
+            .map(pending_form_projection)
+            .collect::<Vec<_>>();
+        forms.sort_by_key(|form| form.emitted_at);
+        if self.projection.interactions.forms == forms {
+            return None;
+        }
+        self.projection.interactions.forms = forms;
+        self.commit(vec![ProjectionChange::InteractionsSet {
+            interactions: self.projection.interactions.clone(),
+        }])
+    }
+
     fn refresh_usage(&mut self) {
         self.projection.usage = merged_usage(&self.event_usage, &self.watch_usage);
     }
@@ -1038,6 +1056,82 @@ fn interjection_projection(
                 handle: handle.clone(),
             },
         },
+    }
+}
+
+fn pending_form_projection(
+    pending: &atman_runtime::form::PendingForm,
+) -> atman_proto::PendingFormProjection {
+    atman_proto::PendingFormProjection {
+        id: pending.form_id.clone(),
+        run_id: FlowRunId(pending.run_id.0),
+        tool_use_id: pending.tool_use_id.clone(),
+        emitted_at: pending.emitted_at,
+        questions: pending
+            .form
+            .questions
+            .iter()
+            .map(|question| {
+                let (kind, prompt, options, min, max, placeholder, multiline) = match &question.kind
+                {
+                    atman_runtime::form::FormKind::Confirm { prompt } => (
+                        atman_proto::FormQuestionKind::Confirm,
+                        prompt.clone(),
+                        Vec::new(),
+                        None,
+                        None,
+                        None,
+                        false,
+                    ),
+                    atman_runtime::form::FormKind::SingleSelect { prompt, options } => (
+                        atman_proto::FormQuestionKind::SingleSelect,
+                        prompt.clone(),
+                        options.clone(),
+                        None,
+                        None,
+                        None,
+                        false,
+                    ),
+                    atman_runtime::form::FormKind::MultiSelect {
+                        prompt,
+                        options,
+                        min,
+                        max,
+                    } => (
+                        atman_proto::FormQuestionKind::MultiSelect,
+                        prompt.clone(),
+                        options.clone(),
+                        *min,
+                        *max,
+                        None,
+                        false,
+                    ),
+                    atman_runtime::form::FormKind::Text {
+                        prompt,
+                        placeholder,
+                        multiline,
+                    } => (
+                        atman_proto::FormQuestionKind::Text,
+                        prompt.clone(),
+                        Vec::new(),
+                        None,
+                        None,
+                        placeholder.clone(),
+                        *multiline,
+                    ),
+                };
+                atman_proto::FormQuestionProjection {
+                    id: question.id.clone(),
+                    kind,
+                    prompt,
+                    options,
+                    min,
+                    max,
+                    placeholder,
+                    multiline,
+                }
+            })
+            .collect(),
     }
 }
 

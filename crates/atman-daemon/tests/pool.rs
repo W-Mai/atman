@@ -180,6 +180,79 @@ async fn session_actor_projects_durable_events_and_watch_state() {
 }
 
 #[tokio::test]
+async fn session_actor_projects_pending_forms_until_submission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    state
+        .register_session(sid.clone(), session.clone(), "alice")
+        .await
+        .unwrap();
+
+    let form_id = "form-1".to_string();
+    let response = session.forms().request(atman_runtime::form::PendingForm {
+        form_id: form_id.clone(),
+        run_id: atman_runtime::event::FlowRunId(Uuid::now_v7()),
+        tool_use_id: "tool-1".into(),
+        form: atman_runtime::form::CompositeForm {
+            questions: vec![atman_runtime::form::FormQuestion {
+                id: "target".into(),
+                kind: atman_runtime::form::FormKind::Text {
+                    prompt: "Target directory".into(),
+                    placeholder: Some("/tmp/example".into()),
+                    multiline: false,
+                },
+            }],
+        },
+        kind: atman_runtime::form::FormKind::Text {
+            prompt: "Target directory".into(),
+            placeholder: Some("/tmp/example".into()),
+            multiline: false,
+        },
+        emitted_at: chrono::Utc::now(),
+    });
+
+    let projected = loop {
+        let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+        if let Some(form) = snapshot.projection.interactions.forms.first() {
+            break form.clone();
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(projected.id, form_id);
+    assert_eq!(projected.questions[0].id, "target");
+    assert_eq!(
+        projected.questions[0].kind,
+        atman_proto::FormQuestionKind::Text
+    );
+    assert_eq!(
+        projected.questions[0].placeholder.as_deref(),
+        Some("/tmp/example")
+    );
+
+    assert!(session.forms().submit(
+        &form_id,
+        atman_runtime::form::FormSubmission::Submitted {
+            answers: vec![atman_runtime::form::FormAnswer::TextEntered {
+                text: "/tmp/target".into(),
+            }],
+        },
+    ));
+    assert!(matches!(
+        response.await.unwrap(),
+        atman_runtime::form::FormSubmission::Submitted { .. }
+    ));
+    loop {
+        let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+        if snapshot.projection.interactions.forms.is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
 async fn live_snapshot_is_actor_consistent_and_redacted() {
     let tmp = tempfile::tempdir().unwrap();
     let state = DaemonState::new_with_generation(tmp.path().to_path_buf(), "generation-a".into());
