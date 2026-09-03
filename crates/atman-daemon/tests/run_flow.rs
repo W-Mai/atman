@@ -259,6 +259,93 @@ async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn start_run_reopens_persisted_session_after_daemon_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+
+    let historical = atman_runtime::Session::open(&data_dir).unwrap();
+    let session_id = atman_proto::SessionId(historical.id().0);
+    let mut metadata = historical.meta().unwrap_or_default();
+    metadata.rebase(&project_root);
+    metadata.save(historical.dir()).unwrap();
+    historical.append_message(
+        atman_runtime::message::Message::user_text(
+            atman_runtime::event::TurnId::now(),
+            "persisted before restart",
+        ),
+        None,
+    );
+    historical.flush_writer().await;
+    historical.shutdown().await;
+    drop(historical);
+
+    let state = Arc::new(DaemonState::new_with_generation(
+        data_dir,
+        "after-restart".into(),
+    ));
+    state.set_launcher(Arc::new(
+        RunLauncher::new(project_root, Some(config_dir), None).unwrap(),
+    ));
+    let started = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(
+            1,
+            &atman_proto::StartRunRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: session_id.clone(),
+                flow_path: repo_root()
+                    .join("examples/hello.at")
+                    .to_string_lossy()
+                    .into_owned(),
+                args: serde_json::Map::new(),
+                reasoning: None,
+                images: Vec::new(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::StartRun>()
+    .unwrap();
+    assert_eq!(started.session_id, session_id);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while state.has_live_runs(&session_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reopened run did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let snapshot = state
+        .session_snapshot(&session_id, "local-daemon")
+        .await
+        .unwrap();
+    assert_eq!(snapshot.daemon_generation.0, "after-restart");
+    assert!(snapshot.projection.transcript.iter().any(|item| {
+        let atman_proto::TranscriptItem::Message { message, .. } = item else {
+            return false;
+        };
+        message.parts.iter().any(|part| {
+            matches!(
+                part,
+                atman_proto::MessagePart::Text { text }
+                    if text == "persisted before restart"
+            )
+        })
+    }));
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

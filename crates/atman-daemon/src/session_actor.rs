@@ -61,17 +61,20 @@ impl SessionActorHandle {
         initial_runs: Vec<LiveRun>,
         owner_principal: String,
         daemon_generation: DaemonGeneration,
+        restored_projection: Option<SessionProjector>,
     ) -> Self {
         let events_rx = session.sink().subscribe();
         let goal_rx = session.subscribe_goal();
         let todos_rx = session.subscribe_todos();
         let plans_rx = session.subscribe_plans();
         let context_rx = session.subscribe_context();
-        let mut projection = SessionProjector::from_events(
-            session_id.clone(),
-            session.meta(),
-            &session.sink().snapshot_envelopes(),
-        );
+        let mut projection = restored_projection.unwrap_or_else(|| {
+            SessionProjector::from_events(
+                session_id.clone(),
+                session.meta(),
+                &session.sink().snapshot_envelopes(),
+            )
+        });
         projection.set_goal(goal_rx.borrow().clone());
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
@@ -340,7 +343,7 @@ impl SessionActor {
                             self.publish_projection_delta(delta);
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => self.rebuild_projection(),
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up_projection(),
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 ActorInput::Goal(Ok(())) => {
@@ -510,20 +513,18 @@ impl SessionActor {
         Ok(summary)
     }
 
-    fn rebuild_projection(&mut self) {
+    fn catch_up_projection(&mut self) {
         let requested_after = self.event_cursor;
         let previous_revision = self.projection.projection().revision;
-        let mut projection = SessionProjector::from_events(
-            self.session_id.clone(),
-            self.session.meta(),
-            &self.session.sink().snapshot_envelopes(),
-        );
-        projection.set_goal(self.goal_rx.borrow().clone());
-        projection.set_todos(self.todos_rx.borrow().clone());
-        projection.set_plans(self.plans_rx.borrow().clone());
-        projection.set_context(self.context_rx.borrow().clone());
-        projection.rebase_after_rebuild(previous_revision);
-        self.projection = projection;
+        for event in self.session.sink().snapshot_envelopes() {
+            self.projection.apply_envelope(&event);
+        }
+        self.projection.set_goal(self.goal_rx.borrow().clone());
+        self.projection.set_todos(self.todos_rx.borrow().clone());
+        self.projection.set_plans(self.plans_rx.borrow().clone());
+        self.projection
+            .set_context(self.context_rx.borrow().clone());
+        self.projection.rebase_after_rebuild(previous_revision);
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
         self.updates.clear();
         let _ = self.updates_tx.send(ProjectionEventEnvelope {

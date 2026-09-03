@@ -31,6 +31,7 @@ pub struct ReplayBundle {
     pub compacted_messages: Vec<(u64, Message)>,
     pub all_messages: Vec<(u64, Message)>,
     pub context: ContextSnapshot,
+    pub events: Vec<crate::event::EventEnvelope>,
 }
 
 #[derive(Debug, Default)]
@@ -165,11 +166,13 @@ impl SessionReplay {
                 observer.observe(entry);
             }
         }
+        let events = records.into_iter().map(|record| record.envelope).collect();
         ReplayBundle {
             last_seq,
             compacted_messages,
             all_messages,
             context,
+            events,
         }
     }
 }

@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::idempotency::IdempotencyRegistry;
+use crate::projection::SessionProjector;
 use crate::session_actor::{RunAdmission, SessionActorHandle};
 
 struct PendingPrompt {
@@ -23,10 +24,16 @@ pub struct DaemonState {
     data_dir: PathBuf,
     daemon_generation: String,
     sessions: Mutex<HashMap<SessionId, SessionActorHandle>>,
+    session_loads: Mutex<HashMap<SessionId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
     pub(crate) idempotency: IdempotencyRegistry,
+}
+
+pub(crate) struct LoadedSession {
+    pub session: std::sync::Arc<atman_runtime::Session>,
+    pub projection: SessionProjector,
 }
 
 #[derive(Clone)]
@@ -51,6 +58,7 @@ impl DaemonState {
             data_dir,
             daemon_generation,
             sessions: Mutex::new(HashMap::new()),
+            session_loads: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
@@ -172,6 +180,7 @@ impl DaemonState {
             vec![run],
             owner_principal.into(),
             RunAdmission::Concurrent,
+            None,
         )
         .await
     }
@@ -189,6 +198,7 @@ impl DaemonState {
             vec![run],
             owner_principal.into(),
             RunAdmission::IdleSession,
+            None,
         )
         .await
     }
@@ -205,6 +215,7 @@ impl DaemonState {
             Vec::new(),
             owner_principal.into(),
             RunAdmission::Concurrent,
+            None,
         )
         .await
     }
@@ -216,6 +227,7 @@ impl DaemonState {
         initial_runs: Vec<LiveRun>,
         owner_principal: String,
         admission: RunAdmission,
+        restored_projection: Option<SessionProjector>,
     ) -> Result<()> {
         let existing = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -230,6 +242,7 @@ impl DaemonState {
                         initial_runs.clone(),
                         owner_principal.clone(),
                         DaemonGeneration(self.daemon_generation.clone()),
+                        restored_projection,
                     ),
                 );
                 None
@@ -260,14 +273,58 @@ impl DaemonState {
             .cloned()
     }
 
-    pub(crate) fn runtime_session(
+    fn loaded_runtime_session(
         &self,
         id: &SessionId,
         principal: &str,
-    ) -> Result<std::sync::Arc<atman_runtime::Session>> {
-        self.authorized_actor(id, principal)
-            .map(|actor| actor.runtime_session())
-            .ok_or_else(|| anyhow::anyhow!("session is not open or permission was denied: {id}"))
+    ) -> Result<Option<std::sync::Arc<atman_runtime::Session>>> {
+        let actor = self.sessions.lock().unwrap().get(id).cloned();
+        let Some(actor) = actor else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            actor.owns(principal),
+            "session {id} is owned by another principal"
+        );
+        Ok(Some(actor.runtime_session()))
+    }
+
+    pub(crate) async fn get_or_load_session<F, Fut>(
+        &self,
+        id: &SessionId,
+        principal: &str,
+        load: F,
+    ) -> Result<std::sync::Arc<atman_runtime::Session>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<LoadedSession>>,
+    {
+        if let Some(session) = self.loaded_runtime_session(id, principal)? {
+            return Ok(session);
+        }
+        let load_gate = self
+            .session_loads
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _guard = load_gate.lock().await;
+        if let Some(session) = self.loaded_runtime_session(id, principal)? {
+            return Ok(session);
+        }
+        let restored = load().await?;
+        let session = restored.session;
+        self.register_session_with_runs(
+            id.clone(),
+            session.clone(),
+            Vec::new(),
+            principal.to_owned(),
+            RunAdmission::Concurrent,
+            Some(restored.projection),
+        )
+        .await?;
+        Ok(session)
     }
 
     pub fn owns_live_session(&self, id: &SessionId, principal: &str) -> bool {
@@ -674,5 +731,52 @@ impl DaemonState {
         }
         out.sort_by_key(|s| std::cmp::Reverse(s.id.0));
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_session_loads_share_one_runtime() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        let load_count = Arc::new(AtomicUsize::new(0));
+        let load = |state: Arc<DaemonState>| {
+            let session = session.clone();
+            let session_id = session_id.clone();
+            let projection_session_id = session_id.clone();
+            let load_count = load_count.clone();
+            async move {
+                state
+                    .get_or_load_session(&session_id, "owner", move || async move {
+                        load_count.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        Ok(LoadedSession {
+                            projection: SessionProjector::from_events(
+                                projection_session_id,
+                                session.meta(),
+                                &[],
+                            ),
+                            session,
+                        })
+                    })
+                    .await
+            }
+        };
+
+        let (first, second) = tokio::join!(load(state.clone()), load(state));
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(load_count.load(Ordering::SeqCst), 1);
     }
 }

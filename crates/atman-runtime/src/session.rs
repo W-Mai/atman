@@ -711,6 +711,11 @@ pub enum SessionOpenError {
     },
 }
 
+pub struct RestoredSession {
+    pub session: Session,
+    pub events: Vec<crate::event::EventEnvelope>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TrustUpdateError {
     #[error("persist session trust: {0}")]
@@ -990,7 +995,25 @@ impl Session {
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         global_trust: crate::trust::TrustConfig,
     ) -> Result<Self, SessionOpenError> {
-        Self::open_existing_with_context_trust_and_observer(
+        Ok(Self::restore_existing_with_context_trust_and_observer(
+            root,
+            sid,
+            redactor,
+            project_index,
+            global_trust,
+            None,
+        )?
+        .session)
+    }
+
+    pub fn restore_existing_with_context_and_trust(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+        global_trust: crate::trust::TrustConfig,
+    ) -> Result<RestoredSession, SessionOpenError> {
+        Self::restore_existing_with_context_trust_and_observer(
             root,
             sid,
             redactor,
@@ -1008,41 +1031,49 @@ impl Session {
         global_trust: crate::trust::TrustConfig,
         observer: &mut dyn TranscriptReplayObserver,
     ) -> Result<Self, SessionOpenError> {
-        Self::open_existing_with_context_trust_and_observer(
+        Ok(Self::restore_existing_with_context_trust_and_observer(
             root,
             sid,
             redactor,
             project_index,
             global_trust,
             Some(observer),
-        )
+        )?
+        .session)
     }
 
-    fn open_existing_with_context_trust_and_observer(
+    fn restore_existing_with_context_trust_and_observer(
         root: impl AsRef<Path>,
         sid: &str,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         global_trust: crate::trust::TrustConfig,
         observer: Option<&mut dyn TranscriptReplayObserver>,
-    ) -> Result<Self, SessionOpenError> {
-        let session =
-            Self::open_existing_with_context_inner(root, sid, redactor, project_index, observer)?;
-        let path = trust_path(&session.dir);
+    ) -> Result<RestoredSession, SessionOpenError> {
+        let restored = Self::restore_existing_with_context_inner(
+            root,
+            sid,
+            redactor,
+            project_index,
+            observer,
+        )?;
+        let path = trust_path(&restored.session.dir);
         let trust = if path.exists() {
-            read_trust(&session.dir).map_err(|source| SessionOpenError::Trust {
+            read_trust(&restored.session.dir).map_err(|source| SessionOpenError::Trust {
                 path: path.clone(),
                 source,
             })?
         } else {
-            write_trust(&session.dir, &global_trust).map_err(|source| SessionOpenError::Trust {
-                path: path.clone(),
-                source,
+            write_trust(&restored.session.dir, &global_trust).map_err(|source| {
+                SessionOpenError::Trust {
+                    path: path.clone(),
+                    source,
+                }
             })?;
             global_trust
         };
-        session.trust.send_replace(trust);
-        Ok(session)
+        restored.session.trust.send_replace(trust);
+        Ok(restored)
     }
 
     pub fn open_existing_with_context(
@@ -1060,13 +1091,13 @@ impl Session {
         )
     }
 
-    fn open_existing_with_context_inner(
+    fn restore_existing_with_context_inner(
         root: impl AsRef<Path>,
         sid: &str,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         observer: Option<&mut dyn TranscriptReplayObserver>,
-    ) -> Result<Self, SessionOpenError> {
+    ) -> Result<RestoredSession, SessionOpenError> {
         let id = SessionId::parse(sid).map_err(|_| SessionOpenError::InvalidId {
             sid: sid.to_string(),
         })?;
@@ -1100,6 +1131,7 @@ impl Session {
             .collect();
         let checkpoint_epoch = replayed_checkpoint_epoch(&initial_msgs);
         let all_msgs = replay.all_messages;
+        let events = replay.events;
         if let Some(last_seq) = replay.last_seq {
             sink.restore_seq(last_seq);
         }
@@ -1121,7 +1153,7 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
-        Ok(Self {
+        let session = Self {
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
@@ -1172,7 +1204,8 @@ impl Session {
             ),
             fs_access_mode: Mutex::new(None),
             project_index,
-        })
+        };
+        Ok(RestoredSession { session, events })
     }
 
     pub fn open_ephemeral() -> Self {
@@ -2762,6 +2795,40 @@ mod tests {
             [TranscriptEntry::Message { message, .. }] if message.text_concat() == "after open"
         ));
         reopened.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restored_session_returns_projection_history_from_the_same_scan() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        let turn_id = crate::event::TurnId::now();
+        created.sink().emit(crate::event::Event::UserMsg {
+            turn_id: turn_id.clone(),
+            flow_run_id: None,
+            message: crate::message::Message::user_text(turn_id, "history"),
+        });
+        created.flush_writer().await;
+        created.shutdown().await;
+        drop(created);
+        crate::event_log::reader::reset_parse_attempts();
+
+        let restored = Session::restore_existing_with_context_and_trust(
+            root.path(),
+            &sid,
+            None,
+            None,
+            crate::trust::TrustConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(crate::event_log::reader::parse_attempts(), 1);
+        assert_eq!(restored.events.len(), 1);
+        assert!(matches!(
+            &restored.events[0].event,
+            crate::event::Event::UserMsg { message, .. } if message.text_concat() == "history"
+        ));
+        restored.session.shutdown().await;
     }
 
     #[test]

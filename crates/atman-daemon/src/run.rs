@@ -6,7 +6,7 @@ use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
 
 use atman_runtime::event::FlowRunId as RuntimeRunId;
 
-use crate::state::{DaemonState, LiveRun};
+use crate::state::{DaemonState, LiveRun, LoadedSession};
 
 fn render_value(v: &atman_runtime::Value) -> String {
     match v {
@@ -19,6 +19,7 @@ fn render_value(v: &atman_runtime::Value) -> String {
     }
 }
 
+#[derive(Clone)]
 pub struct RunLauncher {
     pub project_root: PathBuf,
     pub config_dir: Option<PathBuf>,
@@ -207,14 +208,14 @@ impl RunLauncher {
     }
 
     fn resolve_project_root(&self, requested: Option<&str>) -> Result<PathBuf> {
-        let root = match requested {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                anyhow::ensure!(path.is_absolute(), "project_root must be an absolute path");
-                path
-            }
-            None => self.project_root.clone(),
-        };
+        self.resolve_project_root_path(requested.map(Path::new))
+    }
+
+    fn resolve_project_root_path(&self, requested: Option<&Path>) -> Result<PathBuf> {
+        let root = requested
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.project_root.clone());
+        anyhow::ensure!(root.is_absolute(), "project_root must be an absolute path");
         let root = std::fs::canonicalize(&root)
             .with_context(|| format!("resolve project root {}", root.display()))?;
         anyhow::ensure!(
@@ -225,17 +226,40 @@ impl RunLauncher {
         Ok(root)
     }
 
-    fn open_new_session(
+    fn session_project_root(&self, session_dir: &Path) -> Result<PathBuf> {
+        let meta = atman_runtime::session_meta::SessionMeta::load(session_dir);
+        let persisted = meta
+            .as_ref()
+            .and_then(|meta| meta.project_root.as_deref().or(meta.start_path.as_deref()));
+        self.resolve_project_root_path(persisted)
+    }
+
+    fn config_hub(&self) -> Result<atman_runtime::config_hub::ConfigHub> {
+        match &self.config_dir {
+            Some(dir) => Ok(atman_runtime::config_hub::ConfigHub::from_config_dir(dir)),
+            None => atman_runtime::config_hub::ConfigHub::global()
+                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}")),
+        }
+    }
+
+    fn scope_root(&self, state: &DaemonState, project_root: &Path) -> Result<PathBuf> {
+        atman_runtime::storage::resolve_project_scope_with(
+            &self.config_hub()?,
+            project_root,
+            state.data_dir(),
+        )
+    }
+
+    fn session_context(
         &self,
         state: &DaemonState,
         project_root: &Path,
-    ) -> Result<(Arc<atman_runtime::Session>, PathBuf)> {
-        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let hub = match &self.config_dir {
-            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
-            None => atman_runtime::config_hub::ConfigHub::global()
-                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
-        };
+    ) -> Result<(
+        PathBuf,
+        Option<Arc<atman_runtime::index::AnchorIndex>>,
+        atman_runtime::trust::TrustConfig,
+    )> {
+        let hub = self.config_hub()?;
         let scope_root = atman_runtime::storage::resolve_project_scope_with(
             &hub,
             project_root,
@@ -253,6 +277,16 @@ impl RunLauncher {
             }
         };
         let trust = hub.trust_config().context("load global trust config")?;
+        Ok((scope_root, project_index, trust))
+    }
+
+    fn open_new_session(
+        &self,
+        state: &DaemonState,
+        project_root: &Path,
+    ) -> Result<(Arc<atman_runtime::Session>, PathBuf)> {
+        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
+        let (scope_root, project_index, trust) = self.session_context(state, project_root)?;
         let session = Arc::new(
             atman_runtime::Session::open_with_context_and_trust(
                 state.data_dir(),
@@ -268,6 +302,35 @@ impl RunLauncher {
             .save(session.dir())
             .context("persist session project metadata")?;
         Ok((session, scope_root))
+    }
+
+    fn open_existing_session(
+        &self,
+        state: &DaemonState,
+        session_id: &ProtoSessionId,
+    ) -> Result<LoadedSession> {
+        let session_dir = state.sessions_root().join(session_id.to_string());
+        let project_root = self.session_project_root(&session_dir)?;
+        let (_, project_index, trust) = self.session_context(state, &project_root)?;
+        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
+        let restored = atman_runtime::Session::restore_existing_with_context_and_trust(
+            state.data_dir(),
+            &session_id.to_string(),
+            redactor,
+            project_index,
+            trust,
+        )
+        .with_context(|| format!("opening existing session {session_id}"))?;
+        let mut projection = crate::projection::SessionProjector::from_events(
+            session_id.clone(),
+            restored.session.meta(),
+            &restored.events,
+        );
+        projection.reconcile_disconnected();
+        Ok(LoadedSession {
+            session: Arc::new(restored.session),
+            projection,
+        })
     }
 
     pub async fn spawn(
@@ -329,21 +392,23 @@ impl RunLauncher {
         owner_principal: &str,
         options: RunOptions,
     ) -> Result<SpawnedRun> {
-        let session = state.runtime_session(session_id, owner_principal)?;
-        let project_root = match session.meta().and_then(|meta| meta.project_root) {
-            Some(root) => self.resolve_project_root(root.to_str())?,
-            None => self.resolve_project_root(None)?,
-        };
-        let hub = match &self.config_dir {
-            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
-            None => atman_runtime::config_hub::ConfigHub::global()
-                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
-        };
-        let scope_root = atman_runtime::storage::resolve_project_scope_with(
-            &hub,
-            &project_root,
-            state.data_dir(),
-        )?;
+        let launcher = self.clone();
+        let state_for_load = state.clone();
+        let session_id_for_load = session_id.clone();
+        let session = state
+            .get_or_load_session(session_id, owner_principal, move || async move {
+                let restored = tokio::task::spawn_blocking(move || {
+                    launcher.open_existing_session(&state_for_load, &session_id_for_load)
+                })
+                .await
+                .context("join session replay task")??;
+                restored.session.refresh_todos_from_store_async().await;
+                restored.session.refresh_plans_from_store_async().await;
+                Ok(restored)
+            })
+            .await?;
+        let project_root = self.session_project_root(session.dir())?;
+        let scope_root = self.scope_root(&state, &project_root)?;
         self.spawn_session_as_with_options(
             state,
             session,
