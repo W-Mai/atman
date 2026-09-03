@@ -611,18 +611,48 @@ impl WorkspaceManager {
         let item = &registry.workspaces[index];
         validate_ownership(item, owner_session, owner_flow)?;
         let state = item.lifecycle_state();
-        if !matches!(state, WorkspaceState::Active | WorkspaceState::Retained) {
+        if state == WorkspaceState::Released {
+            return Ok(item.clone());
+        }
+        if !matches!(
+            state,
+            WorkspaceState::Active | WorkspaceState::Retained | WorkspaceState::TerminalPending
+        ) {
             return Err(WorkspaceError::Invalid(format!(
                 "workspace {id} in state {} cannot be released",
                 state.as_str()
             )));
+        }
+        if state == WorkspaceState::TerminalPending {
+            let path = &item.worktree_path;
+            let registered = GitCli::at(&self.repository_root)
+                .worktree_list()?
+                .iter()
+                .any(|worktree| canonicalize(&worktree.path) == canonicalize(path));
+            if !path.exists() && !registered {
+                let released = &mut registry.workspaces[index];
+                released.state = WorkspaceState::Released.as_str().into();
+                released.retained = false;
+                released.lease = None;
+                released.reconciled_at = Some(chrono::Utc::now());
+                released.reconciliation_reason =
+                    Some("completed interrupted explicit workspace release".into());
+                let result = released.clone();
+                self.save(&registry)?;
+                return Ok(result);
+            }
         }
         if !force && crate::git::has_changes(&item.worktree_path)? {
             return Err(WorkspaceError::Invalid(
                 "dirty workspace requires force=true".into(),
             ));
         }
-        GitCli::at(&self.repository_root).worktree_remove(&item.worktree_path, force)?;
+        let worktree_path = item.worktree_path.clone();
+        if state != WorkspaceState::TerminalPending {
+            registry.workspaces[index].state = WorkspaceState::TerminalPending.as_str().into();
+            self.save(&registry)?;
+        }
+        GitCli::at(&self.repository_root).worktree_remove(&worktree_path, force)?;
         let released = &mut registry.workspaces[index];
         released.state = WorkspaceState::Released.as_str().into();
         released.retained = false;
@@ -1347,16 +1377,9 @@ mod tests {
 
     #[test]
     fn conservative_states_reject_retain_and_release_without_mutation() {
-        for (index, state) in [
-            "unknown-legacy",
-            "allocating",
-            "orphaned",
-            "dirty",
-            "terminal_pending",
-            "released",
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, state) in ["unknown-legacy", "allocating", "orphaned", "dirty"]
+            .into_iter()
+            .enumerate()
         {
             let tmp = repo();
             let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
@@ -1463,9 +1486,49 @@ mod tests {
 
         assert!(manager.release("dirty", None, None, false).is_err());
         assert!(item.worktree_path.exists());
+        assert_eq!(
+            manager.get("dirty").unwrap().lifecycle_state(),
+            WorkspaceState::Active
+        );
         let released = manager.release("dirty", None, None, true).unwrap();
         assert_eq!(released.state, "released");
         assert!(!item.worktree_path.exists());
+    }
+
+    #[test]
+    fn release_is_idempotent_and_recovers_interrupted_completion() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let released = manager
+            .create("released", None, None, false, None, None)
+            .and_then(|record| manager.release(&record.id, None, None, false))
+            .unwrap();
+        assert_eq!(
+            manager.release("released", None, None, false).unwrap(),
+            released
+        );
+
+        let interrupted = manager
+            .create("interrupted", None, None, false, None, None)
+            .unwrap();
+        let mut registry = manager.load().unwrap();
+        registry
+            .workspaces
+            .iter_mut()
+            .find(|record| record.id == interrupted.id)
+            .unwrap()
+            .state = WorkspaceState::TerminalPending.as_str().into();
+        manager.save(&registry).unwrap();
+        GitCli::at(tmp.path())
+            .worktree_remove(&interrupted.worktree_path, false)
+            .unwrap();
+
+        let recovered = manager.release("interrupted", None, None, false).unwrap();
+        assert_eq!(recovered.lifecycle_state(), WorkspaceState::Released);
+        assert_eq!(
+            recovered.reconciliation_reason.as_deref(),
+            Some("completed interrupted explicit workspace release")
+        );
     }
 
     #[test]
