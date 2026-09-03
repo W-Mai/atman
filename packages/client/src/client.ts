@@ -25,6 +25,7 @@ import type {
   RpcTransport,
   TransportRequestOptions,
 } from './transport'
+import { SessionClient } from './session-client'
 
 export interface ClientIdentity {
   id?: string
@@ -37,6 +38,7 @@ export class AtmanClient {
   readonly #identity: Required<ClientIdentity>
   #capabilities: CapabilitiesResponse
   #nextRequestId = 2
+  #capabilityRefreshTail: Promise<void> = Promise.resolve()
 
   private constructor(
     transport: RpcTransport,
@@ -95,23 +97,33 @@ export class AtmanClient {
     return this.#transport.sessionEvents?.(sessionId, afterCursor, options)
   }
 
+  async attachSession(
+    sessionId: SessionId,
+    options: TransportRequestOptions = {},
+  ): Promise<SessionClient> {
+    return SessionClient.attach(this, sessionId, options)
+  }
+
   async refreshCapabilities(
     options: TransportRequestOptions = {},
   ): Promise<CapabilitiesResponse> {
-    const capabilities = await this.#invoke(
-      'daemon.capabilities',
-      {
-        client_id: this.#identity.id,
-        client_name: this.#identity.name,
-        client_version: this.#identity.version,
-        protocol_version: PROTOCOL_VERSION,
-      },
-      options,
-      false,
-    )
-    validateCapabilities(capabilities)
-    this.#capabilities = capabilities
-    return this.capabilities
+    return this.#exclusiveCapabilityRefresh(async () => {
+      options.signal?.throwIfAborted()
+      const capabilities = await this.#invoke(
+        'daemon.capabilities',
+        {
+          client_id: this.#identity.id,
+          client_name: this.#identity.name,
+          client_version: this.#identity.version,
+          protocol_version: PROTOCOL_VERSION,
+        },
+        options,
+        false,
+      )
+      validateCapabilities(capabilities)
+      this.#capabilities = capabilities
+      return this.capabilities
+    })
   }
 
   async call<M extends RpcMethodName>(
@@ -133,6 +145,20 @@ export class AtmanClient {
     }
     const requestId = this.#nextRequestId++
     return invoke(this.#transport, requestId, method, params, options)
+  }
+
+  async #exclusiveCapabilityRefresh<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#capabilityRefreshTail
+    let release = () => {}
+    this.#capabilityRefreshTail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await previous
+    try {
+      return await operation()
+    } finally {
+      release()
+    }
   }
 }
 

@@ -8,6 +8,7 @@ import type {
   ProjectionEventEnvelope,
   ResourceProjection,
   RunProjection,
+  SessionId,
   SessionProjection,
   SessionSignal,
   SessionSnapshot,
@@ -25,6 +26,7 @@ export interface AppliedSessionUpdates {
 
 export interface SessionStoreOptions {
   expectedGeneration?: DaemonGeneration
+  expectedSession?: SessionId
   onSubscriberError?: (error: unknown) => void
 }
 
@@ -37,6 +39,9 @@ export class SessionStore {
   constructor(snapshot: SessionSnapshot, options: SessionStoreOptions = {}) {
     const expectedGeneration = options.expectedGeneration ?? snapshot.daemon_generation
     validateSnapshot(snapshot, expectedGeneration)
+    if (options.expectedSession) {
+      validateSession(snapshot, options.expectedSession)
+    }
     this.#snapshot = freezeJson(structuredClone(snapshot))
     this.#onSubscriberError = options.onSubscriberError ?? reportSubscriberError
   }
@@ -109,6 +114,13 @@ export class SessionStore {
       throw reconcileError(
         'page_cursor',
         `session update page ended at cursor ${next.cursor}, but declared ${response.next_cursor}`,
+        { actual: next.cursor, declared: response.next_cursor },
+      )
+    }
+    if (response.has_more && next.cursor === startingCursor) {
+      throw reconcileError(
+        'page_cursor',
+        `session update page declared more events without advancing cursor ${startingCursor}`,
         { actual: next.cursor, declared: response.next_cursor },
       )
     }

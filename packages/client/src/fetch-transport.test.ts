@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { AtmanHttpError } from './errors'
+import { AtmanHttpError, AtmanTransportError } from './errors'
 import { FetchTransport } from './fetch-transport'
 import { EVENT_SCHEMA_VERSION } from './generated/methods.generated'
 import type { ProjectionEventEnvelope } from './generated/types.generated'
@@ -154,5 +154,29 @@ describe('FetchTransport', () => {
         // Consume the stream.
       }
     }).toThrow('does not match')
+  })
+
+  test('classifies event stream disconnects as retryable transport failures', async () => {
+    const transport = new FetchTransport({
+      baseUrl: 'http://127.0.0.1:7777',
+      fetch: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error('connection reset'))
+            },
+          }),
+        ),
+    })
+
+    try {
+      for await (const _event of transport.sessionEvents('session-1', 7)) {
+        // Consume the stream.
+      }
+      throw new Error('expected event stream to fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(AtmanTransportError)
+      expect((error as AtmanTransportError).retryable).toBeTrue()
+    }
   })
 })

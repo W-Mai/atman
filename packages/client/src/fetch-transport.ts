@@ -146,6 +146,16 @@ export class FetchTransport implements RpcTransport {
           }
         }
       }
+    } catch (error) {
+      if (error instanceof AtmanClientError) {
+        throw error
+      }
+      if (options.signal?.aborted || isAbortError(error)) {
+        throw error
+      }
+      throw new AtmanTransportError('atman daemon event stream failed', true, {
+        cause: error,
+      })
     } finally {
       if (!completed) {
         try {

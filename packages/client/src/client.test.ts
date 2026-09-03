@@ -28,7 +28,7 @@ class FakeTransport implements RpcTransport {
     readonly respond: (
       request: RpcRequestEnvelope,
       options?: TransportRequestOptions,
-    ) => JsonRpcResponse,
+    ) => JsonRpcResponse | Promise<JsonRpcResponse>,
   ) {}
 
   async send<M extends RpcRequestEnvelope['method']>(
@@ -148,5 +148,52 @@ describe('AtmanClient', () => {
     })
 
     await expect(client.call('ping', {})).rejects.toBeInstanceOf(AtmanRpcError)
+  })
+
+  test('serializes capability refreshes so an older response cannot win', async () => {
+    let capabilityCalls = 0
+    let releaseFirst = () => {}
+    let markFirstStarted = () => {}
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve
+    })
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const transport = new FakeTransport(async (request) => {
+      capabilityCalls += 1
+      if (capabilityCalls === 1) {
+        return { jsonrpc: '2.0', id: request.id, result: capabilities() }
+      }
+      if (capabilityCalls === 2) {
+        markFirstStarted()
+        await firstGate
+        return {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: capabilities({ daemon_generation: 'generation-2' }),
+        }
+      }
+      return {
+        jsonrpc: '2.0',
+        id: request.id,
+        result: capabilities({ daemon_generation: 'generation-3' }),
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+
+    const first = client.refreshCapabilities()
+    await firstStarted
+    const second = client.refreshCapabilities()
+    await Promise.resolve()
+    expect(capabilityCalls).toBe(2)
+    releaseFirst()
+
+    expect((await first).daemon_generation).toBe('generation-2')
+    expect((await second).daemon_generation).toBe('generation-3')
+    expect(client.capabilities.daemon_generation).toBe('generation-3')
   })
 })

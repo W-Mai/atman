@@ -139,6 +139,15 @@ describe('SessionStore', () => {
     expect(signals).toEqual([])
   })
 
+  test('rejects a paginated response that cannot make progress', () => {
+    const store = new SessionStore(snapshot())
+
+    expect(() => store.applyUpdates(page([], { has_more: true }))).toThrow(
+      SessionReconcileError,
+    )
+    expect(store.current.cursor).toBe(0)
+  })
+
   test('classifies cursor gaps and explicit resync requests for snapshot recovery', () => {
     const store = new SessionStore(snapshot())
     try {
