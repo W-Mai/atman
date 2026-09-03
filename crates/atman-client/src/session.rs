@@ -8,14 +8,15 @@ use atman_proto::{
     InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
     ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
     PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
-    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
+    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
     ReleaseResourceRequest, ReleaseResourceResponse, RenameSessionRequest, RenameSessionResponse,
     RequestId, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
-    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, ResourceId,
-    RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
-    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
-    SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
-    SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, rpc,
+    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, ResolvePromptRequest,
+    ResolvePromptResponse, ResourceId, RetainResourceRequest, RetainResourceResponse, Revision,
+    SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
+    SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
+    SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse,
+    rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -191,6 +192,11 @@ pub enum SessionClientError {
     CommandForm { expected: String, received: String },
     #[error("command result belongs to compact review {received}, expected {expected}")]
     CommandCompactReview { expected: String, received: String },
+    #[error("command result belongs to prompt {received}, expected {expected}")]
+    CommandPrompt {
+        expected: PromptId,
+        received: PromptId,
+    },
     #[error("command result belongs to resource {received:?}, expected {expected:?}")]
     CommandResource {
         expected: ResourceId,
@@ -209,6 +215,7 @@ impl SessionClientError {
             | Self::CommandRun { .. }
             | Self::CommandForm { .. }
             | Self::CommandCompactReview { .. }
+            | Self::CommandPrompt { .. }
             | Self::CommandResource { .. } => false,
         }
     }
@@ -525,6 +532,32 @@ impl SessionClient {
             return Err(SessionClientError::CommandForm {
                 expected: form_id,
                 received: response.form_id,
+            });
+        }
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn resolve_prompt(
+        &self,
+        prompt_id: PromptId,
+        answer: serde_json::Value,
+    ) -> Result<ResolvePromptResponse, SessionClientError> {
+        let expected_prompt = prompt_id.clone();
+        let response = self
+            .client
+            .command::<rpc::ResolvePrompt>(&ResolvePromptRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                prompt_id,
+                answer,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        if response.prompt_id != expected_prompt {
+            return Err(SessionClientError::CommandPrompt {
+                expected: expected_prompt,
+                received: response.prompt_id,
             });
         }
         self.refresh_through(response.cursor).await?;
@@ -1640,6 +1673,7 @@ mod tests {
                             method_descriptor::<rpc::ListSessions>(),
                             method_descriptor::<rpc::SendMessage>(),
                             method_descriptor::<rpc::StartRun>(),
+                            method_descriptor::<rpc::ResolvePrompt>(),
                             method_descriptor::<rpc::SubmitForm>(),
                             method_descriptor::<rpc::ResolveCompactReview>(),
                             method_descriptor::<rpc::ListPermissionRequests>(),
@@ -1700,6 +1734,17 @@ mod tests {
                         revision: Revision(2),
                         cursor: EventCursor(2),
                     })?,
+                    methods::RESOLVE_PROMPT => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(ResolvePromptResponse {
+                            resolved: true,
+                            status: atman_proto::PromptResolutionStatus::Resolved,
+                            session_id: self.session_id.clone(),
+                            prompt_id: serde_json::from_value(params["prompt_id"].clone())?,
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
                     methods::SUBMIT_FORM => {
                         let params = request.params.as_ref().unwrap();
                         serde_json::to_value(SubmitFormResponse {
@@ -1900,6 +1945,15 @@ mod tests {
             .unwrap();
         assert_eq!(started.session_id, *session.session_id());
         assert_eq!(started.cursor, EventCursor(2));
+
+        let prompt_id =
+            PromptId(uuid::Uuid::parse_str("018f7f24-1ab2-7c3d-8e4f-123456789ad2").unwrap());
+        let prompt = session
+            .resolve_prompt(prompt_id.clone(), serde_json::json!(true))
+            .await
+            .unwrap();
+        assert_eq!(prompt.prompt_id, prompt_id);
+        assert_eq!(prompt.cursor, EventCursor(2));
 
         let request_ids = requests
             .lock()
