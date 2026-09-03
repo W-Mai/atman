@@ -11,10 +11,11 @@ use std::sync::{
 };
 
 use atman_proto::{
-    CapabilitiesRequest, CapabilitiesResponse, ClientId, CreateSessionRequest, EventCursor,
-    JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, PROTOCOL_VERSION,
-    ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
-    SessionId, SessionSummary, rpc,
+    CapabilitiesRequest, CapabilitiesResponse, ClientId, CloseSessionRequest, CloseSessionResponse,
+    CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor, JsonRpcRequest,
+    JsonRpcResponse, ListProjectsRequest, ListProjectsResponse, ListSessionsRequest,
+    PROTOCOL_VERSION, ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, RunFlowRequest,
+    RunFlowResponse, SessionId, SessionSummary, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -238,6 +239,37 @@ impl Client {
             project_root,
             search,
             limit,
+        })
+        .await
+    }
+
+    pub async fn list_projects(
+        &self,
+        search: Option<String>,
+        limit: Option<usize>,
+    ) -> Result<ListProjectsResponse, ClientError> {
+        self.call::<rpc::ListProjects>(&ListProjectsRequest { search, limit })
+            .await
+    }
+
+    pub async fn close_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<CloseSessionResponse, ClientError> {
+        self.command::<rpc::CloseSession>(&CloseSessionRequest {
+            request_id: Some(RequestId::now()),
+            session_id,
+        })
+        .await
+    }
+
+    pub async fn delete_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<DeleteSessionResponse, ClientError> {
+        self.command::<rpc::DeleteSession>(&DeleteSessionRequest {
+            request_id: Some(RequestId::now()),
+            session_id,
         })
         .await
     }
