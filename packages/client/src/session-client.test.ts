@@ -15,6 +15,7 @@ import type {
   ProjectionEventEnvelope,
   ServerEvent,
   SessionSnapshot,
+  TrustProjection,
 } from './generated/types.generated'
 import type { RpcRequestEnvelope } from './transport'
 import { MockTransport } from './testing'
@@ -357,6 +358,64 @@ describe('SessionClient', () => {
 
     await session.submitForm('form-1', { status: 'rejected' })
     expect(session.current.cursor).toBe(1)
+  })
+
+  test('updates trust through one command and reconciles the committed projection', async () => {
+    const trust: TrustProjection = {
+      mode: 'eager',
+      theme: 'weather',
+      escalation: 'allow',
+      eager_tiers: { tier3: 'deny' },
+      eager_risks: { network: 'auto' },
+    }
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'session.update_trust', kind: 'command', revision: 1 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'session.update_trust':
+          return result(request, {
+            session_id: sessionId,
+            trust: request.params.trust,
+            revision: 1,
+            cursor: 1,
+          })
+        case 'session.get_updates':
+          return result(
+            request,
+            page('generation-1', 0, [
+              event(
+                'generation-1',
+                1,
+                delta(1, [{ type: 'trust_set', trust }]),
+              ),
+            ]),
+          )
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    const response = await session.updateTrust(trust)
+
+    expect(response.trust).toEqual(trust)
+    expect(session.current.cursor).toBe(1)
+    expect(session.current.projection.trust).toEqual(trust)
+    const command = transport.requests.find(
+      (request) => request.method === 'session.update_trust',
+    )
+    expect(command?.params.trust).toEqual(trust)
   })
 
   test('preserves permission revisions across grouped decisions', async () => {

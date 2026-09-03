@@ -16,7 +16,7 @@ use atman_proto::{
     SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
     SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
     SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse,
-    rpc,
+    TrustProjection, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -454,6 +454,23 @@ impl SessionClient {
             })
             .await?;
         self.validate_command_session(&response.session.id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn update_trust(
+        &self,
+        trust: TrustProjection,
+    ) -> Result<UpdateSessionTrustResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::UpdateSessionTrust>(&UpdateSessionTrustRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                trust,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
         self.refresh_through(response.cursor).await?;
         Ok(response)
     }
@@ -1680,6 +1697,7 @@ mod tests {
                             method_descriptor::<rpc::CreatePermissionGroup>(),
                             method_descriptor::<rpc::ResolvePermissionRequests>(),
                             method_descriptor::<rpc::RenameSession>(),
+                            method_descriptor::<rpc::UpdateSessionTrust>(),
                             method_descriptor::<rpc::ListResources>(),
                             method_descriptor::<rpc::InspectResource>(),
                             method_descriptor::<rpc::TerminateResource>(),
@@ -1809,6 +1827,15 @@ mod tests {
                                 project_root: None,
                                 name_source: atman_proto::NameSource::User,
                             },
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::UPDATE_SESSION_TRUST => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(atman_proto::UpdateSessionTrustResponse {
+                            session_id: self.session_id.clone(),
+                            trust: serde_json::from_value(params["trust"].clone())?,
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?
@@ -2047,5 +2074,14 @@ mod tests {
         let renamed = session.rename("Renamed").await.unwrap();
         assert_eq!(renamed.session.title, "Renamed");
         assert_eq!(renamed.cursor, EventCursor(2));
+
+        let trust = atman_proto::TrustProjection {
+            mode: atman_proto::TrustMode::Eager,
+            escalation: atman_proto::TrustEscalation::Allow,
+            ..Default::default()
+        };
+        let updated = session.update_trust(trust.clone()).await.unwrap();
+        assert_eq!(updated.trust, trust);
+        assert_eq!(updated.cursor, EventCursor(2));
     }
 }

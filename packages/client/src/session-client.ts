@@ -36,6 +36,8 @@ import type {
   StartRunResponse,
   SubmitFormResponse,
   TerminateResourceResponse,
+  TrustProjection,
+  UpdateSessionTrustResponse,
 } from './generated/types.generated'
 import { SessionStore, type SessionView } from './session-store'
 import type { TransportRequestOptions } from './transport'
@@ -217,6 +219,24 @@ export class SessionClient {
       options,
     )
     this.#validateSession(response.session.id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async updateTrust(
+    trust: TrustProjection,
+    options: TransportRequestOptions = {},
+  ): Promise<UpdateSessionTrustResponse> {
+    const response = await this.#client.command(
+      'session.update_trust',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        trust,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
     await this.#refreshThrough(response.cursor, options)
     return response
   }
