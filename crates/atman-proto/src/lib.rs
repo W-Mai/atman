@@ -3,8 +3,13 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 mod projection;
+mod schema;
 
 pub use projection::*;
+pub use schema::{
+    MethodManifest, MethodPayloadSchema, ProtocolArtifacts, ProtocolManifest, ProtocolSchemaError,
+    generate_protocol_artifacts, protocol_openapi_components,
+};
 
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -132,19 +137,28 @@ pub enum RpcKind {
     Query,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct RpcMethodDescriptor {
     pub name: &'static str,
     pub kind: RpcKind,
     pub revision: u32,
+    schema: fn() -> Result<schema::RpcMethodSchema, ProtocolSchemaError>,
+}
+
+impl RpcMethodDescriptor {
+    pub(crate) fn materialize_schema(
+        &self,
+    ) -> Result<schema::RpcMethodSchema, ProtocolSchemaError> {
+        (self.schema)()
+    }
 }
 
 pub trait RpcMethod {
     const NAME: &'static str;
     const KIND: RpcKind;
     const REVISION: u32 = 1;
-    type Params: Serialize + DeserializeOwned;
-    type Output: Serialize + DeserializeOwned;
+    type Params: Serialize + DeserializeOwned + ToSchema;
+    type Output: Serialize + DeserializeOwned + ToSchema;
 }
 
 pub const fn method_descriptor<M: RpcMethod>() -> RpcMethodDescriptor {
@@ -152,6 +166,7 @@ pub const fn method_descriptor<M: RpcMethod>() -> RpcMethodDescriptor {
         name: M::NAME,
         kind: M::KIND,
         revision: M::REVISION,
+        schema: schema::materialize_method::<M>,
     }
 }
 

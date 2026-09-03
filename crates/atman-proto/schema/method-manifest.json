@@ -1,0 +1,466 @@
+{
+  "protocol_version": 1,
+  "snapshot_schema_version": 1,
+  "event_schema_version": 1,
+  "methods": [
+    {
+      "name": "daemon.capabilities",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "CapabilitiesRequest",
+        "schema": {
+          "$ref": "#/$defs/CapabilitiesRequest"
+        }
+      },
+      "result": {
+        "rust_type": "CapabilitiesResponse",
+        "schema": {
+          "$ref": "#/$defs/CapabilitiesResponse"
+        }
+      }
+    },
+    {
+      "name": "ping",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "EmptyParams",
+        "schema": {
+          "$ref": "#/$defs/EmptyParams"
+        }
+      },
+      "result": {
+        "rust_type": "PingResponse",
+        "schema": {
+          "$ref": "#/$defs/PingResponse"
+        }
+      }
+    },
+    {
+      "name": "session.create",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "CreateSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/CreateSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionSnapshot",
+        "schema": {
+          "$ref": "#/$defs/SessionSnapshot"
+        }
+      }
+    },
+    {
+      "name": "session.close",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "CloseSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/CloseSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "CloseSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/CloseSessionResponse"
+        }
+      }
+    },
+    {
+      "name": "session.delete",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "DeleteSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/DeleteSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "DeleteSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/DeleteSessionResponse"
+        }
+      }
+    },
+    {
+      "name": "session.send_message",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "SendMessageRequest",
+        "schema": {
+          "$ref": "#/$defs/SendMessageRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SendMessageResponse",
+        "schema": {
+          "$ref": "#/$defs/SendMessageResponse"
+        }
+      }
+    },
+    {
+      "name": "session.interject",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "InterjectSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/InterjectSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "InterjectSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/InterjectSessionResponse"
+        }
+      }
+    },
+    {
+      "name": "project.list",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "ListProjectsRequest",
+        "schema": {
+          "$ref": "#/$defs/ListProjectsRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ListProjectsResponse",
+        "schema": {
+          "$ref": "#/$defs/ListProjectsResponse"
+        }
+      }
+    },
+    {
+      "name": "list_sessions",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "ListSessionsRequest",
+        "schema": {
+          "$ref": "#/$defs/ListSessionsRequest"
+        }
+      },
+      "result": {
+        "rust_type": "Vec",
+        "schema": {
+          "$ref": "#/$defs/ListSessionsResult"
+        }
+      }
+    },
+    {
+      "name": "rename_session",
+      "kind": "command",
+      "revision": 2,
+      "params": {
+        "rust_type": "RenameSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/RenameSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "RenameSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/RenameSessionResponse"
+        }
+      }
+    },
+    {
+      "name": "run.start",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "StartRunRequest",
+        "schema": {
+          "$ref": "#/$defs/StartRunRequest"
+        }
+      },
+      "result": {
+        "rust_type": "StartRunResponse",
+        "schema": {
+          "$ref": "#/$defs/StartRunResponse"
+        }
+      }
+    },
+    {
+      "name": "run_flow",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "RunFlowRequest",
+        "schema": {
+          "$ref": "#/$defs/RunFlowRequest"
+        }
+      },
+      "result": {
+        "rust_type": "RunFlowResponse",
+        "schema": {
+          "$ref": "#/$defs/RunFlowResponse"
+        }
+      }
+    },
+    {
+      "name": "cancel_run",
+      "kind": "command",
+      "revision": 2,
+      "params": {
+        "rust_type": "CancelRunRequest",
+        "schema": {
+          "$ref": "#/$defs/CancelRunRequest"
+        }
+      },
+      "result": {
+        "rust_type": "CancelRunResponse",
+        "schema": {
+          "$ref": "#/$defs/CancelRunResponse"
+        }
+      }
+    },
+    {
+      "name": "get_events",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetEventsRequest",
+        "schema": {
+          "$ref": "#/$defs/GetEventsRequest"
+        }
+      },
+      "result": {
+        "rust_type": "GetEventsResponse",
+        "schema": {
+          "$ref": "#/$defs/GetEventsResponse"
+        }
+      }
+    },
+    {
+      "name": "session.get_snapshot",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionSnapshotRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionSnapshotRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionSnapshot",
+        "schema": {
+          "$ref": "#/$defs/SessionSnapshot"
+        }
+      }
+    },
+    {
+      "name": "session.get_updates",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionUpdatesRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionUpdatesRequest"
+        }
+      },
+      "result": {
+        "rust_type": "GetSessionUpdatesResponse",
+        "schema": {
+          "$ref": "#/$defs/GetSessionUpdatesResponse"
+        }
+      }
+    },
+    {
+      "name": "resolve_prompt",
+      "kind": "command",
+      "revision": 2,
+      "params": {
+        "rust_type": "ResolvePromptRequest",
+        "schema": {
+          "$ref": "#/$defs/ResolvePromptRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ResolvePromptResponse",
+        "schema": {
+          "$ref": "#/$defs/ResolvePromptResponse"
+        }
+      }
+    },
+    {
+      "name": "form.submit",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "SubmitFormRequest",
+        "schema": {
+          "$ref": "#/$defs/SubmitFormRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SubmitFormResponse",
+        "schema": {
+          "$ref": "#/$defs/SubmitFormResponse"
+        }
+      }
+    },
+    {
+      "name": "compact_review.resolve",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "ResolveCompactReviewRequest",
+        "schema": {
+          "$ref": "#/$defs/ResolveCompactReviewRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ResolveCompactReviewResponse",
+        "schema": {
+          "$ref": "#/$defs/ResolveCompactReviewResponse"
+        }
+      }
+    },
+    {
+      "name": "list_permission_requests",
+      "kind": "query",
+      "revision": 2,
+      "params": {
+        "rust_type": "ListPermissionRequestsRequest",
+        "schema": {
+          "$ref": "#/$defs/ListPermissionRequestsRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ListPermissionRequestsResponse",
+        "schema": {
+          "$ref": "#/$defs/ListPermissionRequestsResponse"
+        }
+      }
+    },
+    {
+      "name": "create_permission_group",
+      "kind": "command",
+      "revision": 2,
+      "params": {
+        "rust_type": "CreatePermissionGroupRequest",
+        "schema": {
+          "$ref": "#/$defs/CreatePermissionGroupRequest"
+        }
+      },
+      "result": {
+        "rust_type": "CreatePermissionGroupResponse",
+        "schema": {
+          "$ref": "#/$defs/CreatePermissionGroupResponse"
+        }
+      }
+    },
+    {
+      "name": "resolve_permission_requests",
+      "kind": "command",
+      "revision": 2,
+      "params": {
+        "rust_type": "ResolvePermissionRequestsRequest",
+        "schema": {
+          "$ref": "#/$defs/ResolvePermissionRequestsRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ResolvePermissionRequestsResponse",
+        "schema": {
+          "$ref": "#/$defs/ResolvePermissionRequestsResponse"
+        }
+      }
+    },
+    {
+      "name": "resource.list",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "ListResourcesRequest",
+        "schema": {
+          "$ref": "#/$defs/ListResourcesRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ListResourcesResponse",
+        "schema": {
+          "$ref": "#/$defs/ListResourcesResponse"
+        }
+      }
+    },
+    {
+      "name": "resource.inspect",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "InspectResourceRequest",
+        "schema": {
+          "$ref": "#/$defs/InspectResourceRequest"
+        }
+      },
+      "result": {
+        "rust_type": "InspectResourceResponse",
+        "schema": {
+          "$ref": "#/$defs/InspectResourceResponse"
+        }
+      }
+    },
+    {
+      "name": "resource.terminate",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "TerminateResourceRequest",
+        "schema": {
+          "$ref": "#/$defs/TerminateResourceRequest"
+        }
+      },
+      "result": {
+        "rust_type": "TerminateResourceResponse",
+        "schema": {
+          "$ref": "#/$defs/TerminateResourceResponse"
+        }
+      }
+    },
+    {
+      "name": "resource.retain",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "RetainResourceRequest",
+        "schema": {
+          "$ref": "#/$defs/RetainResourceRequest"
+        }
+      },
+      "result": {
+        "rust_type": "RetainResourceResponse",
+        "schema": {
+          "$ref": "#/$defs/RetainResourceResponse"
+        }
+      }
+    },
+    {
+      "name": "resource.release",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "ReleaseResourceRequest",
+        "schema": {
+          "$ref": "#/$defs/ReleaseResourceRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ReleaseResourceResponse",
+        "schema": {
+          "$ref": "#/$defs/ReleaseResourceResponse"
+        }
+      }
+    }
+  ]
+}

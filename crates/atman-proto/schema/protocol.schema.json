@@ -1,0 +1,5351 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atman.run/schemas/daemon-protocol-v1.json",
+  "title": "atman daemon protocol payloads",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/CapabilitiesRequest"
+    },
+    {
+      "$ref": "#/$defs/CapabilitiesResponse"
+    },
+    {
+      "$ref": "#/$defs/EmptyParams"
+    },
+    {
+      "$ref": "#/$defs/PingResponse"
+    },
+    {
+      "$ref": "#/$defs/CreateSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/SessionSnapshot"
+    },
+    {
+      "$ref": "#/$defs/CloseSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/CloseSessionResponse"
+    },
+    {
+      "$ref": "#/$defs/DeleteSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/DeleteSessionResponse"
+    },
+    {
+      "$ref": "#/$defs/SendMessageRequest"
+    },
+    {
+      "$ref": "#/$defs/SendMessageResponse"
+    },
+    {
+      "$ref": "#/$defs/InterjectSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/InterjectSessionResponse"
+    },
+    {
+      "$ref": "#/$defs/ListProjectsRequest"
+    },
+    {
+      "$ref": "#/$defs/ListProjectsResponse"
+    },
+    {
+      "$ref": "#/$defs/ListSessionsRequest"
+    },
+    {
+      "$ref": "#/$defs/ListSessionsResult"
+    },
+    {
+      "$ref": "#/$defs/RenameSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/RenameSessionResponse"
+    },
+    {
+      "$ref": "#/$defs/StartRunRequest"
+    },
+    {
+      "$ref": "#/$defs/StartRunResponse"
+    },
+    {
+      "$ref": "#/$defs/RunFlowRequest"
+    },
+    {
+      "$ref": "#/$defs/RunFlowResponse"
+    },
+    {
+      "$ref": "#/$defs/CancelRunRequest"
+    },
+    {
+      "$ref": "#/$defs/CancelRunResponse"
+    },
+    {
+      "$ref": "#/$defs/GetEventsRequest"
+    },
+    {
+      "$ref": "#/$defs/GetEventsResponse"
+    },
+    {
+      "$ref": "#/$defs/GetSessionSnapshotRequest"
+    },
+    {
+      "$ref": "#/$defs/GetSessionUpdatesRequest"
+    },
+    {
+      "$ref": "#/$defs/GetSessionUpdatesResponse"
+    },
+    {
+      "$ref": "#/$defs/ResolvePromptRequest"
+    },
+    {
+      "$ref": "#/$defs/ResolvePromptResponse"
+    },
+    {
+      "$ref": "#/$defs/SubmitFormRequest"
+    },
+    {
+      "$ref": "#/$defs/SubmitFormResponse"
+    },
+    {
+      "$ref": "#/$defs/ResolveCompactReviewRequest"
+    },
+    {
+      "$ref": "#/$defs/ResolveCompactReviewResponse"
+    },
+    {
+      "$ref": "#/$defs/ListPermissionRequestsRequest"
+    },
+    {
+      "$ref": "#/$defs/ListPermissionRequestsResponse"
+    },
+    {
+      "$ref": "#/$defs/CreatePermissionGroupRequest"
+    },
+    {
+      "$ref": "#/$defs/CreatePermissionGroupResponse"
+    },
+    {
+      "$ref": "#/$defs/ResolvePermissionRequestsRequest"
+    },
+    {
+      "$ref": "#/$defs/ResolvePermissionRequestsResponse"
+    },
+    {
+      "$ref": "#/$defs/ListResourcesRequest"
+    },
+    {
+      "$ref": "#/$defs/ListResourcesResponse"
+    },
+    {
+      "$ref": "#/$defs/InspectResourceRequest"
+    },
+    {
+      "$ref": "#/$defs/InspectResourceResponse"
+    },
+    {
+      "$ref": "#/$defs/TerminateResourceRequest"
+    },
+    {
+      "$ref": "#/$defs/TerminateResourceResponse"
+    },
+    {
+      "$ref": "#/$defs/RetainResourceRequest"
+    },
+    {
+      "$ref": "#/$defs/RetainResourceResponse"
+    },
+    {
+      "$ref": "#/$defs/ReleaseResourceRequest"
+    },
+    {
+      "$ref": "#/$defs/ReleaseResourceResponse"
+    },
+    {
+      "$ref": "#/$defs/JsonRpcRequest"
+    },
+    {
+      "$ref": "#/$defs/JsonRpcResponse"
+    },
+    {
+      "$ref": "#/$defs/JsonRpcError"
+    },
+    {
+      "$ref": "#/$defs/ServerEventEnvelope"
+    },
+    {
+      "$ref": "#/$defs/ProjectionEventEnvelope"
+    }
+  ],
+  "$defs": {
+    "ApprovalGroupProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "request_ids",
+        "revision"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "label": {
+          "type": "string"
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "ApprovalProjection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "level",
+            "state"
+          ],
+          "properties": {
+            "level": {
+              "type": "string"
+            },
+            "preview": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "pending"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "approved"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "reason",
+            "state"
+          ],
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "denied"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalRequestProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "run_id",
+        "tool_name",
+        "tier",
+        "state",
+        "revision"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "state": {
+          "$ref": "#/$defs/ApprovalState"
+        },
+        "target": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ApprovalTarget"
+            }
+          ]
+        },
+        "tier": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "tool_name": {
+          "type": "string"
+        }
+      }
+    },
+    "ApprovalState": {
+      "type": "string",
+      "enum": [
+        "evaluating",
+        "pending",
+        "approved",
+        "denied",
+        "cancelled"
+      ]
+    },
+    "ApprovalTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "flow"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "user"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "CancelRunRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "run_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "CancelRunResponse": {
+      "type": "object",
+      "required": [
+        "cancelled",
+        "status",
+        "session_id",
+        "run_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cancelled": {
+          "type": "boolean"
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/RunCancellationStatus"
+        }
+      }
+    },
+    "CapabilitiesRequest": {
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ClientId"
+            }
+          ]
+        },
+        "client_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "CapabilitiesResponse": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "daemon_version",
+        "daemon_generation",
+        "event_schema_version",
+        "methods",
+        "limits"
+      ],
+      "properties": {
+        "daemon_generation": {
+          "$ref": "#/$defs/DaemonGeneration"
+        },
+        "daemon_version": {
+          "type": "string"
+        },
+        "event_schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "limits": {
+          "$ref": "#/$defs/ProtocolLimits"
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MethodCapability"
+          }
+        },
+        "protocol_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "snapshot_schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "ClientId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "CloseSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "CloseSessionResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "status"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/SessionCloseStatus"
+        }
+      }
+    },
+    "CompactReviewDecision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "decision"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "accept_as_is"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "summary",
+            "decision"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "accept_edited"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "decision"
+          ],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "reject"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "CompactReviewProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "summary",
+        "slice_preview",
+        "slice_count",
+        "range_start",
+        "range_end",
+        "tokens_before",
+        "emitted_at"
+      ],
+      "properties": {
+        "emitted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "range_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "range_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slice_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slice_preview": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tokens_before": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "CompactReviewResolutionStatus": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "already_resolved",
+        "abandoned",
+        "not_found"
+      ]
+    },
+    "ContextProjection": {
+      "type": "object",
+      "properties": {
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "format": "double"
+        },
+        "mcp_servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpServerProjection"
+          }
+        },
+        "memory_recent_count": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "window_budget": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "window_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "CreatePermissionGroupRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "request_ids",
+        "expected_request_revisions",
+        "label"
+      ],
+      "properties": {
+        "expected_request_revisions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "propertyNames": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "label": {
+          "type": "string"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "CreatePermissionGroupResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "group_id",
+        "request_ids",
+        "revision",
+        "label",
+        "session_revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "group_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "label": {
+          "type": "string"
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "session_revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      }
+    },
+    "CreateSessionRequest": {
+      "type": "object",
+      "properties": {
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "DaemonGeneration": {
+      "type": "string"
+    },
+    "DeleteSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "DeleteSessionResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "status"
+      ],
+      "properties": {
+        "blocking_resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResourceId"
+          }
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/SessionDeleteStatus"
+        }
+      }
+    },
+    "EmptyParams": {
+      "type": "object"
+    },
+    "EventCursor": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 0
+    },
+    "FlowRunId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "FormAnswer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "value",
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "confirmed"
+              ]
+            },
+            "value": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "index",
+            "label",
+            "kind"
+          ],
+          "properties": {
+            "index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "selected"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "indices",
+            "labels",
+            "kind"
+          ],
+          "properties": {
+            "indices": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "multi_selected"
+              ]
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "text_entered"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "cancelled"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "FormQuestionKind": {
+      "type": "string",
+      "enum": [
+        "confirm",
+        "single_select",
+        "multi_select",
+        "text"
+      ]
+    },
+    "FormQuestionProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "prompt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/FormQuestionKind"
+        },
+        "max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "min": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "multiline": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "placeholder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        }
+      }
+    },
+    "FormResolutionStatus": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "already_resolved",
+        "abandoned",
+        "not_found"
+      ]
+    },
+    "FormSubmission": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "answers",
+            "status"
+          ],
+          "properties": {
+            "answers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FormAnswer"
+              }
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "submitted"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "rejected"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "GetEventsRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "since_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "GetEventsResponse": {
+      "type": "object",
+      "required": [
+        "events",
+        "next_cursor",
+        "has_more"
+      ],
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServerEventEnvelope"
+          }
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "$ref": "#/$defs/EventCursor"
+        }
+      }
+    },
+    "GetSessionSnapshotRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "GetSessionUpdatesRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "after_cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "GetSessionUpdatesResponse": {
+      "type": "object",
+      "required": [
+        "daemon_generation",
+        "events",
+        "next_cursor",
+        "has_more"
+      ],
+      "properties": {
+        "daemon_generation": {
+          "$ref": "#/$defs/DaemonGeneration"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectionEventEnvelope"
+          }
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resync_required": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ResyncRequired"
+            }
+          ]
+        }
+      }
+    },
+    "ImageDetail": {
+      "type": "string",
+      "enum": [
+        "low",
+        "high",
+        "original",
+        "auto"
+      ]
+    },
+    "InlineImage": {
+      "type": "object",
+      "required": [
+        "data_base64"
+      ],
+      "properties": {
+        "data_base64": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "InspectResourceRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id"
+      ],
+      "properties": {
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "InspectResourceResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resource": {
+          "$ref": "#/$defs/ResourceProjection"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "InteractionProjection": {
+      "type": "object",
+      "properties": {
+        "approval_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalGroupProjection"
+          }
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalRequestProjection"
+          }
+        },
+        "compact_review": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/CompactReviewProjection"
+            }
+          ]
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PendingFormProjection"
+          }
+        },
+        "interjections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InterjectionProjection"
+          }
+        },
+        "prompts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PendingPromptProjection"
+          }
+        }
+      }
+    },
+    "InterjectSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "run_id",
+        "text",
+        "level"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/InterjectionLevel"
+        },
+        "redirect_target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "InterjectSessionResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "run_id",
+        "injection_id",
+        "state",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "injection_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "state": {
+          "$ref": "#/$defs/InterjectionState"
+        }
+      }
+    },
+    "InterjectionLevel": {
+      "type": "string",
+      "enum": [
+        "nudge",
+        "course_correct",
+        "redirect",
+        "hard_stop"
+      ]
+    },
+    "InterjectionProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "turn_id",
+        "text",
+        "level",
+        "state",
+        "created_at",
+        "source"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "level": {
+          "$ref": "#/$defs/InterjectionLevel"
+        },
+        "redirect_target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FlowRunId"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/InterjectionSource"
+        },
+        "state": {
+          "$ref": "#/$defs/InterjectionState"
+        },
+        "text": {
+          "type": "string"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        }
+      }
+    },
+    "InterjectionSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "user"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "watcher_id",
+            "kind",
+            "handle",
+            "type"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "watcher"
+              ]
+            },
+            "watcher_id": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "InterjectionState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "injected",
+        "cancelled"
+      ]
+    },
+    "JsonRpcError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "data": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "JsonRpcRequest": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "jsonrpc": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "JsonRpcResponse": {
+      "type": "object",
+      "required": [
+        "jsonrpc"
+      ],
+      "properties": {
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/JsonRpcError"
+            }
+          ]
+        },
+        "id": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "jsonrpc": {
+          "type": "string"
+        },
+        "result": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "ListPermissionRequestsRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ListPermissionRequestsResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "requests",
+        "groups",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionGroupView"
+          }
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionRequestView"
+          }
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ListProjectsRequest": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "search": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ListProjectsResponse": {
+      "type": "object",
+      "required": [
+        "projects",
+        "total"
+      ],
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectSummary"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ListResourcesRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ListResourcesResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resources",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResourceProjection"
+          }
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ListSessionsRequest": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "search": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ListSessionsResult": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "event_count",
+          "status"
+        ],
+        "properties": {
+          "event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "first_ts": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "goal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "name_source": {
+            "$ref": "#/$defs/NameSource"
+          },
+          "project_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/SessionStatus"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "LlmUsageProjection": {
+      "type": "object",
+      "properties": {
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "model": {
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "provider": {
+          "type": "string"
+        },
+        "tokens_per_second": {
+          "type": "number",
+          "format": "double"
+        },
+        "ttft_ms": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "wallclock_ms": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "McpServerProjection": {
+      "type": "object",
+      "required": [
+        "name",
+        "transport",
+        "state"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "tool_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "transport": {
+          "type": "string"
+        }
+      }
+    },
+    "MessageOrigin": {
+      "type": "string",
+      "enum": [
+        "user",
+        "watcher",
+        "interjection",
+        "internal"
+      ]
+    },
+    "MessagePart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "content",
+            "digest",
+            "revision",
+            "type"
+          ],
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "context_record"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "summary",
+            "seq_start",
+            "seq_end",
+            "count",
+            "type"
+          ],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "seq_end": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "seq_start": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "summary": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compact_summary"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "thinking",
+            "type"
+          ],
+          "properties": {
+            "thinking": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "thinking"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "media_type",
+            "detail",
+            "type"
+          ],
+          "properties": {
+            "artifact_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "$ref": "#/$defs/ImageDetail"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "image"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "name",
+            "input",
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "input": {
+              "type": "object"
+            },
+            "intent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_use"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "tool_use_id",
+            "content",
+            "type"
+          ],
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "is_error": {
+              "type": "boolean"
+            },
+            "tool_use_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_result"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "MessageProjection": {
+      "type": "object",
+      "required": [
+        "role",
+        "origin",
+        "turn_id",
+        "parts"
+      ],
+      "properties": {
+        "origin": {
+          "$ref": "#/$defs/MessageOrigin"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessagePart"
+          }
+        },
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        }
+      }
+    },
+    "MessageRole": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant",
+        "system",
+        "tool"
+      ]
+    },
+    "MethodCapability": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "revision"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/RpcKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "NameSource": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "user"
+      ]
+    },
+    "NoticeLevel": {
+      "type": "string",
+      "enum": [
+        "debug",
+        "info",
+        "success",
+        "warning",
+        "error"
+      ]
+    },
+    "NotificationLifecycle": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "persistent"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "duration_ms",
+            "type"
+          ],
+          "properties": {
+            "duration_ms": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "ttl"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "dismissible"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "until_replaced"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "NotificationLocation": {
+      "type": "string",
+      "enum": [
+        "inline",
+        "toast",
+        "status",
+        "modal",
+        "stdout",
+        "stderr"
+      ]
+    },
+    "NotificationStack": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "append"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "type"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "replace"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "window_ms",
+            "type"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "dedupe"
+              ]
+            },
+            "window_ms": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "window_ms",
+            "type"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "merge_count"
+              ]
+            },
+            "window_ms": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "type"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "coalesce"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "PendingFormProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "run_id",
+        "tool_use_id",
+        "emitted_at",
+        "questions"
+      ],
+      "properties": {
+        "emitted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormQuestionProjection"
+          }
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "tool_use_id": {
+          "type": "string"
+        }
+      }
+    },
+    "PendingPromptProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/PromptId"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object"
+        }
+      }
+    },
+    "PermissionGroupView": {
+      "type": "object",
+      "required": [
+        "group_id",
+        "label",
+        "request_ids",
+        "revision"
+      ],
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "label": {
+          "type": "string"
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "PermissionRequestView": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "session_id",
+        "requesting_run_id",
+        "tool",
+        "tier",
+        "state",
+        "target",
+        "revision"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "requesting_run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      }
+    },
+    "PermissionResolutionView": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "PermissionRpcAction": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "deny",
+        "defer"
+      ]
+    },
+    "PermissionRpcScope": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "current_call"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "child_run_same_tool"
+          ],
+          "properties": {
+            "child_run_same_tool": {
+              "type": "object",
+              "required": [
+                "run_id",
+                "tool_name"
+              ],
+              "properties": {
+                "run_id": {
+                  "$ref": "#/$defs/FlowRunId"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "child_run_same_path_rule"
+          ],
+          "properties": {
+            "child_run_same_path_rule": {
+              "type": "object",
+              "required": [
+                "run_id",
+                "tool_name",
+                "workspace_relative_path"
+              ],
+              "properties": {
+                "run_id": {
+                  "$ref": "#/$defs/FlowRunId"
+                },
+                "tool_name": {
+                  "type": "string"
+                },
+                "workspace_relative_path": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PermissionRpcSelector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "request_ids",
+            "expected_request_revisions"
+          ],
+          "properties": {
+            "expected_request_revisions": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "propertyNames": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "request_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "group_id",
+            "expected_group_revision"
+          ],
+          "properties": {
+            "expected_group_revision": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "group_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      ]
+    },
+    "PingResponse": {
+      "type": "object",
+      "required": [
+        "pong",
+        "version"
+      ],
+      "properties": {
+        "pong": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "PlanProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "steps",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStepProjection"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "PlanStepProjection": {
+      "type": "object",
+      "required": [
+        "index",
+        "text"
+      ],
+      "properties": {
+        "done": {
+          "type": "boolean"
+        },
+        "done_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "ProjectId": {
+      "type": "string"
+    },
+    "ProjectSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "root",
+        "session_count",
+        "active_session_count"
+      ],
+      "properties": {
+        "active_session_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "last_session_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "session_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ProjectionChange": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "metadata",
+            "type"
+          ],
+          "properties": {
+            "metadata": {
+              "$ref": "#/$defs/SessionMetadataProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "metadata_set"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "lifecycle",
+            "type"
+          ],
+          "properties": {
+            "lifecycle": {
+              "$ref": "#/$defs/SessionLifecycle"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "lifecycle_set"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run",
+            "type"
+          ],
+          "properties": {
+            "run": {
+              "$ref": "#/$defs/RunProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "run_upsert"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "run_remove"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "items",
+            "type"
+          ],
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptItem"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "transcript_append"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "items",
+            "type"
+          ],
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TranscriptItem"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "transcript_replace"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "workflows",
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "workflows_replace"
+              ]
+            },
+            "workflows": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/WorkflowProjection"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "goal": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "goal_set"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "todos",
+            "type"
+          ],
+          "properties": {
+            "todos": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TodoProjection"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "todos_replace"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "plans",
+            "type"
+          ],
+          "properties": {
+            "plans": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PlanProjection"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "plans_replace"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "context",
+            "type"
+          ],
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/ContextProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "context_set"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "trust",
+            "type"
+          ],
+          "properties": {
+            "trust": {
+              "$ref": "#/$defs/TrustProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "trust_set"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "interactions",
+            "type"
+          ],
+          "properties": {
+            "interactions": {
+              "$ref": "#/$defs/InteractionProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "interactions_set"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "resource",
+            "type"
+          ],
+          "properties": {
+            "resource": {
+              "$ref": "#/$defs/ResourceProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "resource_upsert"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "resource_id",
+            "type"
+          ],
+          "properties": {
+            "resource_id": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "resource_remove"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "usage",
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "usage_set"
+              ]
+            },
+            "usage": {
+              "$ref": "#/$defs/UsageProjection"
+            }
+          }
+        }
+      ]
+    },
+    "ProjectionDelta": {
+      "type": "object",
+      "required": [
+        "base_revision",
+        "revision",
+        "changes"
+      ],
+      "properties": {
+        "base_revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectionChange"
+          }
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      }
+    },
+    "ProjectionEventEnvelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "daemon_generation",
+        "session_id",
+        "cursor",
+        "ts",
+        "event"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "daemon_generation": {
+          "$ref": "#/$defs/DaemonGeneration"
+        },
+        "event": {
+          "$ref": "#/$defs/ServerEvent"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "PromptId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "PromptResolutionStatus": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "already_resolved",
+        "abandoned",
+        "not_found"
+      ]
+    },
+    "ProtocolLimits": {
+      "type": "object",
+      "required": [
+        "max_event_page_size",
+        "subscriber_buffer"
+      ],
+      "properties": {
+        "max_event_page_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "subscriber_buffer": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ReleaseResourceRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ReleaseResourceResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resource": {
+          "$ref": "#/$defs/ResourceProjection"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "RenameSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "title"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "RenameSessionResponse": {
+      "type": "object",
+      "required": [
+        "session",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionSummary"
+        }
+      }
+    },
+    "RequestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "ResolveCompactReviewRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "review_id",
+        "decision"
+      ],
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/CompactReviewDecision"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "review_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ResolveCompactReviewResponse": {
+      "type": "object",
+      "required": [
+        "resolved",
+        "status",
+        "session_id",
+        "review_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "review_id": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/CompactReviewResolutionStatus"
+        }
+      }
+    },
+    "ResolvePermissionRequestsRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "selector",
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PermissionRpcAction"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PermissionRpcScope"
+            }
+          ]
+        },
+        "selector": {
+          "$ref": "#/$defs/PermissionRpcSelector"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ResolvePermissionRequestsResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resolutions",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resolutions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionResolutionView"
+          }
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ResolvePromptRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "prompt_id",
+        "answer"
+      ],
+      "properties": {
+        "answer": {
+          "type": "object"
+        },
+        "prompt_id": {
+          "$ref": "#/$defs/PromptId"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ResolvePromptResponse": {
+      "type": "object",
+      "required": [
+        "resolved",
+        "status",
+        "session_id",
+        "prompt_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "prompt_id": {
+          "$ref": "#/$defs/PromptId"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/PromptResolutionStatus"
+        }
+      }
+    },
+    "ResourceId": {
+      "type": "string"
+    },
+    "ResourceKind": {
+      "type": "string",
+      "enum": [
+        "terminal",
+        "background_process",
+        "workspace",
+        "artifact"
+      ]
+    },
+    "ResourceProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "state",
+        "owner_run_id"
+      ],
+      "properties": {
+        "details": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "type": "string"
+          }
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ResourceKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "owner_run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/$defs/ResourceState"
+        },
+        "tool_use_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ResourceState": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "dirty",
+        "exited",
+        "failed",
+        "terminating",
+        "retained",
+        "released",
+        "lost",
+        "orphaned"
+      ]
+    },
+    "ResourceTerminationStatus": {
+      "type": "string",
+      "enum": [
+        "terminating",
+        "already_terminal",
+        "unavailable",
+        "unsupported",
+        "not_found"
+      ]
+    },
+    "ResyncRequired": {
+      "type": "object",
+      "required": [
+        "requested_after",
+        "available_from",
+        "snapshot_revision",
+        "reason"
+      ],
+      "properties": {
+        "available_from": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requested_after": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "snapshot_revision": {
+          "$ref": "#/$defs/Revision"
+        }
+      }
+    },
+    "RetainResourceRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "RetainResourceResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resource": {
+          "$ref": "#/$defs/ResourceProjection"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "Revision": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": 0
+    },
+    "RpcKind": {
+      "type": "string",
+      "enum": [
+        "command",
+        "query"
+      ]
+    },
+    "RunCancellationStatus": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "already_requested",
+        "not_found"
+      ]
+    },
+    "RunFlowRequest": {
+      "type": "object",
+      "required": [
+        "flow_path"
+      ],
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "flow_path": {
+          "type": "string"
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InlineImage"
+          }
+        },
+        "reasoning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        }
+      }
+    },
+    "RunFlowResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "run_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "RunLifecycle": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "starting",
+        "running",
+        "waiting_input",
+        "cancelling",
+        "cancelled",
+        "succeeded",
+        "failed",
+        "lost"
+      ]
+    },
+    "RunProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "state",
+        "started_at"
+      ],
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "flow_name": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_run_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FlowRunId"
+            }
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/$defs/RunLifecycle"
+        }
+      }
+    },
+    "SendMessageRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "text"
+      ],
+      "properties": {
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InlineImage"
+          }
+        },
+        "reasoning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "SendMessageResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "run_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ServerEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "delta",
+            "type"
+          ],
+          "properties": {
+            "delta": {
+              "$ref": "#/$defs/ProjectionDelta"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "projection_delta"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "signal",
+            "type"
+          ],
+          "properties": {
+            "signal": {
+              "$ref": "#/$defs/SessionSignal"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "signal"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "gap",
+            "type"
+          ],
+          "properties": {
+            "gap": {
+              "$ref": "#/$defs/ResyncRequired"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "resync_required"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "heartbeat"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ServerEventEnvelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "cursor",
+        "event"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "event": {
+          "type": "object"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "SessionCloseStatus": {
+      "type": "string",
+      "enum": [
+        "closed",
+        "already_closed",
+        "busy"
+      ]
+    },
+    "SessionDeleteStatus": {
+      "type": "string",
+      "enum": [
+        "deleted",
+        "not_found",
+        "busy",
+        "unsafe_resources"
+      ]
+    },
+    "SessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "SessionLifecycle": {
+      "type": "string",
+      "enum": [
+        "creating",
+        "idle",
+        "active",
+        "degraded",
+        "closing",
+        "closed"
+      ]
+    },
+    "SessionMetadataProjection": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name_source": {
+          "$ref": "#/$defs/NameSource"
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "SessionNotification": {
+      "type": "object",
+      "required": [
+        "level",
+        "location",
+        "lifecycle",
+        "stack",
+        "message"
+      ],
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/NoticeLevel"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/NotificationLifecycle"
+        },
+        "location": {
+          "$ref": "#/$defs/NotificationLocation"
+        },
+        "message": {
+          "type": "string"
+        },
+        "run_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FlowRunId"
+            }
+          ]
+        },
+        "stack": {
+          "$ref": "#/$defs/NotificationStack"
+        }
+      }
+    },
+    "SessionProjection": {
+      "type": "object",
+      "required": [
+        "revision",
+        "metadata",
+        "lifecycle"
+      ],
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/ContextProjection"
+        },
+        "goal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interactions": {
+          "$ref": "#/$defs/InteractionProjection"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/SessionLifecycle"
+        },
+        "metadata": {
+          "$ref": "#/$defs/SessionMetadataProjection"
+        },
+        "plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanProjection"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResourceProjection"
+          }
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunProjection"
+          }
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TodoProjection"
+          }
+        },
+        "transcript": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscriptItem"
+          }
+        },
+        "trust": {
+          "$ref": "#/$defs/TrustProjection"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageProjection"
+        },
+        "workflows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowProjection"
+          }
+        }
+      }
+    },
+    "SessionSignal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "text",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "llm_text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "text",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "thinking"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "index",
+            "call_id",
+            "name",
+            "arguments_delta",
+            "type"
+          ],
+          "properties": {
+            "arguments_delta": {
+              "type": "string"
+            },
+            "call_id": {
+              "type": "string"
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_call_draft"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "total_tokens",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "total_tokens": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "llm_done"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "llm_retry"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "notification",
+            "type"
+          ],
+          "properties": {
+            "notification": {
+              "$ref": "#/$defs/SessionNotification"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "notification"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "range_start",
+            "range_end",
+            "before_tokens",
+            "compacted_count",
+            "type"
+          ],
+          "properties": {
+            "before_tokens": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "compacted_count": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "range_end": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "range_start": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compaction_started"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "range_start",
+            "range_end",
+            "text",
+            "type"
+          ],
+          "properties": {
+            "range_end": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "range_start": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compaction_text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "range_start",
+            "range_end",
+            "reason",
+            "type"
+          ],
+          "properties": {
+            "range_end": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "range_start": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compaction_failed"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "resource_id",
+            "bytes",
+            "type"
+          ],
+          "properties": {
+            "bytes": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            },
+            "resource_id": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "terminal_bytes"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "resource_id",
+            "stream",
+            "line",
+            "type"
+          ],
+          "properties": {
+            "line": {
+              "type": "string"
+            },
+            "resource_id": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "stream": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "process_line"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "label",
+            "type"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "progress"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "SessionSnapshot": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "daemon_generation",
+        "cursor",
+        "projection"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "daemon_generation": {
+          "$ref": "#/$defs/DaemonGeneration"
+        },
+        "projection": {
+          "$ref": "#/$defs/SessionProjection"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "SessionStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "finished",
+        "pending"
+      ]
+    },
+    "SessionSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "event_count",
+        "status"
+      ],
+      "properties": {
+        "event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_ts": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "goal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name_source": {
+          "$ref": "#/$defs/NameSource"
+        },
+        "project_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/SessionStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "StartRunRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "flow_path"
+      ],
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "flow_path": {
+          "type": "string"
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InlineImage"
+          }
+        },
+        "reasoning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "StartRunResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "run_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "run_id": {
+          "$ref": "#/$defs/FlowRunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "SubmitFormRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "form_id",
+        "submission"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "submission": {
+          "$ref": "#/$defs/FormSubmission"
+        }
+      }
+    },
+    "SubmitFormResponse": {
+      "type": "object",
+      "required": [
+        "resolved",
+        "status",
+        "session_id",
+        "form_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "form_id": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/FormResolutionStatus"
+        }
+      }
+    },
+    "TerminateResourceRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "TerminateResourceResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id",
+        "status",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/ResourceTerminationStatus"
+        }
+      }
+    },
+    "TodoProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "where",
+        "why",
+        "how",
+        "expected_result",
+        "state"
+      ],
+      "properties": {
+        "expected_result": {
+          "type": "string"
+        },
+        "how": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TodoState"
+        },
+        "where": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        }
+      }
+    },
+    "TodoState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_progress",
+        "done",
+        "cancelled"
+      ]
+    },
+    "TranscriptItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "message",
+            "type"
+          ],
+          "properties": {
+            "message": {
+              "$ref": "#/$defs/MessageProjection"
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/FlowRunId"
+                }
+              ]
+            },
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "message"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "title",
+            "type"
+          ],
+          "properties": {
+            "new_content": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old_content": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/FlowRunId"
+                }
+              ]
+            },
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "title": {
+              "type": "string"
+            },
+            "tool_use_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "diff"
+              ]
+            },
+            "unified_diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "tool_name",
+            "path",
+            "added_lines",
+            "removed_lines",
+            "hunks",
+            "type"
+          ],
+          "properties": {
+            "added_lines": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "hunks": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "path": {
+              "type": "string"
+            },
+            "removed_lines": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/FlowRunId"
+                }
+              ]
+            },
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "tool_name": {
+              "type": "string"
+            },
+            "tool_use_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "turn_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/TurnId"
+                }
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "file_edit"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "range_start",
+            "range_end",
+            "before_tokens",
+            "after_tokens",
+            "summary",
+            "type"
+          ],
+          "properties": {
+            "after_tokens": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "before_tokens": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "range_end": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "range_start": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "summary": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compaction"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "source",
+            "type"
+          ],
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "source": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "mermaid"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "level",
+            "text",
+            "type"
+          ],
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/NoticeLevel"
+            },
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "notice"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "kind",
+            "payload",
+            "type"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object"
+            },
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "extension"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "TrustEscalation": {
+      "type": "string",
+      "enum": [
+        "deny",
+        "ask",
+        "allow"
+      ]
+    },
+    "TrustMode": {
+      "type": "string",
+      "enum": [
+        "calm",
+        "steady",
+        "eager",
+        "reckless"
+      ]
+    },
+    "TrustPolicyAction": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "ask",
+        "deny"
+      ]
+    },
+    "TrustProjection": {
+      "type": "object",
+      "properties": {
+        "eager_risks": {
+          "$ref": "#/$defs/TrustRiskOverrides"
+        },
+        "eager_tiers": {
+          "$ref": "#/$defs/TrustTierOverrides"
+        },
+        "escalation": {
+          "$ref": "#/$defs/TrustEscalation"
+        },
+        "mode": {
+          "$ref": "#/$defs/TrustMode"
+        },
+        "theme": {
+          "$ref": "#/$defs/TrustTheme"
+        }
+      }
+    },
+    "TrustRiskOverrides": {
+      "type": "object",
+      "properties": {
+        "filesystem_write": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "irreversible": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "network": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "outside_workspace": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "process_spawn": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "repository_mutation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        }
+      }
+    },
+    "TrustTheme": {
+      "type": "string",
+      "enum": [
+        "default",
+        "wuxia",
+        "animal",
+        "weather",
+        "drink"
+      ]
+    },
+    "TrustTierOverrides": {
+      "type": "object",
+      "properties": {
+        "tier0": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "tier1": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "tier2": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "tier3": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        },
+        "tier4": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TrustPolicyAction"
+            }
+          ]
+        }
+      }
+    },
+    "TurnId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "UsageProjection": {
+      "type": "object",
+      "properties": {
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "format": "double"
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "llm_calls": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "WorkflowNodeKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "flow_name",
+            "type"
+          ],
+          "properties": {
+            "flow_name": {
+              "type": "string"
+            },
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "flow"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "type"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "statement"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "tool_use_id",
+            "tool_name",
+            "args_preview",
+            "type"
+          ],
+          "properties": {
+            "args_preview": {
+              "type": "string"
+            },
+            "intent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "result_preview": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool_name": {
+              "type": "string"
+            },
+            "tool_use_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "flow_name",
+            "type"
+          ],
+          "properties": {
+            "flow_name": {
+              "type": "string"
+            },
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "subflow"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "branch_index",
+            "type"
+          ],
+          "properties": {
+            "branch_index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "fanout_branch"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "WorkflowNodeProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "state"
+      ],
+      "properties": {
+        "approval": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ApprovalProjection"
+            }
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowNodeProjection"
+          }
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkflowNodeKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "llm_usage": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/LlmUsageProjection"
+            }
+          ]
+        },
+        "output_preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parallel": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowNodeState"
+        }
+      }
+    },
+    "WorkflowNodeState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "WorkflowProjection": {
+      "type": "object",
+      "required": [
+        "turn_id"
+      ],
+      "properties": {
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowNodeProjection"
+          }
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        }
+      }
+    }
+  }
+}
