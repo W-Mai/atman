@@ -4,12 +4,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CompactReviewDecision, CompactReviewResolutionStatus, CreatePermissionGroupResponse,
-    DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus, FormSubmission,
-    GetSessionUpdatesResponse, ListPermissionRequestsResponse, NotificationLifecycle,
-    NotificationLocation, NotificationStack, PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView,
-    PermissionRequestView, PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope,
-    PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse, ResourceId, ResourceKind,
+    CompactReviewDecision, CompactReviewResolutionStatus, CompactionRequestStatus,
+    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus,
+    FormSubmission, GetSessionUpdatesResponse, ListPermissionRequestsResponse,
+    NotificationLifecycle, NotificationLocation, NotificationStack,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView, PermissionRequestView,
+    PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope, PromptId,
+    PromptResolutionStatus, ResolvePermissionRequestsResponse, ResourceId, ResourceKind,
     ResourceState, ResourceTerminationStatus, ResyncRequired, RunCancellationStatus, ServerEvent,
     SessionId, SessionNotification, SessionProjection, SessionSignal, SessionSummary,
     TrustProjection,
@@ -74,6 +75,12 @@ pub(crate) struct FormResolutionCommit {
 
 pub(crate) struct CompactReviewResolutionCommit {
     pub status: CompactReviewResolutionStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct CompactionRequestCommit {
+    pub status: CompactionRequestStatus,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -412,6 +419,17 @@ impl SessionActorHandle {
         .await?
     }
 
+    pub async fn request_compaction(
+        &self,
+        providers: atman_runtime::provider::ProviderRegistry,
+    ) -> Result<CompactionRequestCommit> {
+        request(&self.tx, |reply| Command::RequestCompaction {
+            providers,
+            reply,
+        })
+        .await?
+    }
+
     pub async fn rename(&self, title: String) -> Result<RenameSessionCommit> {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
     }
@@ -605,6 +623,10 @@ enum Command {
         id: String,
         decision: CompactReviewDecision,
         reply: oneshot::Sender<Result<CompactReviewResolutionCommit>>,
+    },
+    RequestCompaction {
+        providers: atman_runtime::provider::ProviderRegistry,
+        reply: oneshot::Sender<Result<CompactionRequestCommit>>,
     },
     Rename {
         title: String,
@@ -878,6 +900,22 @@ impl SessionActor {
             } => {
                 let result = self.resolve_compact_review(id, decision);
                 let _ = reply.send(result);
+            }
+            Command::RequestCompaction { providers, reply } => {
+                let status = if atman_runtime::compaction::start_manual_compact(
+                    self.session.clone(),
+                    self.session.last_model(),
+                    providers,
+                ) {
+                    CompactionRequestStatus::Accepted
+                } else {
+                    CompactionRequestStatus::AlreadyRunning
+                };
+                let _ = reply.send(Ok(CompactionRequestCommit {
+                    status,
+                    revision: self.projection.projection().revision,
+                    cursor: self.event_cursor,
+                }));
             }
             Command::Rename { title, reply } => {
                 let result = self.rename(title);

@@ -329,6 +329,38 @@ pub async fn start_auto_compact_with_budget(
     budget_context: CompactionBudgetContext,
 ) {
     let compact_guard = session.acquire_compact_lock_owned().await;
+    spawn_locked_compact(session, model, providers, budget_context, compact_guard);
+}
+
+pub fn start_manual_compact(
+    session: std::sync::Arc<crate::session::Session>,
+    mut model: String,
+    providers: crate::provider::ProviderRegistry,
+) -> bool {
+    let Ok(compact_guard) = session.compact_lock_handle().try_lock_owned() else {
+        return false;
+    };
+    if model.is_empty() {
+        model = "smart".into();
+    }
+    session.request_manual_compact();
+    spawn_locked_compact(
+        session,
+        model,
+        providers,
+        CompactionBudgetContext::default(),
+        compact_guard,
+    );
+    true
+}
+
+fn spawn_locked_compact(
+    session: std::sync::Arc<crate::session::Session>,
+    model: String,
+    providers: crate::provider::ProviderRegistry,
+    budget_context: CompactionBudgetContext,
+    compact_guard: tokio::sync::OwnedMutexGuard<()>,
+) {
     tokio::task::spawn_blocking(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1278,6 +1310,33 @@ mod tests {
             CompactionBudgetContext::default().estimated_input_tokens(11_000),
             11_000
         );
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_starts_only_when_the_compaction_lock_is_available() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let held = session.acquire_compact_lock_owned().await;
+        assert!(!start_manual_compact(
+            session.clone(),
+            "test".into(),
+            crate::provider::ProviderRegistry::new(),
+        ));
+        assert!(!session.take_manual_compact_request());
+        drop(held);
+
+        assert!(start_manual_compact(
+            session.clone(),
+            "test".into(),
+            crate::provider::ProviderRegistry::new(),
+        ));
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            session.acquire_compact_lock_owned(),
+        )
+        .await
+        .expect("manual compaction should release its lock");
+        drop(completed);
+        assert!(!session.take_manual_compact_request());
     }
 
     #[tokio::test]

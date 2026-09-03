@@ -320,6 +320,7 @@ pub mod methods {
     pub const GET_SESSION_UPDATES: &str = "session.get_updates";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
     pub const SUBMIT_FORM: &str = "form.submit";
+    pub const COMPACT_SESSION: &str = "session.compact";
     pub const RESOLVE_COMPACT_REVIEW: &str = "compact_review.resolve";
     pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
@@ -351,6 +352,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::GetSessionUpdates>(),
         super::method_descriptor::<super::rpc::ResolvePrompt>(),
         super::method_descriptor::<super::rpc::SubmitForm>(),
+        super::method_descriptor::<super::rpc::CompactSession>(),
         super::method_descriptor::<super::rpc::ResolveCompactReview>(),
         super::method_descriptor::<super::rpc::ListPermissionRequests>(),
         super::method_descriptor::<super::rpc::CreatePermissionGroup>(),
@@ -699,6 +701,28 @@ pub enum CompactReviewDecision {
     AcceptAsIs,
     AcceptEdited { summary: String },
     Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CompactSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionRequestStatus {
+    Accepted,
+    AlreadyRunning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct CompactSessionResponse {
+    pub session_id: SessionId,
+    pub status: CompactionRequestStatus,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1212,6 +1236,13 @@ pub mod rpc {
         Command,
         SubmitFormRequest,
         SubmitFormResponse
+    );
+    method!(
+        CompactSession,
+        methods::COMPACT_SESSION,
+        Command,
+        CompactSessionRequest,
+        CompactSessionResponse
     );
     method!(
         ResolveCompactReview,

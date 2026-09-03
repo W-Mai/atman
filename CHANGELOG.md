@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Remote manual compaction** — session clients can request background compaction through an idempotent actor command; concurrent requests report the running operation instead of queuing duplicate summaries.
 - **Remote session trust control** — daemon clients can update the complete session trust policy through an idempotent actor command that persists the session policy and the default for new sessions before publishing the committed projection cursor.
 - **Short-lived event stream authentication** — daemon-issued event tickets are scoped to one session and daemon generation, expire after 60 seconds, and replace long-lived bearer tokens in SSE query parameters.
 - **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.

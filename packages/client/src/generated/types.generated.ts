@@ -38,6 +38,8 @@ export type AtmanDaemonProtocolPayloads =
   | ResolvePromptResponse
   | SubmitFormRequest
   | SubmitFormResponse
+  | CompactSessionRequest
+  | CompactSessionResponse
   | ResolveCompactReviewRequest
   | ResolveCompactReviewResponse
   | ListPermissionRequestsRequest
@@ -584,6 +586,7 @@ export type FormAnswer =
       [k: string]: unknown
     }
 export type FormResolutionStatus = 'resolved' | 'already_resolved' | 'abandoned' | 'not_found'
+export type CompactionRequestStatus = 'accepted' | 'already_running'
 export type CompactReviewDecision =
   | {
       decision: 'accept_as_is'
@@ -1197,6 +1200,18 @@ export interface SubmitFormResponse {
   revision: Revision
   session_id: SessionId
   status: FormResolutionStatus
+  [k: string]: unknown
+}
+export interface CompactSessionRequest {
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface CompactSessionResponse {
+  cursor: EventCursor
+  revision: Revision
+  session_id: SessionId
+  status: CompactionRequestStatus
   [k: string]: unknown
 }
 export interface ResolveCompactReviewRequest {

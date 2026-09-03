@@ -898,6 +898,19 @@ impl DaemonState {
             .await
     }
 
+    pub(crate) async fn request_session_compaction(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        principal: &str,
+    ) -> Result<crate::session_actor::CompactionRequestCommit> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        let actor = self.get_or_load_actor(session_id, principal).await?;
+        let providers = launcher.compaction_providers(self).await?;
+        actor.request_compaction(providers).await
+    }
+
     async fn get_or_load_actor(
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,

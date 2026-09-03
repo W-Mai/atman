@@ -44,6 +44,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert!(capabilities.supports::<atman_proto::rpc::CloseSession>());
     assert!(capabilities.supports::<atman_proto::rpc::DeleteSession>());
     assert!(capabilities.supports::<atman_proto::rpc::UpdateSessionTrust>());
+    assert!(capabilities.supports::<atman_proto::rpc::CompactSession>());
 }
 
 #[tokio::test]
@@ -279,6 +280,72 @@ async fn update_session_trust_persists_and_projects_the_complete_policy() {
         global.risks.eager.network,
         Some(atman_runtime::trust::PolicyAction::Auto)
     );
+}
+
+#[tokio::test]
+async fn compact_session_starts_once_without_blocking_the_session_actor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root, Some(config_dir), None).unwrap(),
+    ));
+    let session = Arc::new(atman_runtime::Session::open(tmp.path()).unwrap());
+    let session_id = atman_proto::SessionId(session.id().0);
+    state
+        .register_session(session_id.clone(), session.clone(), "local-daemon")
+        .await
+        .unwrap();
+
+    let held = session.acquire_compact_lock_owned().await;
+    let busy = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CompactSession>(
+            1,
+            &atman_proto::CompactSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CompactSession>()
+    .unwrap();
+    assert_eq!(
+        busy.status,
+        atman_proto::CompactionRequestStatus::AlreadyRunning
+    );
+    drop(held);
+
+    let accepted = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::CompactSession>(
+            2,
+            &atman_proto::CompactSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CompactSession>()
+    .unwrap();
+    assert_eq!(
+        accepted.status,
+        atman_proto::CompactionRequestStatus::Accepted
+    );
+    let completed = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        session.acquire_compact_lock_owned(),
+    )
+    .await
+    .expect("manual compaction should release its lock");
+    drop(completed);
 }
 
 #[tokio::test]

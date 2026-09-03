@@ -327,6 +327,23 @@
       }
     },
     {
+      "name": "session.compact",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "CompactSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/CompactSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "CompactSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/CompactSessionResponse"
+        }
+      }
+    },
+    {
       "name": "compact_review.resolve",
       "kind": "command",
       "revision": 1,

@@ -1,13 +1,13 @@
 use atman_proto::{
-    CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
-    GetSessionSnapshotRequest, GetSessionUpdatesRequest, InspectResourceResponse,
-    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListProjectsRequest,
-    ListResourcesResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
-    PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
-    RenameSessionResponse, RequestId, ResolveCompactReviewResponse, ResolvePromptResponse,
-    RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
-    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse,
-    method_descriptor, methods, rpc,
+    CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, CompactSessionResponse,
+    DaemonGeneration, EventCursor, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
+    InspectResourceResponse, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
+    JsonRpcResponse, ListProjectsRequest, ListResourcesResponse, ListSessionsRequest,
+    MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits,
+    ReleaseResourceResponse, RenameSessionResponse, RequestId, ResolveCompactReviewResponse,
+    ResolvePromptResponse, RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse,
+    SendMessageResponse, StartRunResponse, SubmitFormResponse, TerminateResourceResponse,
+    UpdateSessionTrustResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -165,6 +165,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::GetSessionUpdates>(),
     method_descriptor::<rpc::ResolvePrompt>(),
     method_descriptor::<rpc::SubmitForm>(),
+    method_descriptor::<rpc::CompactSession>(),
     method_descriptor::<rpc::ResolveCompactReview>(),
     method_descriptor::<rpc::ListPermissionRequests>(),
     method_descriptor::<rpc::CreatePermissionGroup>(),
@@ -866,6 +867,40 @@ pub async fn dispatch_as(
                 .await
                 {
                     Ok(response) => method_response::<rpc::SubmitForm>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::COMPACT_SESSION => match parse_params::<rpc::CompactSession>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::CompactSession, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let commit = operation_state
+                            .request_session_compaction(
+                                &operation_params.session_id,
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(CompactSessionResponse {
+                            session_id: operation_params.session_id,
+                            status: commit.status,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
+                        })
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::CompactSession>(id, response),
                     Err(error) => JsonRpcResponse::err(id, error),
                 }
             }

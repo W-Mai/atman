@@ -115,6 +115,12 @@
       "$ref": "#/$defs/SubmitFormResponse"
     },
     {
+      "$ref": "#/$defs/CompactSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/CompactSessionResponse"
+    },
+    {
       "$ref": "#/$defs/ResolveCompactReviewRequest"
     },
     {
@@ -643,6 +649,57 @@
         "already_resolved",
         "abandoned",
         "not_found"
+      ]
+    },
+    "CompactSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "CompactSessionResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "status",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/CompactionRequestStatus"
+        }
+      }
+    },
+    "CompactionRequestStatus": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "already_running"
       ]
     },
     "ContextProjection": {

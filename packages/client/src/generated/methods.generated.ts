@@ -7,6 +7,8 @@ import type {
   CapabilitiesResponse,
   CloseSessionRequest,
   CloseSessionResponse,
+  CompactSessionRequest,
+  CompactSessionResponse,
   CreatePermissionGroupRequest,
   CreatePermissionGroupResponse,
   CreateSessionRequest,
@@ -177,6 +179,12 @@ export interface RpcMethodMap {
     params: SubmitFormRequest
     result: SubmitFormResponse
   }
+  'session.compact': {
+    kind: 'command'
+    revision: 1
+    params: CompactSessionRequest
+    result: CompactSessionResponse
+  }
   'compact_review.resolve': {
     kind: 'command'
     revision: 1
@@ -257,6 +265,7 @@ export const RPC_METHODS = {
   'session.get_updates': { kind: 'query', revision: 1 },
   'resolve_prompt': { kind: 'command', revision: 2 },
   'form.submit': { kind: 'command', revision: 1 },
+  'session.compact': { kind: 'command', revision: 1 },
   'compact_review.resolve': { kind: 'command', revision: 1 },
   'list_permission_requests': { kind: 'query', revision: 2 },
   'create_permission_group': { kind: 'command', revision: 2 },

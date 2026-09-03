@@ -184,15 +184,36 @@ impl RunLauncher {
     }
 
     pub async fn start_provider_catalog_refreshes(&self, state: &DaemonState) -> Result<()> {
+        self.prepare_provider_lifecycle(state).await.map(drop)
+    }
+
+    pub(crate) async fn compaction_providers(
+        &self,
+        state: &DaemonState,
+    ) -> Result<atman_runtime::provider::ProviderRegistry> {
+        Ok(self
+            .prepare_provider_lifecycle(state)
+            .await?
+            .provider_registry()
+            .clone())
+    }
+
+    async fn prepare_provider_lifecycle(
+        &self,
+        state: &DaemonState,
+    ) -> Result<atman_runtime::ProviderLifecycle> {
         reload_model_config(self.config_dir.as_deref());
         let lifecycle = state.provider_lifecycle_for(self.config_dir.as_deref())?;
+        lifecycle
+            .reload_config_providers()
+            .context("load model and provider configuration")?;
         let plan = crate::bootstrap::prepare_auth_provider_runtime(&lifecycle).await?;
         ProviderCatalogRefreshDispatcher {
             runtime: tokio::runtime::Handle::current(),
-            lifecycle,
+            lifecycle: lifecycle.clone(),
         }
         .dispatch(plan);
-        Ok(())
+        Ok(lifecycle)
     }
 
     pub async fn create_session(
