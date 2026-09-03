@@ -17,6 +17,7 @@ pub struct RootInvocation {
     pub turn_id: Option<TurnId>,
     pub session: Option<std::sync::Arc<Session>>,
     pub first_run_id: Option<FlowRunId>,
+    pub flow_cancel: Option<tokio_util::sync::CancellationToken>,
     pub env: InvocationEnv,
 }
 
@@ -211,9 +212,10 @@ impl Executor {
             &args,
             session.as_ref().and_then(|session| session.goal()),
         );
-        let flow_cancel = session
-            .as_ref()
-            .map(|s| s.flow_cancel_token())
+        let flow_cancel = invocation
+            .flow_cancel
+            .clone()
+            .or_else(|| session.as_ref().map(|s| s.flow_cancel_token()))
             .unwrap_or_default();
         let flow_registry = session
             .as_ref()

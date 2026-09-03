@@ -835,7 +835,7 @@ async fn run_flow_inner(
     };
     {
         let _compact_guard = session.acquire_compact_lock().await;
-        session.begin_turn_with_cancel(user_msg, flow_cancel);
+        session.begin_turn_with_cancel(user_msg, flow_cancel.clone());
     }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
@@ -849,6 +849,7 @@ async fn run_flow_inner(
                 turn_id: Some(turn_id),
                 session: Some(session.clone()),
                 first_run_id: Some(run_id),
+                flow_cancel: Some(flow_cancel),
                 env: invocation_env,
             },
         )

@@ -143,8 +143,12 @@ impl<'a> LlmStream<'a> {
 }
 
 impl<'a> StreamingLlmStream<'a> {
-    pub(crate) fn with_session(mut self, session: &'a Session) -> Self {
-        self.flow_cancel = Some(session.flow_cancel_token());
+    pub(crate) fn with_session(
+        mut self,
+        session: &'a Session,
+        flow_cancel: CancellationToken,
+    ) -> Self {
+        self.flow_cancel = Some(flow_cancel);
         self.session = Some(session);
         self
     }
@@ -1132,7 +1136,7 @@ mod tests {
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1))
             .with_stream_tx(stream_tx)
-            .with_session(&session);
+            .with_session(&session, session.flow_cancel_token());
         let fut = async {
             tokio::task::yield_now().await;
             session.cancel_flow();

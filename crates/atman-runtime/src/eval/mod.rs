@@ -780,7 +780,7 @@ async fn dispatch_tool_call<'a>(
             }
         }
     }
-    let ctx_with_anchors = ctx
+    let mut ctx_with_anchors = ctx
         .tool_ctx
         .clone()
         .with_anchors(
@@ -789,6 +789,7 @@ async fn dispatch_tool_call<'a>(
             ctx.events.map(|s| s.next_seq_peek()),
         )
         .with_registry(std::sync::Arc::new(ctx.tools.clone()));
+    ctx_with_anchors.flow_cancel = ctx.flow_cancel.clone();
     let ctx_with_anchors = if let Some(sink) = ctx.events {
         ctx_with_anchors.with_events(sink.clone())
     } else {
@@ -1086,6 +1087,7 @@ fn value_struct_string(value: &Value, name: &str) -> Option<String> {
 #[derive(Default)]
 pub(super) struct StreamCallCtx<'a> {
     session: Option<&'a crate::session::Session>,
+    flow_cancel: tokio_util::sync::CancellationToken,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&'a crate::event::FlowRunId>,
     agent_entry: Option<&'a std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
@@ -1110,7 +1112,7 @@ pub(super) async fn call_and_maybe_stream(
             stream = stream.with_watch_rules(rules);
         }
         if let Some(session) = stream_ctx.session {
-            stream = stream.with_session(session);
+            stream = stream.with_session(session, stream_ctx.flow_cancel.clone());
         }
         if let Some(entry) = stream_ctx.agent_entry {
             stream = stream.with_entry(entry);

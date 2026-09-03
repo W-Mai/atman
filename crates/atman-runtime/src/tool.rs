@@ -96,6 +96,7 @@ pub struct ResolvedPath {
 #[derive(Clone, Default)]
 pub struct ToolCtx {
     pub cancel: CancellationToken,
+    pub flow_cancel: CancellationToken,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub history_segment: HistorySegment,

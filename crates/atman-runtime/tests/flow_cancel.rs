@@ -12,7 +12,8 @@ use atman_runtime::provider::{
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
-use atman_runtime::{Executor, RuntimeError, Value};
+use atman_runtime::{Executor, RootInvocation, RuntimeError, Value};
+use tokio_util::sync::CancellationToken;
 
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
@@ -47,6 +48,67 @@ async fn flow_cancel_before_start_returns_cancelled_error() {
         .await
         .unwrap_err();
     assert!(matches!(err, RuntimeError::Cancelled(msg) if msg.contains("cancelled")));
+}
+
+#[tokio::test]
+async fn root_invocation_cancel_token_is_independent_from_session_slot() {
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
+    let file = parse_file(
+        r#"flow ask() -> string {
+    return llm.call(model: "mock", prompt: "hi", context: "session")
+}
+"#,
+    )
+    .unwrap();
+    let executor = common::executor();
+    common::register_provider(
+        &executor,
+        MockProvider::new("mock").with_model("mock", Value::Str("would-run".into())),
+    );
+
+    let cancelled_invocation_session = Arc::new(Session::open_ephemeral());
+    let cancelled_turn = TurnId::now();
+    cancelled_invocation_session.begin_turn(user_msg(cancelled_turn.clone(), "cancel"));
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = executor
+        .run_with_invocation(
+            &file,
+            "ask",
+            vec![],
+            RootInvocation {
+                turn_id: Some(cancelled_turn),
+                session: Some(cancelled_invocation_session),
+                flow_cancel: Some(cancelled),
+                ..RootInvocation::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, RuntimeError::Cancelled(_)));
+
+    let cancelled_session_slot = Arc::new(Session::open_ephemeral());
+    let live_turn = TurnId::now();
+    cancelled_session_slot.begin_turn(user_msg(live_turn.clone(), "continue"));
+    cancelled_session_slot.cancel_flow();
+    let output = executor
+        .run_with_invocation(
+            &file,
+            "ask",
+            vec![],
+            RootInvocation {
+                turn_id: Some(live_turn),
+                session: Some(cancelled_session_slot),
+                flow_cancel: Some(CancellationToken::new()),
+                ..RootInvocation::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !output.is_err(),
+        "explicit live token must keep the run active"
+    );
 }
 
 struct CancelAfterFirstProvider {

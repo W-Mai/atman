@@ -395,6 +395,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 context_plan.into_request(),
                 StreamCallCtx {
                     session: ctx.session_runtime.as_deref(),
+                    flow_cancel: ctx.flow_cancel.clone(),
                     stream_tx: stream_tx.clone(),
                     flow_run_id: ctx.flow_run_id.as_ref(),
                     agent_entry: ctx.agent_entry.as_ref(),
