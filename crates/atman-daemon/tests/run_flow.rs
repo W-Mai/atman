@@ -99,6 +99,10 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     .expect("run_flow retry ok");
     assert_eq!(retry.session_id, result.session_id);
     assert_eq!(retry.run_id, result.run_id);
+    assert_eq!(retry.revision, result.revision);
+    assert_eq!(retry.cursor, result.cursor);
+    assert!(result.revision.0 > 0);
+    assert!(result.cursor.0 > 0);
     let sid_val = result.session_id.to_string();
     assert!(!sid_val.is_empty());
 

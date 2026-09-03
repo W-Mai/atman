@@ -1023,9 +1023,9 @@ pub async fn dispatch_as(
                         &params,
                         async move {
                             let args = runtime_args(operation_params.args);
-                            launcher
+                            let spawned = launcher
                                 .spawn_as_with_options(
-                                    operation_state,
+                                    operation_state.clone(),
                                     &operation_params.flow_path,
                                     args,
                                     &operation_principal,
@@ -1036,11 +1036,17 @@ pub async fn dispatch_as(
                                     },
                                 )
                                 .await
-                                .map(|spawned| RunFlowResponse {
-                                    session_id: spawned.session_id,
-                                    run_id: spawned.run_id,
-                                })
-                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            let snapshot = operation_state
+                                .session_snapshot(&spawned.session_id, &operation_principal)
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(RunFlowResponse {
+                                session_id: spawned.session_id,
+                                run_id: spawned.run_id,
+                                revision: snapshot.projection.revision,
+                                cursor: snapshot.cursor,
+                            })
                         },
                     )
                     .await;

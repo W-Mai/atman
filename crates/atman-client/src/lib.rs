@@ -13,7 +13,8 @@ use std::sync::{
 use atman_proto::{
     CapabilitiesRequest, CapabilitiesResponse, ClientId, CreateSessionRequest, EventCursor,
     JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, PROTOCOL_VERSION,
-    ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, SessionId, SessionSummary, rpc,
+    ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
+    SessionId, SessionSummary, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -247,6 +248,23 @@ impl Client {
         .await
     }
 
+    pub async fn run_flow(
+        &self,
+        flow_path: impl Into<String>,
+        args: serde_json::Map<String, serde_json::Value>,
+        reasoning: Option<String>,
+        images: Vec<atman_proto::InlineImage>,
+    ) -> Result<RunFlowResponse, ClientError> {
+        self.command::<rpc::RunFlow>(&RunFlowRequest {
+            request_id: Some(RequestId::now()),
+            flow_path: flow_path.into(),
+            args,
+            reasoning,
+            images,
+        })
+        .await
+    }
+
     pub async fn session_events(
         &self,
         session_id: SessionId,
@@ -287,11 +305,15 @@ async fn invoke<M: RpcMethod>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use atman_proto::{
-        DaemonGeneration, EVENT_SCHEMA_VERSION, EmptyParams, JsonRpcResponse, MethodCapability,
-        PingResponse, ProtocolLimits, RpcKind, method_descriptor, methods,
+        DaemonGeneration, EVENT_SCHEMA_VERSION, EmptyParams, FlowRunId, JsonRpcResponse,
+        MethodCapability, PingResponse, ProtocolLimits, Revision, RpcKind, method_descriptor,
+        methods,
     };
 
     use super::*;
@@ -299,6 +321,64 @@ mod tests {
     struct FakeTransport {
         requests: Mutex<Vec<JsonRpcRequest>>,
         protocol_version: u32,
+    }
+
+    struct RetryRunFlowTransport {
+        attempts: AtomicUsize,
+        requests: Arc<Mutex<Vec<JsonRpcRequest>>>,
+    }
+
+    impl RpcTransport for RetryRunFlowTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<JsonRpcResponse, TransportError>> {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(request.clone());
+                match request.method.as_str() {
+                    methods::DAEMON_CAPABILITIES => {
+                        let methods = [
+                            method_descriptor::<rpc::DaemonCapabilities>(),
+                            method_descriptor::<rpc::RunFlow>(),
+                        ]
+                        .into_iter()
+                        .map(|method| MethodCapability {
+                            name: method.name.into(),
+                            kind: method.kind,
+                            revision: method.revision,
+                        })
+                        .collect();
+                        Ok(JsonRpcResponse::ok(
+                            request.id,
+                            serde_json::to_value(CapabilitiesResponse {
+                                protocol_version: PROTOCOL_VERSION,
+                                daemon_version: "test".into(),
+                                daemon_generation: DaemonGeneration("generation".into()),
+                                event_schema_version: EVENT_SCHEMA_VERSION,
+                                methods,
+                                limits: ProtocolLimits {
+                                    max_event_page_size: 100,
+                                    subscriber_buffer: 256,
+                                },
+                            })?,
+                        ))
+                    }
+                    methods::RUN_FLOW if self.attempts.fetch_add(1, Ordering::Relaxed) == 0 => {
+                        Err(TransportError::Closed)
+                    }
+                    methods::RUN_FLOW => Ok(JsonRpcResponse::ok(
+                        request.id,
+                        serde_json::to_value(RunFlowResponse {
+                            session_id: SessionId(uuid::Uuid::nil()),
+                            run_id: FlowRunId(uuid::Uuid::nil()),
+                            revision: Revision(3),
+                            cursor: EventCursor(4),
+                        })?,
+                    )),
+                    method => panic!("unexpected method {method}"),
+                }
+            })
+        }
     }
 
     impl FakeTransport {
@@ -373,6 +453,38 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(error, ClientError::ProtocolVersion { .. }));
+    }
+
+    #[tokio::test]
+    async fn flow_start_retry_reuses_the_business_request_id() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = Client::connect(
+            RetryRunFlowTransport {
+                attempts: AtomicUsize::new(0),
+                requests: requests.clone(),
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .unwrap();
+
+        let response = client
+            .run_flow("agent.at", serde_json::Map::new(), None, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(response.revision, Revision(3));
+        assert_eq!(response.cursor, EventCursor(4));
+
+        let request_ids = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == methods::RUN_FLOW)
+            .map(|request| request.params.as_ref().unwrap()["request_id"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(request_ids.len(), 2);
+        assert_eq!(request_ids[0], request_ids[1]);
+        assert!(!request_ids[0].is_null());
     }
 
     #[test]

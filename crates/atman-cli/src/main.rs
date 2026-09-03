@@ -495,13 +495,12 @@ async fn cmd_daemon_run(
         })
         .collect::<Result<Vec<_>>>()?;
     let run = client
-        .call::<atman_proto::rpc::RunFlow>(&atman_proto::RunFlowRequest {
-            request_id: Some(atman_proto::RequestId::now()),
-            flow_path: abs.to_string_lossy().into_owned(),
-            args: serde_json::Map::new(),
+        .run_flow(
+            abs.to_string_lossy().into_owned(),
+            serde_json::Map::new(),
             reasoning,
             images,
-        })
+        )
         .await
         .context("start daemon flow")?;
     println!("session_id: {}", run.session_id);

@@ -719,6 +719,8 @@ pub struct InlineImage {
 pub struct RunFlowResponse {
     pub session_id: SessionId,
     pub run_id: FlowRunId,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
