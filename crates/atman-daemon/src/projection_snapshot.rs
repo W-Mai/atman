@@ -3,14 +3,14 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use atman_proto::SessionId;
+use atman_proto::{EventCursor, SessionId};
 use atman_runtime::event::EventEnvelope;
 use atman_runtime::event_writer::EventWriterWatermark;
 use serde::{Deserialize, Serialize};
 
-use crate::projection::SessionProjector;
+use crate::projection::{RestoredProjection, SessionProjector};
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 const SNAPSHOT_DIR: &str = ".projection-snapshots";
 const SNAPSHOT_PREFIX: &str = "projection-";
 const SNAPSHOT_SUFFIX: &str = ".json";
@@ -29,6 +29,8 @@ struct ProjectionSnapshotDocument {
     schema_version: u32,
     session_id: SessionId,
     coverage: EventLogCoverage,
+    #[serde(default)]
+    event_cursor: Option<EventCursor>,
     boundary_digest: String,
     projector_digest: String,
     projector: serde_json::Value,
@@ -36,6 +38,7 @@ struct ProjectionSnapshotDocument {
 
 struct DecodedProjectionSnapshot {
     coverage: EventLogCoverage,
+    event_cursor: EventCursor,
     projector: SessionProjector,
 }
 
@@ -43,6 +46,7 @@ pub(crate) fn save(
     session_id: &SessionId,
     session_dir: &Path,
     watermark: EventWriterWatermark,
+    event_cursor: EventCursor,
     projector: &SessionProjector,
     redactor: Option<&atman_runtime::redact::Redactor>,
 ) -> Result<()> {
@@ -51,6 +55,12 @@ pub(crate) fn save(
         "projection covers runtime event {}, durable log covers {}",
         projector.last_runtime_seq(),
         watermark.seq
+    );
+    anyhow::ensure!(
+        event_cursor.0 >= projector.projection().revision.0,
+        "event cursor {} trails projection revision {}",
+        event_cursor.0,
+        projector.projection().revision.0
     );
     let events_path = session_dir.join("events.jsonl");
     let boundary_digest = boundary_digest(&events_path, watermark.offset)?;
@@ -68,6 +78,7 @@ pub(crate) fn save(
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         session_id: session_id.clone(),
         coverage,
+        event_cursor: Some(event_cursor),
         boundary_digest,
         projector_digest,
         projector: projector_value,
@@ -90,7 +101,10 @@ pub(crate) fn save(
     Ok(())
 }
 
-pub(crate) fn load(session_id: &SessionId, session_dir: &Path) -> Result<Option<SessionProjector>> {
+pub(crate) fn load(
+    session_id: &SessionId,
+    session_dir: &Path,
+) -> Result<Option<RestoredProjection>> {
     let events_path = session_dir.join("events.jsonl");
     let snapshots_dir = session_dir.join(SNAPSHOT_DIR);
     let metadata = match fs::symlink_metadata(&snapshots_dir) {
@@ -111,10 +125,16 @@ pub(crate) fn load(session_id: &SessionId, session_dir: &Path) -> Result<Option<
             continue;
         };
         let mut projector = document.projector;
+        let mut event_cursor = document.event_cursor;
         for event in tail {
-            projector.apply_envelope(&event);
+            if projector.apply_envelope(&event).is_some() {
+                event_cursor.0 = event_cursor.0.saturating_add(1);
+            }
         }
-        return Ok(Some(projector));
+        return Ok(Some(RestoredProjection {
+            projector,
+            event_cursor,
+        }));
     }
     Ok(None)
 }
@@ -215,7 +235,10 @@ fn load_candidate(
     let document: ProjectionSnapshotDocument =
         serde_json::from_reader(BufReader::new(File::open(path)?))
             .context("decode projection snapshot")?;
-    anyhow::ensure!(document.schema_version == SNAPSHOT_SCHEMA_VERSION);
+    anyhow::ensure!(matches!(
+        document.schema_version,
+        1 | SNAPSHOT_SCHEMA_VERSION
+    ));
     anyhow::ensure!(&document.session_id == expected_session_id);
     anyhow::ensure!(
         document.coverage
@@ -227,6 +250,10 @@ fn load_candidate(
     anyhow::ensure!(document.projector_digest == value_digest(&document.projector)?);
     let projector: SessionProjector =
         serde_json::from_value(document.projector).context("decode projection snapshot state")?;
+    let event_cursor = document
+        .event_cursor
+        .unwrap_or(EventCursor(projector.projection().revision.0));
+    anyhow::ensure!(event_cursor.0 >= projector.projection().revision.0);
     anyhow::ensure!(projector.last_runtime_seq() == document.coverage.seq);
     anyhow::ensure!(
         projector.projection().metadata.id == *expected_session_id,
@@ -238,6 +265,7 @@ fn load_candidate(
     );
     Ok(DecodedProjectionSnapshot {
         coverage: document.coverage,
+        event_cursor,
         projector,
     })
 }
@@ -333,6 +361,7 @@ mod tests {
             &session_id,
             session_dir.path(),
             EventWriterWatermark { seq: 1, offset },
+            EventCursor(projector.projection().revision.0),
             &projector,
             None,
         )
@@ -355,7 +384,7 @@ mod tests {
         fs::write(corrupt, b"not-json").unwrap();
 
         let loaded = load(&session_id, session_dir.path()).unwrap().unwrap();
-        assert_eq!(loaded.last_runtime_seq(), 2);
+        assert_eq!(loaded.projector.last_runtime_seq(), 2);
     }
 
     #[test]
@@ -375,6 +404,7 @@ mod tests {
             &session_id,
             session_dir.path(),
             EventWriterWatermark { seq: 1, offset },
+            EventCursor(projector.projection().revision.0),
             &projector,
             None,
         )
@@ -407,6 +437,7 @@ mod tests {
                 &session_id,
                 session_dir.path(),
                 EventWriterWatermark { seq, offset },
+                EventCursor(projector.projection().revision.0),
                 &projector,
                 None,
             )
@@ -454,6 +485,7 @@ mod tests {
             &session_id,
             session_dir.path(),
             EventWriterWatermark { seq: 1, offset },
+            EventCursor(projector.projection().revision.0),
             &projector,
             Some(&atman_runtime::redact::Redactor::builtin()),
         )
@@ -470,8 +502,48 @@ mod tests {
             load(&session_id, session_dir.path())
                 .unwrap()
                 .unwrap()
+                .projector
                 .last_runtime_seq(),
             1
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_defaults_event_cursor_to_projection_revision() {
+        let session_dir = tempfile::tempdir().unwrap();
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let events_path = session_dir.path().join("events.jsonl");
+        let event = EventEnvelope::new(
+            1,
+            Event::TurnStart {
+                turn_id: TurnId::now(),
+            },
+        );
+        let offset = append_envelope(&events_path, &event);
+        let projector = SessionProjector::from_events(session_id.clone(), None, &[event]);
+        save(
+            &session_id,
+            session_dir.path(),
+            EventWriterWatermark { seq: 1, offset },
+            EventCursor(projector.projection().revision.0),
+            &projector,
+            None,
+        )
+        .unwrap();
+        let (_, _, snapshot_path) = snapshot_candidates(&session_dir.path().join(SNAPSHOT_DIR))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+        document["schema_version"] = serde_json::json!(1);
+        document.as_object_mut().unwrap().remove("event_cursor");
+        fs::write(&snapshot_path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let loaded = load(&session_id, session_dir.path()).unwrap().unwrap();
+        assert_eq!(
+            loaded.event_cursor,
+            EventCursor(loaded.projector.projection().revision.0)
         );
     }
 
@@ -522,10 +594,12 @@ mod tests {
             offset = append_envelope(&events_path, event);
         }
         let projector = SessionProjector::from_events(session_id.clone(), None, &events[..2]);
+        let snapshot_revision = projector.projection().revision.0;
         save(
             &session_id,
             session_dir.path(),
             EventWriterWatermark { seq: 2, offset },
+            EventCursor(20),
             &projector,
             None,
         )
@@ -536,7 +610,14 @@ mod tests {
 
         let restored = load(&session_id, session_dir.path()).unwrap().unwrap();
         let rebuilt = SessionProjector::from_events(session_id, None, &events);
-        assert_eq!(restored.last_runtime_seq(), rebuilt.last_runtime_seq());
-        assert_eq!(restored.projection(), rebuilt.projection());
+        assert_eq!(
+            restored.event_cursor,
+            EventCursor(20 + rebuilt.projection().revision.0 - snapshot_revision)
+        );
+        assert_eq!(
+            restored.projector.last_runtime_seq(),
+            rebuilt.last_runtime_seq()
+        );
+        assert_eq!(restored.projector.projection(), rebuilt.projection());
     }
 }

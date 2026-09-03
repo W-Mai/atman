@@ -2,15 +2,15 @@ use std::collections::HashMap;
 
 use atman_proto::{
     ApprovalGroupProjection, ApprovalRequestProjection, ApprovalState, ApprovalTarget,
-    ContextProjection, FlowRunId, ImageDetail, InteractionProjection, InterjectionProjection,
-    InterjectionSource, LlmUsageProjection, McpServerProjection, MessageOrigin, MessagePart,
-    MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection,
-    ProjectionChange, ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState,
-    Revision, RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
-    SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
-    TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
-    UsageProjection, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
-    WorkflowProjection,
+    ContextProjection, EventCursor, FlowRunId, ImageDetail, InteractionProjection,
+    InterjectionProjection, InterjectionSource, LlmUsageProjection, McpServerProjection,
+    MessageOrigin, MessagePart, MessageProjection, MessageRole, NameSource, NoticeLevel,
+    PlanProjection, PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId,
+    ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
+    SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
+    TodoState, TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
+    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection, WorkflowNodeKind,
+    WorkflowNodeProjection, WorkflowNodeState, WorkflowProjection,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -26,6 +26,16 @@ pub(crate) struct SessionProjector {
     event_usage: UsageProjection,
     watch_usage: UsageProjection,
     last_runtime_seq: u64,
+}
+
+pub(crate) struct HistoricalProjection {
+    pub cursor: EventCursor,
+    pub projection: SessionProjection,
+}
+
+pub(crate) struct RestoredProjection {
+    pub projector: SessionProjector,
+    pub event_cursor: EventCursor,
 }
 
 impl SessionProjector {
@@ -1082,6 +1092,10 @@ pub(crate) fn redacted_updates(
     let Some(redactor) = redactor else {
         return Ok(updates.clone());
     };
+    let mut updates = updates.clone();
+    for event in &mut updates.events {
+        redact_terminal_bytes(event, redactor);
+    }
     let mut value = serde_json::to_value(updates)?;
     redactor.redact_json(&mut value);
     Ok(serde_json::from_value(value)?)
@@ -1094,54 +1108,88 @@ pub(crate) fn redacted_projection_event(
     let Some(redactor) = redactor else {
         return Ok(event.clone());
     };
+    let mut event = event.clone();
+    redact_terminal_bytes(&mut event, redactor);
     let mut value = serde_json::to_value(event)?;
     redactor.redact_json(&mut value);
     Ok(serde_json::from_value(value)?)
+}
+
+fn redact_terminal_bytes(
+    event: &mut atman_proto::ProjectionEventEnvelope,
+    redactor: &atman_runtime::redact::Redactor,
+) {
+    let atman_proto::ServerEvent::Signal {
+        signal: atman_proto::SessionSignal::TerminalBytes { bytes, .. },
+    } = &mut event.event
+    else {
+        return;
+    };
+    let mut redacted = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor].is_ascii() {
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii() {
+                cursor += 1;
+            }
+            let text = std::str::from_utf8(&bytes[start..cursor])
+                .expect("an ASCII byte range is valid UTF-8");
+            redacted.extend_from_slice(redactor.redact(text).0.as_bytes());
+        } else {
+            redacted.push(bytes[cursor]);
+            cursor += 1;
+        }
+    }
+    *bytes = redacted;
 }
 
 pub(crate) async fn load_historical_projection(
     session_id: SessionId,
     session_dir: &std::path::Path,
     fallback_trust: atman_runtime::trust::TrustConfig,
-) -> anyhow::Result<SessionProjection> {
+) -> anyhow::Result<HistoricalProjection> {
     let replay_dir = session_dir.to_path_buf();
     let replay_session_id = session_id.clone();
-    let (meta, mut projector, context, goal, trust) = tokio::task::spawn_blocking(move || {
-        let events_path = replay_dir.join("events.jsonl");
-        anyhow::ensure!(
-            events_path.is_file(),
-            "session not found: {replay_session_id}"
-        );
-        let meta = atman_runtime::session_meta::SessionMeta::load(&replay_dir);
-        let (projector, context) =
-            match crate::projection_snapshot::load(&replay_session_id, &replay_dir)? {
-                Some(projector) => (projector, None),
-                None => {
-                    let events =
-                        atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
-                    let context =
-                        atman_runtime::event_log::reader::context_snapshot_from_envelopes(&events);
-                    (
-                        SessionProjector::from_events(
+    let (meta, mut projector, mut event_cursor, context, goal, trust) =
+        tokio::task::spawn_blocking(move || {
+            let events_path = replay_dir.join("events.jsonl");
+            anyhow::ensure!(
+                events_path.is_file(),
+                "session not found: {replay_session_id}"
+            );
+            let meta = atman_runtime::session_meta::SessionMeta::load(&replay_dir);
+            let (projector, event_cursor, context) =
+                match crate::projection_snapshot::load(&replay_session_id, &replay_dir)? {
+                    Some(loaded) => (loaded.projector, loaded.event_cursor, None),
+                    None => {
+                        let events =
+                            atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
+                        let context =
+                            atman_runtime::event_log::reader::context_snapshot_from_envelopes(
+                                &events,
+                            );
+                        let projector = SessionProjector::from_events(
                             replay_session_id.clone(),
                             meta.clone(),
                             &events,
-                        ),
-                        Some(context),
-                    )
-                }
-            };
-        let goal = atman_runtime::memory::goal::GoalStore::at(&replay_dir).get()?;
-        let trust =
-            atman_runtime::session::load_session_trust(&replay_dir)?.unwrap_or(fallback_trust);
-        Ok::<_, anyhow::Error>((meta, projector, context, goal, trust))
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("historical session replay task failed: {error}"))??;
+                        );
+                        let event_cursor = EventCursor(projector.projection().revision.0);
+                        (projector, event_cursor, Some(context))
+                    }
+                };
+            let goal = atman_runtime::memory::goal::GoalStore::at(&replay_dir).get()?;
+            let trust =
+                atman_runtime::session::load_session_trust(&replay_dir)?.unwrap_or(fallback_trust);
+            Ok::<_, anyhow::Error>((meta, projector, event_cursor, context, goal, trust))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("historical session replay task failed: {error}"))??;
 
     let todo_store = atman_runtime::memory::todo::TodoStore::at(session_dir);
     let plan_store = atman_runtime::memory::plan::PlanStore::at(session_dir);
     let (todos, plans) = tokio::join!(todo_store.list(), plan_store.list());
+    let previous_revision = projector.projection().revision.0;
     projector.set_metadata(meta);
     projector.set_goal((!goal.is_empty()).then_some(goal));
     projector.set_todos(todos?);
@@ -1151,7 +1199,17 @@ pub(crate) async fn load_historical_projection(
         projector.set_context(context);
     }
     projector.reconcile_disconnected();
-    Ok(projector.snapshot())
+    event_cursor.0 = event_cursor.0.saturating_add(
+        projector
+            .projection()
+            .revision
+            .0
+            .saturating_sub(previous_revision),
+    );
+    Ok(HistoricalProjection {
+        cursor: event_cursor,
+        projection: projector.snapshot(),
+    })
 }
 
 fn transcript_message_slots(
@@ -1716,7 +1774,7 @@ fn resource_is_terminal(state: &str) -> bool {
     matches!(state, "released" | "failed" | "error" | "lost" | "orphaned")
 }
 
-fn task_resource_id(task_id: &atman_runtime::TaskId) -> ResourceId {
+pub(crate) fn task_resource_id(task_id: &atman_runtime::TaskId) -> ResourceId {
     ResourceId(format!("task:{task_id}"))
 }
 
@@ -1746,6 +1804,41 @@ mod tests {
 
     fn envelope(seq: u64, ts: chrono::DateTime<chrono::Utc>, event: Event) -> EventEnvelope {
         EventEnvelope { seq, ts, event }
+    }
+
+    #[test]
+    fn terminal_signal_redaction_preserves_non_utf8_bytes() {
+        let secret = "sk-abcdefghijklmnop1234567890";
+        let mut bytes = vec![0xff];
+        bytes.extend_from_slice(format!("token={secret}").as_bytes());
+        bytes.push(0xfe);
+        let event = atman_proto::ProjectionEventEnvelope {
+            schema_version: atman_proto::PROJECTION_EVENT_SCHEMA_VERSION,
+            daemon_generation: atman_proto::DaemonGeneration("test".into()),
+            session_id: SessionId(uuid::Uuid::now_v7()),
+            cursor: EventCursor(1),
+            ts: chrono::Utc::now(),
+            event: atman_proto::ServerEvent::Signal {
+                signal: atman_proto::SessionSignal::TerminalBytes {
+                    resource_id: ResourceId("task:test".into()),
+                    bytes,
+                },
+            },
+        };
+
+        let redacted =
+            redacted_projection_event(&event, Some(&atman_runtime::redact::Redactor::builtin()))
+                .unwrap();
+        let atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::TerminalBytes { bytes, .. },
+        } = redacted.event
+        else {
+            panic!("expected terminal signal");
+        };
+        assert_eq!(bytes.first(), Some(&0xff));
+        assert_eq!(bytes.last(), Some(&0xfe));
+        assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+        assert!(String::from_utf8_lossy(&bytes).contains("<REDACTED:openai_api_key>"));
     }
 
     #[test]

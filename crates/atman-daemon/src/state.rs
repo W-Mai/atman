@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::idempotency::IdempotencyRegistry;
 use crate::project_registry::{ProjectRecord, ProjectRegistry};
-use crate::projection::SessionProjector;
+use crate::projection::RestoredProjection;
 use crate::session_actor::{RunAdmission, SessionActorHandle, SessionActorLease};
 
 pub struct DaemonState {
@@ -46,7 +46,7 @@ enum SessionUnloadOutcome {
 
 pub(crate) struct LoadedSession {
     pub session: std::sync::Arc<atman_runtime::Session>,
-    pub projection: SessionProjector,
+    pub projection: RestoredProjection,
 }
 
 #[derive(Clone)]
@@ -269,7 +269,7 @@ impl DaemonState {
         initial_runs: Vec<LiveRun>,
         owner_principal: String,
         admission: RunAdmission,
-        restored_projection: Option<SessionProjector>,
+        restored_projection: Option<RestoredProjection>,
     ) -> Result<()> {
         let existing = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -407,7 +407,7 @@ impl DaemonState {
                 Some(launcher) => launcher.trust_config()?,
                 None => atman_runtime::trust::TrustConfig::default(),
             };
-            let projection = crate::projection::load_historical_projection(
+            let historical = crate::projection::load_historical_projection(
                 id.clone(),
                 &session_dir,
                 fallback_trust,
@@ -417,9 +417,11 @@ impl DaemonState {
                 .launcher()
                 .and_then(|launcher| launcher.config_dir.clone());
             let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
-            let projection =
-                crate::projection::redacted_projection(&projection, redactor.as_deref())?;
-            (EventCursor(projection.revision.0), projection)
+            let projection = crate::projection::redacted_projection(
+                &historical.projection,
+                redactor.as_deref(),
+            )?;
+            (historical.cursor, projection)
         };
         Ok(SessionSnapshot {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
@@ -1240,6 +1242,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::projection::SessionProjector;
 
     #[test]
     fn deletion_blocks_every_non_terminal_resource_state() {
@@ -1281,12 +1284,16 @@ mod tests {
                     .get_or_load_session(&session_id, "owner", move || async move {
                         load_count.fetch_add(1, Ordering::SeqCst);
                         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        let projection = SessionProjector::from_events(
+                            projection_session_id,
+                            session.meta(),
+                            &[],
+                        );
                         Ok(LoadedSession {
-                            projection: SessionProjector::from_events(
-                                projection_session_id,
-                                session.meta(),
-                                &[],
-                            ),
+                            projection: RestoredProjection {
+                                event_cursor: EventCursor(projection.projection().revision.0),
+                                projector: projection,
+                            },
                             session,
                         })
                     })

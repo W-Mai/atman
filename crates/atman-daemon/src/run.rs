@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
+use atman_proto::{EventCursor, FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
 
 use atman_runtime::event::FlowRunId as RuntimeRunId;
 
@@ -344,20 +344,36 @@ impl RunLauncher {
             trust,
         )
         .with_context(|| format!("opening existing session {session_id}"))?;
-        let mut projection = crate::projection_snapshot::load(session_id, &session_dir)?
-            .unwrap_or_else(|| {
-                crate::projection::SessionProjector::from_events(
+        let loaded = crate::projection_snapshot::load(session_id, &session_dir)?;
+        let (mut projection, mut event_cursor) = match loaded {
+            Some(loaded) => (loaded.projector, loaded.event_cursor),
+            None => {
+                let projection = crate::projection::SessionProjector::from_events(
                     session_id.clone(),
                     restored.session.meta(),
                     &restored.events,
-                )
-            });
+                );
+                let event_cursor = EventCursor(projection.projection().revision.0);
+                (projection, event_cursor)
+            }
+        };
+        let previous_revision = projection.projection().revision.0;
         projection.set_metadata(restored.session.meta());
         projection.set_trust(restored.session.trust_config());
         projection.reconcile_disconnected();
+        event_cursor.0 = event_cursor.0.saturating_add(
+            projection
+                .projection()
+                .revision
+                .0
+                .saturating_sub(previous_revision),
+        );
         Ok(LoadedSession {
             session: Arc::new(restored.session),
-            projection,
+            projection: crate::projection::RestoredProjection {
+                projector: projection,
+                event_cursor,
+            },
         })
     }
 

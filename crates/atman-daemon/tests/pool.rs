@@ -488,6 +488,194 @@ async fn session_updates_page_in_order_and_report_retention_gaps() {
 }
 
 #[tokio::test]
+async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    let run_id = FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: run_id.clone(),
+                flow_name: "agent".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .await
+        .unwrap();
+    let before = state.session_snapshot(&sid, "alice").await.unwrap();
+    let stream = session.stream_tx();
+    stream
+        .send(atman_runtime::stream::StreamFrame::LlmChunk {
+            text: "hello".into(),
+            model: "test-model".into(),
+            run_id: Some(run_id.to_string()),
+        })
+        .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::ThinkingChunk {
+            text: "inspect".into(),
+            run_id: Some(run_id.to_string()),
+        })
+        .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "call-1".into(),
+            name: "fs.read".into(),
+            arguments_delta: "{\"path\":".into(),
+            run_id: Some(run_id.clone().to_string()),
+        })
+        .unwrap();
+
+    let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let updates = state
+                .session_updates(&sid, "alice", before.cursor, None)
+                .await
+                .unwrap();
+            if updates.events.len() == 3 {
+                break updates;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        updates
+            .events
+            .iter()
+            .map(|event| event.cursor.0)
+            .collect::<Vec<_>>(),
+        vec![
+            before.cursor.0 + 1,
+            before.cursor.0 + 2,
+            before.cursor.0 + 3
+        ]
+    );
+    assert!(matches!(
+        &updates.events[0].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::LlmText { run_id: id, text }
+        } if id == &run_id && text == "hello"
+    ));
+    assert!(matches!(
+        &updates.events[1].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::Thinking { run_id: id, text }
+        } if id == &run_id && text == "inspect"
+    ));
+    assert!(matches!(
+        &updates.events[2].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::ToolCallDraft { run_id: id, name, .. }
+        } if id == &run_id && name == "fs.read"
+    ));
+    let after = state.session_snapshot(&sid, "alice").await.unwrap();
+    assert_eq!(after.projection.revision, before.projection.revision);
+    assert_eq!(after.cursor, updates.next_cursor);
+}
+
+#[tokio::test]
+async fn process_signal_follows_its_durable_resource_projection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    let run_id = FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id: run_id.clone(),
+                flow_name: "agent".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .await
+        .unwrap();
+    let before = state.session_snapshot(&sid, "alice").await.unwrap();
+    let task_id = state.task_registry().register(
+        atman_runtime::TaskKind::Bash,
+        "build".into(),
+        "bg-1".into(),
+        atman_runtime::TaskOwner::new(
+            sid.to_string(),
+            Some(atman_runtime::event::FlowRunId(run_id.0)),
+        ),
+        CancellationToken::new(),
+    );
+    session
+        .stream_tx()
+        .send(atman_runtime::stream::StreamFrame::BashChunk {
+            handle: "bg-1".into(),
+            tool_use_id: None,
+            kind: "stdout".into(),
+            line: "building\n".into(),
+            call_intent: None,
+            run_id: None,
+        })
+        .unwrap();
+
+    let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let updates = state
+                .session_updates(&sid, "alice", before.cursor, None)
+                .await
+                .unwrap();
+            if updates.events.len() >= 2 {
+                break updates;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let resource_id = atman_proto::ResourceId(format!("task:{task_id}"));
+    let resource_index = updates
+        .events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                atman_proto::ServerEvent::ProjectionDelta { delta }
+                    if delta.changes.iter().any(|change| matches!(
+                        change,
+                        atman_proto::ProjectionChange::ResourceUpsert { resource }
+                            if resource.id == resource_id
+                    ))
+            )
+        })
+        .unwrap();
+    let signal_index = updates
+        .events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                atman_proto::ServerEvent::Signal {
+                    signal: atman_proto::SessionSignal::ProcessLine {
+                        resource_id: id,
+                        stream,
+                        line,
+                    }
+                } if id == &resource_id && stream == "stdout" && line == "building\n"
+            )
+        })
+        .unwrap();
+    assert!(resource_index < signal_index);
+}
+
+#[tokio::test]
 async fn list_sessions_accepts_search_and_limit_query() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

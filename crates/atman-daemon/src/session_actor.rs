@@ -10,11 +10,13 @@ use atman_proto::{
     PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
     ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
     ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
-    RunCancellationStatus, ServerEvent, SessionId, SessionProjection, SessionSummary,
+    RunCancellationStatus, ServerEvent, SessionId, SessionProjection, SessionSignal,
+    SessionSummary,
 };
+use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use crate::projection::SessionProjector;
+use crate::projection::{RestoredProjection, SessionProjector};
 use crate::state::LiveRun;
 
 const UPDATE_RETENTION: usize = 2_048;
@@ -154,7 +156,7 @@ impl SessionActorHandle {
         initial_runs: Vec<LiveRun>,
         owner_principal: String,
         daemon_generation: DaemonGeneration,
-        restored_projection: Option<SessionProjector>,
+        restored_projection: Option<RestoredProjection>,
         task_registry: atman_runtime::TaskRegistry,
     ) -> Self {
         let actor_id = uuid::Uuid::now_v7();
@@ -171,6 +173,7 @@ impl SessionActorHandle {
                     .expect("daemon generation was validated when daemon state was created")
                 });
         let events_rx = session.sink().subscribe();
+        let stream_rx = session.stream_subscribe();
         let goal_rx = session.subscribe_goal();
         let todos_rx = session.subscribe_todos();
         let plans_rx = session.subscribe_plans();
@@ -178,13 +181,17 @@ impl SessionActorHandle {
         let trust_rx = session.subscribe_trust();
         let forms_rx = session.forms().subscribe();
         let compact_review_rx = session.compact_reviews().subscribe();
-        let mut projection = restored_projection.unwrap_or_else(|| {
-            SessionProjector::from_events(
-                session_id.clone(),
-                session.meta(),
-                &session.sink().snapshot_envelopes(),
-            )
-        });
+        let (mut projection, restored_event_cursor) = match restored_projection {
+            Some(restored) => (restored.projector, Some(restored.event_cursor)),
+            None => (
+                SessionProjector::from_events(
+                    session_id.clone(),
+                    session.meta(),
+                    &session.sink().snapshot_envelopes(),
+                ),
+                None,
+            ),
+        };
         projection.set_goal(goal_rx.borrow().clone());
         projection.set_todos(todos_rx.borrow().clone());
         projection.set_plans(plans_rx.borrow().clone());
@@ -195,7 +202,10 @@ impl SessionActorHandle {
         for run in &initial_runs {
             projection.register_run(run.run_id.clone(), run.flow_name.clone(), run.started_at);
         }
-        let event_cursor = EventCursor(projection.projection().revision.0);
+        let projection_cursor = EventCursor(projection.projection().revision.0);
+        let event_cursor = restored_event_cursor
+            .map(|cursor| EventCursor(cursor.0.max(projection_cursor.0)))
+            .unwrap_or(projection_cursor);
         let leases = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
@@ -223,6 +233,7 @@ impl SessionActorHandle {
             view_tx,
             rx,
             events_rx,
+            stream_rx,
             goal_rx,
             todos_rx,
             plans_rx,
@@ -642,6 +653,7 @@ enum Command {
 enum ActorInput {
     Command(Option<Command>),
     Event(Box<Result<atman_runtime::event::EventEnvelope, broadcast::error::RecvError>>),
+    Signal(Box<Result<StreamFrame, broadcast::error::RecvError>>),
     Goal(Result<(), watch::error::RecvError>),
     Todos(Result<(), watch::error::RecvError>),
     Plans(Result<(), watch::error::RecvError>),
@@ -669,6 +681,7 @@ struct SessionActor {
     view_tx: watch::Sender<SessionActorView>,
     rx: mpsc::UnboundedReceiver<Command>,
     events_rx: broadcast::Receiver<atman_runtime::event::EventEnvelope>,
+    stream_rx: broadcast::Receiver<StreamFrame>,
     goal_rx: watch::Receiver<Option<String>>,
     todos_rx: watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>,
     plans_rx: watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>,
@@ -690,6 +703,7 @@ impl SessionActor {
             let input = tokio::select! {
                 command = self.rx.recv() => ActorInput::Command(command),
                 event = self.events_rx.recv() => ActorInput::Event(Box::new(event)),
+                signal = self.stream_rx.recv() => ActorInput::Signal(Box::new(signal)),
                 changed = self.goal_rx.changed() => ActorInput::Goal(changed),
                 changed = self.todos_rx.changed() => ActorInput::Todos(changed),
                 changed = self.plans_rx.changed() => ActorInput::Plans(changed),
@@ -738,6 +752,11 @@ impl SessionActor {
                 ActorInput::Event(event) => match *event {
                     Ok(event) => self.apply_runtime_event(&event),
                     Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up_projection(),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                ActorInput::Signal(signal) => match *signal {
+                    Ok(frame) => self.apply_runtime_signal(frame),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 ActorInput::Goal(Ok(()))
@@ -1010,12 +1029,14 @@ impl SessionActor {
             &mut self.projection,
             SessionProjector::new(self.session_id.clone(), None),
         );
+        let event_cursor = self.event_cursor;
         let redactor = self.session.sink().redactor();
         tokio::task::spawn_blocking(move || {
             crate::projection_snapshot::save(
                 &session_id,
                 &session_dir,
                 watermark,
+                event_cursor,
                 &projector,
                 redactor.as_deref(),
             )
@@ -1349,6 +1370,15 @@ impl SessionActor {
 
     fn publish_projection_delta(&mut self, delta: ProjectionDelta) {
         debug_assert_eq!(delta.revision, self.projection.projection().revision);
+        self.publish_server_event(ServerEvent::ProjectionDelta { delta });
+        self.publish();
+    }
+
+    fn publish_signal(&mut self, signal: SessionSignal) {
+        self.publish_server_event(ServerEvent::Signal { signal });
+    }
+
+    fn publish_server_event(&mut self, event: ServerEvent) {
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
         let envelope = ProjectionEventEnvelope {
             schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
@@ -1356,14 +1386,89 @@ impl SessionActor {
             session_id: self.session_id.clone(),
             cursor: self.event_cursor,
             ts: chrono::Utc::now(),
-            event: ServerEvent::ProjectionDelta { delta },
+            event,
         };
         self.updates.push_back(envelope.clone());
         while self.updates.len() > UPDATE_RETENTION {
             self.updates.pop_front();
         }
         let _ = self.updates_tx.send(envelope);
-        self.publish();
+    }
+
+    fn apply_runtime_signal(&mut self, frame: StreamFrame) {
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        if self.projection.last_runtime_seq() < published_seq
+            && let Err(error) = self.catch_up_through(published_seq)
+        {
+            eprintln!(
+                "warning: failed to order live signal after durable session events for {}: {error:#}",
+                self.session_id
+            );
+            return;
+        }
+        let signal = match frame {
+            StreamFrame::LlmChunk {
+                text,
+                run_id: Some(run_id),
+                ..
+            } if !text.is_empty() => self
+                .known_run_id(&run_id)
+                .map(|run_id| SessionSignal::LlmText { run_id, text }),
+            StreamFrame::ThinkingChunk {
+                text,
+                run_id: Some(run_id),
+            } if !text.is_empty() => self
+                .known_run_id(&run_id)
+                .map(|run_id| SessionSignal::Thinking { run_id, text }),
+            StreamFrame::ToolCallDraft {
+                index,
+                call_id,
+                name,
+                arguments_delta,
+                run_id: Some(run_id),
+            } => self
+                .known_run_id(&run_id)
+                .map(|run_id| SessionSignal::ToolCallDraft {
+                    run_id,
+                    index,
+                    call_id,
+                    name,
+                    arguments_delta,
+                }),
+            StreamFrame::TerminalChunk { handle, bytes, .. } if !bytes.is_empty() => self
+                .resource_id_for_handle(&handle)
+                .map(|resource_id| SessionSignal::TerminalBytes { resource_id, bytes }),
+            StreamFrame::BashChunk {
+                handle, kind, line, ..
+            } if !line.is_empty() => {
+                self.resource_id_for_handle(&handle)
+                    .map(|resource_id| SessionSignal::ProcessLine {
+                        resource_id,
+                        stream: kind,
+                        line,
+                    })
+            }
+            _ => None,
+        };
+        if let Some(signal) = signal {
+            self.publish_signal(signal);
+        }
+    }
+
+    fn resource_id_for_handle(&self, handle: &str) -> Option<ResourceId> {
+        self.task_registry
+            .lookup_by_handle_in_session(handle, &self.session_id.to_string())
+            .map(|task| crate::projection::task_resource_id(&task.id))
+    }
+
+    fn known_run_id(&self, run_id: &str) -> Option<FlowRunId> {
+        let run_id = parse_run_id(run_id)?;
+        self.projection
+            .projection()
+            .runs
+            .iter()
+            .any(|run| run.id == run_id)
+            .then_some(run_id)
     }
 
     fn refresh_watch_projections(&mut self) {
@@ -1868,6 +1973,10 @@ fn task_id_from_resource_id(resource_id: &ResourceId) -> Option<atman_runtime::T
         .strip_prefix("task:")
         .and_then(|id| uuid::Uuid::parse_str(id).ok())
         .map(atman_runtime::TaskId)
+}
+
+fn parse_run_id(run_id: &str) -> Option<FlowRunId> {
+    uuid::Uuid::parse_str(run_id).ok().map(FlowRunId)
 }
 
 fn workspace_id_from_resource_id(resource_id: &ResourceId) -> Option<&str> {
