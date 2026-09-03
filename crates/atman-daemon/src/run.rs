@@ -202,7 +202,7 @@ impl RunLauncher {
         title: Option<&str>,
         owner_principal: &str,
     ) -> Result<ProtoSessionId> {
-        let project_root = self.resolve_project_root(project_root)?;
+        let project_root = self.resolve_project(&state, project_root)?.root;
         let (session, _) = self.open_new_session(&state, &project_root)?;
         if let Some(title) = title {
             let title = title.trim();
@@ -219,31 +219,36 @@ impl RunLauncher {
         Ok(session_id)
     }
 
-    fn resolve_project_root(&self, requested: Option<&str>) -> Result<PathBuf> {
-        self.resolve_project_root_path(requested.map(Path::new))
-    }
-
-    fn resolve_project_root_path(&self, requested: Option<&Path>) -> Result<PathBuf> {
+    fn resolve_project(
+        &self,
+        state: &DaemonState,
+        requested: Option<&str>,
+    ) -> Result<crate::project_registry::ProjectRecord> {
         let root = requested
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.project_root.clone());
-        anyhow::ensure!(root.is_absolute(), "project_root must be an absolute path");
-        let root = std::fs::canonicalize(&root)
-            .with_context(|| format!("resolve project root {}", root.display()))?;
-        anyhow::ensure!(
-            root.is_dir(),
-            "project root is not a directory: {}",
-            root.display()
-        );
-        Ok(root)
+            .map(Path::new)
+            .unwrap_or(self.project_root.as_path());
+        state.resolve_project(root)
     }
 
-    fn session_project_root(&self, session_dir: &Path) -> Result<PathBuf> {
+    fn session_project(
+        &self,
+        state: &DaemonState,
+        session_dir: &Path,
+    ) -> Result<crate::project_registry::ProjectRecord> {
         let meta = atman_runtime::session_meta::SessionMeta::load(session_dir);
-        let persisted = meta
-            .as_ref()
-            .and_then(|meta| meta.project_root.as_deref().or(meta.start_path.as_deref()));
-        self.resolve_project_root_path(persisted)
+        let Some(meta) = meta else {
+            return self.resolve_project(state, None);
+        };
+        let Some(root) = meta.project_root.as_deref().or(meta.start_path.as_deref()) else {
+            return self.resolve_project(state, None);
+        };
+        let project = state.observe_project(root, meta.project_fingerprint.as_deref())?;
+        anyhow::ensure!(
+            project.root.is_dir(),
+            "project root is not a directory: {}",
+            project.root.display()
+        );
+        Ok(project)
     }
 
     fn config_hub(&self) -> Result<atman_runtime::config_hub::ConfigHub> {
@@ -322,7 +327,7 @@ impl RunLauncher {
         session_id: &ProtoSessionId,
     ) -> Result<LoadedSession> {
         let session_dir = state.sessions_root().join(session_id.to_string());
-        let project_root = self.session_project_root(&session_dir)?;
+        let project_root = self.session_project(state, &session_dir)?.root;
         let (_, project_index, trust) = self.session_context(state, &project_root)?;
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
         let restored = atman_runtime::Session::restore_existing_with_context_and_trust(
@@ -379,7 +384,7 @@ impl RunLauncher {
         owner_principal: &str,
         options: RunOptions,
     ) -> Result<SpawnedRun> {
-        let project_root = self.resolve_project_root(None)?;
+        let project_root = self.resolve_project(&state, None)?.root;
         let (session, scope_root) = self.open_new_session(&state, &project_root)?;
         self.spawn_session_as_with_options(
             state,
@@ -420,7 +425,7 @@ impl RunLauncher {
             })
             .await?;
         let session = session_lease.runtime_session();
-        let project_root = self.session_project_root(session.dir())?;
+        let project_root = self.session_project(&state, session.dir())?.root;
         let scope_root = self.scope_root(&state, &project_root)?;
         self.spawn_session_as_with_options(
             state,

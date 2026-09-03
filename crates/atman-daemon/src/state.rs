@@ -11,12 +11,14 @@ use atman_proto::{
 use tokio_util::sync::CancellationToken;
 
 use crate::idempotency::IdempotencyRegistry;
+use crate::project_registry::{ProjectRecord, ProjectRegistry};
 use crate::projection::SessionProjector;
 use crate::session_actor::{RunAdmission, SessionActorHandle, SessionActorLease};
 
 pub struct DaemonState {
     data_dir: PathBuf,
     daemon_generation: String,
+    projects: ProjectRegistry,
     sessions: Mutex<HashMap<SessionId, SessionActorHandle>>,
     session_loads: Mutex<HashMap<SessionId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
@@ -59,6 +61,7 @@ impl DaemonState {
         Self {
             data_dir,
             daemon_generation,
+            projects: ProjectRegistry::default(),
             sessions: Mutex::new(HashMap::new()),
             session_loads: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
@@ -109,6 +112,18 @@ impl DaemonState {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    pub(crate) fn resolve_project(&self, root: &Path) -> Result<ProjectRecord> {
+        self.projects.resolve(root)
+    }
+
+    pub(crate) fn observe_project(
+        &self,
+        root: &Path,
+        persisted_fingerprint: Option<&str>,
+    ) -> Result<ProjectRecord> {
+        self.projects.observe_persisted(root, persisted_fingerprint)
     }
 
     pub fn task_registry(&self) -> atman_runtime::TaskRegistry {
