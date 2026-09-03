@@ -556,6 +556,7 @@ describe('SessionClient', () => {
             capabilities('generation-1', [
               { name: 'resource.inspect', kind: 'query', revision: 1 },
               { name: 'resource.terminate', kind: 'command', revision: 1 },
+              { name: 'resource.resize_terminal', kind: 'command', revision: 1 },
             ]),
           )
         case 'session.get_snapshot':
@@ -574,6 +575,16 @@ describe('SessionClient', () => {
             status: 'terminating',
             revision: 2,
             cursor: 2,
+          })
+        case 'resource.resize_terminal':
+          return result(request, {
+            session_id: sessionId,
+            resource_id: resource.id,
+            rows: request.params.rows,
+            cols: request.params.cols,
+            status: 'resized',
+            revision: 3,
+            cursor: 3,
           })
         case 'session.get_updates': {
           const afterCursor = Number(request.params.after_cursor ?? 0)
@@ -596,7 +607,18 @@ describe('SessionClient', () => {
 
     expect((await session.inspectResource(resource.id)).resource).toEqual(resource)
     expect((await session.terminateResource(resource.id)).status).toBe('terminating')
-    expect(session.current.cursor).toBe(2)
+    const resized = await session.resizeTerminal(resource.id, 42, 120)
+    expect(resized).toMatchObject({ status: 'resized', rows: 42, cols: 120 })
+    const resizeRequest = transport.requests.find(
+      (request) => request.method === 'resource.resize_terminal',
+    )
+    expect(resizeRequest?.params).toMatchObject({
+      resource_id: resource.id,
+      rows: 42,
+      cols: 120,
+    })
+    expect(resizeRequest?.params.request_id).toBeString()
+    expect(session.current.cursor).toBe(3)
   })
 })
 

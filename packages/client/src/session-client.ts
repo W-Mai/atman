@@ -25,6 +25,7 @@ import type {
   PromptId,
   ReleaseResourceResponse,
   RenameSessionResponse,
+  ResizeTerminalResourceResponse,
   ResolveCompactReviewResponse,
   ResolvePermissionRequestsResponse,
   ResolvePromptResponse,
@@ -466,6 +467,29 @@ export class SessionClient {
         request_id: crypto.randomUUID(),
         session_id: this.#sessionId,
         resource_id: resourceId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_resource', 'resource', response.resource_id, resourceId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async resizeTerminal(
+    resourceId: ResourceId,
+    rows: number,
+    cols: number,
+    options: TransportRequestOptions = {},
+  ): Promise<ResizeTerminalResourceResponse> {
+    const response = await this.#client.command(
+      'resource.resize_terminal',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        resource_id: resourceId,
+        rows,
+        cols,
       },
       options,
     )
