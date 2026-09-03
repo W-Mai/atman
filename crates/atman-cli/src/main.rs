@@ -1319,117 +1319,14 @@ type SlashCommandParsed = (
 );
 
 fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
-    let trimmed_line = line.trim();
-    let (name_full, rest_raw) = match trimmed_line.split_once(char::is_whitespace) {
-        Some((n, r)) => (n, r.trim_start()),
-        None => (trimmed_line, ""),
-    };
-    if name_full.is_empty() {
-        bail!("empty slash command");
-    }
-    let name = name_full.strip_prefix('/').unwrap_or(name_full);
-    let cfg = config_dir()?;
-    if name == "agent" {
-        atman_runtime::templates::ensure_managed_agent_at(&cfg)?;
-    }
-    let path = cfg.join("commands").join(format!("{name}.at"));
-    if !path.exists() {
-        bail!("no such command: {} (looked for {})", name, path.display());
-    }
-    let source =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
-    if parsed.flows.is_empty() {
-        bail!("{} declares no flows", path.display());
-    }
-    let flow = parsed
-        .flows
-        .iter()
-        .find(|f| f.name.name == name)
-        .or_else(|| {
-            if parsed.flows.len() == 1 {
-                parsed.flows.first()
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            let names: Vec<&str> = parsed.flows.iter().map(|f| f.name.name.as_str()).collect();
-            anyhow::anyhow!(
-                "{} has {} flows but none is named `{name}` — declare a `flow {name}(...)` entry or invoke one of: {}",
-                path.display(),
-                parsed.flows.len(),
-                names.join(", ")
-            )
-        })?;
-    let flow_name = flow.name.name.clone();
-    let params: Vec<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
-
-    let mut kv: Vec<(String, Value)> = Vec::new();
-    let tokens = split_quoted_args(rest_raw);
-
-    let single_string_param = params.len() == 1
-        && !rest_raw.is_empty()
-        && !tokens
-            .iter()
-            .any(|t| t.contains('=') && !t.starts_with('='));
-    if single_string_param {
-        kv.push((params[0].clone(), Value::Str(rest_raw.to_string())));
-        let source_dir = path.parent().map(|p| p.to_path_buf());
-        return Ok((parsed, flow_name, kv, source_dir));
-    }
-
-    let mut positional_index = 0usize;
-    for tok in tokens {
-        if let Some((k, v)) = tok.split_once('=') {
-            kv.push((k.to_string(), Value::Str(v.to_string())));
-        } else if positional_index < params.len() {
-            kv.push((
-                params[positional_index].clone(),
-                Value::Str(tok.to_string()),
-            ));
-            positional_index += 1;
-        } else {
-            kv.push((format!("_extra{positional_index}"), Value::Str(tok)));
-            positional_index += 1;
-        }
-    }
-    let source_dir = path.parent().map(|p| p.to_path_buf());
-    Ok((parsed, flow_name, kv, source_dir))
-}
-
-fn split_quoted_args(input: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut chars = input.chars().peekable();
-    let mut in_single = false;
-    let mut in_double = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '\\' if in_double => {
-                if let Some(&next) = chars.peek() {
-                    cur.push(next);
-                    chars.next();
-                }
-            }
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            c => cur.push(c),
-        }
-    }
-    if !cur.is_empty() || in_single || in_double {
-        out.push(cur);
-    }
-    out
+    let hub = atman_runtime::config_hub::ConfigHub::global()?;
+    let resolved = atman_runtime::routing::resolve_command_call(&hub, line)?;
+    Ok((
+        resolved.file,
+        resolved.flow_name,
+        resolved.args,
+        resolved.source_dir,
+    ))
 }
 
 struct PrebuiltSession {

@@ -1,7 +1,10 @@
 use std::fmt;
+use std::path::PathBuf;
 
+use anyhow::{Context, Result, bail};
 use atman_dsl::ast::File;
 
+use crate::Value;
 use crate::config_hub::{ConfigError, ConfigHub};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +73,129 @@ impl RouteProgram {
             args: input.trim().to_string(),
         })
     }
+}
+
+pub struct ResolvedCommand {
+    pub file: File,
+    pub flow_name: String,
+    pub args: Vec<(String, Value)>,
+    pub source_dir: Option<PathBuf>,
+    pub path: PathBuf,
+}
+
+pub fn resolve_command_call(hub: &ConfigHub, line: &str) -> Result<ResolvedCommand> {
+    let trimmed_line = line.trim();
+    let (name_full, rest_raw) = match trimmed_line.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim_start()),
+        None => (trimmed_line, ""),
+    };
+    if name_full.is_empty() {
+        bail!("empty slash command");
+    }
+    let name = name_full.strip_prefix('/').unwrap_or(name_full);
+    if name == "agent" {
+        crate::templates::ensure_managed_agent_at(hub.config_dir())?;
+    }
+    let path = hub.config_dir().join("commands").join(format!("{name}.at"));
+    if !path.exists() {
+        bail!("no such command: {name} (looked for {})", path.display());
+    }
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let file = atman_dsl::parse::parse_file(&source)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    if file.flows.is_empty() {
+        bail!("{} declares no flows", path.display());
+    }
+    let flow = file
+        .flows
+        .iter()
+        .find(|flow| flow.name.name == name)
+        .or_else(|| (file.flows.len() == 1).then(|| &file.flows[0]))
+        .ok_or_else(|| {
+            let names = file
+                .flows
+                .iter()
+                .map(|flow| flow.name.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!(
+                "{} has {} flows but none is named `{name}` — declare a `flow {name}(...)` entry or invoke one of: {names}",
+                path.display(),
+                file.flows.len()
+            )
+        })?;
+    let flow_name = flow.name.name.clone();
+    let params = flow
+        .params
+        .iter()
+        .map(|param| param.name.name.clone())
+        .collect::<Vec<_>>();
+    let args = bind_command_args(&params, rest_raw);
+    let source_dir = path.parent().map(std::path::Path::to_path_buf);
+    Ok(ResolvedCommand {
+        file,
+        flow_name,
+        args,
+        source_dir,
+        path,
+    })
+}
+
+fn bind_command_args(params: &[String], raw: &str) -> Vec<(String, Value)> {
+    let tokens = split_quoted_args(raw);
+    if params.len() == 1
+        && !raw.is_empty()
+        && !tokens
+            .iter()
+            .any(|token| token.contains('=') && !token.starts_with('='))
+    {
+        return vec![(params[0].clone(), Value::Str(raw.to_owned()))];
+    }
+
+    let mut args = Vec::new();
+    let mut positional_index = 0usize;
+    for token in tokens {
+        if let Some((key, value)) = token.split_once('=') {
+            args.push((key.to_owned(), Value::Str(value.to_owned())));
+        } else if positional_index < params.len() {
+            args.push((params[positional_index].clone(), Value::Str(token)));
+            positional_index += 1;
+        } else {
+            args.push((format!("_extra{positional_index}"), Value::Str(token)));
+            positional_index += 1;
+        }
+    }
+    args
+}
+
+fn split_quoted_args(input: &str) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(character) = chars.next() {
+        match character {
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            '\\' if in_double => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            character if character.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    output.push(std::mem::take(&mut current));
+                }
+            }
+            character => current.push(character),
+        }
+    }
+    if !current.is_empty() || in_single || in_double {
+        output.push(current);
+    }
+    output
 }
 
 #[cfg(test)]
