@@ -407,7 +407,7 @@ impl RunLauncher {
         let launcher = self.clone();
         let state_for_load = state.clone();
         let session_id_for_load = session_id.clone();
-        let session = state
+        let session_lease = state
             .get_or_load_session(session_id, owner_principal, move || async move {
                 let restored = tokio::task::spawn_blocking(move || {
                     launcher.open_existing_session(&state_for_load, &session_id_for_load)
@@ -419,6 +419,7 @@ impl RunLauncher {
                 Ok(restored)
             })
             .await?;
+        let session = session_lease.runtime_session();
         let project_root = self.session_project_root(session.dir())?;
         let scope_root = self.scope_root(&state, &project_root)?;
         self.spawn_session_as_with_options(

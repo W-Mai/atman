@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
@@ -21,6 +22,7 @@ const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
 const PROMPT_TERMINAL_RETENTION: usize = 256;
 const FORM_TERMINAL_RETENTION: usize = 256;
 const COMPACT_REVIEW_TERMINAL_RETENTION: usize = 256;
+const LEASES_CLOSED: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunAdmission {
@@ -116,6 +118,26 @@ pub(crate) struct SessionActorHandle {
     owner_principal: Arc<str>,
     tx: mpsc::UnboundedSender<Command>,
     view: watch::Receiver<SessionActorView>,
+    leases: Arc<AtomicUsize>,
+}
+
+pub(crate) struct SessionActorLease {
+    handle: SessionActorHandle,
+}
+
+impl std::ops::Deref for SessionActorLease {
+    type Target = SessionActorHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+impl Drop for SessionActorLease {
+    fn drop(&mut self) {
+        let previous = self.handle.leases.fetch_sub(1, Ordering::Release);
+        debug_assert!(previous != 0 && previous != LEASES_CLOSED);
+    }
 }
 
 impl SessionActorHandle {
@@ -165,6 +187,7 @@ impl SessionActorHandle {
             projection.register_run(run.run_id.clone(), run.flow_name.clone(), run.started_at);
         }
         let event_cursor = EventCursor(projection.projection().revision.0);
+        let leases = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
         let runs = initial_runs
@@ -198,6 +221,7 @@ impl SessionActorHandle {
             task_registry,
             workspace_service,
             workspace_mutations: HashSet::new(),
+            leases: leases.clone(),
             command_tx: tx.clone(),
             _permission_client: session.permission_broker().register_client(),
         };
@@ -208,6 +232,7 @@ impl SessionActorHandle {
             owner_principal: owner_principal.into(),
             tx,
             view,
+            leases,
         }
     }
 
@@ -221,6 +246,31 @@ impl SessionActorHandle {
 
     pub fn is_same_actor(&self, other: &Self) -> bool {
         self.actor_id == other.actor_id
+    }
+
+    pub fn lease(&self) -> Result<SessionActorLease> {
+        let mut current = self.leases.load(Ordering::Acquire);
+        loop {
+            if current == LEASES_CLOSED {
+                anyhow::bail!("session actor is closing");
+            }
+            let next = current
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("session actor lease count overflow"))?;
+            match self.leases.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(SessionActorLease {
+                        handle: self.clone(),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub fn view(&self) -> SessionActorView {
@@ -272,17 +322,23 @@ impl SessionActorHandle {
         payload: serde_json::Value,
     ) -> oneshot::Receiver<serde_json::Value> {
         let (responder, receiver) = oneshot::channel();
+        let Ok(lease) = self.lease() else {
+            return receiver;
+        };
         let _ = self.tx.send(Command::RegisterPrompt {
             id,
             kind,
             payload,
             responder,
+            _lease: lease,
         });
         receiver
     }
 
     pub fn drop_prompt(&self, id: PromptId) {
-        let _ = self.tx.send(Command::DropPrompt { id });
+        if let Ok(lease) = self.lease() {
+            let _ = self.tx.send(Command::DropPrompt { id, _lease: lease });
+        }
     }
 
     pub async fn resolve_prompt(
@@ -476,9 +532,11 @@ enum Command {
         kind: String,
         payload: serde_json::Value,
         responder: oneshot::Sender<serde_json::Value>,
+        _lease: SessionActorLease,
     },
     DropPrompt {
         id: PromptId,
+        _lease: SessionActorLease,
     },
     ResolvePrompt {
         id: PromptId,
@@ -590,6 +648,7 @@ struct SessionActor {
     task_registry: atman_runtime::TaskRegistry,
     workspace_service: Option<atman_runtime::flow_workspace::FlowWorkspaceService>,
     workspace_mutations: HashSet<ResourceId>,
+    leases: Arc<AtomicUsize>,
     command_tx: mpsc::UnboundedSender<Command>,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
 }
@@ -728,8 +787,9 @@ impl SessionActor {
                 kind,
                 payload,
                 responder,
+                _lease: _,
             } => self.register_prompt(id, kind, payload, responder),
-            Command::DropPrompt { id } => self.drop_prompt(id),
+            Command::DropPrompt { id, _lease: _ } => self.drop_prompt(id),
             Command::ResolvePrompt { id, answer, reply } => {
                 let result = self.resolve_prompt(id, answer);
                 let _ = reply.send(result);
@@ -865,8 +925,18 @@ impl SessionActor {
         {
             return Ok(false);
         }
+        if self
+            .leases
+            .compare_exchange(0, LEASES_CLOSED, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(false);
+        }
         let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
-        self.catch_up_through(target_seq)?;
+        if let Err(error) = self.catch_up_through(target_seq) {
+            self.leases.store(0, Ordering::Release);
+            return Err(error);
+        }
         Ok(true)
     }
 

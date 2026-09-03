@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::idempotency::IdempotencyRegistry;
 use crate::projection::SessionProjector;
-use crate::session_actor::{RunAdmission, SessionActorHandle};
+use crate::session_actor::{RunAdmission, SessionActorHandle, SessionActorLease};
 
 pub struct DaemonState {
     data_dir: PathBuf,
@@ -130,7 +130,8 @@ impl DaemonState {
     ) -> Result<crate::session_actor::PromptResolutionCommit> {
         let actor = self
             .authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()?;
         actor.resolve_prompt(id, answer).await
     }
 
@@ -143,7 +144,8 @@ impl DaemonState {
     ) -> Result<crate::session_actor::FormResolutionCommit> {
         let actor = self
             .authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()?;
         actor.submit_form(id, submission).await
     }
 
@@ -156,7 +158,8 @@ impl DaemonState {
     ) -> Result<crate::session_actor::CompactReviewResolutionCommit> {
         let actor = self
             .authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()?;
         actor.resolve_compact_review(id, decision).await
     }
 
@@ -257,6 +260,7 @@ impl DaemonState {
                 entry.owns_session(&session),
                 "session {id} is already registered with another runtime"
             );
+            let entry = entry.lease()?;
             for run in initial_runs {
                 entry.add_run(run, admission).await?;
             }
@@ -277,7 +281,7 @@ impl DaemonState {
         &self,
         id: &SessionId,
         principal: &str,
-    ) -> Result<Option<std::sync::Arc<atman_runtime::Session>>> {
+    ) -> Result<Option<SessionActorLease>> {
         let actor = self.sessions.lock().unwrap().get(id).cloned();
         let Some(actor) = actor else {
             return Ok(None);
@@ -286,7 +290,7 @@ impl DaemonState {
             actor.owns(principal),
             "session {id} is owned by another principal"
         );
-        Ok(Some(actor.runtime_session()))
+        Ok(Some(actor.lease()?))
     }
 
     pub(crate) async fn get_or_load_session<F, Fut>(
@@ -294,14 +298,11 @@ impl DaemonState {
         id: &SessionId,
         principal: &str,
         load: F,
-    ) -> Result<std::sync::Arc<atman_runtime::Session>>
+    ) -> Result<SessionActorLease>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<LoadedSession>>,
     {
-        if let Some(session) = self.loaded_runtime_session(id, principal)? {
-            return Ok(session);
-        }
         let load_gate = self
             .session_loads
             .lock()
@@ -310,8 +311,8 @@ impl DaemonState {
             .or_default()
             .clone();
         let _guard = load_gate.lock().await;
-        if let Some(session) = self.loaded_runtime_session(id, principal)? {
-            return Ok(session);
+        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+            return Ok(actor);
         }
         let restored = load().await?;
         let session = restored.session;
@@ -324,7 +325,9 @@ impl DaemonState {
             Some(restored.projection),
         )
         .await?;
-        Ok(session)
+        self.authorized_actor(id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()
     }
 
     pub fn owns_live_session(&self, id: &SessionId, principal: &str) -> bool {
@@ -355,7 +358,7 @@ impl DaemonState {
                 actor.owns(principal),
                 "session {id} is owned by another principal"
             );
-            actor.snapshot().await?
+            actor.lease()?.snapshot().await?
         } else {
             let session_dir = self.sessions_root().join(id.to_string());
             let projection =
@@ -389,7 +392,7 @@ impl DaemonState {
                 actor.owns(principal),
                 "session {id} is owned by another principal"
             );
-            return actor.updates(after_cursor, limit).await;
+            return actor.lease()?.updates(after_cursor, limit).await;
         }
 
         let snapshot = self.session_snapshot(id, principal).await?;
@@ -441,7 +444,7 @@ impl DaemonState {
             actor.owns(principal),
             "session {id} is owned by another principal"
         );
-        Ok(Some(actor.subscribe_updates().await?))
+        Ok(Some(actor.lease()?.subscribe_updates().await?))
     }
 
     pub fn finish_run(&self, session_id: &SessionId, run_id: &FlowRunId) -> bool {
@@ -532,7 +535,8 @@ impl DaemonState {
     ) -> Result<crate::RunCancellationCommit> {
         let actor = self
             .authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()?;
         actor.cancel_run(run_id.clone()).await
     }
 
@@ -547,7 +551,8 @@ impl DaemonState {
     ) -> Result<crate::session_actor::InterjectionCommit> {
         let actor = self
             .authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()?;
         actor.interject(run_id, text, level, redirect_target).await
     }
 
@@ -565,9 +570,9 @@ impl DaemonState {
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,
         principal: &str,
-    ) -> Result<SessionActorHandle> {
+    ) -> Result<SessionActorLease> {
         if let Some(actor) = self.authorized_actor(session_id, principal) {
-            return Ok(actor);
+            return actor.lease();
         }
         let launcher = self
             .launcher()
@@ -579,9 +584,7 @@ impl DaemonState {
                 .await
                 .context("join session replay task")?
         })
-        .await?;
-        self.authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))
+        .await
     }
 
     pub(crate) async fn terminate_resource(
@@ -855,7 +858,10 @@ mod tests {
         let first = first.unwrap();
         let second = second.unwrap();
 
-        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(
+            &first.runtime_session(),
+            &second.runtime_session()
+        ));
         assert_eq!(load_count.load(Ordering::SeqCst), 1);
     }
 
@@ -870,6 +876,13 @@ mod tests {
             .register_session(session_id.clone(), session, "owner")
             .await
             .unwrap();
+
+        let lease = state
+            .loaded_runtime_session(&session_id, "owner")
+            .unwrap()
+            .unwrap();
+        assert!(!state.unload_session_if_idle(&session_id).await.unwrap());
+        drop(lease);
 
         let (updates, _) = state
             .subscribe_session_updates(&session_id, "owner")
