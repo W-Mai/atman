@@ -9,9 +9,10 @@ use atman_proto::{
     ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
     PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
     PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
-    RenameSessionRequest, RenameSessionResponse, RequestId, ResolveCompactReviewRequest,
-    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
-    ResolvePermissionRequestsResponse, ResourceId, Revision, SNAPSHOT_SCHEMA_VERSION,
+    ReleaseResourceRequest, ReleaseResourceResponse, RenameSessionRequest, RenameSessionResponse,
+    RequestId, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
+    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, ResourceId,
+    RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
     SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
     SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, rpc,
@@ -615,6 +616,44 @@ impl SessionClient {
             .await?;
         self.validate_command_session(&response.session_id)?;
         self.validate_command_resource(&expected_resource, &response.resource_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn retain_resource(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<RetainResourceResponse, SessionClientError> {
+        let expected_resource = resource_id.clone();
+        let response = self
+            .client
+            .command::<rpc::RetainResource>(&RetainResourceRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                resource_id,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.validate_command_resource(&expected_resource, &response.resource.id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn release_resource(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<ReleaseResourceResponse, SessionClientError> {
+        let expected_resource = resource_id.clone();
+        let response = self
+            .client
+            .command::<rpc::ReleaseResource>(&ReleaseResourceRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                resource_id,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.validate_command_resource(&expected_resource, &response.resource.id)?;
         self.refresh_through(response.cursor).await?;
         Ok(response)
     }
@@ -1578,6 +1617,8 @@ mod tests {
                             method_descriptor::<rpc::ListResources>(),
                             method_descriptor::<rpc::InspectResource>(),
                             method_descriptor::<rpc::TerminateResource>(),
+                            method_descriptor::<rpc::RetainResource>(),
+                            method_descriptor::<rpc::ReleaseResource>(),
                         ] {
                             capabilities.methods.push(MethodCapability {
                                 name: method.name.into(),
@@ -1717,6 +1758,18 @@ mod tests {
                             cursor: EventCursor(2),
                         })?
                     }
+                    methods::RETAIN_RESOURCE => serde_json::to_value(RetainResourceResponse {
+                        session_id: self.session_id.clone(),
+                        resource: test_resource(),
+                        revision: Revision(2),
+                        cursor: EventCursor(2),
+                    })?,
+                    methods::RELEASE_RESOURCE => serde_json::to_value(ReleaseResourceResponse {
+                        session_id: self.session_id.clone(),
+                        resource: test_resource(),
+                        revision: Revision(2),
+                        cursor: EventCursor(2),
+                    })?,
                     methods::GET_SESSION_UPDATES => {
                         let current = SessionState::new(
                             SessionSnapshot {
@@ -1871,6 +1924,10 @@ mod tests {
             terminated.status,
             atman_proto::ResourceTerminationStatus::Terminating
         );
+        let retained = session.retain_resource(resource_id.clone()).await.unwrap();
+        assert_eq!(retained.resource.id, resource_id);
+        let released = session.release_resource(resource_id.clone()).await.unwrap();
+        assert_eq!(released.resource.id, resource_id);
 
         let permission_id = uuid::Uuid::now_v7();
         let group = session
