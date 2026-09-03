@@ -103,6 +103,7 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
     assert!(listed.error.is_none(), "owner list failed: {listed:?}");
     let listed: atman_proto::ListPermissionRequestsResponse =
         serde_json::from_value(listed.result.unwrap()).unwrap();
+    assert_eq!(listed.session_id, session_id);
     assert_eq!(listed.requests.len(), 2);
     assert!(
         listed
@@ -136,8 +137,17 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
     let group = dispatch_as(state.clone(), create_group(2), "alice").await;
     assert!(group.error.is_none(), "group creation failed: {group:?}");
     let group = group.result.unwrap();
+    assert_eq!(group["session_id"], serde_json::json!(session_id));
     let group_id: Uuid = serde_json::from_value(group["group_id"].clone()).unwrap();
     let group_revision: u64 = serde_json::from_value(group["revision"].clone()).unwrap();
+    let group_cursor: atman_proto::EventCursor =
+        serde_json::from_value(group["cursor"].clone()).unwrap();
+    let snapshot = state.session_snapshot(&session_id, "alice").await.unwrap();
+    assert_eq!(snapshot.cursor, group_cursor);
+    assert_eq!(
+        snapshot.projection.revision,
+        serde_json::from_value(group["session_revision"].clone()).unwrap()
+    );
     let group_retry = dispatch_as(state.clone(), create_group(20), "alice").await;
     assert_eq!(group_retry.result.unwrap(), group);
 
@@ -178,6 +188,12 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
         resolved_group.error.is_none(),
         "group resolve failed: {resolved_group:?}"
     );
+    let resolved_group: atman_proto::ResolvePermissionRequestsResponse =
+        serde_json::from_value(resolved_group.result.unwrap()).unwrap();
+    let snapshot = state.session_snapshot(&session_id, "alice").await.unwrap();
+    assert_eq!(resolved_group.session_id, session_id);
+    assert_eq!(resolved_group.cursor, snapshot.cursor);
+    assert_eq!(resolved_group.revision, snapshot.projection.revision);
 
     let stale_request = dispatch_as(
         state.clone(),
@@ -218,6 +234,12 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
     assert!(first.error.is_none(), "first retry failed: {first:?}");
     assert!(second.error.is_none(), "second retry failed: {second:?}");
     assert_eq!(first.result, second.result);
+    let resolved: atman_proto::ResolvePermissionRequestsResponse =
+        serde_json::from_value(first.result.unwrap()).unwrap();
+    assert_eq!(resolved.session_id, session_id);
+    let snapshot = state.session_snapshot(&session_id, "alice").await.unwrap();
+    assert_eq!(resolved.cursor, snapshot.cursor);
+    assert_eq!(resolved.revision, snapshot.projection.revision);
 
     let mut saw_created = false;
     let mut saw_resolved = false;

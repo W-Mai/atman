@@ -795,8 +795,11 @@ pub struct PermissionGroupView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ListPermissionRequestsResponse {
+    pub session_id: SessionId,
     pub requests: Vec<PermissionRequestView>,
     pub groups: Vec<PermissionGroupView>,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -807,7 +810,10 @@ pub struct PermissionResolutionView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePermissionRequestsResponse {
+    pub session_id: SessionId,
     pub resolutions: Vec<PermissionResolutionView>,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -827,10 +833,13 @@ pub struct GetEventsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreatePermissionGroupResponse {
+    pub session_id: SessionId,
     pub group_id: Uuid,
     pub request_ids: Vec<Uuid>,
     pub revision: u64,
     pub label: String,
+    pub session_revision: Revision,
+    pub cursor: EventCursor,
 }
 
 pub mod rpc {
@@ -974,21 +983,24 @@ pub mod rpc {
         methods::LIST_PERMISSION_REQUESTS,
         Query,
         ListPermissionRequestsRequest,
-        ListPermissionRequestsResponse
+        ListPermissionRequestsResponse,
+        2
     );
     method!(
         CreatePermissionGroup,
         methods::CREATE_PERMISSION_GROUP,
         Command,
         CreatePermissionGroupRequest,
-        CreatePermissionGroupResponse
+        CreatePermissionGroupResponse,
+        2
     );
     method!(
         ResolvePermissionRequests,
         methods::RESOLVE_PERMISSION_REQUESTS,
         Command,
         ResolvePermissionRequestsRequest,
-        ResolvePermissionRequestsResponse
+        ResolvePermissionRequestsResponse,
+        2
     );
 }
 

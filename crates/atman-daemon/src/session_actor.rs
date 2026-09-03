@@ -1102,6 +1102,7 @@ impl SessionActor {
             .permission_broker()
             .user_list(&self.session_id.to_string());
         ListPermissionRequestsResponse {
+            session_id: self.session_id.clone(),
             requests: requests
                 .into_iter()
                 .map(|request| PermissionRequestView {
@@ -1128,11 +1129,13 @@ impl SessionActor {
                     revision: group.revision,
                 })
                 .collect(),
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
         }
     }
 
     fn create_permission_group(
-        &self,
+        &mut self,
         request_ids: Vec<uuid::Uuid>,
         expected_request_revisions: std::collections::BTreeMap<uuid::Uuid, u64>,
         label: String,
@@ -1151,7 +1154,10 @@ impl SessionActor {
             label,
             &revisions,
         )?;
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(published_seq)?;
         Ok(CreatePermissionGroupResponse {
+            session_id: self.session_id.clone(),
             group_id: group.group_id.0,
             request_ids: group
                 .request_ids
@@ -1160,12 +1166,14 @@ impl SessionActor {
                 .collect(),
             revision: group.revision,
             label: group.label,
+            session_revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
         })
     }
 
     #[allow(clippy::too_many_arguments)]
     fn resolve_permissions(
-        &self,
+        &mut self,
         request_ids: Vec<uuid::Uuid>,
         expected_request_revisions: std::collections::BTreeMap<uuid::Uuid, u64>,
         group: Option<(uuid::Uuid, u64)>,
@@ -1194,7 +1202,10 @@ impl SessionActor {
             scope,
             reason,
         )?;
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(published_seq)?;
         Ok(ResolvePermissionRequestsResponse {
+            session_id: self.session_id.clone(),
             resolutions: results
                 .into_iter()
                 .map(|result| PermissionResolutionView {
@@ -1202,6 +1213,8 @@ impl SessionActor {
                     outcome: format!("{:?}", result.outcome),
                 })
                 .collect(),
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
         })
     }
 }
