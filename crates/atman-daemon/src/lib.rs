@@ -1,12 +1,13 @@
 use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, InspectResourceResponse,
-    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListResourcesResponse,
-    ListSessionsRequest, MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse,
-    ProtocolLimits, ReleaseResourceResponse, RenameSessionResponse, RequestId,
-    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
-    SubmitFormResponse, TerminateResourceResponse, method_descriptor, methods, rpc,
+    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListProjectsRequest,
+    ListResourcesResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
+    PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
+    RenameSessionResponse, RequestId, ResolveCompactReviewResponse, ResolvePromptResponse,
+    RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
+    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, method_descriptor, methods,
+    rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -149,6 +150,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::CreateSession>(),
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
+    method_descriptor::<rpc::ListProjects>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
     method_descriptor::<rpc::StartRun>(),
@@ -225,6 +227,17 @@ pub async fn dispatch_as(
                 version: env!("CARGO_PKG_VERSION").into(),
             },
         ),
+        methods::LIST_PROJECTS => match parse_params::<rpc::ListProjects>(req.params) {
+            Ok(ListProjectsRequest { search, limit }) => {
+                match state.list_projects_query(search.as_deref(), limit) {
+                    Ok(projects) => method_response::<rpc::ListProjects>(id, projects),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::internal(error.to_string()))
+                    }
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::CREATE_SESSION => {
             let Some(launcher) = state.launcher() else {
                 return JsonRpcResponse::err(

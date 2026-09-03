@@ -32,6 +32,81 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert!(capabilities.supports::<atman_proto::rpc::GetSessionSnapshot>());
     assert!(capabilities.supports::<atman_proto::rpc::GetSessionUpdates>());
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
+    assert!(capabilities.supports::<atman_proto::rpc::ListProjects>());
+}
+
+#[tokio::test]
+async fn project_list_rebuilds_persisted_projects_and_applies_queries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let first_root = tmp.path().join("alpha-project");
+    let second_root = tmp.path().join("beta-project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&first_root).unwrap();
+    std::fs::create_dir_all(&second_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(data_dir));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(first_root.clone(), Some(config_dir.clone()), None)
+            .unwrap(),
+    ));
+
+    for root in [&first_root, &second_root] {
+        let request = atman_proto::CreateSessionRequest {
+            request_id: Some(atman_proto::RequestId::now()),
+            project_root: Some(root.display().to_string()),
+            title: None,
+        };
+        dispatch(
+            state.clone(),
+            JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(1, &request).unwrap(),
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::CreateSession>()
+        .unwrap();
+    }
+
+    let listed = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::ListProjects>(
+            2,
+            &atman_proto::ListProjectsRequest::default(),
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::ListProjects>()
+    .unwrap();
+    assert_eq!(listed.total, 2);
+    assert_eq!(listed.projects.len(), 2);
+    assert!(
+        listed
+            .projects
+            .iter()
+            .all(|project| project.session_count == 1 && project.active_session_count == 0)
+    );
+
+    let filtered = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::ListProjects>(
+            3,
+            &atman_proto::ListProjectsRequest {
+                search: Some("BETA".into()),
+                limit: Some(1),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::ListProjects>()
+    .unwrap();
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.projects[0].name, "beta-project");
 }
 
 #[tokio::test]

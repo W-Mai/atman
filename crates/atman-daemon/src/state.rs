@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse, PromptId, ResyncRequired,
-    SNAPSHOT_SCHEMA_VERSION, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse, ListProjectsResponse,
+    ProjectSummary, PromptId, ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SessionId, SessionSnapshot,
+    SessionStatus, SessionSummary,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -892,6 +893,73 @@ impl DaemonState {
             summaries.truncate(limit);
         }
         Ok(summaries)
+    }
+
+    pub fn list_projects_query(
+        &self,
+        search: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<ListProjectsResponse> {
+        let summaries = self.list_sessions()?;
+        let sessions_root = self.sessions_root();
+        let mut projects = HashMap::<atman_proto::ProjectId, ProjectSummary>::new();
+        for summary in summaries {
+            let session_dir = sessions_root.join(summary.id.to_string());
+            let Some(meta) = atman_runtime::session_meta::SessionMeta::load(&session_dir) else {
+                continue;
+            };
+            let Some(root) = meta.project_root.as_deref().or(meta.start_path.as_deref()) else {
+                continue;
+            };
+            let project = self.observe_project(root, meta.project_fingerprint.as_deref())?;
+            let candidate_time = meta.created_at.or(summary.first_ts);
+            let entry = projects
+                .entry(project.id.clone())
+                .or_insert_with(|| ProjectSummary {
+                    id: project.id.clone(),
+                    name: project.name(),
+                    root: project.root.display().to_string(),
+                    session_count: 0,
+                    active_session_count: 0,
+                    last_session_at: None,
+                });
+            entry.session_count += 1;
+            entry.active_session_count += usize::from(summary.status == SessionStatus::Running);
+            entry.last_session_at = entry.last_session_at.max(candidate_time);
+        }
+        for project in self.projects.list() {
+            projects
+                .entry(project.id.clone())
+                .or_insert_with(|| ProjectSummary {
+                    id: project.id.clone(),
+                    name: project.name(),
+                    root: project.root.display().to_string(),
+                    session_count: 0,
+                    active_session_count: 0,
+                    last_session_at: None,
+                });
+        }
+
+        let mut projects = projects.into_values().collect::<Vec<_>>();
+        if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
+            let needle = search.to_lowercase();
+            projects.retain(|project| {
+                project.id.0.to_lowercase().contains(&needle)
+                    || project.name.to_lowercase().contains(&needle)
+                    || project.root.to_lowercase().contains(&needle)
+            });
+        }
+        projects.sort_by(|left, right| {
+            right
+                .last_session_at
+                .cmp(&left.last_session_at)
+                .then_with(|| left.root.cmp(&right.root))
+        });
+        let total = projects.len();
+        if let Some(limit) = limit {
+            projects.truncate(limit);
+        }
+        Ok(ListProjectsResponse { projects, total })
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
