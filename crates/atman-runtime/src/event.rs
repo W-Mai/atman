@@ -298,6 +298,15 @@ pub enum Event {
         #[serde(default)]
         abandoned: bool,
     },
+    CompactReviewRequested {
+        review: crate::session::PendingCompactReview,
+    },
+    CompactReviewResolved {
+        review_id: String,
+        decision: crate::session::CompactReviewDecision,
+        #[serde(default)]
+        abandoned: bool,
+    },
     FlowGraph {
         run_id: FlowRunId,
         graph: crate::nodegraph::FlowGraph,

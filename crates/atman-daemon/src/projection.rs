@@ -511,6 +511,27 @@ impl SessionProjector {
                     });
                 }
             }
+            Event::CompactReviewRequested { review } => {
+                let review = compact_review_projection(review);
+                self.projection.interactions.compact_review = Some(review);
+                changes.push(ProjectionChange::InteractionsSet {
+                    interactions: self.projection.interactions.clone(),
+                });
+            }
+            Event::CompactReviewResolved { review_id, .. } => {
+                if self
+                    .projection
+                    .interactions
+                    .compact_review
+                    .as_ref()
+                    .is_some_and(|review| review.id == *review_id)
+                {
+                    self.projection.interactions.compact_review = None;
+                    changes.push(ProjectionChange::InteractionsSet {
+                        interactions: self.projection.interactions.clone(),
+                    });
+                }
+            }
             Event::UserInject { injection, .. } => {
                 let interjection = interjection_projection(injection);
                 self.projection
@@ -705,6 +726,20 @@ impl SessionProjector {
             return None;
         }
         self.projection.interactions.forms = forms;
+        self.commit(vec![ProjectionChange::InteractionsSet {
+            interactions: self.projection.interactions.clone(),
+        }])
+    }
+
+    pub(crate) fn set_compact_review(
+        &mut self,
+        review: Option<atman_runtime::session::PendingCompactReview>,
+    ) -> Option<ProjectionDelta> {
+        let review = review.as_ref().map(compact_review_projection);
+        if self.projection.interactions.compact_review == review {
+            return None;
+        }
+        self.projection.interactions.compact_review = review;
         self.commit(vec![ProjectionChange::InteractionsSet {
             interactions: self.projection.interactions.clone(),
         }])
@@ -1177,6 +1212,21 @@ fn pending_form_projection(
                 }
             })
             .collect(),
+    }
+}
+
+fn compact_review_projection(
+    pending: &atman_runtime::session::PendingCompactReview,
+) -> atman_proto::CompactReviewProjection {
+    atman_proto::CompactReviewProjection {
+        id: pending.review_id.clone(),
+        summary: pending.summary.clone(),
+        slice_preview: pending.slice_preview.clone(),
+        slice_count: pending.slice_count,
+        range_start: pending.range_start,
+        range_end: pending.range_end,
+        tokens_before: pending.tokens_before,
+        emitted_at: pending.emitted_at,
     }
 }
 

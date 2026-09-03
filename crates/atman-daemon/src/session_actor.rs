@@ -106,6 +106,7 @@ impl SessionActorHandle {
         let plans_rx = session.subscribe_plans();
         let context_rx = session.subscribe_context();
         let forms_rx = session.forms().subscribe();
+        let compact_review_rx = session.compact_reviews().subscribe();
         let mut projection = restored_projection.unwrap_or_else(|| {
             SessionProjector::from_events(
                 session_id.clone(),
@@ -118,6 +119,7 @@ impl SessionActorHandle {
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
         projection.set_forms(forms_rx.borrow().clone());
+        projection.set_compact_review(compact_review_rx.borrow().clone());
         for run in &initial_runs {
             projection.register_run(run.run_id.clone(), run.flow_name.clone(), run.started_at);
         }
@@ -150,6 +152,7 @@ impl SessionActorHandle {
             plans_rx,
             context_rx,
             forms_rx,
+            compact_review_rx,
             _permission_client: session.permission_broker().register_client(),
         };
         tokio::spawn(actor.run());
@@ -433,6 +436,7 @@ enum ActorInput {
     Plans(Result<(), watch::error::RecvError>),
     Context(Result<(), watch::error::RecvError>),
     Forms(Result<(), watch::error::RecvError>),
+    CompactReview(Result<(), watch::error::RecvError>),
 }
 
 struct SessionActor {
@@ -456,6 +460,7 @@ struct SessionActor {
     plans_rx: watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>,
     context_rx: watch::Receiver<atman_runtime::ContextSnapshot>,
     forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
+    compact_review_rx: watch::Receiver<Option<atman_runtime::session::PendingCompactReview>>,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
 }
 
@@ -470,6 +475,7 @@ impl SessionActor {
                 changed = self.plans_rx.changed() => ActorInput::Plans(changed),
                 changed = self.context_rx.changed() => ActorInput::Context(changed),
                 changed = self.forms_rx.changed() => ActorInput::Forms(changed),
+                changed = self.compact_review_rx.changed() => ActorInput::CompactReview(changed),
             };
             match input {
                 ActorInput::Command(None) => break,
@@ -509,11 +515,18 @@ impl SessionActor {
                         self.publish_projection_delta(delta);
                     }
                 }
+                ActorInput::CompactReview(Ok(())) => {
+                    let review = self.compact_review_rx.borrow_and_update().clone();
+                    if let Some(delta) = self.projection.set_compact_review(review) {
+                        self.publish_projection_delta(delta);
+                    }
+                }
                 ActorInput::Goal(Err(_))
                 | ActorInput::Todos(Err(_))
                 | ActorInput::Plans(Err(_))
                 | ActorInput::Context(Err(_))
-                | ActorInput::Forms(Err(_)) => break,
+                | ActorInput::Forms(Err(_))
+                | ActorInput::CompactReview(Err(_)) => break,
             }
         }
     }
@@ -908,6 +921,8 @@ impl SessionActor {
         self.projection
             .set_context(self.context_rx.borrow().clone());
         self.projection.set_forms(self.forms_rx.borrow().clone());
+        self.projection
+            .set_compact_review(self.compact_review_rx.borrow().clone());
         self.projection.rebase_after_rebuild(previous_revision);
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
         self.updates.clear();

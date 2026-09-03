@@ -281,6 +281,66 @@ async fn session_actor_projects_pending_forms_until_submission() {
 }
 
 #[tokio::test]
+async fn session_actor_projects_compact_review_until_decision() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    state
+        .register_session(sid.clone(), session.clone(), "alice")
+        .await
+        .unwrap();
+
+    let review_id = "review-1".to_string();
+    let response =
+        session
+            .compact_reviews()
+            .request(atman_runtime::session::PendingCompactReview {
+                review_id: review_id.clone(),
+                summary: "summary".into(),
+                slice_preview: "preview".into(),
+                slice_count: 3,
+                range_start: 2,
+                range_end: 5,
+                tokens_before: 1_024,
+                emitted_at: chrono::Utc::now(),
+            });
+
+    let projected = loop {
+        let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+        if let Some(review) = snapshot.projection.interactions.compact_review {
+            break review;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(projected.id, review_id);
+    assert_eq!(projected.summary, "summary");
+    assert_eq!(projected.slice_count, 3);
+    assert_eq!(projected.range_start, 2);
+    assert_eq!(projected.range_end, 5);
+    assert_eq!(projected.tokens_before, 1_024);
+
+    assert!(session.compact_reviews().decide(
+        &review_id,
+        atman_runtime::session::CompactReviewDecision::AcceptEdited {
+            summary: "edited summary".into(),
+        },
+    ));
+    assert!(matches!(
+        response.await.unwrap(),
+        atman_runtime::session::CompactReviewDecision::AcceptEdited { summary }
+            if summary == "edited summary"
+    ));
+    loop {
+        let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+        if snapshot.projection.interactions.compact_review.is_none() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
 async fn live_snapshot_is_actor_consistent_and_redacted() {
     let tmp = tempfile::tempdir().unwrap();
     let state = DaemonState::new_with_generation(tmp.path().to_path_buf(), "generation-a".into());

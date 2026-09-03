@@ -182,7 +182,9 @@ impl InteractionServices {
     fn new(sink: &EventSink) -> Self {
         Self {
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
-            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new_with_event_sink(
+                sink.clone(),
+            )),
             forms: std::sync::Arc::new(FormRegistry::new_with_event_sink(sink.clone())),
         }
     }
@@ -220,7 +222,7 @@ pub struct Session {
     project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PendingCompactReview {
     pub review_id: String,
     pub summary: String,
@@ -232,7 +234,7 @@ pub struct PendingCompactReview {
     pub emitted_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum CompactReviewDecision {
     AcceptAsIs,
     AcceptEdited { summary: String },
@@ -242,11 +244,16 @@ pub enum CompactReviewDecision {
 pub struct CompactReviewRegistry {
     entry: std::sync::Mutex<Option<CompactReviewEntry>>,
     watch_tx: watch::Sender<Option<PendingCompactReview>>,
+    event_sink: Option<EventSink>,
 }
 
 struct CompactReviewEntry {
     pending: PendingCompactReview,
     responder: tokio::sync::oneshot::Sender<CompactReviewDecision>,
+}
+
+pub struct CompactReviewResolutionCommit {
+    pub event: Option<crate::event::EventEnvelope>,
 }
 
 impl Default for CompactReviewRegistry {
@@ -261,7 +268,14 @@ impl CompactReviewRegistry {
         Self {
             entry: std::sync::Mutex::new(None),
             watch_tx,
+            event_sink: None,
         }
+    }
+
+    fn new_with_event_sink(event_sink: EventSink) -> Self {
+        let mut registry = Self::new();
+        registry.event_sink = Some(event_sink);
+        registry
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Option<PendingCompactReview>> {
@@ -292,6 +306,13 @@ impl CompactReviewRegistry {
         {
             let mut slot = self.entry.lock().unwrap();
             if let Some(prev) = slot.take() {
+                if let Some(sink) = &self.event_sink {
+                    sink.emit(crate::event::Event::CompactReviewResolved {
+                        review_id: prev.pending.review_id.clone(),
+                        decision: CompactReviewDecision::Reject,
+                        abandoned: true,
+                    });
+                }
                 let _ = prev.responder.send(CompactReviewDecision::Reject);
             }
             *slot = Some(CompactReviewEntry {
@@ -299,11 +320,24 @@ impl CompactReviewRegistry {
                 responder: tx,
             });
         }
+        if let Some(sink) = &self.event_sink {
+            sink.emit(crate::event::Event::CompactReviewRequested {
+                review: pending.clone(),
+            });
+        }
         let _ = self.watch_tx.send(Some(pending));
         rx
     }
 
     pub fn decide(&self, review_id: &str, decision: CompactReviewDecision) -> bool {
+        self.decide_with_commit(review_id, decision).is_some()
+    }
+
+    pub fn decide_with_commit(
+        &self,
+        review_id: &str,
+        decision: CompactReviewDecision,
+    ) -> Option<CompactReviewResolutionCommit> {
         let entry = {
             let mut slot = self.entry.lock().unwrap();
             match slot.as_ref() {
@@ -313,11 +347,18 @@ impl CompactReviewRegistry {
         };
         match entry {
             Some(e) => {
+                let event = self.event_sink.as_ref().map(|sink| {
+                    sink.emit_returning_envelope(crate::event::Event::CompactReviewResolved {
+                        review_id: review_id.to_owned(),
+                        decision: decision.clone(),
+                        abandoned: false,
+                    })
+                });
                 let _ = e.responder.send(decision);
                 let _ = self.watch_tx.send(None);
-                true
+                Some(CompactReviewResolutionCommit { event })
             }
-            None => false,
+            None => None,
         }
     }
 }
@@ -3536,6 +3577,46 @@ mod tests {
             other => panic!("unexpected decision: {other:?}"),
         }
         assert!(reg.list_pending().is_none());
+    }
+
+    #[test]
+    fn session_compact_review_registry_emits_ordered_durable_events() {
+        let session = Session::open_ephemeral();
+        let _sub = session.compact_reviews().subscribe();
+        let response = session.compact_reviews().request(PendingCompactReview {
+            review_id: "durable-review".into(),
+            summary: "summary".into(),
+            slice_preview: "preview".into(),
+            slice_count: 2,
+            range_start: 1,
+            range_end: 3,
+            tokens_before: 100,
+            emitted_at: chrono::Utc::now(),
+        });
+        let commit = session
+            .compact_reviews()
+            .decide_with_commit("durable-review", CompactReviewDecision::AcceptAsIs)
+            .unwrap();
+
+        assert_eq!(commit.event.unwrap().seq, 2);
+        assert!(matches!(
+            response.blocking_recv().unwrap(),
+            CompactReviewDecision::AcceptAsIs
+        ));
+        let events = session.sink().snapshot_envelopes();
+        assert!(matches!(
+            &events[0].event,
+            crate::event::Event::CompactReviewRequested { review }
+                if review.review_id == "durable-review"
+        ));
+        assert!(matches!(
+            &events[1].event,
+            crate::event::Event::CompactReviewResolved {
+                review_id,
+                abandoned: false,
+                ..
+            } if review_id == "durable-review"
+        ));
     }
 
     #[test]
