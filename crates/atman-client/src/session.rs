@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    DaemonGeneration, EventCursor, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
-    GetSessionUpdatesResponse, PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta,
-    ProjectionEventEnvelope, Revision, SNAPSHOT_SCHEMA_VERSION, ServerEvent, SessionId,
-    SessionProjection, SessionSignal, SessionSnapshot, rpc,
+    CancelRunRequest, CancelRunResponse, DaemonGeneration, EventCursor, FlowRunId,
+    GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
+    InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
+    PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
+    RequestId, Revision, SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse,
+    ServerEvent, SessionId, SessionProjection, SessionSignal, SessionSnapshot, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -161,6 +163,21 @@ pub enum SessionClientError {
     Transport(#[from] TransportError),
     #[error(transparent)]
     Reconcile(#[from] ReconcileError),
+    #[error("daemon acknowledged cursor {target:?}, but the session remained at {current:?}")]
+    CommittedCursorUnavailable {
+        target: EventCursor,
+        current: EventCursor,
+    },
+    #[error("command result belongs to session {received}, expected {expected}")]
+    CommandSession {
+        expected: SessionId,
+        received: SessionId,
+    },
+    #[error("command result belongs to run {received}, expected {expected}")]
+    CommandRun {
+        expected: FlowRunId,
+        received: FlowRunId,
+    },
 }
 
 impl SessionClientError {
@@ -169,6 +186,8 @@ impl SessionClientError {
             Self::Client(error) => error.is_retryable(),
             Self::Transport(error) => error.is_retryable(),
             Self::Reconcile(_) => false,
+            Self::CommittedCursorUnavailable { .. } => false,
+            Self::CommandSession { .. } | Self::CommandRun { .. } => false,
         }
     }
 }
@@ -338,6 +357,103 @@ impl SessionClient {
                 RefreshOutcome::Reconnected => return Ok(RefreshOutcome::Reconnected),
             }
         }
+    }
+
+    pub async fn send_message(
+        &self,
+        text: impl Into<String>,
+        reasoning: Option<String>,
+        images: Vec<InlineImage>,
+    ) -> Result<SendMessageResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::SendMessage>(&SendMessageRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                text: text.into(),
+                reasoning,
+                images,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn interject(
+        &self,
+        run_id: FlowRunId,
+        text: impl Into<String>,
+        level: InterjectionLevel,
+        redirect_target: Option<String>,
+    ) -> Result<InterjectSessionResponse, SessionClientError> {
+        let expected_run = run_id.clone();
+        let response = self
+            .client
+            .command::<rpc::InterjectSession>(&InterjectSessionRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                run_id,
+                text: text.into(),
+                level,
+                redirect_target,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        if response.run_id != expected_run {
+            return Err(SessionClientError::CommandRun {
+                expected: expected_run,
+                received: response.run_id,
+            });
+        }
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn cancel_run(
+        &self,
+        run_id: FlowRunId,
+    ) -> Result<CancelRunResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::CancelRun>(&CancelRunRequest {
+                request_id: Some(RequestId::now()),
+                run_id,
+            })
+            .await?;
+        self.refresh().await?;
+        Ok(response)
+    }
+
+    async fn refresh_through(&self, target: EventCursor) -> Result<(), SessionClientError> {
+        let mut stalled = 0;
+        while self.current().cursor() < target {
+            let before = self.current().cursor();
+            self.refresh().await?;
+            let after = self.current().cursor();
+            if after == before {
+                stalled += 1;
+                if stalled >= 2 {
+                    return Err(SessionClientError::CommittedCursorUnavailable {
+                        target,
+                        current: after,
+                    });
+                }
+            } else {
+                stalled = 0;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_command_session(&self, received: &SessionId) -> Result<(), SessionClientError> {
+        if received != &self.session_id {
+            return Err(SessionClientError::CommandSession {
+                expected: self.session_id.clone(),
+                received: received.clone(),
+            });
+        }
+        Ok(())
     }
 
     pub async fn synchronize(&self) -> Result<(), SessionClientError> {
@@ -1173,5 +1289,131 @@ mod tests {
             Some("after")
         );
         assert_eq!(session.current().cursor(), EventCursor(2));
+    }
+
+    struct CommandTransport {
+        session_id: SessionId,
+        send_attempts: AtomicUsize,
+        requests: Arc<StdMutex<Vec<JsonRpcRequest>>>,
+    }
+
+    impl RpcTransport for CommandTransport {
+        fn send(
+            &self,
+            request: JsonRpcRequest,
+        ) -> BoxFuture<'_, Result<JsonRpcResponse, TransportError>> {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(request.clone());
+                if request.method == methods::SEND_MESSAGE
+                    && self.send_attempts.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    return Err(TransportError::Closed);
+                }
+                let result = match request.method.as_str() {
+                    methods::DAEMON_CAPABILITIES => {
+                        let mut capabilities = capabilities("generation-a");
+                        let method = method_descriptor::<rpc::SendMessage>();
+                        capabilities.methods.push(MethodCapability {
+                            name: method.name.into(),
+                            kind: method.kind,
+                            revision: method.revision,
+                        });
+                        serde_json::to_value(capabilities)?
+                    }
+                    methods::GET_SESSION_SNAPSHOT => serde_json::to_value(SessionSnapshot {
+                        schema_version: SNAPSHOT_SCHEMA_VERSION,
+                        daemon_generation: DaemonGeneration("generation-a".into()),
+                        cursor: EventCursor(1),
+                        projection: projection(self.session_id.clone(), Revision(1)),
+                    })?,
+                    methods::SEND_MESSAGE => serde_json::to_value(SendMessageResponse {
+                        session_id: self.session_id.clone(),
+                        run_id: FlowRunId(
+                            uuid::Uuid::parse_str("018f7f24-1ab2-7c3d-8e4f-123456789ad0").unwrap(),
+                        ),
+                        revision: Revision(2),
+                        cursor: EventCursor(2),
+                    })?,
+                    methods::GET_SESSION_UPDATES => {
+                        let current = SessionState::new(
+                            SessionSnapshot {
+                                schema_version: SNAPSHOT_SCHEMA_VERSION,
+                                daemon_generation: DaemonGeneration("generation-a".into()),
+                                cursor: EventCursor(1),
+                                projection: projection(self.session_id.clone(), Revision(1)),
+                            },
+                            &DaemonGeneration("generation-a".into()),
+                        )
+                        .unwrap();
+                        serde_json::to_value(GetSessionUpdatesResponse {
+                            daemon_generation: DaemonGeneration("generation-a".into()),
+                            events: vec![envelope(
+                                &current,
+                                2,
+                                ProjectionDelta {
+                                    base_revision: Revision(1),
+                                    revision: Revision(2),
+                                    changes: vec![ProjectionChange::LifecycleSet {
+                                        lifecycle: atman_proto::SessionLifecycle::Active,
+                                    }],
+                                },
+                            )],
+                            next_cursor: EventCursor(2),
+                            has_more: false,
+                            resync_required: None,
+                        })?
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                Ok(JsonRpcResponse::ok(request.id, result))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn session_commands_retry_with_one_id_and_reconcile_through_the_commit_cursor() {
+        let session_id =
+            SessionId(uuid::Uuid::parse_str("018f7f24-1ab2-7c3d-8e4f-123456789acf").unwrap());
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let client = Client::connect(
+            CommandTransport {
+                session_id: session_id.clone(),
+                send_attempts: AtomicUsize::new(0),
+                requests: requests.clone(),
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .unwrap();
+        let session = client.attach_session(session_id).await.unwrap();
+
+        let response = session
+            .send_message("retry me", None, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(response.cursor, EventCursor(2));
+        assert_eq!(session.current().cursor(), EventCursor(2));
+        assert_eq!(
+            session.current().projection().lifecycle,
+            atman_proto::SessionLifecycle::Active
+        );
+
+        let request_ids = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == methods::SEND_MESSAGE)
+            .map(|request| {
+                request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("request_id"))
+                    .cloned()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(request_ids.len(), 2);
+        assert_eq!(request_ids[0], request_ids[1]);
+        assert!(!request_ids[0].is_null());
     }
 }

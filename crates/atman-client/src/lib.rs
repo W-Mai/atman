@@ -12,7 +12,7 @@ use std::sync::{
 
 use atman_proto::{
     CapabilitiesRequest, CapabilitiesResponse, ClientId, EventCursor, JsonRpcRequest,
-    JsonRpcResponse, PROTOCOL_VERSION, ProjectionEventEnvelope, RpcMethod, SessionId, rpc,
+    JsonRpcResponse, PROTOCOL_VERSION, ProjectionEventEnvelope, RpcKind, RpcMethod, SessionId, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -197,6 +197,17 @@ impl Client {
         }
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         invoke::<M>(self.inner.transport.as_ref(), request_id, params).await
+    }
+
+    pub(crate) async fn command<M: RpcMethod>(
+        &self,
+        params: &M::Params,
+    ) -> Result<M::Output, ClientError> {
+        debug_assert_eq!(M::KIND, RpcKind::Command);
+        match self.call::<M>(params).await {
+            Err(error) if error.is_retryable() => self.call::<M>(params).await,
+            result => result,
+        }
     }
 
     pub async fn attach_session(
