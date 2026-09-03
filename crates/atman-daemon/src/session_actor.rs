@@ -111,6 +111,7 @@ impl SessionActorView {
 
 #[derive(Clone)]
 pub(crate) struct SessionActorHandle {
+    actor_id: uuid::Uuid,
     session: Arc<atman_runtime::Session>,
     owner_principal: Arc<str>,
     tx: mpsc::UnboundedSender<Command>,
@@ -127,6 +128,7 @@ impl SessionActorHandle {
         restored_projection: Option<SessionProjector>,
         task_registry: atman_runtime::TaskRegistry,
     ) -> Self {
+        let actor_id = uuid::Uuid::now_v7();
         let workspace_service =
             session
                 .meta()
@@ -201,6 +203,7 @@ impl SessionActorHandle {
         };
         tokio::spawn(actor.run());
         Self {
+            actor_id,
             session,
             owner_principal: owner_principal.into(),
             tx,
@@ -214,6 +217,10 @@ impl SessionActorHandle {
 
     pub fn owns_session(&self, session: &Arc<atman_runtime::Session>) -> bool {
         Arc::ptr_eq(&self.session, session)
+    }
+
+    pub fn is_same_actor(&self, other: &Self) -> bool {
+        self.actor_id == other.actor_id
     }
 
     pub fn view(&self) -> SessionActorView {
@@ -349,6 +356,10 @@ impl SessionActorHandle {
             reply,
         })
         .await?
+    }
+
+    pub async fn try_unload(&self) -> Result<bool> {
+        request(&self.tx, |reply| Command::TryUnload { reply }).await?
     }
 
     pub async fn snapshot(&self) -> Result<(EventCursor, SessionProjection)> {
@@ -500,6 +511,9 @@ enum Command {
         resource_id: ResourceId,
         reply: oneshot::Sender<Result<ResourceMutationCommit>>,
     },
+    TryUnload {
+        reply: oneshot::Sender<Result<bool>>,
+    },
     WorkspaceMutationFinished {
         action: WorkspaceMutationAction,
         resource_id: ResourceId,
@@ -595,6 +609,19 @@ impl SessionActor {
             };
             match input {
                 ActorInput::Command(None) => break,
+                ActorInput::Command(Some(Command::TryUnload { reply })) => {
+                    let result = self.prepare_unload();
+                    let should_stop = matches!(result, Ok(true));
+                    if should_stop {
+                        self.session.shutdown().await;
+                        self.task_registry
+                            .unbind_session(&self.session_id.to_string());
+                    }
+                    let _ = reply.send(result);
+                    if should_stop {
+                        break;
+                    }
+                }
                 ActorInput::Command(Some(command)) => self.handle_command(command),
                 ActorInput::Event(event) => match *event {
                     Ok(event) => self.apply_runtime_event(&event),
@@ -748,6 +775,7 @@ impl SessionActor {
                     self.finish_workspace_mutation(action, resource_id, owner_run_id, *result);
                 let _ = reply.send(result);
             }
+            Command::TryUnload { .. } => unreachable!("try_unload is handled by the actor loop"),
             Command::Snapshot { reply } => {
                 let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
                 let result = self
@@ -810,6 +838,36 @@ impl SessionActor {
         self.revision = self.revision.saturating_add(1);
         self.view_tx
             .send_replace(view_for(self.revision, &self.runs, &self.projection));
+    }
+
+    fn prepare_unload(&mut self) -> Result<bool> {
+        let interactions = &self.projection.projection().interactions;
+        let has_pending_interactions = !self.prompts.is_empty()
+            || !interactions.prompts.is_empty()
+            || !interactions.forms.is_empty()
+            || interactions.compact_review.is_some()
+            || interactions.approvals.iter().any(|approval| {
+                matches!(
+                    approval.state,
+                    atman_proto::ApprovalState::Evaluating | atman_proto::ApprovalState::Pending
+                )
+            })
+            || interactions
+                .interjections
+                .iter()
+                .any(|interjection| interjection.state == atman_proto::InterjectionState::Pending);
+        let session_id = self.session_id.to_string();
+        if !self.runs.is_empty()
+            || has_pending_interactions
+            || !self.workspace_mutations.is_empty()
+            || self.updates_tx.receiver_count() != 0
+            || self.task_registry.has_running_in_session(&session_id)
+        {
+            return Ok(false);
+        }
+        let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(target_seq)?;
+        Ok(true)
     }
 
     fn interject(

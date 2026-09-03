@@ -283,6 +283,16 @@ impl TaskRegistry {
             .insert(session_id.into(), events);
     }
 
+    pub fn unbind_session(&self, session_id: &str) {
+        self.session_events.lock().unwrap().remove(session_id);
+    }
+
+    pub fn has_running_in_session(&self, session_id: &str) -> bool {
+        self.inner.lock().unwrap().values().any(|entry| {
+            entry.snapshot.session_id == session_id && entry.snapshot.status.is_running()
+        })
+    }
+
     pub fn register(
         &self,
         kind: TaskKind,

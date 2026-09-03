@@ -453,11 +453,31 @@ impl DaemonState {
             .is_some_and(|entry| entry.finish_run(run_id.clone()))
     }
 
-    pub fn remove_session(&self, id: &SessionId) -> bool {
-        let removed = self.sessions.lock().unwrap().remove(id);
-        let existed = removed.is_some();
-        drop(removed);
-        existed
+    pub async fn unload_session_if_idle(&self, id: &SessionId) -> Result<bool> {
+        let load_gate = self
+            .session_loads
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _guard = load_gate.lock().await;
+        let actor = self.sessions.lock().unwrap().get(id).cloned();
+        let Some(actor) = actor else {
+            return Ok(false);
+        };
+        if !actor.try_unload().await? {
+            return Ok(false);
+        }
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions
+            .get(id)
+            .is_some_and(|registered| registered.is_same_actor(&actor))
+        {
+            sessions.remove(id);
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn has_live_runs(&self, id: &SessionId) -> bool {
@@ -837,5 +857,41 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(load_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_unload_waits_for_clients_and_managed_tasks() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session, "owner")
+            .await
+            .unwrap();
+
+        let (updates, _) = state
+            .subscribe_session_updates(&session_id, "owner")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!state.unload_session_if_idle(&session_id).await.unwrap());
+        drop(updates);
+
+        let task_id = state.task_registry().register(
+            atman_runtime::TaskKind::Bash,
+            "inspect workspace".into(),
+            "bg-1".into(),
+            atman_runtime::TaskOwner::new(session_id.to_string(), None),
+            CancellationToken::new(),
+        );
+        assert!(!state.unload_session_if_idle(&session_id).await.unwrap());
+        state
+            .task_registry()
+            .finish(&task_id, atman_runtime::TaskStatus::Ok);
+
+        assert!(state.unload_session_if_idle(&session_id).await.unwrap());
+        assert!(state.session_revision(&session_id).is_none());
     }
 }
