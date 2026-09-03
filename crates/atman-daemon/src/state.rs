@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
@@ -21,6 +22,7 @@ pub struct DaemonState {
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
     task_registry: atman_runtime::TaskRegistry,
+    accepting_commands: AtomicBool,
     pub(crate) idempotency: IdempotencyRegistry,
 }
 
@@ -55,12 +57,21 @@ impl DaemonState {
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
             task_registry: atman_runtime::TaskRegistry::new(),
+            accepting_commands: AtomicBool::new(true),
             idempotency: IdempotencyRegistry::default(),
         }
     }
 
     pub fn daemon_generation(&self) -> &str {
         &self.daemon_generation
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.accepting_commands.store(false, Ordering::Release);
+    }
+
+    pub fn is_accepting_commands(&self) -> bool {
+        self.accepting_commands.load(Ordering::Acquire)
     }
 
     pub fn set_launcher(&self, launcher: std::sync::Arc<crate::run::RunLauncher>) {

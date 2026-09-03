@@ -96,6 +96,7 @@ where
     M: RpcMethod,
     F: Future<Output = Result<M::Output, JsonRpcError>> + Send + 'static,
 {
+    let accepting_commands = state.is_accepting_commands();
     let encoded = state
         .idempotency
         .execute(
@@ -104,6 +105,9 @@ where
             M::NAME,
             params,
             async move {
+                if !accepting_commands {
+                    return Err(JsonRpcError::application("daemon is shutting down"));
+                }
                 serde_json::to_value(operation.await?).map_err(|error| {
                     JsonRpcError::internal(format!(
                         "could not encode {} command result: {error}",

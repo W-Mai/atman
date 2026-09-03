@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
     };
 
     let ctrlc_shutdown = shutdown.clone();
+    let state_for_shutdown = state.clone();
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("register SIGTERM handler");
@@ -100,6 +101,7 @@ async fn main() -> Result<()> {
             _ = tokio::signal::ctrl_c() => {}
             _ = sigterm.recv() => {}
         }
+        state_for_shutdown.begin_shutdown();
         ctrlc_shutdown.cancel();
     });
 

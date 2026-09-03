@@ -333,10 +333,46 @@ async fn rename_session_retries_return_the_original_committed_result() {
         Some("External change")
     );
 
+    state.begin_shutdown();
+    let retry_during_shutdown = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::RenameSession>(3, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::RenameSession>()
+    .unwrap();
+    assert_eq!(retry_during_shutdown.session.title, "Committed title");
+
+    let rejected = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::RenameSession>(
+            4,
+            &atman_proto::RenameSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: atman_proto::SessionId(sid),
+                title: "Rejected title".into(),
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(rejected.error.unwrap().message, "daemon is shutting down");
+
+    let ping = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::Ping>(
+            5,
+            &atman_proto::EmptyParams::default(),
+        )
+        .unwrap(),
+    )
+    .await;
+    assert!(ping.error.is_none());
+
     let conflict = dispatch(
         state,
         JsonRpcRequest::for_method::<atman_proto::rpc::RenameSession>(
-            3,
+            6,
             &atman_proto::RenameSessionRequest {
                 request_id: Some(request_id),
                 session_id: atman_proto::SessionId(sid),
