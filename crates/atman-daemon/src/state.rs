@@ -20,6 +20,7 @@ pub struct DaemonState {
     session_loads: Mutex<HashMap<SessionId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
+    task_registry: atman_runtime::TaskRegistry,
     pub(crate) idempotency: IdempotencyRegistry,
 }
 
@@ -53,6 +54,7 @@ impl DaemonState {
             session_loads: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
+            task_registry: atman_runtime::TaskRegistry::new(),
             idempotency: IdempotencyRegistry::default(),
         }
     }
@@ -89,6 +91,10 @@ impl DaemonState {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    pub fn task_registry(&self) -> atman_runtime::TaskRegistry {
+        self.task_registry.clone()
     }
 
     pub fn register_pending_prompt(

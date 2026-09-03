@@ -679,6 +679,10 @@ async fn run_flow_inner(
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
         events: session.sink().clone(),
+        task_registry: daemon_state
+            .as_ref()
+            .map(|state| state.task_registry())
+            .unwrap_or_default(),
         mock: false,
         config_dir: config_dir.clone(),
         project_root: project_root.clone(),
@@ -1055,6 +1059,7 @@ mod tests {
                 let outcome =
                     crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
                         events: atman_runtime::event::EventSink::new(),
+                        task_registry: atman_runtime::TaskRegistry::new(),
                         mock: true,
                         config_dir: None,
                         project_root: repository.path().to_path_buf(),
@@ -1144,6 +1149,7 @@ mod tests {
                 drop(state.provider_lifecycle_for(Some(config.path())).unwrap());
                 let options = || crate::bootstrap::BootstrapOptions {
                     events: atman_runtime::event::EventSink::new(),
+                    task_registry: atman_runtime::TaskRegistry::new(),
                     mock: false,
                     config_dir: Some(config.path().to_path_buf()),
                     project_root: project.path().to_path_buf(),

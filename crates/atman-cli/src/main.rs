@@ -5831,6 +5831,7 @@ fn bootstrap_opts(
         .clone();
     Ok(atman_daemon::bootstrap::BootstrapOptions {
         events,
+        task_registry: atman_runtime::TaskRegistry::new(),
         mock,
         config_dir,
         project_root,

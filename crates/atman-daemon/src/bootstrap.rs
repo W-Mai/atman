@@ -11,6 +11,7 @@ pub use atman_runtime::config_hub::{RedactConfig, SandboxConfig};
 
 pub struct BootstrapOptions {
     pub events: EventSink,
+    pub task_registry: atman_runtime::TaskRegistry,
     pub mock: bool,
     pub config_dir: Option<PathBuf>,
     pub project_root: PathBuf,
@@ -347,7 +348,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
     tools::register_git_ops(&executor.tools);
     tools::register_watch(&executor.tools);
-    let task_registry = atman_runtime::TaskRegistry::new();
+    let task_registry = opts.task_registry;
     let bg_registry =
         tools::register_bash_bg_with_task_registry(&executor.tools, task_registry.clone());
     let term_registry =
@@ -707,6 +708,7 @@ mod tests {
 
                 let outcome = build_executor(BootstrapOptions {
                     events: EventSink::new(),
+                    task_registry: atman_runtime::TaskRegistry::new(),
                     mock: true,
                     config_dir: Some(config.path().to_path_buf()),
                     project_root: project.path().to_path_buf(),
@@ -774,6 +776,7 @@ enabled = true
 
                 let outcome = build_executor(BootstrapOptions {
                     events: EventSink::new(),
+                    task_registry: atman_runtime::TaskRegistry::new(),
                     mock: false,
                     config_dir: Some(config.path().to_path_buf()),
                     project_root: project.path().to_path_buf(),
@@ -844,6 +847,7 @@ enabled = true
 
                 let outcome = build_executor(BootstrapOptions {
                     events: EventSink::new(),
+                    task_registry: atman_runtime::TaskRegistry::new(),
                     mock: false,
                     config_dir: Some(config.path().to_path_buf()),
                     project_root: project.path().to_path_buf(),
@@ -897,6 +901,7 @@ enabled = true
 
                 let result = build_executor(BootstrapOptions {
                     events: EventSink::new(),
+                    task_registry: atman_runtime::TaskRegistry::new(),
                     mock: false,
                     config_dir: Some(config.path().to_path_buf()),
                     project_root: project.path().to_path_buf(),
