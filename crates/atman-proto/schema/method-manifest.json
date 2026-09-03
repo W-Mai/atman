@@ -123,6 +123,23 @@
       }
     },
     {
+      "name": "session.update_trust",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "UpdateSessionTrustRequest",
+        "schema": {
+          "$ref": "#/$defs/UpdateSessionTrustRequest"
+        }
+      },
+      "result": {
+        "rust_type": "UpdateSessionTrustResponse",
+        "schema": {
+          "$ref": "#/$defs/UpdateSessionTrustResponse"
+        }
+      }
+    },
+    {
       "name": "project.list",
       "kind": "query",
       "revision": 1,

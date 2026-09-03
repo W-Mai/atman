@@ -1291,7 +1291,7 @@ fn metadata_projection(
     }
 }
 
-fn trust_projection(trust: &atman_runtime::trust::TrustConfig) -> TrustProjection {
+pub(crate) fn trust_projection(trust: &atman_runtime::trust::TrustConfig) -> TrustProjection {
     let action = |action: Option<atman_runtime::trust::PolicyAction>| {
         action.map(|action| match action {
             atman_runtime::trust::PolicyAction::Auto => TrustPolicyAction::Auto,
@@ -1332,6 +1332,55 @@ fn trust_projection(trust: &atman_runtime::trust::TrustConfig) -> TrustProjectio
             filesystem_write: action(trust.risks.eager.filesystem_write),
             process_spawn: action(trust.risks.eager.process_spawn),
             repository_mutation: action(trust.risks.eager.repository_mutation),
+        },
+    }
+}
+
+pub(crate) fn runtime_trust_config(trust: &TrustProjection) -> atman_runtime::trust::TrustConfig {
+    let action = |action: Option<TrustPolicyAction>| {
+        action.map(|action| match action {
+            TrustPolicyAction::Auto => atman_runtime::trust::PolicyAction::Auto,
+            TrustPolicyAction::Ask => atman_runtime::trust::PolicyAction::Ask,
+            TrustPolicyAction::Deny => atman_runtime::trust::PolicyAction::Deny,
+        })
+    };
+    atman_runtime::trust::TrustConfig {
+        mode: match trust.mode {
+            TrustMode::Calm => atman_runtime::trust::TrustMode::Calm,
+            TrustMode::Steady => atman_runtime::trust::TrustMode::Steady,
+            TrustMode::Eager => atman_runtime::trust::TrustMode::Eager,
+            TrustMode::Reckless => atman_runtime::trust::TrustMode::Reckless,
+        },
+        theme: match trust.theme {
+            TrustTheme::Default => atman_runtime::trust::Theme::Default,
+            TrustTheme::Wuxia => atman_runtime::trust::Theme::Wuxia,
+            TrustTheme::Animal => atman_runtime::trust::Theme::Animal,
+            TrustTheme::Weather => atman_runtime::trust::Theme::Weather,
+            TrustTheme::Drink => atman_runtime::trust::Theme::Drink,
+        },
+        escalation: match trust.escalation {
+            TrustEscalation::Deny => atman_runtime::trust::EscalationPolicy::Deny,
+            TrustEscalation::Ask => atman_runtime::trust::EscalationPolicy::Ask,
+            TrustEscalation::Allow => atman_runtime::trust::EscalationPolicy::Allow,
+        },
+        tiers: atman_runtime::trust::TierPolicyConfig {
+            eager: atman_runtime::trust::TierPolicyOverrides {
+                tier0: action(trust.eager_tiers.tier0),
+                tier1: action(trust.eager_tiers.tier1),
+                tier2: action(trust.eager_tiers.tier2),
+                tier3: action(trust.eager_tiers.tier3),
+                tier4: action(trust.eager_tiers.tier4),
+            },
+        },
+        risks: atman_runtime::trust::RiskPolicyConfig {
+            eager: atman_runtime::trust::RiskPolicyOverrides {
+                outside_workspace: action(trust.eager_risks.outside_workspace),
+                network: action(trust.eager_risks.network),
+                irreversible: action(trust.eager_risks.irreversible),
+                filesystem_write: action(trust.eager_risks.filesystem_write),
+                process_spawn: action(trust.eager_risks.process_spawn),
+                repository_mutation: action(trust.eager_risks.repository_mutation),
+            },
         },
     }
 }
@@ -2123,6 +2172,7 @@ mod tests {
             delta.changes.as_slice(),
             [ProjectionChange::TrustSet { .. }]
         ));
+        assert_eq!(runtime_trust_config(&projector.projection().trust), trust);
         assert!(projector.set_trust(trust).is_none());
     }
 

@@ -12,6 +12,7 @@ use atman_proto::{
     PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse, ResourceId, ResourceKind,
     ResourceState, ResourceTerminationStatus, ResyncRequired, RunCancellationStatus, ServerEvent,
     SessionId, SessionNotification, SessionProjection, SessionSignal, SessionSummary,
+    TrustProjection,
 };
 use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -79,6 +80,12 @@ pub(crate) struct CompactReviewResolutionCommit {
 
 pub struct RenameSessionCommit {
     pub session: SessionSummary,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct TrustUpdateCommit {
+    pub trust: TrustProjection,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -409,6 +416,19 @@ impl SessionActorHandle {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
     }
 
+    pub async fn update_trust(
+        &self,
+        trust: TrustProjection,
+        launcher: Arc<crate::run::RunLauncher>,
+    ) -> Result<TrustUpdateCommit> {
+        request(&self.tx, |reply| Command::UpdateTrust {
+            trust,
+            launcher,
+            reply,
+        })
+        .await?
+    }
+
     pub async fn terminate_resource(
         &self,
         resource_id: ResourceId,
@@ -589,6 +609,11 @@ enum Command {
     Rename {
         title: String,
         reply: oneshot::Sender<Result<RenameSessionCommit>>,
+    },
+    UpdateTrust {
+        trust: TrustProjection,
+        launcher: Arc<crate::run::RunLauncher>,
+        reply: oneshot::Sender<Result<TrustUpdateCommit>>,
     },
     TerminateResource {
         resource_id: ResourceId,
@@ -856,6 +881,14 @@ impl SessionActor {
             }
             Command::Rename { title, reply } => {
                 let result = self.rename(title);
+                let _ = reply.send(result);
+            }
+            Command::UpdateTrust {
+                trust,
+                launcher,
+                reply,
+            } => {
+                let result = self.update_trust(trust, &launcher);
                 let _ = reply.send(result);
             }
             Command::TerminateResource { resource_id, reply } => {
@@ -1642,6 +1675,27 @@ impl SessionActor {
         }
         Ok(RenameSessionCommit {
             session,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn update_trust(
+        &mut self,
+        trust: TrustProjection,
+        launcher: &crate::run::RunLauncher,
+    ) -> Result<TrustUpdateCommit> {
+        let trust = crate::projection::runtime_trust_config(&trust);
+        self.session.update_trust(trust.clone(), |trust| {
+            launcher
+                .set_trust_config(trust)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })?;
+        if let Some(delta) = self.projection.set_trust(trust.clone()) {
+            self.publish_projection_delta(delta);
+        }
+        Ok(TrustUpdateCommit {
+            trust: crate::projection::trust_projection(&trust),
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })

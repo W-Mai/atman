@@ -883,6 +883,21 @@ impl DaemonState {
         actor.rename(title.to_owned()).await
     }
 
+    pub(crate) async fn update_session_trust(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        trust: atman_proto::TrustProjection,
+        principal: &str,
+    ) -> Result<crate::session_actor::TrustUpdateCommit> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .update_trust(trust, launcher)
+            .await
+    }
+
     async fn get_or_load_actor(
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,

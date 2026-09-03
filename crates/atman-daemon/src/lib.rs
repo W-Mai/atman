@@ -6,8 +6,8 @@ use atman_proto::{
     PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
     RenameSessionResponse, RequestId, ResolveCompactReviewResponse, ResolvePromptResponse,
     RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
-    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, method_descriptor, methods,
-    rpc,
+    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse,
+    method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -153,6 +153,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::DeleteSession>(),
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
+    method_descriptor::<rpc::UpdateSessionTrust>(),
     method_descriptor::<rpc::ListProjects>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
@@ -499,6 +500,43 @@ pub async fn dispatch_as(
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::UPDATE_SESSION_TRUST => {
+            match parse_params::<rpc::UpdateSessionTrust>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    let outcome = execute_command::<rpc::UpdateSessionTrust, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            operation_state
+                                .update_session_trust(
+                                    &operation_params.session_id,
+                                    operation_params.trust,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map(|commit| UpdateSessionTrustResponse {
+                                    session_id: operation_params.session_id,
+                                    trust: commit.trust,
+                                    revision: commit.revision,
+                                    cursor: commit.cursor,
+                                })
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(result) => method_response::<rpc::UpdateSessionTrust>(id, result),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {
             Ok(params) => {
                 let operation_state = state.clone();

@@ -51,6 +51,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "daemon.capabilities",
         "session.send_message",
         "session.interject",
+        "session.update_trust",
         "list_permission_requests",
         "create_permission_group",
         "resolve_permission_requests",

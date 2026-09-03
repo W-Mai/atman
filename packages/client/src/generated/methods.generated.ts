@@ -54,6 +54,8 @@ import type {
   SubmitFormResponse,
   TerminateResourceRequest,
   TerminateResourceResponse,
+  UpdateSessionTrustRequest,
+  UpdateSessionTrustResponse,
 } from './types.generated'
 
 export const PROTOCOL_VERSION = 1 as const
@@ -102,6 +104,12 @@ export interface RpcMethodMap {
     revision: 1
     params: InterjectSessionRequest
     result: InterjectSessionResponse
+  }
+  'session.update_trust': {
+    kind: 'command'
+    revision: 1
+    params: UpdateSessionTrustRequest
+    result: UpdateSessionTrustResponse
   }
   'project.list': {
     kind: 'query'
@@ -237,6 +245,7 @@ export const RPC_METHODS = {
   'session.delete': { kind: 'command', revision: 1 },
   'session.send_message': { kind: 'command', revision: 1 },
   'session.interject': { kind: 'command', revision: 1 },
+  'session.update_trust': { kind: 'command', revision: 1 },
   'project.list': { kind: 'query', revision: 1 },
   'list_sessions': { kind: 'query', revision: 1 },
   'rename_session': { kind: 'command', revision: 2 },

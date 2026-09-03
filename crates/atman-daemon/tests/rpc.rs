@@ -43,6 +43,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert!(capabilities.supports::<atman_proto::rpc::ListProjects>());
     assert!(capabilities.supports::<atman_proto::rpc::CloseSession>());
     assert!(capabilities.supports::<atman_proto::rpc::DeleteSession>());
+    assert!(capabilities.supports::<atman_proto::rpc::UpdateSessionTrust>());
 }
 
 #[tokio::test]
@@ -185,6 +186,98 @@ async fn create_session_returns_an_idle_snapshot_and_replays_retries() {
             .join(first.projection.metadata.id.to_string())
             .join("events.jsonl")
             .is_file()
+    );
+}
+
+#[tokio::test]
+async fn update_session_trust_persists_and_projects_the_complete_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root.clone(), Some(config_dir.clone()), None)
+            .unwrap(),
+    ));
+    let created = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(
+            1,
+            &atman_proto::CreateSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                project_root: Some(project_root.display().to_string()),
+                title: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let session_id = created.projection.metadata.id;
+    let trust = atman_proto::TrustProjection {
+        mode: atman_proto::TrustMode::Eager,
+        theme: atman_proto::TrustTheme::Weather,
+        escalation: atman_proto::TrustEscalation::Allow,
+        eager_tiers: atman_proto::TrustTierOverrides {
+            tier3: Some(atman_proto::TrustPolicyAction::Deny),
+            ..Default::default()
+        },
+        eager_risks: atman_proto::TrustRiskOverrides {
+            network: Some(atman_proto::TrustPolicyAction::Auto),
+            ..Default::default()
+        },
+    };
+
+    let response = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::UpdateSessionTrust>(
+            2,
+            &atman_proto::UpdateSessionTrustRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: session_id.clone(),
+                trust: trust.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::UpdateSessionTrust>()
+    .unwrap();
+
+    assert_eq!(response.session_id, session_id);
+    assert_eq!(response.trust, trust);
+    assert!(response.cursor > created.cursor);
+    let snapshot = state
+        .session_snapshot(&session_id, "local-daemon")
+        .await
+        .unwrap();
+    assert_eq!(snapshot.projection.trust, trust);
+    assert_eq!(snapshot.cursor, response.cursor);
+
+    let global = atman_runtime::config_hub::ConfigHub::from_config_dir(&config_dir)
+        .trust_config()
+        .unwrap();
+    assert_eq!(global.mode, atman_runtime::trust::TrustMode::Eager);
+    assert_eq!(global.theme, atman_runtime::trust::Theme::Weather);
+    assert_eq!(
+        global.escalation,
+        atman_runtime::trust::EscalationPolicy::Allow
+    );
+    assert_eq!(
+        global.tiers.eager.tier3,
+        Some(atman_runtime::trust::PolicyAction::Deny)
+    );
+    assert_eq!(
+        global.risks.eager.network,
+        Some(atman_runtime::trust::PolicyAction::Auto)
     );
 }
 

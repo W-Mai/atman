@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Remote session trust control** — daemon clients can update the complete session trust policy through an idempotent actor command that persists the session policy and the default for new sessions before publishing the committed projection cursor.
 - **Short-lived event stream authentication** — daemon-issued event tickets are scoped to one session and daemon generation, expire after 60 seconds, and replace long-lived bearer tokens in SSE query parameters.
 - **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.
 - **Streaming edit and compaction output** — provider tool-argument deltas surface allowlisted file content while it is generated, and compaction summaries update incrementally without entering assistant history.

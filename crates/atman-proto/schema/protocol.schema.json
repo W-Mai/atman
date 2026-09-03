@@ -46,6 +46,12 @@
       "$ref": "#/$defs/InterjectSessionResponse"
     },
     {
+      "$ref": "#/$defs/UpdateSessionTrustRequest"
+    },
+    {
+      "$ref": "#/$defs/UpdateSessionTrustResponse"
+    },
+    {
       "$ref": "#/$defs/ListProjectsRequest"
     },
     {
@@ -5068,6 +5074,54 @@
     "TurnId": {
       "type": "string",
       "format": "uuid"
+    },
+    "UpdateSessionTrustRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "trust"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "trust": {
+          "$ref": "#/$defs/TrustProjection"
+        }
+      }
+    },
+    "UpdateSessionTrustResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "trust",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "trust": {
+          "$ref": "#/$defs/TrustProjection"
+        }
+      }
     },
     "UsageProjection": {
       "type": "object",

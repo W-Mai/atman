@@ -265,6 +265,12 @@ impl RunLauncher {
             .context("load global trust config")
     }
 
+    pub(crate) fn set_trust_config(&self, trust: &atman_runtime::trust::TrustConfig) -> Result<()> {
+        self.config_hub()?
+            .set_trust_config(trust)
+            .context("persist global trust config")
+    }
+
     fn scope_root(&self, state: &DaemonState, project_root: &Path) -> Result<PathBuf> {
         atman_runtime::storage::resolve_project_scope_with(
             &self.config_hub()?,
