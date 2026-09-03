@@ -1,22 +1,23 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    CancelRunRequest, CancelRunResponse, CompactReviewDecision, CreatePermissionGroupRequest,
-    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormSubmission,
-    GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
-    InspectResourceRequest, InspectResourceResponse, InterjectSessionRequest,
-    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
-    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
-    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
-    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    ReleaseResourceRequest, ReleaseResourceResponse, RenameSessionRequest, RenameSessionResponse,
-    RequestId, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
-    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, ResolvePromptRequest,
-    ResolvePromptResponse, ResourceId, RetainResourceRequest, RetainResourceResponse, Revision,
-    SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
-    SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
-    SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse,
-    TrustProjection, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
+    CancelRunRequest, CancelRunResponse, CompactReviewDecision, CompactSessionRequest,
+    CompactSessionResponse, CreatePermissionGroupRequest, CreatePermissionGroupResponse,
+    DaemonGeneration, EventCursor, FlowRunId, FormSubmission, GetSessionSnapshotRequest,
+    GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage, InspectResourceRequest,
+    InspectResourceResponse, InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
+    ListPermissionRequestsRequest, ListPermissionRequestsResponse, ListResourcesRequest,
+    ListResourcesResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
+    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
+    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
+    RenameSessionRequest, RenameSessionResponse, RequestId, ResolveCompactReviewRequest,
+    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
+    RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
+    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
+    SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
+    SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, TrustProjection,
+    UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -468,6 +469,19 @@ impl SessionClient {
                 request_id: Some(RequestId::now()),
                 session_id: self.session_id.clone(),
                 trust,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn compact(&self) -> Result<CompactSessionResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::CompactSession>(&CompactSessionRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
             })
             .await?;
         self.validate_command_session(&response.session_id)?;
@@ -1698,6 +1712,7 @@ mod tests {
                             method_descriptor::<rpc::ResolvePermissionRequests>(),
                             method_descriptor::<rpc::RenameSession>(),
                             method_descriptor::<rpc::UpdateSessionTrust>(),
+                            method_descriptor::<rpc::CompactSession>(),
                             method_descriptor::<rpc::ListResources>(),
                             method_descriptor::<rpc::InspectResource>(),
                             method_descriptor::<rpc::TerminateResource>(),
@@ -1836,6 +1851,14 @@ mod tests {
                         serde_json::to_value(atman_proto::UpdateSessionTrustResponse {
                             session_id: self.session_id.clone(),
                             trust: serde_json::from_value(params["trust"].clone())?,
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::COMPACT_SESSION => {
+                        serde_json::to_value(atman_proto::CompactSessionResponse {
+                            session_id: self.session_id.clone(),
+                            status: atman_proto::CompactionRequestStatus::Accepted,
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?
@@ -2083,5 +2106,12 @@ mod tests {
         let updated = session.update_trust(trust.clone()).await.unwrap();
         assert_eq!(updated.trust, trust);
         assert_eq!(updated.cursor, EventCursor(2));
+
+        let compacted = session.compact().await.unwrap();
+        assert_eq!(
+            compacted.status,
+            atman_proto::CompactionRequestStatus::Accepted
+        );
+        assert_eq!(compacted.cursor, EventCursor(2));
     }
 }

@@ -6,6 +6,7 @@ import {
 import type {
   CancelRunResponse,
   CompactReviewDecision,
+  CompactSessionResponse,
   CreatePermissionGroupResponse,
   DaemonGeneration,
   EventCursor,
@@ -233,6 +234,22 @@ export class SessionClient {
         request_id: crypto.randomUUID(),
         session_id: this.#sessionId,
         trust,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async compact(
+    options: TransportRequestOptions = {},
+  ): Promise<CompactSessionResponse> {
+    const response = await this.#client.command(
+      'session.compact',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
       },
       options,
     )
