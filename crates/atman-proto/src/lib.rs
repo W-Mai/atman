@@ -303,6 +303,9 @@ pub mod methods {
     pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
     pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
+    pub const LIST_RESOURCES: &str = "resource.list";
+    pub const INSPECT_RESOURCE: &str = "resource.inspect";
+    pub const TERMINATE_RESOURCE: &str = "resource.terminate";
     pub const PING: &str = "ping";
 
     pub const ALL: &[super::RpcMethodDescriptor] = &[
@@ -325,6 +328,9 @@ pub mod methods {
         super::method_descriptor::<super::rpc::ListPermissionRequests>(),
         super::method_descriptor::<super::rpc::CreatePermissionGroup>(),
         super::method_descriptor::<super::rpc::ResolvePermissionRequests>(),
+        super::method_descriptor::<super::rpc::ListResources>(),
+        super::method_descriptor::<super::rpc::InspectResource>(),
+        super::method_descriptor::<super::rpc::TerminateResource>(),
     ];
 }
 
@@ -842,6 +848,60 @@ pub struct CreatePermissionGroupResponse {
     pub cursor: EventCursor,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListResourcesRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListResourcesResponse {
+    pub session_id: SessionId,
+    pub resources: Vec<ResourceProjection>,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InspectResourceRequest {
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InspectResourceResponse {
+    pub session_id: SessionId,
+    pub resource: ResourceProjection,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TerminateResourceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceTerminationStatus {
+    Terminating,
+    AlreadyTerminal,
+    Unavailable,
+    Unsupported,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TerminateResourceResponse {
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+    pub status: ResourceTerminationStatus,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
 pub mod rpc {
     use super::*;
 
@@ -1001,6 +1061,27 @@ pub mod rpc {
         ResolvePermissionRequestsRequest,
         ResolvePermissionRequestsResponse,
         2
+    );
+    method!(
+        ListResources,
+        methods::LIST_RESOURCES,
+        Query,
+        ListResourcesRequest,
+        ListResourcesResponse
+    );
+    method!(
+        InspectResource,
+        methods::INSPECT_RESOURCE,
+        Query,
+        InspectResourceRequest,
+        InspectResourceResponse
+    );
+    method!(
+        TerminateResource,
+        methods::TERMINATE_RESOURCE,
+        Command,
+        TerminateResourceRequest,
+        TerminateResourceResponse
     );
 }
 
