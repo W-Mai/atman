@@ -57,3 +57,36 @@ export class UnsupportedMethodError extends AtmanProtocolError {
     super(`atman daemon does not support ${method} revision ${revision}`)
   }
 }
+
+export type SessionReconcileErrorCode =
+  | 'snapshot_schema'
+  | 'event_schema'
+  | 'daemon_generation'
+  | 'session'
+  | 'cursor_gap'
+  | 'page_cursor'
+  | 'revision_base'
+  | 'revision_step'
+  | 'resync_required'
+
+export class SessionReconcileError extends AtmanProtocolError {
+  override readonly name: string = 'SessionReconcileError'
+
+  constructor(
+    readonly code: SessionReconcileErrorCode,
+    message: string,
+    readonly details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message)
+  }
+
+  get requiresSnapshot(): boolean {
+    return (
+      this.code === 'cursor_gap' ||
+      this.code === 'page_cursor' ||
+      this.code === 'revision_base' ||
+      this.code === 'revision_step' ||
+      this.code === 'resync_required'
+    )
+  }
+}

@@ -1,0 +1,210 @@
+import { describe, expect, test } from 'bun:test'
+
+import { SessionReconcileError } from './errors'
+import { EVENT_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION } from './generated/methods.generated'
+import type {
+  GetSessionUpdatesResponse,
+  ProjectionChange,
+  ProjectionEventEnvelope,
+  ServerEvent,
+  SessionSnapshot,
+} from './generated/types.generated'
+import { SessionStore } from './session-store'
+
+const sessionId = '00000000-0000-0000-0000-000000000001'
+const generation = 'generation-1'
+
+function snapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
+  return {
+    schema_version: SNAPSHOT_SCHEMA_VERSION,
+    daemon_generation: generation,
+    cursor: 0,
+    projection: {
+      revision: 0,
+      lifecycle: 'idle',
+      metadata: { id: sessionId, title: 'initial' },
+      transcript: [],
+      runs: [],
+      resources: [],
+    },
+    ...overrides,
+  }
+}
+
+function event(
+  cursor: number,
+  payload: ServerEvent,
+  overrides: Partial<ProjectionEventEnvelope> = {},
+): ProjectionEventEnvelope {
+  return {
+    schema_version: EVENT_SCHEMA_VERSION,
+    daemon_generation: generation,
+    session_id: sessionId,
+    cursor,
+    ts: '2026-09-03T00:00:00Z',
+    event: payload,
+    ...overrides,
+  }
+}
+
+function delta(revision: number, changes: ProjectionChange[]): ServerEvent {
+  return {
+    type: 'projection_delta',
+    delta: { base_revision: revision - 1, revision, changes },
+  }
+}
+
+function page(
+  events: ProjectionEventEnvelope[],
+  overrides: Partial<GetSessionUpdatesResponse> = {},
+): GetSessionUpdatesResponse {
+  return {
+    daemon_generation: generation,
+    events,
+    next_cursor: events.at(-1)?.cursor ?? 0,
+    has_more: false,
+    ...overrides,
+  }
+}
+
+describe('SessionStore', () => {
+  test('applies ordered deltas and publishes one immutable view', () => {
+    const store = new SessionStore(snapshot())
+    const views: number[] = []
+    store.subscribe((current) => views.push(current.cursor))
+    const change: ProjectionChange = {
+      type: 'run_upsert',
+      run: {
+        id: 'run-1',
+        flow_name: 'agent',
+        state: 'running',
+        started_at: '2026-09-03T00:00:00Z',
+      },
+    }
+    const response = page([
+      event(1, delta(1, [{ type: 'lifecycle_set', lifecycle: 'active' }])),
+      event(2, delta(2, [change])),
+    ])
+
+    expect(store.applyUpdates(response)).toEqual({ events: 2, signals: [], hasMore: false })
+    expect(store.current.cursor).toBe(2)
+    expect(store.current.projection.revision).toBe(2)
+    expect(store.current.projection.lifecycle).toBe('active')
+    expect(store.current.projection.runs?.[0]?.id).toBe('run-1')
+    expect(views).toEqual([2])
+
+    change.run.state = 'failed'
+    expect(store.current.projection.runs?.[0]?.state).toBe('running')
+    expect(Object.isFrozen(store.current.projection.runs?.[0])).toBeTrue()
+  })
+
+  test('deduplicates replayed events without notifying subscribers', () => {
+    const store = new SessionStore(snapshot({ cursor: 2 }))
+    let notifications = 0
+    store.subscribe(() => notifications++)
+
+    const result = store.applyUpdates(
+      page([event(1, { type: 'heartbeat' }), event(2, { type: 'heartbeat' })], {
+        next_cursor: 2,
+      }),
+    )
+
+    expect(result.events).toBe(0)
+    expect(notifications).toBe(0)
+    expect(store.current.cursor).toBe(2)
+  })
+
+  test('rolls back an entire page and its signals when a later delta is invalid', () => {
+    const store = new SessionStore(snapshot())
+    const signals: string[] = []
+    store.subscribeSignals((signal) => signals.push(signal.type))
+    const response = page([
+      event(1, {
+        type: 'signal',
+        signal: { type: 'llm_text', run_id: 'run-1', text: 'partial' },
+      }),
+      event(2, {
+        type: 'projection_delta',
+        delta: {
+          base_revision: 7,
+          revision: 8,
+          changes: [{ type: 'lifecycle_set', lifecycle: 'active' }],
+        },
+      }),
+    ])
+
+    expect(() => store.applyUpdates(response)).toThrow(SessionReconcileError)
+    expect(store.current.cursor).toBe(0)
+    expect(store.current.projection.lifecycle).toBe('idle')
+    expect(signals).toEqual([])
+  })
+
+  test('classifies cursor gaps and explicit resync requests for snapshot recovery', () => {
+    const store = new SessionStore(snapshot())
+    try {
+      store.applyEvent(event(2, { type: 'heartbeat' }))
+      throw new Error('expected cursor gap')
+    } catch (error) {
+      expect(error).toBeInstanceOf(SessionReconcileError)
+      expect((error as SessionReconcileError).code).toBe('cursor_gap')
+      expect((error as SessionReconcileError).requiresSnapshot).toBeTrue()
+    }
+
+    try {
+      store.applyEvent(
+        event(99, {
+          type: 'resync_required',
+          gap: {
+            available_from: 20,
+            requested_after: 0,
+            snapshot_revision: 4,
+            reason: 'retention gap',
+          },
+        }),
+      )
+      throw new Error('expected resync request')
+    } catch (error) {
+      expect((error as SessionReconcileError).code).toBe('resync_required')
+      expect((error as SessionReconcileError).requiresSnapshot).toBeTrue()
+    }
+  })
+
+  test('rejects wrong generation and session without mutating the view', () => {
+    const store = new SessionStore(snapshot())
+    expect(() =>
+      store.applyUpdates(page([], { daemon_generation: 'generation-2' })),
+    ).toThrow(SessionReconcileError)
+    expect(() =>
+      store.applyEvent(event(1, { type: 'heartbeat' }, { session_id: 'other-session' })),
+    ).toThrow(SessionReconcileError)
+    expect(() =>
+      store.replace(
+        snapshot({
+          projection: {
+            revision: 0,
+            lifecycle: 'idle',
+            metadata: { id: 'other-session' },
+          },
+        }),
+        generation,
+      ),
+    ).toThrow(SessionReconcileError)
+    expect(store.current.cursor).toBe(0)
+  })
+
+  test('subscriber failures cannot roll back state or starve sibling subscribers', () => {
+    const errors: unknown[] = []
+    const store = new SessionStore(snapshot(), { onSubscriberError: (error) => errors.push(error) })
+    const cursors: number[] = []
+    store.subscribe(() => {
+      throw new Error('broken subscriber')
+    })
+    store.subscribe((current) => cursors.push(current.cursor))
+
+    store.applyEvent(event(1, { type: 'heartbeat' }))
+
+    expect(store.current.cursor).toBe(1)
+    expect(cursors).toEqual([1])
+    expect(errors).toHaveLength(1)
+  })
+})
