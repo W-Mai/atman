@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    CancelRunRequest, CancelRunResponse, CompactReviewDecision, DaemonGeneration, EventCursor,
-    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
-    GetSessionUpdatesResponse, InlineImage, InterjectSessionRequest, InterjectSessionResponse,
-    InterjectionLevel, PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta,
-    ProjectionEventEnvelope, RenameSessionRequest, RenameSessionResponse, RequestId,
-    ResolveCompactReviewRequest, ResolveCompactReviewResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
-    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
-    SessionSignal, SessionSnapshot, SubmitFormRequest, SubmitFormResponse, rpc,
+    CancelRunRequest, CancelRunResponse, CompactReviewDecision, CreatePermissionGroupRequest,
+    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormSubmission,
+    GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
+    InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
+    ListPermissionRequestsRequest, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
+    PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector, ProjectionChange,
+    ProjectionDelta, ProjectionEventEnvelope, RenameSessionRequest, RenameSessionResponse,
+    RequestId, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
+    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, Revision,
+    SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
+    SessionProjection, SessionSignal, SessionSnapshot, SubmitFormRequest, SubmitFormResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -508,6 +511,64 @@ impl SessionClient {
                 received: response.review_id,
             });
         }
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn list_permissions(
+        &self,
+    ) -> Result<ListPermissionRequestsResponse, SessionClientError> {
+        let response = self
+            .client
+            .call::<rpc::ListPermissionRequests>(&ListPermissionRequestsRequest {
+                session_id: self.session_id.clone(),
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn create_permission_group(
+        &self,
+        request_ids: Vec<uuid::Uuid>,
+        expected_request_revisions: std::collections::BTreeMap<uuid::Uuid, u64>,
+        label: impl Into<String>,
+    ) -> Result<CreatePermissionGroupResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::CreatePermissionGroup>(&CreatePermissionGroupRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                request_ids,
+                expected_request_revisions,
+                label: label.into(),
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn resolve_permissions(
+        &self,
+        selector: PermissionRpcSelector,
+        action: PermissionRpcAction,
+        scope: Option<PermissionRpcScope>,
+        reason: Option<String>,
+    ) -> Result<ResolvePermissionRequestsResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::ResolvePermissionRequests>(&ResolvePermissionRequestsRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                selector,
+                action,
+                scope,
+                reason,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
         self.refresh_through(response.cursor).await?;
         Ok(response)
     }
@@ -1403,6 +1464,9 @@ mod tests {
                             method_descriptor::<rpc::SendMessage>(),
                             method_descriptor::<rpc::SubmitForm>(),
                             method_descriptor::<rpc::ResolveCompactReview>(),
+                            method_descriptor::<rpc::ListPermissionRequests>(),
+                            method_descriptor::<rpc::CreatePermissionGroup>(),
+                            method_descriptor::<rpc::ResolvePermissionRequests>(),
                             method_descriptor::<rpc::RenameSession>(),
                         ] {
                             capabilities.methods.push(MethodCapability {
@@ -1445,6 +1509,35 @@ mod tests {
                             status: atman_proto::CompactReviewResolutionStatus::Resolved,
                             session_id: self.session_id.clone(),
                             review_id: params["review_id"].as_str().unwrap().into(),
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::LIST_PERMISSION_REQUESTS => {
+                        serde_json::to_value(ListPermissionRequestsResponse {
+                            session_id: self.session_id.clone(),
+                            requests: Vec::new(),
+                            groups: Vec::new(),
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::CREATE_PERMISSION_GROUP => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(CreatePermissionGroupResponse {
+                            session_id: self.session_id.clone(),
+                            group_id: uuid::Uuid::nil(),
+                            request_ids: serde_json::from_value(params["request_ids"].clone())?,
+                            revision: 1,
+                            label: params["label"].as_str().unwrap().into(),
+                            session_revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::RESOLVE_PERMISSION_REQUESTS => {
+                        serde_json::to_value(ResolvePermissionRequestsResponse {
+                            session_id: self.session_id.clone(),
+                            resolutions: Vec::new(),
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?
@@ -1566,6 +1659,39 @@ mod tests {
             .unwrap();
         assert_eq!(review.review_id, "review-1");
         assert_eq!(review.cursor, EventCursor(2));
+
+        let permissions = session.list_permissions().await.unwrap();
+        assert!(permissions.requests.is_empty());
+        assert_eq!(permissions.cursor, EventCursor(2));
+
+        let permission_id = uuid::Uuid::now_v7();
+        let group = session
+            .create_permission_group(
+                vec![permission_id],
+                std::collections::BTreeMap::from([(permission_id, 1)]),
+                "shell calls",
+            )
+            .await
+            .unwrap();
+        assert_eq!(group.request_ids, vec![permission_id]);
+        assert_eq!(group.cursor, EventCursor(2));
+
+        let resolved = session
+            .resolve_permissions(
+                PermissionRpcSelector::Requests {
+                    request_ids: vec![permission_id],
+                    expected_request_revisions: std::collections::BTreeMap::from([(
+                        permission_id,
+                        1,
+                    )]),
+                },
+                PermissionRpcAction::Deny,
+                None,
+                Some("not needed".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.cursor, EventCursor(2));
 
         let renamed = session.rename("Renamed").await.unwrap();
         assert_eq!(renamed.session.title, "Renamed");
