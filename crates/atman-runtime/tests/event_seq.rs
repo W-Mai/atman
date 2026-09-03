@@ -75,6 +75,43 @@ fn cloned_sink_publishes_the_persisted_envelope_sequence() {
 }
 
 #[test]
+fn concurrent_emitters_publish_in_persisted_sequence_order() {
+    const WORKERS: usize = 8;
+    const EVENTS_PER_WORKER: usize = 100;
+
+    let sink = EventSink::new();
+    let mut receiver = sink.subscribe();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKERS));
+    let workers = (0..WORKERS)
+        .map(|_| {
+            let sink = sink.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..EVENTS_PER_WORKER {
+                    sink.emit(make_turn_start());
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let expected = (1..=(WORKERS * EVENTS_PER_WORKER) as u64).collect::<Vec<_>>();
+    let persisted = sink
+        .snapshot_envelopes()
+        .into_iter()
+        .map(|event| event.seq)
+        .collect::<Vec<_>>();
+    let published = std::iter::from_fn(|| receiver.try_recv().ok())
+        .map(|event| event.seq)
+        .collect::<Vec<_>>();
+    assert_eq!(persisted, expected);
+    assert_eq!(published, expected);
+}
+
+#[test]
 fn next_seq_peek_does_not_advance_counter() {
     let sink = EventSink::new();
     let a = sink.next_seq_peek();

@@ -523,6 +523,7 @@ impl EventSink {
     }
 
     pub fn restore_seq(&self, last_seq: u64) {
+        let _events = self.events.lock().expect("event sink poisoned");
         self.seq_counter
             .store(last_seq, std::sync::atomic::Ordering::SeqCst);
     }
@@ -531,12 +532,18 @@ impl EventSink {
     // no other reservation can obtain, at the cost of advancing the counter even if
     // the caller never emits (a hole in seq numbering). Not used yet; kept ready.
     pub fn reserve_seq(&self) -> u64 {
+        let _events = self.events.lock().expect("event sink poisoned");
         self.seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1
     }
 
     pub fn emit_returning_seq(&self, event: Event) -> u64 {
+        self.emit_returning_envelope(event).seq
+    }
+
+    pub fn emit_returning_envelope(&self, event: Event) -> EventEnvelope {
+        let mut events = self.events.lock().expect("event sink poisoned");
         let next = self
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -545,28 +552,13 @@ impl EventSink {
         if let Some(tx) = &self.forwarder {
             let _ = tx.send(envelope.clone());
         }
-        self.events
-            .lock()
-            .expect("event sink poisoned")
-            .push(envelope.clone());
-        let _ = self.event_tx.send(envelope);
-        next
+        events.push(envelope.clone());
+        let _ = self.event_tx.send(envelope.clone());
+        envelope
     }
 
     pub fn emit(&self, event: Event) {
-        let next = self
-            .seq_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let envelope = EventEnvelope::new(next, event);
-        if let Some(tx) = &self.forwarder {
-            let _ = tx.send(envelope.clone());
-        }
-        self.events
-            .lock()
-            .expect("event sink poisoned")
-            .push(envelope.clone());
-        let _ = self.event_tx.send(envelope);
+        self.emit_returning_envelope(event);
     }
 
     pub fn events_handle(&self) -> Arc<Mutex<Vec<EventEnvelope>>> {
