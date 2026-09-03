@@ -6,12 +6,12 @@ use anyhow::{Context, Result};
 use atman_proto::{
     CompactReviewDecision, CompactReviewResolutionStatus, CreatePermissionGroupResponse,
     DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus, FormSubmission,
-    GetSessionUpdatesResponse, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
-    PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
-    ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
-    ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
-    RunCancellationStatus, ServerEvent, SessionId, SessionProjection, SessionSignal,
-    SessionSummary,
+    GetSessionUpdatesResponse, ListPermissionRequestsResponse, NotificationLifecycle,
+    NotificationLocation, NotificationStack, PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView,
+    PermissionRequestView, PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope,
+    PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse, ResourceId, ResourceKind,
+    ResourceState, ResourceTerminationStatus, ResyncRequired, RunCancellationStatus, ServerEvent,
+    SessionId, SessionNotification, SessionProjection, SessionSignal, SessionSummary,
 };
 use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -1440,6 +1440,9 @@ impl SessionActor {
             } => self
                 .known_run_id(&run_id)
                 .map(|run_id| SessionSignal::LlmRetry { run_id }),
+            StreamFrame::Notification(frame) => self
+                .notification_signal(frame)
+                .map(|notification| SessionSignal::Notification { notification }),
             StreamFrame::TerminalChunk { handle, bytes, .. } if !bytes.is_empty() => self
                 .resource_id_for_handle(&handle)
                 .map(|resource_id| SessionSignal::TerminalBytes { resource_id, bytes }),
@@ -1464,6 +1467,73 @@ impl SessionActor {
         self.task_registry
             .lookup_by_handle_in_session(handle, &self.session_id.to_string())
             .map(|task| crate::projection::task_resource_id(&task.id))
+    }
+
+    fn notification_signal(
+        &self,
+        frame: atman_runtime::stream::NotificationFrame,
+    ) -> Option<SessionNotification> {
+        let run_id = match frame.run_id {
+            Some(run_id) => Some(self.known_run_id(&run_id)?),
+            None => None,
+        };
+        let level = match frame.level {
+            atman_runtime::notify::NotifyLevel::Debug => atman_proto::NoticeLevel::Debug,
+            atman_runtime::notify::NotifyLevel::Info => atman_proto::NoticeLevel::Info,
+            atman_runtime::notify::NotifyLevel::Success => atman_proto::NoticeLevel::Success,
+            atman_runtime::notify::NotifyLevel::Warn => atman_proto::NoticeLevel::Warning,
+            atman_runtime::notify::NotifyLevel::Error => atman_proto::NoticeLevel::Error,
+        };
+        let location = match frame.location {
+            atman_runtime::notify::NotifyLocation::Inline => NotificationLocation::Inline,
+            atman_runtime::notify::NotifyLocation::Toast => NotificationLocation::Toast,
+            atman_runtime::notify::NotifyLocation::Status => NotificationLocation::Status,
+            atman_runtime::notify::NotifyLocation::Modal => NotificationLocation::Modal,
+            atman_runtime::notify::NotifyLocation::Stdout => NotificationLocation::Stdout,
+            atman_runtime::notify::NotifyLocation::Stderr => NotificationLocation::Stderr,
+            atman_runtime::notify::NotifyLocation::Log => return None,
+        };
+        let lifecycle = match frame.lifecycle {
+            atman_runtime::notify::NotifyLifecycle::Persistent => NotificationLifecycle::Persistent,
+            atman_runtime::notify::NotifyLifecycle::Ttl(duration) => NotificationLifecycle::Ttl {
+                duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+            },
+            atman_runtime::notify::NotifyLifecycle::Dismissible => {
+                NotificationLifecycle::Dismissible
+            }
+            atman_runtime::notify::NotifyLifecycle::UntilReplaced => {
+                NotificationLifecycle::UntilReplaced
+            }
+        };
+        let stack = match frame.stack {
+            atman_runtime::notify::NotifyStack::Append => NotificationStack::Append,
+            atman_runtime::notify::NotifyStack::Replace { key } => {
+                NotificationStack::Replace { key }
+            }
+            atman_runtime::notify::NotifyStack::Dedupe { key, window } => {
+                NotificationStack::Dedupe {
+                    key,
+                    window_ms: window.as_millis().try_into().unwrap_or(u64::MAX),
+                }
+            }
+            atman_runtime::notify::NotifyStack::MergeCount { key, window } => {
+                NotificationStack::MergeCount {
+                    key,
+                    window_ms: window.as_millis().try_into().unwrap_or(u64::MAX),
+                }
+            }
+            atman_runtime::notify::NotifyStack::Coalesce { key } => {
+                NotificationStack::Coalesce { key }
+            }
+        };
+        Some(SessionNotification {
+            run_id,
+            level,
+            location,
+            lifecycle,
+            stack,
+            message: frame.message,
+        })
     }
 
     fn known_run_id(&self, run_id: &str) -> Option<FlowRunId> {

@@ -796,6 +796,9 @@ pub enum SessionSignal {
     LlmRetry {
         run_id: FlowRunId,
     },
+    Notification {
+        notification: SessionNotification,
+    },
     TerminalBytes {
         resource_id: ResourceId,
         bytes: Vec<u8>,
@@ -809,6 +812,47 @@ pub enum SessionSignal {
         run_id: FlowRunId,
         label: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SessionNotification {
+    #[serde(default)]
+    pub run_id: Option<FlowRunId>,
+    pub level: NoticeLevel,
+    pub location: NotificationLocation,
+    pub lifecycle: NotificationLifecycle,
+    pub stack: NotificationStack,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLocation {
+    Inline,
+    Toast,
+    Status,
+    Modal,
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationLifecycle {
+    Persistent,
+    Ttl { duration_ms: u64 },
+    Dismissible,
+    UntilReplaced,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationStack {
+    Append,
+    Replace { key: String },
+    Dedupe { key: String, window_ms: u64 },
+    MergeCount { key: String, window_ms: u64 },
+    Coalesce { key: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

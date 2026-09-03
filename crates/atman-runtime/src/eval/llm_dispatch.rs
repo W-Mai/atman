@@ -827,6 +827,7 @@ fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message
     let node = ctx.current_node_id.as_deref().unwrap_or("llm");
     let _ = tx.send(crate::stream::StreamFrame::Notification(
         crate::stream::NotificationFrame {
+            run_id: ctx.flow_run_id.as_ref().map(ToString::to_string),
             level,
             location: crate::notify::NotifyLocation::Inline,
             lifecycle: crate::notify::NotifyLifecycle::UntilReplaced,
@@ -929,9 +930,10 @@ mod tests {
     async fn llm_diagnostic_uses_session_stream_without_content_streaming() {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         let mut rx = session.stream_subscribe();
+        let expected_run_id = crate::event::FlowRunId::now();
         let ctx = ToolCtx::new()
             .with_session_runtime(session)
-            .with_anchors(None, Some(crate::event::FlowRunId::now()), None)
+            .with_anchors(None, Some(expected_run_id.clone()), None)
             .with_current_node(Some("7.iter[0].0".into()));
 
         send_llm_diagnostic(
@@ -944,12 +946,15 @@ mod tests {
         assert!(matches!(
             frame,
             crate::stream::StreamFrame::Notification(crate::stream::NotificationFrame {
+                run_id: Some(run_id),
                 level: crate::notify::NotifyLevel::Error,
                 location: crate::notify::NotifyLocation::Inline,
                 stack: crate::notify::NotifyStack::Replace { key },
                 message,
                 ..
-            }) if key.ends_with(":7.iter[0].0") && message.contains("invalid request")
+            }) if run_id == expected_run_id.to_string()
+                && key.ends_with(":7.iter[0].0")
+                && message.contains("invalid request")
         ));
     }
 

@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationFrame {
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub level: NotifyLevel,
     pub location: NotifyLocation,
     pub lifecycle: NotifyLifecycle,
@@ -13,6 +15,7 @@ pub struct NotificationFrame {
 impl From<crate::notify::Notification> for NotificationFrame {
     fn from(n: crate::notify::Notification) -> Self {
         Self {
+            run_id: None,
             level: n.level,
             location: n.location,
             lifecycle: n.lifecycle,
@@ -388,7 +391,10 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
         }
         | StreamFrame::FileEditApplied {
             run_id: Some(rid), ..
-        } => Some(rid.as_str()),
+        }
+        | StreamFrame::Notification(NotificationFrame {
+            run_id: Some(rid), ..
+        }) => Some(rid.as_str()),
         _ => None,
     }
 }
@@ -417,6 +423,22 @@ mod tests {
         let frame = StreamFrame::LlmRetry {
             run_id: Some("run-1".into()),
         };
+
+        assert_eq!(frame_run_id(&frame), Some("run-1"));
+    }
+
+    #[test]
+    fn notification_routes_to_its_run() {
+        let frame = StreamFrame::Notification(NotificationFrame {
+            run_id: Some("run-1".into()),
+            level: NotifyLevel::Error,
+            location: NotifyLocation::Inline,
+            lifecycle: NotifyLifecycle::UntilReplaced,
+            stack: NotifyStack::Replace {
+                key: "llm-call:run-1:node".into(),
+            },
+            message: "request failed".into(),
+        });
 
         assert_eq!(frame_run_id(&frame), Some("run-1"));
     }

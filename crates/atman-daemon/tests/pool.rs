@@ -537,6 +537,20 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
             run_id: Some(run_id.to_string()),
         })
         .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::Notification(
+            atman_runtime::stream::NotificationFrame {
+                run_id: Some(run_id.to_string()),
+                level: atman_runtime::notify::NotifyLevel::Error,
+                location: atman_runtime::notify::NotifyLocation::Inline,
+                lifecycle: atman_runtime::notify::NotifyLifecycle::UntilReplaced,
+                stack: atman_runtime::notify::NotifyStack::Replace {
+                    key: format!("llm-call:{run_id}:node"),
+                },
+                message: "request failed".into(),
+            },
+        ))
+        .unwrap();
 
     let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -544,7 +558,7 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
                 .session_updates(&sid, "alice", before.cursor, None)
                 .await
                 .unwrap();
-            if updates.events.len() == 4 {
+            if updates.events.len() == 5 {
                 break updates;
             }
             tokio::task::yield_now().await;
@@ -562,7 +576,8 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
             before.cursor.0 + 1,
             before.cursor.0 + 2,
             before.cursor.0 + 3,
-            before.cursor.0 + 4
+            before.cursor.0 + 4,
+            before.cursor.0 + 5
         ]
     );
     assert!(matches!(
@@ -588,6 +603,14 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
         atman_proto::ServerEvent::Signal {
             signal: atman_proto::SessionSignal::LlmRetry { run_id: id }
         } if id == &run_id
+    ));
+    assert!(matches!(
+        &updates.events[4].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::Notification { notification }
+        } if notification.run_id.as_ref() == Some(&run_id)
+            && notification.level == atman_proto::NoticeLevel::Error
+            && notification.message == "request failed"
     ));
     let after = state.session_snapshot(&sid, "alice").await.unwrap();
     assert_eq!(after.projection.revision, before.projection.revision);

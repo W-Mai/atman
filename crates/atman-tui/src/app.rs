@@ -4225,6 +4225,7 @@ mod tests {
         };
         let frame = |level, message: &str| {
             StreamFrame::Notification(atman_runtime::stream::NotificationFrame {
+                run_id: None,
                 level,
                 location: atman_runtime::notify::NotifyLocation::Inline,
                 lifecycle: atman_runtime::notify::NotifyLifecycle::UntilReplaced,

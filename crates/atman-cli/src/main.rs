@@ -5183,6 +5183,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
 
     let send = |level, location, message: &str| {
         let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+            run_id: None,
             level,
             location,
             lifecycle: NotifyLifecycle::Persistent,
@@ -5226,6 +5227,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
     // Toast notifications
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        run_id: None,
         level: NotifyLevel::Success,
         location: NotifyLocation::Toast,
         lifecycle: NotifyLifecycle::Ttl(std::time::Duration::from_secs(3)),
@@ -5234,6 +5236,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
     }));
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        run_id: None,
         level: NotifyLevel::Info,
         location: NotifyLocation::Toast,
         lifecycle: NotifyLifecycle::Ttl(std::time::Duration::from_secs(3)),
@@ -5242,6 +5245,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
     }));
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        run_id: None,
         level: NotifyLevel::Warn,
         location: NotifyLocation::Toast,
         lifecycle: NotifyLifecycle::Ttl(std::time::Duration::from_secs(5)),
@@ -5255,6 +5259,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
     // Status bar notes — appear in bottom bar
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        run_id: None,
         level: NotifyLevel::Info,
         location: NotifyLocation::Status,
         lifecycle: NotifyLifecycle::UntilReplaced,
@@ -5265,6 +5270,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
     }));
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        run_id: None,
         level: NotifyLevel::Warn,
         location: NotifyLocation::Status,
         lifecycle: NotifyLifecycle::UntilReplaced,
@@ -5277,6 +5283,7 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
     // Modal — critical error inline
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        run_id: None,
         level: NotifyLevel::Error,
         location: NotifyLocation::Modal,
         lifecycle: NotifyLifecycle::Persistent,
