@@ -11,8 +11,9 @@ use std::sync::{
 };
 
 use atman_proto::{
-    CapabilitiesRequest, CapabilitiesResponse, ClientId, EventCursor, JsonRpcRequest,
-    JsonRpcResponse, PROTOCOL_VERSION, ProjectionEventEnvelope, RpcKind, RpcMethod, SessionId, rpc,
+    CapabilitiesRequest, CapabilitiesResponse, ClientId, CreateSessionRequest, EventCursor,
+    JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, PROTOCOL_VERSION,
+    ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, SessionId, SessionSummary, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -215,6 +216,35 @@ impl Client {
         session_id: atman_proto::SessionId,
     ) -> Result<SessionClient, SessionClientError> {
         SessionClient::attach(self.clone(), session_id).await
+    }
+
+    pub async fn create_session(
+        &self,
+        project_root: Option<String>,
+        title: Option<String>,
+    ) -> Result<SessionClient, SessionClientError> {
+        let snapshot = self
+            .command::<rpc::CreateSession>(&CreateSessionRequest {
+                request_id: Some(RequestId::now()),
+                project_root,
+                title,
+            })
+            .await?;
+        SessionClient::from_snapshot(self.clone(), snapshot)
+    }
+
+    pub async fn list_sessions(
+        &self,
+        project_root: Option<String>,
+        search: Option<String>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SessionSummary>, ClientError> {
+        self.call::<rpc::ListSessions>(&ListSessionsRequest {
+            project_root,
+            search,
+            limit,
+        })
+        .await
     }
 
     pub async fn session_events(

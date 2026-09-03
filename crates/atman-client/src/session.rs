@@ -11,7 +11,8 @@ use atman_proto::{
     RequestId, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
     ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, Revision,
     SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
-    SessionProjection, SessionSignal, SessionSnapshot, SubmitFormRequest, SubmitFormResponse, rpc,
+    SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
+    SubmitFormRequest, SubmitFormResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -224,6 +225,15 @@ impl SessionClient {
             })
             .await?;
         validate_session(&snapshot, &session_id)?;
+        Self::from_snapshot(client, snapshot)
+    }
+
+    pub(crate) fn from_snapshot(
+        client: Client,
+        snapshot: SessionSnapshot,
+    ) -> Result<Self, SessionClientError> {
+        let session_id = snapshot.projection.metadata.id.clone();
+        validate_session(&snapshot, &session_id)?;
         let capabilities = client.capabilities();
         let state = SessionState::new(snapshot, &capabilities.daemon_generation)?;
         let (state, _) = watch::channel(state);
@@ -383,6 +393,29 @@ impl SessionClient {
                 request_id: Some(RequestId::now()),
                 session_id: self.session_id.clone(),
                 text: text.into(),
+                reasoning,
+                images,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn start_run(
+        &self,
+        flow_path: impl Into<String>,
+        args: serde_json::Map<String, serde_json::Value>,
+        reasoning: Option<String>,
+        images: Vec<InlineImage>,
+    ) -> Result<StartRunResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::StartRun>(&StartRunRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                flow_path: flow_path.into(),
+                args,
                 reasoning,
                 images,
             })
@@ -1461,7 +1494,10 @@ mod tests {
                     methods::DAEMON_CAPABILITIES => {
                         let mut capabilities = capabilities("generation-a");
                         for method in [
+                            method_descriptor::<rpc::CreateSession>(),
+                            method_descriptor::<rpc::ListSessions>(),
                             method_descriptor::<rpc::SendMessage>(),
+                            method_descriptor::<rpc::StartRun>(),
                             method_descriptor::<rpc::SubmitForm>(),
                             method_descriptor::<rpc::ResolveCompactReview>(),
                             method_descriptor::<rpc::ListPermissionRequests>(),
@@ -1483,10 +1519,36 @@ mod tests {
                         cursor: EventCursor(1),
                         projection: projection(self.session_id.clone(), Revision(1)),
                     })?,
+                    methods::CREATE_SESSION => serde_json::to_value(SessionSnapshot {
+                        schema_version: SNAPSHOT_SCHEMA_VERSION,
+                        daemon_generation: DaemonGeneration("generation-a".into()),
+                        cursor: EventCursor(1),
+                        projection: projection(self.session_id.clone(), Revision(1)),
+                    })?,
+                    methods::LIST_SESSIONS => {
+                        serde_json::to_value(vec![atman_proto::SessionSummary {
+                            id: self.session_id.clone(),
+                            event_count: 1,
+                            first_ts: None,
+                            status: atman_proto::SessionStatus::Running,
+                            title: "Session".into(),
+                            goal: None,
+                            project_root: Some("/workspace".into()),
+                            name_source: atman_proto::NameSource::Auto,
+                        }])?
+                    }
                     methods::SEND_MESSAGE => serde_json::to_value(SendMessageResponse {
                         session_id: self.session_id.clone(),
                         run_id: FlowRunId(
                             uuid::Uuid::parse_str("018f7f24-1ab2-7c3d-8e4f-123456789ad0").unwrap(),
+                        ),
+                        revision: Revision(2),
+                        cursor: EventCursor(2),
+                    })?,
+                    methods::START_RUN => serde_json::to_value(StartRunResponse {
+                        session_id: self.session_id.clone(),
+                        run_id: FlowRunId(
+                            uuid::Uuid::parse_str("018f7f24-1ab2-7c3d-8e4f-123456789ad1").unwrap(),
                         ),
                         revision: Revision(2),
                         cursor: EventCursor(2),
@@ -1610,6 +1672,18 @@ mod tests {
         )
         .await
         .unwrap();
+        let listed = client
+            .list_sessions(Some("/workspace".into()), None, Some(10))
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, session_id);
+        let created = client
+            .create_session(Some("/workspace".into()), Some("Session".into()))
+            .await
+            .unwrap();
+        assert_eq!(created.session_id(), &session_id);
+        assert_eq!(created.current().cursor(), EventCursor(1));
         let session = client.attach_session(session_id).await.unwrap();
 
         let response = session
@@ -1622,6 +1696,13 @@ mod tests {
             session.current().projection().lifecycle,
             atman_proto::SessionLifecycle::Active
         );
+
+        let started = session
+            .start_run("agent.at", serde_json::Map::new(), None, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(started.session_id, *session.session_id());
+        assert_eq!(started.cursor, EventCursor(2));
 
         let request_ids = requests
             .lock()
