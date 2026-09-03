@@ -957,6 +957,20 @@ impl DaemonState {
             .await
     }
 
+    pub(crate) async fn resize_terminal(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        resource_id: atman_proto::ResourceId,
+        rows: u16,
+        cols: u16,
+        principal: &str,
+    ) -> Result<crate::session_actor::TerminalResizeCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .resize_terminal(resource_id, rows, cols, self.terminal_registry())
+            .await
+    }
+
     pub(crate) async fn retain_resource(
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,
@@ -1282,6 +1296,14 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use atman_runtime::flow_authority::EffectiveAuthority;
+    use atman_runtime::permission::PermissionBroker;
+    use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+    use atman_runtime::tools::agent_ctrl::FlowRegistry;
+    use atman_runtime::tools::term::TermSpawn;
+    use atman_runtime::trust::{TrustConfig, TrustMode};
+    use atman_runtime::{Tier, Value};
+
     use super::*;
     use crate::projection::SessionProjector;
 
@@ -1305,6 +1327,124 @@ mod tests {
         ] {
             assert!(!resource_blocks_session_deletion(state));
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_resize_uses_the_daemon_registry_and_projects_dimensions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(root.path().join("data")));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session.clone(), "owner")
+            .await
+            .unwrap();
+
+        let trust = TrustConfig {
+            mode: TrustMode::Reckless,
+            ..TrustConfig::default()
+        };
+        let flows = Arc::new(FlowRegistry::new());
+        let broker = PermissionBroker::shared(flows.clone());
+        let run_id = atman_runtime::event::FlowRunId::now();
+        let identity = flows
+            .register_root(
+                "terminal-resize-test".into(),
+                run_id.clone(),
+                EffectiveAuthority::root(&trust, true, None),
+            )
+            .unwrap();
+        let terminal_registry = state.terminal_registry();
+        let mut ctx = ToolCtx::new()
+            .with_term_registry(terminal_registry.clone())
+            .with_task_registry(state.task_registry())
+            .with_session_dir(root.path().join("session"))
+            .with_session_id(session_id.to_string())
+            .with_events(session.sink().clone())
+            .with_trust(trust)
+            .with_flow_registry(flows)
+            .with_permission_broker(broker)
+            .with_anchors(None, Some(run_id), None)
+            .with_fs_access(atman_runtime::fs_access::FsAccessPolicy::workspace_write(
+                root.path().to_path_buf(),
+            ));
+        ctx.flow_identity = Some(identity);
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("cmd".into(), Value::Str("sleep 30".into())),
+                ("rows".into(), Value::Int(12)),
+                ("cols".into(), Value::Int(40)),
+            ],
+        };
+        let call_ctx = atman_runtime::approval::authorize_tool_invocation(
+            &ctx.for_tool_invocation(Tier::Four),
+            "terminal-resize-call",
+            "term.spawn",
+            &args,
+            &TermSpawn,
+        )
+        .await
+        .unwrap();
+        let Value::Struct(fields) = TermSpawn.call(args, &call_ctx).await.unwrap() else {
+            panic!("term.spawn must return a struct")
+        };
+        let handle = fields
+            .iter()
+            .find_map(|(name, value)| match (name.as_str(), value) {
+                ("handle", Value::Str(handle)) => Some(handle.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let entry = terminal_registry.get(&handle).unwrap();
+        let task_id = entry.task_id.lock().unwrap().clone().unwrap();
+        let resource_id = atman_proto::ResourceId(format!("task:{task_id}"));
+
+        let request = atman_proto::ResizeTerminalResourceRequest {
+            request_id: Some(atman_proto::RequestId::now()),
+            session_id: session_id.clone(),
+            resource_id: resource_id.clone(),
+            rows: 42,
+            cols: 120,
+        };
+        let resized = crate::dispatch_as(
+            state.clone(),
+            atman_proto::JsonRpcRequest::for_method::<atman_proto::rpc::ResizeTerminalResource>(
+                1, &request,
+            )
+            .unwrap(),
+            "owner",
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::ResizeTerminalResource>()
+        .unwrap();
+        assert_eq!(resized.status, atman_proto::TerminalResizeStatus::Resized);
+        assert_eq!((entry.snapshot().rows, entry.snapshot().cols), (42, 120));
+        let retry = crate::dispatch_as(
+            state.clone(),
+            atman_proto::JsonRpcRequest::for_method::<atman_proto::rpc::ResizeTerminalResource>(
+                2, &request,
+            )
+            .unwrap(),
+            "owner",
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::ResizeTerminalResource>()
+        .unwrap();
+        assert_eq!(retry.cursor, resized.cursor);
+        let snapshot = state.session_snapshot(&session_id, "owner").await.unwrap();
+        let resource = snapshot
+            .projection
+            .resources
+            .iter()
+            .find(|resource| resource.id == resource_id)
+            .unwrap();
+        assert_eq!(resource.details["rows"], "42");
+        assert_eq!(resource.details["cols"], "120");
+        assert_eq!(snapshot.cursor, resized.cursor);
+
+        terminal_registry.kill_all();
     }
 
     #[tokio::test]

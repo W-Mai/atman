@@ -1056,7 +1056,9 @@ pub struct ResizeTerminalResourceRequest {
     pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub resource_id: ResourceId,
+    #[schema(minimum = 1)]
     pub rows: u16,
+    #[schema(minimum = 2)]
     pub cols: u16,
 }
 

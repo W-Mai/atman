@@ -12,7 +12,23 @@ use crate::error::RuntimeError;
 
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_COLS: u16 = 80;
+const MAX_TERMINAL_CELLS: usize = 1_048_576;
 const STREAM_CHANNEL_CAPACITY: usize = 256;
+
+fn validate_terminal_size(rows: u16, cols: u16) -> Result<(), RuntimeError> {
+    if rows == 0 || cols < 2 {
+        return Err(RuntimeError::ToolFailed(
+            "terminal size requires at least 1 row and 2 columns".into(),
+        ));
+    }
+    let cells = usize::from(rows) * usize::from(cols);
+    if cells > MAX_TERMINAL_CELLS {
+        return Err(RuntimeError::ToolFailed(format!(
+            "terminal size {rows}x{cols} exceeds the {MAX_TERMINAL_CELLS}-cell limit"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TermHandle {
@@ -251,10 +267,7 @@ impl TermEntry {
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), RuntimeError> {
-        {
-            let mut parser = self.parser.lock().expect("parser poisoned");
-            parser.screen_mut().set_size(rows, cols);
-        }
+        validate_terminal_size(rows, cols)?;
         let master = self.master.lock().expect("master poisoned");
         if let Some(master) = master.as_ref() {
             master
@@ -266,6 +279,8 @@ impl TermEntry {
                 })
                 .map_err(|e| RuntimeError::ToolFailed(format!("term resize: pty resize: {e}")))?;
         }
+        let mut parser = self.parser.lock().expect("parser poisoned");
+        parser.screen_mut().set_size(rows, cols);
         Ok(())
     }
 
@@ -770,13 +785,28 @@ async fn spawn_impl(
 ) -> crate::tool::ToolResult {
     let cmd_str = extract_optional_string(&args, "cmd");
     let rows = extract_optional_int(&args, "rows")
-        .map(|v| v as u16)
+        .map(|value| {
+            u16::try_from(value).map_err(|_| {
+                RuntimeError::ToolFailed(
+                    "term.spawn: rows must fit in an unsigned 16-bit integer".into(),
+                )
+            })
+        })
+        .transpose()?
         .unwrap_or(DEFAULT_ROWS)
         .max(1);
     let cols = extract_optional_int(&args, "cols")
-        .map(|v| v as u16)
+        .map(|value| {
+            u16::try_from(value).map_err(|_| {
+                RuntimeError::ToolFailed(
+                    "term.spawn: cols must fit in an unsigned 16-bit integer".into(),
+                )
+            })
+        })
+        .transpose()?
         .unwrap_or(DEFAULT_COLS)
         .max(2);
+    validate_terminal_size(rows, cols)?;
     let explicit_cwd = extract_optional_string(&args, "cwd").map(std::path::PathBuf::from);
     let cwd = ctx.resolve_cwd(explicit_cwd.as_deref())?;
     let env: Vec<(String, String)> = if let Some(Value::Struct(fields)) = args.named("env") {
@@ -1819,12 +1849,24 @@ impl Tool for TermResize {
     ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let rows = extract_optional_int(&args, "rows")
-                .ok_or_else(|| RuntimeError::MissingArg("rows".into()))?
-                as u16;
-            let cols = extract_optional_int(&args, "cols")
-                .ok_or_else(|| RuntimeError::MissingArg("cols".into()))?
-                as u16;
+            let rows = u16::try_from(
+                extract_optional_int(&args, "rows")
+                    .ok_or_else(|| RuntimeError::MissingArg("rows".into()))?,
+            )
+            .map_err(|_| {
+                RuntimeError::ToolFailed(
+                    "term.resize: rows must fit in an unsigned 16-bit integer".into(),
+                )
+            })?;
+            let cols = u16::try_from(
+                extract_optional_int(&args, "cols")
+                    .ok_or_else(|| RuntimeError::MissingArg("cols".into()))?,
+            )
+            .map_err(|_| {
+                RuntimeError::ToolFailed(
+                    "term.resize: cols must fit in an unsigned 16-bit integer".into(),
+                )
+            })?;
             let registry = ctx.term_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("term.resize: registry not available".into())
             })?;
@@ -1991,6 +2033,7 @@ mod tests {
     enum PtyIoFailure {
         Reader,
         Writer,
+        Resize,
         Never,
     }
 
@@ -1998,6 +2041,9 @@ mod tests {
 
     impl portable_pty::MasterPty for FailingMaster {
         fn resize(&self, _size: portable_pty::PtySize) -> anyhow::Result<()> {
+            if matches!(self.0, PtyIoFailure::Resize) {
+                anyhow::bail!("resize sentinel")
+            }
             Ok(())
         }
 
@@ -2680,6 +2726,45 @@ mod tests {
         assert_eq!(screen.cells.len(), 15);
         assert_eq!(screen.cells[0].chars, "h");
         assert_eq!(screen.cells[4].chars, "o");
+    }
+
+    #[test]
+    fn resize_commits_parser_dimensions_only_after_the_pty_accepts() {
+        let entry = TermEntry {
+            handle: TermHandle {
+                session_id: "resize".into(),
+                local_id: 1,
+            },
+            session_id: "resize".into(),
+            pty_size: portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0))),
+            writer: Mutex::new(Box::new(std::io::sink())),
+            state: Arc::new(Mutex::new(TermState::Running {
+                pid: 0,
+                started_at: 0,
+            })),
+            stream_tx: broadcast::channel(STREAM_CHANNEL_CAPACITY).0,
+            log_path: std::env::temp_dir().join("term_resize_test.log"),
+            reader_task: Mutex::new(None),
+            child: Mutex::new(None),
+            master: Mutex::new(Some(Box::new(FailingMaster(PtyIoFailure::Resize)))),
+            profile: Arc::new(Mutex::new(None)),
+            started_at: Instant::now(),
+            task_id: Mutex::new(None),
+        };
+
+        assert!(entry.resize(42, 120).is_err());
+        assert_eq!((entry.snapshot().rows, entry.snapshot().cols), (24, 80));
+        *entry.master.lock().unwrap() = Some(Box::new(FailingMaster(PtyIoFailure::Never)));
+        assert!(entry.resize(u16::MAX, u16::MAX).is_err());
+        assert_eq!((entry.snapshot().rows, entry.snapshot().cols), (24, 80));
+        entry.resize(42, 120).unwrap();
+        assert_eq!((entry.snapshot().rows, entry.snapshot().cols), (42, 120));
     }
 
     #[tokio::test]

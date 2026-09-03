@@ -45,6 +45,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert!(capabilities.supports::<atman_proto::rpc::DeleteSession>());
     assert!(capabilities.supports::<atman_proto::rpc::UpdateSessionTrust>());
     assert!(capabilities.supports::<atman_proto::rpc::CompactSession>());
+    assert!(capabilities.supports::<atman_proto::rpc::ResizeTerminalResource>());
 }
 
 #[tokio::test]

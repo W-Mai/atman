@@ -3190,7 +3190,7 @@
         "cols": {
           "type": "integer",
           "format": "int32",
-          "minimum": 0
+          "minimum": 2
         },
         "request_id": {
           "oneOf": [
@@ -3208,7 +3208,7 @@
         "rows": {
           "type": "integer",
           "format": "int32",
-          "minimum": 0
+          "minimum": 1
         },
         "session_id": {
           "$ref": "#/$defs/SessionId"

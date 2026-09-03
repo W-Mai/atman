@@ -13,7 +13,7 @@ use atman_proto::{
     PromptResolutionStatus, ResolvePermissionRequestsResponse, ResourceId, ResourceKind,
     ResourceState, ResourceTerminationStatus, ResyncRequired, RunCancellationStatus, ServerEvent,
     SessionId, SessionNotification, SessionProjection, SessionSignal, SessionSummary,
-    TrustProjection,
+    TerminalResizeStatus, TrustProjection,
 };
 use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -99,6 +99,12 @@ pub(crate) struct TrustUpdateCommit {
 
 pub(crate) struct ResourceTerminationCommit {
     pub status: ResourceTerminationStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct TerminalResizeCommit {
+    pub status: TerminalResizeStatus,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -458,6 +464,23 @@ impl SessionActorHandle {
         .await?
     }
 
+    pub async fn resize_terminal(
+        &self,
+        resource_id: ResourceId,
+        rows: u16,
+        cols: u16,
+        terminal_registry: Arc<atman_runtime::tools::term::TermRegistry>,
+    ) -> Result<TerminalResizeCommit> {
+        request(&self.tx, |reply| Command::ResizeTerminal {
+            resource_id,
+            rows,
+            cols,
+            terminal_registry,
+            reply,
+        })
+        .await?
+    }
+
     pub async fn retain_resource(&self, resource_id: ResourceId) -> Result<ResourceMutationCommit> {
         request(&self.tx, |reply| Command::RetainResource {
             resource_id,
@@ -640,6 +663,13 @@ enum Command {
     TerminateResource {
         resource_id: ResourceId,
         reply: oneshot::Sender<Result<ResourceTerminationCommit>>,
+    },
+    ResizeTerminal {
+        resource_id: ResourceId,
+        rows: u16,
+        cols: u16,
+        terminal_registry: Arc<atman_runtime::tools::term::TermRegistry>,
+        reply: oneshot::Sender<Result<TerminalResizeCommit>>,
     },
     RetainResource {
         resource_id: ResourceId,
@@ -931,6 +961,16 @@ impl SessionActor {
             }
             Command::TerminateResource { resource_id, reply } => {
                 let result = self.terminate_resource(resource_id);
+                let _ = reply.send(result);
+            }
+            Command::ResizeTerminal {
+                resource_id,
+                rows,
+                cols,
+                terminal_registry,
+                reply,
+            } => {
+                let result = self.resize_terminal(resource_id, rows, cols, &terminal_registry);
                 let _ = reply.send(result);
             }
             Command::RetainResource { resource_id, reply } => {
@@ -1785,6 +1825,60 @@ impl SessionActor {
             },
         };
         Ok(ResourceTerminationCommit {
+            status,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn resize_terminal(
+        &mut self,
+        resource_id: ResourceId,
+        rows: u16,
+        cols: u16,
+        terminal_registry: &atman_runtime::tools::term::TermRegistry,
+    ) -> Result<TerminalResizeCommit> {
+        anyhow::ensure!(rows > 0, "terminal rows must be greater than zero");
+        anyhow::ensure!(cols > 1, "terminal columns must be greater than one");
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(published_seq)?;
+        let resource = self
+            .projection
+            .projection()
+            .resources
+            .iter()
+            .find(|resource| resource.id == resource_id)
+            .cloned();
+        let status = match resource {
+            None => TerminalResizeStatus::NotFound,
+            Some(resource) if resource.kind != ResourceKind::Terminal => {
+                TerminalResizeStatus::Unsupported
+            }
+            Some(resource)
+                if resource.state == ResourceState::Terminating
+                    || resource_state_is_terminal(resource.state) =>
+            {
+                TerminalResizeStatus::AlreadyTerminal
+            }
+            Some(resource) => match resource.details.get("source_handle") {
+                None => TerminalResizeStatus::Unavailable,
+                Some(handle) => {
+                    match terminal_registry.lookup(handle, &self.session_id.to_string()) {
+                        Ok(entry) => {
+                            entry.resize(rows, cols)?;
+                            if let Some(delta) =
+                                self.projection.set_terminal_size(&resource_id, rows, cols)
+                            {
+                                self.publish_projection_delta(delta);
+                            }
+                            TerminalResizeStatus::Resized
+                        }
+                        Err(_) => TerminalResizeStatus::Unavailable,
+                    }
+                }
+            },
+        };
+        Ok(TerminalResizeCommit {
             status,
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,

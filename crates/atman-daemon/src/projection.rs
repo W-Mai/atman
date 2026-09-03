@@ -105,6 +105,28 @@ impl SessionProjector {
         self.commit(vec![ProjectionChange::LifecycleSet { lifecycle }])
     }
 
+    pub(crate) fn set_terminal_size(
+        &mut self,
+        resource_id: &ResourceId,
+        rows: u16,
+        cols: u16,
+    ) -> Option<ProjectionDelta> {
+        let resource = self.projection.resources.iter_mut().find(|resource| {
+            &resource.id == resource_id && resource.kind == ResourceKind::Terminal
+        })?;
+        let rows = rows.to_string();
+        let cols = cols.to_string();
+        if resource.details.get("rows") == Some(&rows)
+            && resource.details.get("cols") == Some(&cols)
+        {
+            return None;
+        }
+        resource.details.insert("rows".into(), rows);
+        resource.details.insert("cols".into(), cols);
+        let resource = resource.clone();
+        self.commit(vec![ProjectionChange::ResourceUpsert { resource }])
+    }
+
     pub(crate) fn reconcile_disconnected(&mut self) -> Option<ProjectionDelta> {
         let mut changes = Vec::new();
         for run in &mut self.projection.runs {
@@ -500,18 +522,19 @@ impl SessionProjector {
                 termination,
             } if !matches!(kind, atman_runtime::TaskKind::Flow) => {
                 let id = task_resource_id(task_id);
-                let started_at = self
+                let previous = self
                     .projection
                     .resources
                     .iter()
-                    .find(|resource| resource.id == id)
+                    .find(|resource| resource.id == id);
+                let started_at = previous
                     .and_then(|resource| resource.started_at)
                     .or(Some(envelope.ts));
                 let state = task_resource_state(*status);
-                let mut details = std::collections::BTreeMap::from([(
-                    "source_handle".into(),
-                    source_handle.clone(),
-                )]);
+                let mut details = previous
+                    .map(|resource| resource.details.clone())
+                    .unwrap_or_default();
+                details.insert("source_handle".into(), source_handle.clone());
                 if let Some(command) = command {
                     details.insert("command".into(), command.clone());
                 }
@@ -547,6 +570,22 @@ impl SessionProjector {
                 changes.push(ProjectionChange::ResourceUpsert { resource });
             }
             Event::TaskLifecycle { .. } => {}
+            Event::TerminalFinalState { handle, screen, .. } => {
+                if let Some(resource) = self.projection.resources.iter_mut().find(|resource| {
+                    resource.kind == ResourceKind::Terminal
+                        && resource.details.get("source_handle") == Some(handle)
+                }) {
+                    resource
+                        .details
+                        .insert("rows".into(), screen.rows.to_string());
+                    resource
+                        .details
+                        .insert("cols".into(), screen.cols.to_string());
+                    changes.push(ProjectionChange::ResourceUpsert {
+                        resource: resource.clone(),
+                    });
+                }
+            }
             Event::TaskReaped { task_id } => {
                 let resource_id = task_resource_id(task_id);
                 let previous_len = self.projection.resources.len();
@@ -2121,6 +2160,76 @@ mod tests {
             delta.changes.as_slice(),
             [ProjectionChange::ResourceRemove { .. }]
         ));
+    }
+
+    #[test]
+    fn terminal_size_updates_one_resource_and_is_idempotent() {
+        let mut projector = SessionProjector::new(SessionId(uuid::Uuid::now_v7()), None);
+        let task_id = atman_runtime::TaskId::now();
+        let run_id = RuntimeRunId::now();
+        projector.apply_envelope(&envelope(
+            1,
+            chrono::Utc::now(),
+            Event::TaskLifecycle {
+                task_id: task_id.clone(),
+                kind: atman_runtime::TaskKind::Terminal,
+                run_id: Some(run_id.clone()),
+                source_handle: "term_1".into(),
+                label: "interactive shell".into(),
+                command: Some("sh".into()),
+                workspace_id: None,
+                status: atman_runtime::TaskStatus::Running,
+                termination: None,
+            },
+        ));
+        let resource_id = task_resource_id(&task_id);
+        let before = projector.projection().revision;
+
+        let delta = projector.set_terminal_size(&resource_id, 42, 120).unwrap();
+        assert_eq!(delta.base_revision, before);
+        assert_eq!(delta.changes.len(), 1);
+        let resource = &projector.projection().resources[0];
+        assert_eq!(resource.details["rows"], "42");
+        assert_eq!(resource.details["cols"], "120");
+        assert!(projector.set_terminal_size(&resource_id, 42, 120).is_none());
+        assert!(
+            projector
+                .set_terminal_size(&ResourceId("task:missing".into()), 42, 120)
+                .is_none()
+        );
+        projector.apply_envelope(&envelope(
+            2,
+            chrono::Utc::now(),
+            Event::TerminalFinalState {
+                handle: "term_1".into(),
+                screen: atman_runtime::tools::term::TerminalScreen {
+                    rows: 50,
+                    cols: 140,
+                    cells: Vec::new(),
+                    cursor: None,
+                    alt_screen: false,
+                },
+                state: atman_runtime::tools::term::TermStateSnapshot::Exited { exit_code: None },
+            },
+        ));
+        projector.apply_envelope(&envelope(
+            3,
+            chrono::Utc::now(),
+            Event::TaskLifecycle {
+                task_id,
+                kind: atman_runtime::TaskKind::Terminal,
+                run_id: Some(run_id),
+                source_handle: "term_1".into(),
+                label: "interactive shell".into(),
+                command: Some("sh".into()),
+                workspace_id: None,
+                status: atman_runtime::TaskStatus::Ok,
+                termination: None,
+            },
+        ));
+        let resource = &projector.projection().resources[0];
+        assert_eq!(resource.details["rows"], "50");
+        assert_eq!(resource.details["cols"], "140");
     }
 
     #[test]

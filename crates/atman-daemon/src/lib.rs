@@ -4,10 +4,11 @@ use atman_proto::{
     InspectResourceResponse, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, ListProjectsRequest, ListResourcesResponse, ListSessionsRequest,
     MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits,
-    ReleaseResourceResponse, RenameSessionResponse, RequestId, ResolveCompactReviewResponse,
-    ResolvePromptResponse, RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse,
-    SendMessageResponse, StartRunResponse, SubmitFormResponse, TerminateResourceResponse,
-    UpdateSessionTrustResponse, method_descriptor, methods, rpc,
+    ReleaseResourceResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
+    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
+    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
+    SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse, method_descriptor,
+    methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -173,6 +174,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::ListResources>(),
     method_descriptor::<rpc::InspectResource>(),
     method_descriptor::<rpc::TerminateResource>(),
+    method_descriptor::<rpc::ResizeTerminalResource>(),
     method_descriptor::<rpc::RetainResource>(),
     method_descriptor::<rpc::ReleaseResource>(),
 ];
@@ -725,6 +727,50 @@ pub async fn dispatch_as(
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::RESIZE_TERMINAL_RESOURCE => {
+            match parse_params::<rpc::ResizeTerminalResource>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::ResizeTerminalResource, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let commit = operation_state
+                                .resize_terminal(
+                                    &operation_params.session_id,
+                                    operation_params.resource_id.clone(),
+                                    operation_params.rows,
+                                    operation_params.cols,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(ResizeTerminalResourceResponse {
+                                session_id: operation_params.session_id,
+                                resource_id: operation_params.resource_id,
+                                rows: operation_params.rows,
+                                cols: operation_params.cols,
+                                status: commit.status,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                        },
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            method_response::<rpc::ResizeTerminalResource>(id, response)
+                        }
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::RETAIN_RESOURCE => match parse_params::<rpc::RetainResource>(req.params) {
             Ok(params) => {
                 let operation_state = state.clone();
