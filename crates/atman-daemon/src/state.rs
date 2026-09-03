@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CloseSessionResponse, DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse,
-    ListProjectsResponse, ProjectSummary, PromptId, ResyncRequired, SNAPSHOT_SCHEMA_VERSION,
-    SessionCloseStatus, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    CloseSessionResponse, DaemonGeneration, DeleteSessionResponse, EventCursor, FlowRunId,
+    GetSessionUpdatesResponse, ListProjectsResponse, ProjectSummary, PromptId, ResourceState,
+    ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SessionCloseStatus, SessionDeleteStatus, SessionId,
+    SessionSnapshot, SessionStatus, SessionSummary,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -545,6 +546,85 @@ impl DaemonState {
         Ok(CloseSessionResponse {
             session_id: id.clone(),
             status,
+        })
+    }
+
+    pub async fn delete_session(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<DeleteSessionResponse> {
+        let load_gate = self
+            .session_loads
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _guard = load_gate.lock().await;
+        if self
+            .unload_session_while_locked(id, Some(principal))
+            .await?
+            == SessionUnloadOutcome::Busy
+        {
+            return Ok(DeleteSessionResponse {
+                session_id: id.clone(),
+                status: SessionDeleteStatus::Busy,
+                blocking_resources: Vec::new(),
+            });
+        }
+
+        let sessions_root = self.sessions_root();
+        let session_dir = sessions_root.join(id.to_string());
+        let tombstone = sessions_root.join(format!(".deleting-{id}"));
+        if !session_dir.exists() {
+            if tombstone.exists() {
+                remove_session_tree(tombstone).await?;
+                return Ok(DeleteSessionResponse {
+                    session_id: id.clone(),
+                    status: SessionDeleteStatus::Deleted,
+                    blocking_resources: Vec::new(),
+                });
+            }
+            return Ok(DeleteSessionResponse {
+                session_id: id.clone(),
+                status: SessionDeleteStatus::NotFound,
+                blocking_resources: Vec::new(),
+            });
+        }
+        validate_session_tree(&session_dir)?;
+
+        let snapshot = self.session_snapshot(id, principal).await?;
+        let blocking_resources = snapshot
+            .projection
+            .resources
+            .into_iter()
+            .filter(|resource| resource_blocks_session_deletion(resource.state))
+            .map(|resource| resource.id)
+            .collect::<Vec<_>>();
+        if !blocking_resources.is_empty() {
+            return Ok(DeleteSessionResponse {
+                session_id: id.clone(),
+                status: SessionDeleteStatus::UnsafeResources,
+                blocking_resources,
+            });
+        }
+
+        if tombstone.exists() {
+            remove_session_tree(tombstone.clone()).await?;
+        }
+        std::fs::rename(&session_dir, &tombstone).with_context(|| {
+            format!(
+                "move session {} to deletion tombstone {}",
+                session_dir.display(),
+                tombstone.display()
+            )
+        })?;
+        remove_session_tree(tombstone).await?;
+        Ok(DeleteSessionResponse {
+            session_id: id.clone(),
+            status: SessionDeleteStatus::Deleted,
+            blocking_resources: Vec::new(),
         })
     }
 
@@ -1110,12 +1190,70 @@ impl DaemonState {
     }
 }
 
+fn validate_session_tree(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect session directory {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "session path is not a directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+async fn remove_session_tree(path: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        validate_session_tree(&path)?;
+        std::fs::remove_dir_all(&path)
+            .with_context(|| format!("remove session directory {}", path.display()))
+    })
+    .await
+    .context("join session deletion task")?
+}
+
+fn resource_blocks_session_deletion(state: ResourceState) -> bool {
+    match state {
+        ResourceState::Starting
+        | ResourceState::Running
+        | ResourceState::Dirty
+        | ResourceState::Terminating
+        | ResourceState::Retained
+        | ResourceState::Orphaned => true,
+        ResourceState::Exited
+        | ResourceState::Failed
+        | ResourceState::Released
+        | ResourceState::Lost => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn deletion_blocks_every_non_terminal_resource_state() {
+        for state in [
+            ResourceState::Starting,
+            ResourceState::Running,
+            ResourceState::Dirty,
+            ResourceState::Terminating,
+            ResourceState::Retained,
+            ResourceState::Orphaned,
+        ] {
+            assert!(resource_blocks_session_deletion(state));
+        }
+        for state in [
+            ResourceState::Exited,
+            ResourceState::Failed,
+            ResourceState::Released,
+            ResourceState::Lost,
+        ] {
+            assert!(!resource_blocks_session_deletion(state));
+        }
+    }
 
     #[tokio::test]
     async fn concurrent_session_loads_share_one_runtime() {

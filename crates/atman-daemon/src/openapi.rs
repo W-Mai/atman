@@ -1,12 +1,13 @@
 use atman_proto::{
     CancelRunRequest, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
     CloseSessionRequest, CloseSessionResponse, CreatePermissionGroupRequest,
-    CreatePermissionGroupResponse, CreateSessionRequest, GetEventsRequest, GetEventsResponse,
-    InspectResourceRequest, InspectResourceResponse, InterjectSessionRequest,
-    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
-    ListPermissionRequestsRequest, ListProjectsRequest, ListProjectsResponse, ListResourcesRequest,
-    ListResourcesResponse, ListSessionsRequest, MethodCapability, ProjectSummary, ProtocolLimits,
-    ReleaseResourceRequest, ReleaseResourceResponse, RenameSessionRequest, RenameSessionResponse,
+    CreatePermissionGroupResponse, CreateSessionRequest, DeleteSessionRequest,
+    DeleteSessionResponse, GetEventsRequest, GetEventsResponse, InspectResourceRequest,
+    InspectResourceResponse, InterjectSessionRequest, InterjectSessionResponse, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, ListPermissionRequestsRequest, ListProjectsRequest,
+    ListProjectsResponse, ListResourcesRequest, ListResourcesResponse, ListSessionsRequest,
+    MethodCapability, ProjectSummary, ProtocolLimits, ReleaseResourceRequest,
+    ReleaseResourceResponse, RenameSessionRequest, RenameSessionResponse,
     ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePromptRequest, ResolvePromptResponse, RetainResourceRequest, RetainResourceResponse,
     RunFlowRequest, RunFlowResponse, SendMessageRequest, SendMessageResponse, ServerEventEnvelope,
@@ -83,7 +84,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: daemon.capabilities, ping, project.list, session.create, session.close, session.send_message, session.interject, list_sessions, rename_session, run.start, run_flow, cancel_run, get_events, session.get_snapshot, session.get_updates, resolve_prompt, form.submit, compact_review.resolve, list_permission_requests, create_permission_group, resolve_permission_requests, resource.list, resource.inspect, resource.terminate, resource.retain, resource.release. \
+Methods dispatched at POST /rpc: daemon.capabilities, ping, project.list, session.create, session.close, session.delete, session.send_message, session.interject, list_sessions, rename_session, run.start, run_flow, cancel_run, get_events, session.get_snapshot, session.get_updates, resolve_prompt, form.submit, compact_review.resolve, list_permission_requests, create_permission_group, resolve_permission_requests, resource.list, resource.inspect, resource.terminate, resource.retain, resource.release. \
 Raw event-log SSE is available at GET /events. Convergent session projection SSE is available at GET /session-events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, session_sse_endpoint, openapi_endpoint),
@@ -99,6 +100,9 @@ Raw event-log SSE is available at GET /events. Convergent session projection SSE
         CloseSessionRequest,
         CloseSessionResponse,
         atman_proto::SessionCloseStatus,
+        DeleteSessionRequest,
+        DeleteSessionResponse,
+        atman_proto::SessionDeleteStatus,
         SendMessageRequest,
         SendMessageResponse,
         InterjectSessionRequest,

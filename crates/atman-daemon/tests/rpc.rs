@@ -34,6 +34,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
     assert!(capabilities.supports::<atman_proto::rpc::ListProjects>());
     assert!(capabilities.supports::<atman_proto::rpc::CloseSession>());
+    assert!(capabilities.supports::<atman_proto::rpc::DeleteSession>());
 }
 
 #[tokio::test]
@@ -262,6 +263,101 @@ async fn close_session_unloads_runtime_and_keeps_history_recoverable() {
         snapshot.projection.lifecycle,
         atman_proto::SessionLifecycle::Idle
     );
+}
+
+#[tokio::test]
+async fn delete_session_waits_for_resources_and_removes_history_atomically() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root, Some(config_dir), None).unwrap(),
+    ));
+    let created = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(
+            1,
+            &atman_proto::CreateSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                project_root: None,
+                title: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let session_id = created.projection.metadata.id;
+    let session_dir = state.sessions_root().join(session_id.to_string());
+    let task_id = state.task_registry().register(
+        atman_runtime::TaskKind::Bash,
+        "pending cleanup".into(),
+        "bg-delete-test".into(),
+        atman_runtime::TaskOwner::new(session_id.to_string(), None),
+        tokio_util::sync::CancellationToken::new(),
+    );
+
+    let busy = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::DeleteSession>(
+            2,
+            &atman_proto::DeleteSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::DeleteSession>()
+    .unwrap();
+    assert_eq!(busy.status, atman_proto::SessionDeleteStatus::Busy);
+    assert!(session_dir.is_dir());
+
+    state
+        .task_registry()
+        .finish(&task_id, atman_runtime::TaskStatus::Ok);
+    let delete = atman_proto::DeleteSessionRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: session_id.clone(),
+    };
+    let deleted = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::DeleteSession>(3, &delete).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::DeleteSession>()
+    .unwrap();
+    assert_eq!(deleted.status, atman_proto::SessionDeleteStatus::Deleted);
+    assert!(!session_dir.exists());
+
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::DeleteSession>(4, &delete).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::DeleteSession>()
+    .unwrap();
+    assert_eq!(retry, deleted);
+    let missing = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::DeleteSession>(
+            5,
+            &atman_proto::DeleteSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::DeleteSession>()
+    .unwrap();
+    assert_eq!(missing.status, atman_proto::SessionDeleteStatus::NotFound);
 }
 
 #[tokio::test]
