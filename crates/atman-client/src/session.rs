@@ -10,14 +10,14 @@ use atman_proto::{
     ListResourcesResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
     PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
     ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
-    RenameSessionRequest, RenameSessionResponse, RequestId, ResolveCompactReviewRequest,
-    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
-    ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
-    RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
-    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
-    SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
-    SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, TrustProjection,
-    UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
+    RenameSessionRequest, RenameSessionResponse, RequestId, ResizeTerminalResourceRequest,
+    ResizeTerminalResourceResponse, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
+    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, ResolvePromptRequest,
+    ResolvePromptResponse, ResourceId, RetainResourceRequest, RetainResourceResponse, Revision,
+    SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
+    SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
+    SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse,
+    TrustProjection, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -676,6 +676,29 @@ impl SessionClient {
                 request_id: Some(RequestId::now()),
                 session_id: self.session_id.clone(),
                 resource_id,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.validate_command_resource(&expected_resource, &response.resource_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn resize_terminal(
+        &self,
+        resource_id: ResourceId,
+        rows: u16,
+        cols: u16,
+    ) -> Result<ResizeTerminalResourceResponse, SessionClientError> {
+        let expected_resource = resource_id.clone();
+        let response = self
+            .client
+            .command::<rpc::ResizeTerminalResource>(&ResizeTerminalResourceRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                resource_id,
+                rows,
+                cols,
             })
             .await?;
         self.validate_command_session(&response.session_id)?;
@@ -1716,6 +1739,7 @@ mod tests {
                             method_descriptor::<rpc::ListResources>(),
                             method_descriptor::<rpc::InspectResource>(),
                             method_descriptor::<rpc::TerminateResource>(),
+                            method_descriptor::<rpc::ResizeTerminalResource>(),
                             method_descriptor::<rpc::RetainResource>(),
                             method_descriptor::<rpc::ReleaseResource>(),
                         ] {
@@ -1881,6 +1905,18 @@ mod tests {
                             session_id: self.session_id.clone(),
                             resource_id: serde_json::from_value(params["resource_id"].clone())?,
                             status: atman_proto::ResourceTerminationStatus::Terminating,
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::RESIZE_TERMINAL_RESOURCE => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(ResizeTerminalResourceResponse {
+                            session_id: self.session_id.clone(),
+                            resource_id: serde_json::from_value(params["resource_id"].clone())?,
+                            rows: serde_json::from_value(params["rows"].clone())?,
+                            cols: serde_json::from_value(params["cols"].clone())?,
+                            status: atman_proto::TerminalResizeStatus::Resized,
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?
@@ -2060,6 +2096,13 @@ mod tests {
             terminated.status,
             atman_proto::ResourceTerminationStatus::Terminating
         );
+        let resized = session
+            .resize_terminal(resource_id.clone(), 42, 120)
+            .await
+            .unwrap();
+        assert_eq!(resized.resource_id, resource_id);
+        assert_eq!((resized.rows, resized.cols), (42, 120));
+        assert_eq!(resized.status, atman_proto::TerminalResizeStatus::Resized);
         let retained = session.retain_resource(resource_id.clone()).await.unwrap();
         assert_eq!(retained.resource.id, resource_id);
         let released = session.release_resource(resource_id.clone()).await.unwrap();
