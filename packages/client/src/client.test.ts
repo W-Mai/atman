@@ -11,34 +11,8 @@ import {
   PROTOCOL_VERSION,
   SNAPSHOT_SCHEMA_VERSION,
 } from './generated/methods.generated'
-import type {
-  CapabilitiesResponse,
-  JsonRpcResponse,
-} from './generated/types.generated'
-import type {
-  RpcRequestEnvelope,
-  RpcTransport,
-  TransportRequestOptions,
-} from './transport'
-
-class FakeTransport implements RpcTransport {
-  readonly requests: RpcRequestEnvelope[] = []
-
-  constructor(
-    readonly respond: (
-      request: RpcRequestEnvelope,
-      options?: TransportRequestOptions,
-    ) => JsonRpcResponse | Promise<JsonRpcResponse>,
-  ) {}
-
-  async send<M extends RpcRequestEnvelope['method']>(
-    request: RpcRequestEnvelope<M>,
-    options?: TransportRequestOptions,
-  ): Promise<JsonRpcResponse> {
-    this.requests.push(request as RpcRequestEnvelope)
-    return this.respond(request as RpcRequestEnvelope, options)
-  }
-}
+import type { CapabilitiesResponse } from './generated/types.generated'
+import { MockTransport, mockRpcRoutes, rpcResult } from './testing'
 
 function capabilities(
   overrides: Partial<CapabilitiesResponse> = {},
@@ -60,14 +34,12 @@ function capabilities(
 
 describe('AtmanClient', () => {
   test('handshakes before typed calls and correlates responses', async () => {
-    const transport = new FakeTransport((request) => ({
-      jsonrpc: '2.0',
-      id: request.id,
-      result:
-        request.method === 'daemon.capabilities'
-          ? capabilities()
-          : { pong: true, version: 'test' },
-    }))
+    const transport = new MockTransport(
+      mockRpcRoutes({
+        'daemon.capabilities': () => capabilities(),
+        ping: () => ({ pong: true, version: 'test' }),
+      }),
+    )
     const client = await AtmanClient.connect(transport, {
       id: 'client-id',
       name: 'browser-test',
@@ -88,11 +60,16 @@ describe('AtmanClient', () => {
   })
 
   test('rejects unsupported methods before sending', async () => {
-    const transport = new FakeTransport((request) => ({
-      jsonrpc: '2.0',
-      id: request.id,
-      result: capabilities({ methods: [{ name: 'daemon.capabilities', kind: 'query', revision: 1 }] }),
-    }))
+    const transport = new MockTransport((request) =>
+      rpcResult(
+        request,
+        capabilities({
+          methods: [
+            { name: 'daemon.capabilities', kind: 'query', revision: 1 },
+          ],
+        }),
+      ),
+    )
     const client = await AtmanClient.connect(transport, {
       id: 'client-id',
       name: 'browser-test',
@@ -104,11 +81,12 @@ describe('AtmanClient', () => {
   })
 
   test('rejects incompatible protocol and correlation identities', async () => {
-    const incompatible = new FakeTransport((request) => ({
-      jsonrpc: '2.0',
-      id: request.id,
-      result: capabilities({ protocol_version: PROTOCOL_VERSION + 1 }),
-    }))
+    const incompatible = new MockTransport((request) =>
+      rpcResult(
+        request,
+        capabilities({ protocol_version: PROTOCOL_VERSION + 1 }),
+      ),
+    )
     await expect(
       AtmanClient.connect(incompatible, {
         id: 'client-id',
@@ -117,7 +95,7 @@ describe('AtmanClient', () => {
       }),
     ).rejects.toBeInstanceOf(AtmanProtocolError)
 
-    const mismatched = new FakeTransport((request) => ({
+    const mismatched = new MockTransport((request) => ({
       jsonrpc: '2.0',
       id: request.id + 1,
       result: capabilities(),
@@ -132,9 +110,9 @@ describe('AtmanClient', () => {
   })
 
   test('surfaces typed JSON-RPC errors', async () => {
-    const transport = new FakeTransport((request) =>
+    const transport = new MockTransport((request) =>
       request.method === 'daemon.capabilities'
-        ? { jsonrpc: '2.0', id: request.id, result: capabilities() }
+        ? rpcResult(request, capabilities())
         : {
             jsonrpc: '2.0',
             id: request.id,
@@ -160,25 +138,23 @@ describe('AtmanClient', () => {
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve
     })
-    const transport = new FakeTransport(async (request) => {
+    const transport = new MockTransport(async (request) => {
       capabilityCalls += 1
       if (capabilityCalls === 1) {
-        return { jsonrpc: '2.0', id: request.id, result: capabilities() }
+        return rpcResult(request, capabilities())
       }
       if (capabilityCalls === 2) {
         markFirstStarted()
         await firstGate
-        return {
-          jsonrpc: '2.0',
-          id: request.id,
-          result: capabilities({ daemon_generation: 'generation-2' }),
-        }
+        return rpcResult(
+          request,
+          capabilities({ daemon_generation: 'generation-2' }),
+        )
       }
-      return {
-        jsonrpc: '2.0',
-        id: request.id,
-        result: capabilities({ daemon_generation: 'generation-3' }),
-      }
+      return rpcResult(
+        request,
+        capabilities({ daemon_generation: 'generation-3' }),
+      )
     })
     const client = await AtmanClient.connect(transport, {
       name: 'browser-test',

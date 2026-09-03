@@ -16,46 +16,10 @@ import type {
   ServerEvent,
   SessionSnapshot,
 } from './generated/types.generated'
-import type {
-  RpcRequestEnvelope,
-  RpcTransport,
-  TransportRequestOptions,
-} from './transport'
+import type { RpcRequestEnvelope } from './transport'
+import { MockTransport } from './testing'
 
 const sessionId = '00000000-0000-0000-0000-000000000001'
-
-class SessionTransport implements RpcTransport {
-  readonly requests: RpcRequestEnvelope[] = []
-  readonly streamCursors: number[] = []
-
-  constructor(
-    readonly respond: (
-      request: RpcRequestEnvelope,
-      options?: TransportRequestOptions,
-    ) => JsonRpcResponse | Promise<JsonRpcResponse>,
-    readonly stream?: (
-      afterCursor: number,
-      options?: TransportRequestOptions,
-    ) => AsyncIterable<ProjectionEventEnvelope>,
-  ) {}
-
-  async send<M extends RpcRequestEnvelope['method']>(
-    request: RpcRequestEnvelope<M>,
-    options?: TransportRequestOptions,
-  ): Promise<JsonRpcResponse> {
-    this.requests.push(request as RpcRequestEnvelope)
-    return this.respond(request as RpcRequestEnvelope, options)
-  }
-
-  sessionEvents(
-    _sessionId: string,
-    afterCursor: number,
-    options?: TransportRequestOptions,
-  ): AsyncIterable<ProjectionEventEnvelope> {
-    this.streamCursors.push(afterCursor)
-    return this.stream?.(afterCursor, options) ?? emptyEvents()
-  }
-}
 
 function capabilities(
   generation: string,
@@ -137,15 +101,13 @@ function page(
   }
 }
 
-function result(request: RpcRequestEnvelope, value: unknown): JsonRpcResponse {
-  return { jsonrpc: '2.0', id: request.id, result: value }
+function result(request: RpcRequestEnvelope, value: unknown) {
+  return { jsonrpc: '2.0', id: request.id, result: value } satisfies JsonRpcResponse
 }
-
-async function* emptyEvents(): AsyncIterable<ProjectionEventEnvelope> {}
 
 describe('SessionClient', () => {
   test('attaches to one session and rejects a mismatched snapshot identity', async () => {
-    const transport = new SessionTransport((request) =>
+    const transport = new MockTransport((request) =>
       result(
         request,
         request.method === 'daemon.capabilities'
@@ -166,7 +128,7 @@ describe('SessionClient', () => {
 
   test('recovers a retention gap from a fresh snapshot', async () => {
     let snapshotCalls = 0
-    const transport = new SessionTransport((request) => {
+    const transport = new MockTransport((request) => {
       switch (request.method) {
         case 'daemon.capabilities':
           return result(request, capabilities('generation-1'))
@@ -209,7 +171,7 @@ describe('SessionClient', () => {
   test('re-handshakes and replaces state after the daemon generation changes', async () => {
     let capabilityCalls = 0
     let snapshotCalls = 0
-    const transport = new SessionTransport((request) => {
+    const transport = new MockTransport((request) => {
       switch (request.method) {
         case 'daemon.capabilities':
           capabilityCalls += 1
@@ -261,7 +223,7 @@ describe('SessionClient', () => {
       ]),
     )
     const final = event('generation-1', 3, { type: 'heartbeat' })
-    const transport = new SessionTransport(
+    const transport = new MockTransport(
       (request) => {
         switch (request.method) {
           case 'daemon.capabilities':
@@ -301,7 +263,7 @@ describe('SessionClient', () => {
         maxReconnectDelayMs: 0,
       }),
     ).rejects.toHaveProperty('name', 'AbortError')
-    expect(transport.streamCursors).toEqual([0, 2])
+    expect(transport.streams.map(({ afterCursor }) => afterCursor)).toEqual([0, 2])
     expect(session.current.cursor).toBe(3)
     expect(session.current.projection.metadata.title).toBe('caught up')
   })
@@ -312,7 +274,7 @@ describe('SessionClient', () => {
       event('generation-1', 1, { type: 'heartbeat' }),
       event('generation-1', 2, { type: 'heartbeat' }),
     ]
-    const transport = new SessionTransport((request) => {
+    const transport = new MockTransport((request) => {
       switch (request.method) {
         case 'daemon.capabilities':
           return result(request, capabilities('generation-1'))
@@ -354,7 +316,7 @@ describe('SessionClient', () => {
   })
 
   test('keeps interaction responses reconciled with the session', async () => {
-    const transport = new SessionTransport((request) => {
+    const transport = new MockTransport((request) => {
       switch (request.method) {
         case 'daemon.capabilities':
           return result(
@@ -398,7 +360,7 @@ describe('SessionClient', () => {
   })
 
   test('preserves permission revisions across grouped decisions', async () => {
-    const transport = new SessionTransport((request) => {
+    const transport = new MockTransport((request) => {
       switch (request.method) {
         case 'daemon.capabilities':
           return result(
@@ -481,7 +443,7 @@ describe('SessionClient', () => {
       owner_run_id: 'run-1',
       state: 'running' as const,
     }
-    const transport = new SessionTransport((request) => {
+    const transport = new MockTransport((request) => {
       switch (request.method) {
         case 'daemon.capabilities':
           return result(
