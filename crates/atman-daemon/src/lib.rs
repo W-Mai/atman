@@ -3,10 +3,10 @@ use atman_proto::{
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, InspectResourceResponse,
     InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListResourcesResponse,
     ListSessionsRequest, MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse,
-    ProtocolLimits, RenameSessionResponse, RequestId, ResolveCompactReviewResponse,
-    ResolvePromptResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
-    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, method_descriptor, methods,
-    rpc,
+    ProtocolLimits, ReleaseResourceResponse, RenameSessionResponse, RequestId,
+    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
+    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
+    SubmitFormResponse, TerminateResourceResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -161,6 +161,8 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::ListResources>(),
     method_descriptor::<rpc::InspectResource>(),
     method_descriptor::<rpc::TerminateResource>(),
+    method_descriptor::<rpc::RetainResource>(),
+    method_descriptor::<rpc::ReleaseResource>(),
 ];
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
@@ -607,6 +609,76 @@ pub async fn dispatch_as(
                 .await
                 {
                     Ok(response) => method_response::<rpc::TerminateResource>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::RETAIN_RESOURCE => match parse_params::<rpc::RetainResource>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::RetainResource, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let commit = operation_state
+                            .retain_resource(
+                                &operation_params.session_id,
+                                operation_params.resource_id,
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(RetainResourceResponse {
+                            session_id: operation_params.session_id,
+                            resource: commit.resource,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
+                        })
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::RetainResource>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::RELEASE_RESOURCE => match parse_params::<rpc::ReleaseResource>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::ReleaseResource, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let commit = operation_state
+                            .release_resource(
+                                &operation_params.session_id,
+                                operation_params.resource_id,
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(ReleaseResourceResponse {
+                            session_id: operation_params.session_id,
+                            resource: commit.resource,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
+                        })
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::ReleaseResource>(id, response),
                     Err(error) => JsonRpcResponse::err(id, error),
                 }
             }

@@ -434,14 +434,22 @@ impl SessionProjector {
                 state,
                 cleanup_error,
             } => {
+                let id = ResourceId(format!("workspace:{workspace_id}"));
+                let started_at = self
+                    .projection
+                    .resources
+                    .iter()
+                    .find(|resource| resource.id == id)
+                    .and_then(|resource| resource.started_at)
+                    .or(Some(envelope.ts));
                 let resource = ResourceProjection {
-                    id: ResourceId(format!("workspace:{workspace_id}")),
+                    id,
                     kind: ResourceKind::Workspace,
                     state: workspace_state(state),
                     owner_run_id: FlowRunId(run_id.0),
                     tool_use_id: None,
                     label: path.clone(),
-                    started_at: Some(envelope.ts),
+                    started_at,
                     finished_at: resource_is_terminal(state).then_some(envelope.ts),
                     details: cleanup_error
                         .iter()

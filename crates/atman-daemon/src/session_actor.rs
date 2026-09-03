@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -83,6 +83,18 @@ pub(crate) struct ResourceTerminationCommit {
     pub cursor: EventCursor,
 }
 
+pub(crate) struct ResourceMutationCommit {
+    pub resource: atman_proto::ResourceProjection,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceMutationAction {
+    Retain,
+    Release,
+}
+
 struct PendingPrompt {
     responder: oneshot::Sender<serde_json::Value>,
 }
@@ -115,6 +127,18 @@ impl SessionActorHandle {
         restored_projection: Option<SessionProjector>,
         task_registry: atman_runtime::TaskRegistry,
     ) -> Self {
+        let workspace_service =
+            session
+                .meta()
+                .and_then(|meta| meta.project_root)
+                .map(|project_root| {
+                    atman_runtime::flow_workspace::FlowWorkspaceService::new(
+                        project_root,
+                        None,
+                        &daemon_generation.0,
+                    )
+                    .expect("daemon generation was validated when daemon state was created")
+                });
         let events_rx = session.sink().subscribe();
         let goal_rx = session.subscribe_goal();
         let todos_rx = session.subscribe_todos();
@@ -170,6 +194,9 @@ impl SessionActorHandle {
             forms_rx,
             compact_review_rx,
             task_registry,
+            workspace_service,
+            workspace_mutations: HashSet::new(),
+            command_tx: tx.clone(),
             _permission_client: session.permission_broker().register_client(),
         };
         tokio::spawn(actor.run());
@@ -299,6 +326,25 @@ impl SessionActorHandle {
         resource_id: ResourceId,
     ) -> Result<ResourceTerminationCommit> {
         request(&self.tx, |reply| Command::TerminateResource {
+            resource_id,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn retain_resource(&self, resource_id: ResourceId) -> Result<ResourceMutationCommit> {
+        request(&self.tx, |reply| Command::RetainResource {
+            resource_id,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn release_resource(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<ResourceMutationCommit> {
+        request(&self.tx, |reply| Command::ReleaseResource {
             resource_id,
             reply,
         })
@@ -446,6 +492,21 @@ enum Command {
         resource_id: ResourceId,
         reply: oneshot::Sender<Result<ResourceTerminationCommit>>,
     },
+    RetainResource {
+        resource_id: ResourceId,
+        reply: oneshot::Sender<Result<ResourceMutationCommit>>,
+    },
+    ReleaseResource {
+        resource_id: ResourceId,
+        reply: oneshot::Sender<Result<ResourceMutationCommit>>,
+    },
+    WorkspaceMutationFinished {
+        action: WorkspaceMutationAction,
+        resource_id: ResourceId,
+        owner_run_id: FlowRunId,
+        result: Box<Result<atman_runtime::git_workspace::WorkspaceRecord, String>>,
+        reply: oneshot::Sender<Result<ResourceMutationCommit>>,
+    },
     Snapshot {
         reply: oneshot::Sender<Result<(EventCursor, SessionProjection)>>,
     },
@@ -513,6 +574,9 @@ struct SessionActor {
     forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
     compact_review_rx: watch::Receiver<Option<atman_runtime::session::PendingCompactReview>>,
     task_registry: atman_runtime::TaskRegistry,
+    workspace_service: Option<atman_runtime::flow_workspace::FlowWorkspaceService>,
+    workspace_mutations: HashSet<ResourceId>,
+    command_tx: mpsc::UnboundedSender<Command>,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
 }
 
@@ -665,6 +729,23 @@ impl SessionActor {
             }
             Command::TerminateResource { resource_id, reply } => {
                 let result = self.terminate_resource(resource_id);
+                let _ = reply.send(result);
+            }
+            Command::RetainResource { resource_id, reply } => {
+                self.begin_workspace_mutation(WorkspaceMutationAction::Retain, resource_id, reply);
+            }
+            Command::ReleaseResource { resource_id, reply } => {
+                self.begin_workspace_mutation(WorkspaceMutationAction::Release, resource_id, reply);
+            }
+            Command::WorkspaceMutationFinished {
+                action,
+                resource_id,
+                owner_run_id,
+                result,
+                reply,
+            } => {
+                let result =
+                    self.finish_workspace_mutation(action, resource_id, owner_run_id, *result);
                 let _ = reply.send(result);
             }
             Command::Snapshot { reply } => {
@@ -1095,6 +1176,150 @@ impl SessionActor {
         })
     }
 
+    fn begin_workspace_mutation(
+        &mut self,
+        action: WorkspaceMutationAction,
+        resource_id: ResourceId,
+        reply: oneshot::Sender<Result<ResourceMutationCommit>>,
+    ) {
+        let result = self.prepare_workspace_mutation(action, &resource_id);
+        let (service, workspace_id, owner_run_id) = match result {
+            Ok(WorkspaceMutationPreparation::Complete(commit)) => {
+                let _ = reply.send(Ok(commit));
+                return;
+            }
+            Ok(WorkspaceMutationPreparation::Execute {
+                service,
+                workspace_id,
+                owner_run_id,
+            }) => (service, workspace_id, owner_run_id),
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+
+        self.workspace_mutations.insert(resource_id.clone());
+        let owner_session = self.session_id.to_string();
+        let owner_flow = owner_run_id.to_string();
+        let command_tx = self.command_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || match action {
+                WorkspaceMutationAction::Retain => {
+                    service.retain(&workspace_id, &owner_session, &owner_flow)
+                }
+                WorkspaceMutationAction::Release => {
+                    service.release(&workspace_id, &owner_session, &owner_flow)
+                }
+            })
+            .await
+            .map_err(|error| format!("workspace action task failed: {error}"))
+            .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = command_tx.send(Command::WorkspaceMutationFinished {
+                action,
+                resource_id,
+                owner_run_id,
+                result: Box::new(result),
+                reply,
+            });
+        });
+    }
+
+    fn prepare_workspace_mutation(
+        &mut self,
+        action: WorkspaceMutationAction,
+        resource_id: &ResourceId,
+    ) -> Result<WorkspaceMutationPreparation> {
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(published_seq)?;
+        let resource = self
+            .projection
+            .projection()
+            .resources
+            .iter()
+            .find(|resource| &resource.id == resource_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("resource not found: {}", resource_id.0))?;
+        anyhow::ensure!(
+            resource.kind == ResourceKind::Workspace,
+            "resource {} does not support workspace lifecycle actions",
+            resource_id.0
+        );
+        let already_complete = match action {
+            WorkspaceMutationAction::Retain => resource.state == ResourceState::Retained,
+            WorkspaceMutationAction::Release => resource.state == ResourceState::Released,
+        };
+        if already_complete {
+            return Ok(WorkspaceMutationPreparation::Complete(
+                self.resource_mutation_commit(resource),
+            ));
+        }
+        anyhow::ensure!(
+            !self.workspace_mutations.contains(resource_id),
+            "resource {} already has a workspace lifecycle action in progress",
+            resource_id.0
+        );
+        let workspace_id = workspace_id_from_resource_id(resource_id)
+            .ok_or_else(|| anyhow::anyhow!("invalid workspace resource id: {}", resource_id.0))?;
+        let service = self
+            .workspace_service
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("session has no project workspace service"))?;
+        Ok(WorkspaceMutationPreparation::Execute {
+            service,
+            workspace_id: workspace_id.to_owned(),
+            owner_run_id: resource.owner_run_id,
+        })
+    }
+
+    fn finish_workspace_mutation(
+        &mut self,
+        action: WorkspaceMutationAction,
+        resource_id: ResourceId,
+        owner_run_id: FlowRunId,
+        result: Result<atman_runtime::git_workspace::WorkspaceRecord, String>,
+    ) -> Result<ResourceMutationCommit> {
+        self.workspace_mutations.remove(&resource_id);
+        let record = result.map_err(|error| {
+            anyhow::anyhow!(
+                "workspace {} failed for resource {}: {error}",
+                action.as_str(),
+                resource_id.0
+            )
+        })?;
+        let state = record.lifecycle_state().as_str().to_owned();
+        let event = self.session.sink().emit_returning_envelope(
+            atman_runtime::event::Event::WorkspaceLifecycle {
+                run_id: atman_runtime::event::FlowRunId(owner_run_id.0),
+                workspace_id: record.id,
+                path: record.worktree_path.display().to_string(),
+                state,
+                cleanup_error: None,
+            },
+        );
+        self.catch_up_through(event.seq)?;
+        let resource = self
+            .projection
+            .projection()
+            .resources
+            .iter()
+            .find(|resource| resource.id == resource_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("workspace lifecycle event did not update resource"))?;
+        Ok(self.resource_mutation_commit(resource))
+    }
+
+    fn resource_mutation_commit(
+        &self,
+        resource: atman_proto::ResourceProjection,
+    ) -> ResourceMutationCommit {
+        ResourceMutationCommit {
+            resource,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        }
+    }
+
     fn catch_up_projection(&mut self) {
         let requested_after = self.event_cursor;
         let previous_revision = self.projection.projection().revision;
@@ -1307,6 +1532,24 @@ impl SessionActor {
     }
 }
 
+enum WorkspaceMutationPreparation {
+    Complete(ResourceMutationCommit),
+    Execute {
+        service: atman_runtime::flow_workspace::FlowWorkspaceService,
+        workspace_id: String,
+        owner_run_id: FlowRunId,
+    },
+}
+
+impl WorkspaceMutationAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Retain => "retain",
+            Self::Release => "release",
+        }
+    }
+}
+
 fn runtime_form_submission(submission: FormSubmission) -> atman_runtime::form::FormSubmission {
     match submission {
         FormSubmission::Submitted { answers } => atman_runtime::form::FormSubmission::Submitted {
@@ -1333,6 +1576,10 @@ fn task_id_from_resource_id(resource_id: &ResourceId) -> Option<atman_runtime::T
         .strip_prefix("task:")
         .and_then(|id| uuid::Uuid::parse_str(id).ok())
         .map(atman_runtime::TaskId)
+}
+
+fn workspace_id_from_resource_id(resource_id: &ResourceId) -> Option<&str> {
+    resource_id.0.strip_prefix("workspace:")
 }
 
 fn runtime_compact_review_decision(

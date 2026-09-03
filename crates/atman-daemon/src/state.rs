@@ -576,6 +576,30 @@ impl DaemonState {
             .await
     }
 
+    pub(crate) async fn retain_resource(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        resource_id: atman_proto::ResourceId,
+        principal: &str,
+    ) -> Result<crate::session_actor::ResourceMutationCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .retain_resource(resource_id)
+            .await
+    }
+
+    pub(crate) async fn release_resource(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        resource_id: atman_proto::ResourceId,
+        principal: &str,
+    ) -> Result<crate::session_actor::ResourceMutationCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .release_resource(resource_id)
+            .await
+    }
+
     pub async fn list_permission_requests(
         &self,
         session_id: &SessionId,
