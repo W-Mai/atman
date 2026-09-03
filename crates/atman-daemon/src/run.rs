@@ -737,18 +737,22 @@ async fn run_flow_inner(
         .as_ref()
         .map(|state| state.daemon_generation().to_owned())
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
-        events: session.sink().clone(),
-        task_registry: daemon_state
-            .as_ref()
-            .map(|state| state.task_registry())
-            .unwrap_or_default(),
-        mock: false,
-        config_dir: config_dir.clone(),
-        project_root: project_root.clone(),
-        home_dir,
-        workspace_generation,
-    })
+    let terminal_registry = daemon_state.as_ref().map(|state| state.terminal_registry());
+    let outcome = crate::bootstrap::build_executor_with_terminal_registry(
+        crate::bootstrap::BootstrapOptions {
+            events: session.sink().clone(),
+            task_registry: daemon_state
+                .as_ref()
+                .map(|state| state.task_registry())
+                .unwrap_or_default(),
+            mock: false,
+            config_dir: config_dir.clone(),
+            project_root: project_root.clone(),
+            home_dir,
+            workspace_generation,
+        },
+        terminal_registry,
+    )
     .await?;
     provider_catalog_refresh.dispatch(outcome.provider_catalog_refresh_plan);
     let mut executor = outcome.executor;

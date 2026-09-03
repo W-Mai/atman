@@ -184,7 +184,13 @@ pub fn register_web_search(reg: &ToolRegistry, config: &web::SearchConfig) {
 }
 
 pub fn register_terminal(reg: &ToolRegistry) -> Arc<term::TermRegistry> {
-    let registry = Arc::new(term::TermRegistry::new());
+    register_terminal_registry(reg, Arc::new(term::TermRegistry::new()))
+}
+
+pub fn register_terminal_registry(
+    reg: &ToolRegistry,
+    registry: Arc<term::TermRegistry>,
+) -> Arc<term::TermRegistry> {
     reg.register(Arc::new(term::TermSpawn));
     reg.register(Arc::new(term::TermInput));
     reg.register(Arc::new(term::TermCapture));
@@ -199,15 +205,10 @@ pub fn register_terminal_with_task_registry(
     reg: &ToolRegistry,
     task_registry: crate::task_registry::TaskRegistry,
 ) -> Arc<term::TermRegistry> {
-    let registry = Arc::new(term::TermRegistry::new().with_task_registry(task_registry));
-    reg.register(Arc::new(term::TermSpawn));
-    reg.register(Arc::new(term::TermInput));
-    reg.register(Arc::new(term::TermCapture));
-    reg.register(Arc::new(term::TermFind));
-    reg.register(Arc::new(term::TermResize));
-    reg.register(Arc::new(term::TermKill));
-    reg.register(Arc::new(term::TermList));
-    registry
+    register_terminal_registry(
+        reg,
+        Arc::new(term::TermRegistry::new().with_task_registry(task_registry)),
+    )
 }
 
 pub fn register_preview(reg: &ToolRegistry, config: preview::PreviewConfig) {

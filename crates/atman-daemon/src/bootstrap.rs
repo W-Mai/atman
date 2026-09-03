@@ -332,6 +332,13 @@ pub fn spawn_mcp_boot(
 }
 
 pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
+    build_executor_with_terminal_registry(opts, None).await
+}
+
+pub(crate) async fn build_executor_with_terminal_registry(
+    opts: BootstrapOptions,
+    terminal_registry: Option<Arc<atman_runtime::tools::term::TermRegistry>>,
+) -> Result<BootstrapOutcome> {
     let events = opts.events.clone();
     let mut executor = Executor::with_events(events);
     let workspace_service = atman_runtime::flow_workspace::FlowWorkspaceService::new(
@@ -351,8 +358,10 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let task_registry = opts.task_registry;
     let bg_registry =
         tools::register_bash_bg_with_task_registry(&executor.tools, task_registry.clone());
-    let term_registry =
-        tools::register_terminal_with_task_registry(&executor.tools, task_registry.clone());
+    let term_registry = terminal_registry.map_or_else(
+        || tools::register_terminal_with_task_registry(&executor.tools, task_registry.clone()),
+        |registry| tools::register_terminal_registry(&executor.tools, registry),
+    );
     executor.tools.register(std::sync::Arc::new(
         atman_runtime::tools::task_ops::TaskList,
     ));
@@ -725,6 +734,51 @@ mod tests {
                         max_bytes: 777,
                         max_line_bytes: 111,
                     }
+                );
+            });
+    }
+
+    #[test]
+    fn daemon_executor_reuses_the_injected_terminal_registry() {
+        let _registry_lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let config = tempfile::tempdir().unwrap();
+                let project = tempfile::tempdir().unwrap();
+                let home = tempfile::tempdir().unwrap();
+                let task_registry = atman_runtime::TaskRegistry::new();
+                let terminal_registry = Arc::new(
+                    atman_runtime::tools::term::TermRegistry::new()
+                        .with_task_registry(task_registry.clone()),
+                );
+
+                let outcome = build_executor_with_terminal_registry(
+                    BootstrapOptions {
+                        events: EventSink::new(),
+                        task_registry,
+                        mock: true,
+                        config_dir: Some(config.path().to_path_buf()),
+                        project_root: project.path().to_path_buf(),
+                        home_dir: Some(home.path().to_path_buf()),
+                        workspace_generation: "shared-terminal-registry-test".into(),
+                    },
+                    Some(terminal_registry.clone()),
+                )
+                .await
+                .unwrap();
+
+                assert!(
+                    outcome
+                        .executor
+                        .tool_ctx
+                        .term_registry
+                        .as_ref()
+                        .is_some_and(|registered| Arc::ptr_eq(registered, &terminal_registry))
                 );
             });
     }

@@ -26,6 +26,7 @@ pub struct DaemonState {
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
     task_registry: atman_runtime::TaskRegistry,
+    terminal_registry: std::sync::Arc<atman_runtime::tools::term::TermRegistry>,
     accepting_commands: AtomicBool,
     pub(crate) idempotency: IdempotencyRegistry,
 }
@@ -67,6 +68,11 @@ impl DaemonState {
             !daemon_generation.is_empty(),
             "daemon generation must be non-empty"
         );
+        let task_registry = atman_runtime::TaskRegistry::new();
+        let terminal_registry = std::sync::Arc::new(
+            atman_runtime::tools::term::TermRegistry::new()
+                .with_task_registry(task_registry.clone()),
+        );
         Self {
             data_dir,
             daemon_generation,
@@ -75,7 +81,8 @@ impl DaemonState {
             session_loads: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
-            task_registry: atman_runtime::TaskRegistry::new(),
+            task_registry,
+            terminal_registry,
             accepting_commands: AtomicBool::new(true),
             idempotency: IdempotencyRegistry::default(),
         }
@@ -137,6 +144,12 @@ impl DaemonState {
 
     pub fn task_registry(&self) -> atman_runtime::TaskRegistry {
         self.task_registry.clone()
+    }
+
+    pub(crate) fn terminal_registry(
+        &self,
+    ) -> std::sync::Arc<atman_runtime::tools::term::TermRegistry> {
+        self.terminal_registry.clone()
     }
 
     pub fn register_pending_prompt(
