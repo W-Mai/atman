@@ -148,6 +148,10 @@ flow cached() -> string {
         .await
         .unwrap();
 
+    // The call schedules a background compaction check while holding this lock.
+    // Wait for it before constructing the oversized rewrite fixture below.
+    let compact_guard = session.acquire_compact_lock().await;
+    drop(compact_guard);
     session.append_message(
         Message::assistant_text(TurnId::now(), "large output".repeat(2_000)),
         None,
