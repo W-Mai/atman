@@ -81,6 +81,12 @@ impl std::fmt::Display for RequestId {
 #[serde(transparent)]
 pub struct ProjectId(pub String);
 
+impl std::fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
 pub struct DaemonGeneration(pub String);
@@ -292,6 +298,7 @@ pub mod methods {
     pub const CREATE_SESSION: &str = "session.create";
     pub const SEND_MESSAGE: &str = "session.send_message";
     pub const INTERJECT_SESSION: &str = "session.interject";
+    pub const LIST_PROJECTS: &str = "project.list";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
@@ -316,6 +323,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::CreateSession>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::InterjectSession>(),
+        super::method_descriptor::<super::rpc::ListProjects>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
         super::method_descriptor::<super::rpc::StartRun>(),
@@ -388,6 +396,31 @@ impl CapabilitiesResponse {
             .iter()
             .any(|method| method.name == M::NAME && method.revision >= M::REVISION)
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ListProjectsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ProjectSummary {
+    pub id: ProjectId,
+    pub name: String,
+    pub root: String,
+    pub session_count: usize,
+    pub active_session_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ListProjectsResponse {
+    pub projects: Vec<ProjectSummary>,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -973,6 +1006,13 @@ pub mod rpc {
         CapabilitiesResponse
     );
     method!(Ping, methods::PING, Query, EmptyParams, PingResponse);
+    method!(
+        ListProjects,
+        methods::LIST_PROJECTS,
+        Query,
+        ListProjectsRequest,
+        ListProjectsResponse
+    );
     method!(
         CreateSession,
         methods::CREATE_SESSION,
