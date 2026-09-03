@@ -13,7 +13,8 @@ use axum::{
     routing::{get, post},
 };
 use futures::{Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use atman_proto::{
     EventCursor, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROJECTION_EVENT_SCHEMA_VERSION,
@@ -22,14 +23,31 @@ use atman_proto::{
 
 use crate::DaemonState;
 
+const EVENT_TICKET_TTL_SECS: u64 = 60;
+const EVENT_TICKET_VERSION: &str = "v1";
+const EVENT_TICKET_SCOPE: &str = "session-events";
+
 pub struct HttpState {
     pub daemon: Arc<DaemonState>,
     pub auth_token: String,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct EventTicketRequest {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct EventTicketResponse {
+    pub session_id: SessionId,
+    pub ticket: String,
+    pub expires_at_unix: u64,
+}
+
 pub fn router(state: Arc<HttpState>) -> Router {
     Router::new()
         .route("/rpc", post(rpc_handler))
+        .route("/event-ticket", post(event_ticket_handler))
         .route("/events", get(sse_handler))
         .route("/session-events", get(session_sse_handler))
         .route("/openapi.json", get(openapi_handler))
@@ -38,6 +56,30 @@ pub fn router(state: Arc<HttpState>) -> Router {
             require_bearer,
         ))
         .with_state(state)
+}
+
+async fn event_ticket_handler(
+    State(state): State<Arc<HttpState>>,
+    Extension(principal_id): Extension<String>,
+    Json(request): Json<EventTicketRequest>,
+) -> Result<Json<EventTicketResponse>, (StatusCode, String)> {
+    if !state
+        .daemon
+        .can_read_session(&request.session_id, &principal_id)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "permission denied for session".into(),
+        ));
+    }
+    let now = unix_timestamp();
+    let expires_at_unix = now.saturating_add(EVENT_TICKET_TTL_SECS);
+    let ticket = issue_event_ticket(&state, &request.session_id, expires_at_unix);
+    Ok(Json(EventTicketResponse {
+        session_id: request.session_id,
+        ticket,
+        expires_at_unix,
+    }))
 }
 
 async fn openapi_handler() -> Json<serde_json::Value> {
@@ -277,29 +319,83 @@ async fn require_bearer(
         }
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    // EventSource in browsers cannot set headers, so accept ?token=<t> as a fallback on GET.
     if req.method() == axum::http::Method::GET
-        && let Some(q) = req.uri().query()
+        && matches!(req.uri().path(), "/events" | "/session-events")
+        && let Some(query) = req.uri().query()
+        && let (Some(session_id), Some(ticket)) = (
+            unique_query_parameter(query, "session_id"),
+            unique_query_parameter(query, "ticket"),
+        )
+        && let Ok(session_id) = uuid::Uuid::parse_str(&session_id).map(SessionId)
+        && verify_event_ticket(&state, &session_id, &ticket, unix_timestamp())
     {
-        for pair in q.split('&') {
-            if let Some(rest) = pair.strip_prefix("token=") {
-                let decoded = urlencoding::decode(rest)
-                    .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| rest.to_string());
-                if constant_time_eq(decoded.as_bytes(), state.auth_token.as_bytes()) {
-                    let principal_id = "authenticated-daemon-client".to_string();
-                    let mut req = req;
-                    req.extensions_mut().insert(principal_id);
-                    return next.run(req).await;
-                }
-            }
-        }
+        let principal_id = "authenticated-daemon-client".to_string();
+        let mut req = req;
+        req.extensions_mut().insert(principal_id);
+        return next.run(req).await;
     }
     (
         StatusCode::UNAUTHORIZED,
-        "missing or invalid Authorization / token",
+        "missing or invalid Authorization or event ticket",
     )
         .into_response()
+}
+
+fn issue_event_ticket(state: &HttpState, session_id: &SessionId, expires_at_unix: u64) -> String {
+    let signature = event_ticket_signature(state, session_id, expires_at_unix);
+    format!("{EVENT_TICKET_VERSION}.{expires_at_unix}.{signature}")
+}
+
+fn verify_event_ticket(state: &HttpState, session_id: &SessionId, ticket: &str, now: u64) -> bool {
+    let mut parts = ticket.split('.');
+    let (Some(version), Some(expires_at), Some(signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let Ok(expires_at_unix) = expires_at.parse::<u64>() else {
+        return false;
+    };
+    if version != EVENT_TICKET_VERSION || expires_at_unix < now {
+        return false;
+    }
+    let expected = event_ticket_signature(state, session_id, expires_at_unix);
+    constant_time_eq(signature.as_bytes(), expected.as_bytes())
+}
+
+fn event_ticket_signature(
+    state: &HttpState,
+    session_id: &SessionId,
+    expires_at_unix: u64,
+) -> String {
+    let key = blake3::derive_key("atman event ticket v1", state.auth_token.as_bytes());
+    let payload = format!(
+        "{EVENT_TICKET_SCOPE}\n{}\n{session_id}\n{expires_at_unix}",
+        state.daemon.daemon_generation()
+    );
+    blake3::keyed_hash(&key, payload.as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+fn unique_query_parameter(query: &str, name: &str) -> Option<String> {
+    let mut values = query.split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| {
+            urlencoding::decode(value)
+                .map(|decoded| decoded.into_owned())
+                .unwrap_or_else(|_| value.to_owned())
+        })
+    });
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -311,4 +407,53 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         acc |= x ^ y;
     }
     acc == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> HttpState {
+        HttpState {
+            daemon: Arc::new(DaemonState::new_with_generation(
+                std::path::PathBuf::new(),
+                "generation-one".into(),
+            )),
+            auth_token: "secret".into(),
+        }
+    }
+
+    #[test]
+    fn event_ticket_is_session_generation_and_expiry_scoped() {
+        let state = state();
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let other_session_id = SessionId(uuid::Uuid::now_v7());
+        let ticket = issue_event_ticket(&state, &session_id, 160);
+
+        assert!(verify_event_ticket(&state, &session_id, &ticket, 100));
+        assert!(!verify_event_ticket(&state, &session_id, &ticket, 161));
+        assert!(!verify_event_ticket(
+            &state,
+            &other_session_id,
+            &ticket,
+            100
+        ));
+
+        let restarted = HttpState {
+            daemon: Arc::new(DaemonState::new_with_generation(
+                std::path::PathBuf::new(),
+                "generation-two".into(),
+            )),
+            auth_token: state.auth_token.clone(),
+        };
+        assert!(!verify_event_ticket(&restarted, &session_id, &ticket, 100));
+    }
+
+    #[test]
+    fn duplicate_query_credentials_are_rejected() {
+        assert_eq!(
+            unique_query_parameter("ticket=one&session_id=s&ticket=two", "ticket"),
+            None
+        );
+    }
 }

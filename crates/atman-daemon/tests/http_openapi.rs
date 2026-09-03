@@ -42,6 +42,7 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
 
     let paths = doc["paths"].as_object().expect("paths object");
     assert!(paths.contains_key("/rpc"), "paths keys: {paths:?}");
+    assert!(paths.contains_key("/event-ticket"));
     assert!(paths.contains_key("/events"));
     assert!(paths.contains_key("/session-events"));
     assert!(paths.contains_key("/openapi.json"));
@@ -57,6 +58,37 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         assert!(description.contains(method), "missing RPC method {method}");
     }
     assert!(paths["/events"]["get"]["responses"].get("403").is_some());
+    let event_parameters = paths["/events"]["get"]["parameters"]
+        .as_array()
+        .expect("event query parameters");
+    assert!(
+        event_parameters
+            .iter()
+            .any(|parameter| parameter["name"] == "ticket")
+    );
+    assert!(
+        event_parameters
+            .iter()
+            .all(|parameter| parameter["name"] != "token")
+    );
+    assert_eq!(
+        paths["/rpc"]["post"]["security"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        paths["/event-ticket"]["post"]["security"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        paths["/events"]["get"]["security"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let schemas = doc["components"]["schemas"]
         .as_object()
@@ -69,6 +101,8 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "CapabilitiesResponse",
         "MethodCapability",
         "InlineImage",
+        "EventTicketRequest",
+        "EventTicketResponse",
         "CreateSessionRequest",
         "SendMessageRequest",
         "SendMessageResponse",
@@ -99,6 +133,10 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
     let bearer = &doc["components"]["securitySchemes"]["bearer_token"];
     assert_eq!(bearer["type"].as_str(), Some("http"));
     assert_eq!(bearer["scheme"].as_str(), Some("bearer"));
+    let event_ticket = &doc["components"]["securitySchemes"]["event_ticket"];
+    assert_eq!(event_ticket["type"].as_str(), Some("apiKey"));
+    assert_eq!(event_ticket["in"].as_str(), Some("query"));
+    assert_eq!(event_ticket["name"].as_str(), Some("ticket"));
 }
 
 #[tokio::test]
