@@ -509,16 +509,57 @@ async fn cmd_daemon_run(
     if !follow {
         return Ok(());
     }
-    stream_daemon_events(
-        &reqwest::Client::new(),
-        &base,
-        &cfg.auth_token,
-        &run.session_id.to_string(),
-        None,
-        true,
-    )
-    .await?;
+    follow_daemon_run(&client, &run).await?;
     Ok(())
+}
+
+async fn follow_daemon_run(
+    client: &atman_client::Client,
+    run: &atman_proto::RunFlowResponse,
+) -> Result<()> {
+    use futures::StreamExt;
+
+    let session = client
+        .attach_session(run.session_id.clone())
+        .await
+        .context("attach daemon session for follow")?;
+    if run_projection_finished(&session.current().projection().runs, &run.run_id) {
+        return Ok(());
+    }
+    let Some(mut events) = client
+        .session_events(run.session_id.clone(), session.current().cursor())
+        .await?
+    else {
+        bail!("daemon transport does not support session event streaming");
+    };
+    while let Some(event) = events.next().await {
+        let event = event?;
+        println!("{}", serde_json::to_string(&event)?);
+        session.apply_event(event).await?;
+        if run_projection_finished(&session.current().projection().runs, &run.run_id) {
+            return Ok(());
+        }
+    }
+    bail!(
+        "session event stream ended before run {} reached a terminal state",
+        run.run_id
+    )
+}
+
+fn run_projection_finished(
+    runs: &[atman_proto::RunProjection],
+    run_id: &atman_proto::FlowRunId,
+) -> bool {
+    runs.iter().any(|run| {
+        &run.id == run_id
+            && matches!(
+                run.state,
+                atman_proto::RunLifecycle::Cancelled
+                    | atman_proto::RunLifecycle::Succeeded
+                    | atman_proto::RunLifecycle::Failed
+                    | atman_proto::RunLifecycle::Lost
+            )
+    })
 }
 
 async fn stream_daemon_events(
@@ -7112,6 +7153,50 @@ mod tests {
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    fn run_projection(
+        id: atman_proto::FlowRunId,
+        state: atman_proto::RunLifecycle,
+    ) -> atman_proto::RunProjection {
+        atman_proto::RunProjection {
+            id,
+            flow_name: "test".into(),
+            model: None,
+            provider: None,
+            parent_run_id: None,
+            parent_node_id: None,
+            state,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn daemon_follow_stops_only_for_the_target_run_terminal_state() {
+        let target = atman_proto::FlowRunId(uuid::Uuid::now_v7());
+        for state in [
+            atman_proto::RunLifecycle::Cancelled,
+            atman_proto::RunLifecycle::Succeeded,
+            atman_proto::RunLifecycle::Failed,
+            atman_proto::RunLifecycle::Lost,
+        ] {
+            let runs = vec![run_projection(target.clone(), state)];
+            assert!(run_projection_finished(&runs, &target));
+        }
+
+        let running = vec![run_projection(
+            target.clone(),
+            atman_proto::RunLifecycle::Running,
+        )];
+        assert!(!run_projection_finished(&running, &target));
+
+        let other = vec![run_projection(
+            atman_proto::FlowRunId(uuid::Uuid::now_v7()),
+            atman_proto::RunLifecycle::Succeeded,
+        )];
+        assert!(!run_projection_finished(&other, &target));
+    }
 
     async fn panic_provider_mutation() -> Result<atman_tui::ProviderMutationSuccess> {
         panic!("provider mutation panic fixture")
