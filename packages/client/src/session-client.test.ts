@@ -473,6 +473,64 @@ describe('SessionClient', () => {
     expect(create?.params.expected_request_revisions).toEqual({ 'permission-1': 7 })
     expect(session.current.cursor).toBe(3)
   })
+
+  test('validates managed resource identities and reconciles command cursors', async () => {
+    const resource = {
+      id: 'resource-1',
+      kind: 'terminal' as const,
+      owner_run_id: 'run-1',
+      state: 'running' as const,
+    }
+    const transport = new SessionTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'resource.inspect', kind: 'query', revision: 1 },
+              { name: 'resource.terminate', kind: 'command', revision: 1 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'resource.inspect':
+          return result(request, {
+            session_id: sessionId,
+            resource,
+            revision: 1,
+            cursor: 1,
+          })
+        case 'resource.terminate':
+          return result(request, {
+            session_id: sessionId,
+            resource_id: resource.id,
+            status: 'terminating',
+            revision: 2,
+            cursor: 2,
+          })
+        case 'session.get_updates': {
+          const afterCursor = Number(request.params.after_cursor ?? 0)
+          return result(
+            request,
+            page('generation-1', afterCursor, [
+              event('generation-1', afterCursor + 1, { type: 'heartbeat' }),
+            ]),
+          )
+        }
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    expect((await session.inspectResource(resource.id)).resource).toEqual(resource)
+    expect((await session.terminateResource(resource.id)).status).toBe('terminating')
+    expect(session.current.cursor).toBe(2)
+  })
 })
 
 async function* oneEvent(

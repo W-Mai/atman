@@ -13,23 +13,29 @@ import type {
   FormSubmission,
   GetSessionUpdatesResponse,
   InlineImage,
+  InspectResourceResponse,
   InterjectionLevel,
   InterjectSessionResponse,
   ListPermissionRequestsResponse,
+  ListResourcesResponse,
   PermissionRpcAction,
   PermissionRpcScope,
   PermissionRpcSelector,
   PromptId,
+  ReleaseResourceResponse,
   RenameSessionResponse,
   ResolveCompactReviewResponse,
   ResolvePermissionRequestsResponse,
   ResolvePromptResponse,
+  ResourceId,
+  RetainResourceResponse,
   SendMessageResponse,
   SessionId,
   SessionSignal,
   SessionSnapshot,
   StartRunResponse,
   SubmitFormResponse,
+  TerminateResourceResponse,
 } from './generated/types.generated'
 import { SessionStore, type SessionView } from './session-store'
 import type { TransportRequestOptions } from './transport'
@@ -385,6 +391,91 @@ export class SessionClient {
     return response
   }
 
+  async listResources(
+    options: TransportRequestOptions = {},
+  ): Promise<ListResourcesResponse> {
+    const response = await this.#client.call(
+      'resource.list',
+      { session_id: this.#sessionId },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async inspectResource(
+    resourceId: ResourceId,
+    options: TransportRequestOptions = {},
+  ): Promise<InspectResourceResponse> {
+    const response = await this.#client.call(
+      'resource.inspect',
+      { session_id: this.#sessionId, resource_id: resourceId },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_resource', 'resource', response.resource.id, resourceId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async terminateResource(
+    resourceId: ResourceId,
+    options: TransportRequestOptions = {},
+  ): Promise<TerminateResourceResponse> {
+    const response = await this.#client.command(
+      'resource.terminate',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        resource_id: resourceId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_resource', 'resource', response.resource_id, resourceId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async retainResource(
+    resourceId: ResourceId,
+    options: TransportRequestOptions = {},
+  ): Promise<RetainResourceResponse> {
+    const response = await this.#client.command(
+      'resource.retain',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        resource_id: resourceId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_resource', 'resource', response.resource.id, resourceId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async releaseResource(
+    resourceId: ResourceId,
+    options: TransportRequestOptions = {},
+  ): Promise<ReleaseResourceResponse> {
+    const response = await this.#client.command(
+      'resource.release',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        resource_id: resourceId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_resource', 'resource', response.resource.id, resourceId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
   async synchronize(options: SynchronizeOptions = {}): Promise<never> {
     const pollInterval = delayOption(
       options.pollIntervalMs,
@@ -572,7 +663,11 @@ export class SessionClient {
   }
 
   #validateTarget(
-    code: 'command_form' | 'command_compact_review' | 'command_prompt',
+    code:
+      | 'command_form'
+      | 'command_compact_review'
+      | 'command_prompt'
+      | 'command_resource',
     target: string,
     received: string,
     expected: string,

@@ -98,6 +98,7 @@ export type SessionCommandErrorCode =
   | 'command_form'
   | 'command_compact_review'
   | 'command_prompt'
+  | 'command_resource'
 
 export class SessionCommandError extends AtmanProtocolError {
   override readonly name: string = 'SessionCommandError'
