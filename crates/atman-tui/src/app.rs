@@ -1239,6 +1239,21 @@ impl AppState {
         None
     }
 
+    pub fn task_resource_id(&self, handle: &str) -> Option<atman_proto::ResourceId> {
+        let task_id = self
+            .task_handle_index
+            .get(handle)
+            .and_then(|index| self.task_snapshots.get(*index))
+            .map(|snapshot| snapshot.id.clone())
+            .or_else(|| {
+                self.task_registry
+                    .as_ref()
+                    .and_then(|registry| registry.lookup_by_handle(handle))
+                    .map(|snapshot| snapshot.id)
+            })?;
+        Some(atman_proto::ResourceId::task(task_id.0))
+    }
+
     pub fn bash_item_handle(&self, idx: usize) -> Option<String> {
         let item = self.items.get(idx)?;
         if let crate::app::OutputItem::Bash { handle, .. } = item {
@@ -6222,6 +6237,30 @@ mod terminal_stream_tests {
         };
         assert_eq!(title.as_deref(), Some("检查系统负载"));
         assert_eq!(command.as_deref(), Some("htop --sort-key PERCENT_CPU"));
+    }
+
+    #[test]
+    fn terminal_handle_resolves_to_public_resource_identity() {
+        let mut app = AppState::new("s".into(), None);
+        let snapshot = atman_runtime::TaskSnapshot {
+            id: atman_runtime::TaskId::now(),
+            kind: atman_runtime::TaskKind::Terminal,
+            label: "terminal".into(),
+            command: None,
+            status: atman_runtime::TaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+            source_handle: "term_s_0".into(),
+            session_id: "s".into(),
+            workspace_id: None,
+            flow_run_id: None,
+            termination: None,
+        };
+        let expected = atman_proto::ResourceId::task(snapshot.id.0);
+        app.apply_task_event(atman_runtime::TaskEvent::Registered(snapshot));
+
+        assert_eq!(app.task_resource_id("term_s_0"), Some(expected));
+        assert_eq!(app.task_resource_id("term_missing"), None);
     }
 
     #[test]

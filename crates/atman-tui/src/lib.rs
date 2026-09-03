@@ -158,7 +158,7 @@ pub enum TuiControl {
         entry: atman_runtime::model_registry::ProviderEntry,
     },
     TermResize {
-        handle: String,
+        resource_id: atman_proto::ResourceId,
         rows: u16,
         cols: u16,
     },

@@ -809,8 +809,14 @@ impl WindowManager {
                     self.toggle_maximize(id, app.maximized_canvas());
                 }
                 WmCommand::TermResize { handle, rows, cols } => {
-                    if let Some(tx) = control_tx {
-                        let _ = tx.send(crate::TuiControl::TermResize { handle, rows, cols });
+                    if let (Some(tx), Some(resource_id)) =
+                        (control_tx, app.task_resource_id(&handle))
+                    {
+                        let _ = tx.send(crate::TuiControl::TermResize {
+                            resource_id,
+                            rows,
+                            cols,
+                        });
                     }
                 }
                 WmCommand::OpenTaskPanel { handle, maximized } => {

@@ -376,15 +376,18 @@ pub(crate) async fn run_frames(
                                             let inner_cols = p.rect.width.saturating_sub(8);
                                             let inner_rows = p.rect.height.saturating_sub(5);
                                             if inner_cols > 0 && inner_rows > 0 {
-                                                if let Some(tx) = &handle.control_tx {
+                                                let terminal_handle = app.wm
+                                                    .content_kind(max_id)
+                                                    .and_then(|kind| match kind {
+                                                        crate::wm::WindowContent::Task { handle, .. } => Some(handle),
+                                                        _ => None,
+                                                    });
+                                                if let (Some(tx), Some(resource_id)) = (
+                                                    &handle.control_tx,
+                                                    terminal_handle.and_then(|handle| app.app.task_resource_id(handle)),
+                                                ) {
                                                     let _ = tx.send(TuiControl::TermResize {
-                                                        handle: app.wm
-                                                            .content_kind(max_id)
-                                                            .and_then(|kind| match kind {
-                                                                crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
-                                                                _ => None,
-                                                            })
-                                                            .unwrap_or_default(),
+                                                        resource_id,
                                                         rows: inner_rows,
                                                         cols: inner_cols,
                                                     });
@@ -932,15 +935,18 @@ pub(crate) async fn run_frames(
                                                 let inner_cols = nw.saturating_sub(8);
                                                 let inner_rows = nh.saturating_sub(5);
                                                 if inner_cols > 0 && inner_rows > 0 {
-                                                    if let Some(tx) = &handle.control_tx {
+                                                    let terminal_handle = app.wm
+                                                        .content_kind(id)
+                                                        .and_then(|kind| match kind {
+                                                            crate::wm::WindowContent::Task { handle, .. } => Some(handle),
+                                                            _ => None,
+                                                        });
+                                                    if let (Some(tx), Some(resource_id)) = (
+                                                        &handle.control_tx,
+                                                        terminal_handle.and_then(|handle| app.app.task_resource_id(handle)),
+                                                    ) {
                                                         let _ = tx.send(TuiControl::TermResize {
-                                                            handle: app.wm
-                                                                .content_kind(id)
-                                                                .and_then(|kind| match kind {
-                                                                    crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
-                                                                    _ => None,
-                                                                })
-                                                                .unwrap_or_default(),
+                                                            resource_id,
                                                             rows: inner_rows,
                                                             cols: inner_cols,
                                                         });
@@ -1206,15 +1212,18 @@ pub(crate) async fn run_frames(
                                         let inner_cols = p.rect.width.saturating_sub(8);
                                         let inner_rows = p.rect.height.saturating_sub(5);
                                         if inner_cols > 0 && inner_rows > 0 {
-                                            if let Some(tx) = &handle.control_tx {
+                                            let terminal_handle = app.wm
+                                                .content_kind(id)
+                                                .and_then(|kind| match kind {
+                                                    crate::wm::WindowContent::Task { handle, .. } => Some(handle),
+                                                    _ => None,
+                                                });
+                                            if let (Some(tx), Some(resource_id)) = (
+                                                &handle.control_tx,
+                                                terminal_handle.and_then(|handle| app.app.task_resource_id(handle)),
+                                            ) {
                                                 let _ = tx.send(TuiControl::TermResize {
-                                                    handle: app.wm
-                                                        .content_kind(id)
-                                                        .and_then(|kind| match kind {
-                                                            crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
-                                                            _ => None,
-                                                        })
-                                                        .unwrap_or_default(),
+                                                    resource_id,
                                                     rows: inner_rows,
                                                     cols: inner_cols,
                                                 });

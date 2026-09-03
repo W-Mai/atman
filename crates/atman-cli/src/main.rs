@@ -2029,13 +2029,31 @@ async fn cmd_repl_once(
                             let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult((msg, ok)));
                         });
                     }
-                    atman_tui::TuiControl::TermResize { handle, rows, cols } => {
-                        if let Some(tr) = &session_for_ctrl_term_registry {
-                            if let Ok(entry) =
-                                tr.lookup(&handle, &session_for_ctrl.id().to_string())
-                            {
-                                let _ = entry.resize(rows, cols);
-                            }
+                    atman_tui::TuiControl::TermResize {
+                        resource_id,
+                        rows,
+                        cols,
+                    } => {
+                        let task = resource_id
+                            .task_id()
+                            .map(atman_runtime::TaskId)
+                            .and_then(|id| {
+                                executor_for_ctrl
+                                    .tool_ctx
+                                    .task_registry
+                                    .as_ref()
+                                    .and_then(|registry| registry.lookup(&id))
+                            })
+                            .filter(|task| {
+                                task.session_id == session_for_ctrl.id().to_string()
+                                    && task.kind == atman_runtime::TaskKind::Terminal
+                            });
+                        if let (Some(registry), Some(task)) =
+                            (&session_for_ctrl_term_registry, task)
+                            && let Ok(entry) = registry
+                                .lookup(&task.source_handle, &session_for_ctrl.id().to_string())
+                        {
+                            let _ = entry.resize(rows, cols);
                         }
                     }
                     atman_tui::TuiControl::McpTest { name } => {
