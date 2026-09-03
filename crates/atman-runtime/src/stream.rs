@@ -365,6 +365,9 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
         | StreamFrame::ToolCallDraft {
             run_id: Some(rid), ..
         }
+        | StreamFrame::LlmRetry {
+            run_id: Some(rid), ..
+        }
         | StreamFrame::LlmDone {
             run_id: Some(rid), ..
         }
@@ -407,6 +410,15 @@ mod tests {
         let json = serde_json::to_string(&f).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, StreamFrame::ToolNode { .. }));
+    }
+
+    #[test]
+    fn llm_retry_routes_to_its_run() {
+        let frame = StreamFrame::LlmRetry {
+            run_id: Some("run-1".into()),
+        };
+
+        assert_eq!(frame_run_id(&frame), Some("run-1"));
     }
 
     #[test]
