@@ -26,6 +26,14 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert_eq!(capabilities.protocol_version, atman_proto::PROTOCOL_VERSION);
     assert_eq!(capabilities.daemon_generation.0, "test-generation");
     assert_eq!(
+        capabilities.snapshot_schema_version,
+        atman_proto::SNAPSHOT_SCHEMA_VERSION
+    );
+    assert_eq!(
+        capabilities.event_schema_version,
+        atman_proto::PROJECTION_EVENT_SCHEMA_VERSION
+    );
+    assert_eq!(
         capabilities.methods.len(),
         atman_daemon::SUPPORTED_METHODS.len()
     );

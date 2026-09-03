@@ -87,6 +87,10 @@ pub enum ClientError {
     Correlation { expected: u64, received: String },
     #[error("daemon protocol version {daemon} is incompatible with client version {client}")]
     ProtocolVersion { client: u32, daemon: u32 },
+    #[error("daemon snapshot schema version {daemon} is incompatible with client version {client}")]
+    SnapshotSchemaVersion { client: u32, daemon: u32 },
+    #[error("daemon event schema version {daemon} is incompatible with client version {client}")]
+    EventSchemaVersion { client: u32, daemon: u32 },
     #[error("daemon does not support {method} revision {revision}")]
     UnsupportedMethod { method: &'static str, revision: u32 },
 }
@@ -145,12 +149,7 @@ impl Client {
             },
         )
         .await?;
-        if capabilities.protocol_version != PROTOCOL_VERSION {
-            return Err(ClientError::ProtocolVersion {
-                client: PROTOCOL_VERSION,
-                daemon: capabilities.protocol_version,
-            });
-        }
+        validate_capabilities(&capabilities)?;
         Ok(Self {
             inner: Arc::new(ClientInner {
                 transport,
@@ -180,12 +179,7 @@ impl Client {
             },
         )
         .await?;
-        if capabilities.protocol_version != PROTOCOL_VERSION {
-            return Err(ClientError::ProtocolVersion {
-                client: PROTOCOL_VERSION,
-                daemon: capabilities.protocol_version,
-            });
-        }
+        validate_capabilities(&capabilities)?;
         *self.inner.capabilities.write().unwrap() = capabilities.clone();
         Ok(capabilities)
     }
@@ -277,6 +271,32 @@ impl Client {
     }
 }
 
+fn validate_capabilities(capabilities: &CapabilitiesResponse) -> Result<(), ClientError> {
+    if capabilities.protocol_version != PROTOCOL_VERSION {
+        return Err(ClientError::ProtocolVersion {
+            client: PROTOCOL_VERSION,
+            daemon: capabilities.protocol_version,
+        });
+    }
+    if capabilities.supports::<rpc::GetSessionSnapshot>()
+        && capabilities.snapshot_schema_version != atman_proto::SNAPSHOT_SCHEMA_VERSION
+    {
+        return Err(ClientError::SnapshotSchemaVersion {
+            client: atman_proto::SNAPSHOT_SCHEMA_VERSION,
+            daemon: capabilities.snapshot_schema_version,
+        });
+    }
+    if capabilities.supports::<rpc::GetSessionUpdates>()
+        && capabilities.event_schema_version != atman_proto::PROJECTION_EVENT_SCHEMA_VERSION
+    {
+        return Err(ClientError::EventSchemaVersion {
+            client: atman_proto::PROJECTION_EVENT_SCHEMA_VERSION,
+            daemon: capabilities.event_schema_version,
+        });
+    }
+    Ok(())
+}
+
 async fn invoke<M: RpcMethod>(
     transport: &dyn RpcTransport,
     request_id: u64,
@@ -311,9 +331,9 @@ mod tests {
     };
 
     use atman_proto::{
-        DaemonGeneration, EVENT_SCHEMA_VERSION, EmptyParams, FlowRunId, JsonRpcResponse,
-        MethodCapability, PingResponse, ProtocolLimits, Revision, RpcKind, method_descriptor,
-        methods,
+        DaemonGeneration, EmptyParams, FlowRunId, JsonRpcResponse, MethodCapability,
+        PROJECTION_EVENT_SCHEMA_VERSION, PingResponse, ProtocolLimits, Revision, RpcKind,
+        SNAPSHOT_SCHEMA_VERSION, method_descriptor, methods,
     };
 
     use super::*;
@@ -321,6 +341,8 @@ mod tests {
     struct FakeTransport {
         requests: Mutex<Vec<JsonRpcRequest>>,
         protocol_version: u32,
+        snapshot_schema_version: u32,
+        event_schema_version: u32,
     }
 
     struct RetryRunFlowTransport {
@@ -354,7 +376,8 @@ mod tests {
                                 protocol_version: PROTOCOL_VERSION,
                                 daemon_version: "test".into(),
                                 daemon_generation: DaemonGeneration("generation".into()),
-                                event_schema_version: EVENT_SCHEMA_VERSION,
+                                snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
+                                event_schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
                                 methods,
                                 limits: ProtocolLimits {
                                     max_event_page_size: 100,
@@ -386,6 +409,8 @@ mod tests {
             Self {
                 requests: Mutex::new(Vec::new()),
                 protocol_version,
+                snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
+                event_schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
             }
         }
     }
@@ -402,10 +427,13 @@ mod tests {
                         protocol_version: self.protocol_version,
                         daemon_version: "test".into(),
                         daemon_generation: DaemonGeneration("generation".into()),
-                        event_schema_version: EVENT_SCHEMA_VERSION,
+                        snapshot_schema_version: self.snapshot_schema_version,
+                        event_schema_version: self.event_schema_version,
                         methods: vec![
                             method_descriptor::<rpc::DaemonCapabilities>(),
                             method_descriptor::<rpc::Ping>(),
+                            method_descriptor::<rpc::GetSessionSnapshot>(),
+                            method_descriptor::<rpc::GetSessionUpdates>(),
                         ]
                         .into_iter()
                         .map(|method| MethodCapability {
@@ -453,6 +481,39 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(error, ClientError::ProtocolVersion { .. }));
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_incompatible_projection_schema_versions() {
+        let snapshot_error = Client::connect(
+            FakeTransport {
+                snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION + 1,
+                ..FakeTransport::new(PROTOCOL_VERSION)
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            snapshot_error,
+            ClientError::SnapshotSchemaVersion { .. }
+        ));
+
+        let event_error = Client::connect(
+            FakeTransport {
+                event_schema_version: PROJECTION_EVENT_SCHEMA_VERSION + 1,
+                ..FakeTransport::new(PROTOCOL_VERSION)
+            },
+            ClientIdentity::new("test", "1"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(
+            event_error,
+            ClientError::EventSchemaVersion { .. }
+        ));
     }
 
     #[tokio::test]

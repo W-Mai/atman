@@ -948,8 +948,8 @@ mod tests {
     };
 
     use atman_proto::{
-        CapabilitiesResponse, EVENT_SCHEMA_VERSION, JsonRpcRequest, JsonRpcResponse,
-        MethodCapability, ProtocolLimits, method_descriptor, methods,
+        CapabilitiesResponse, JsonRpcRequest, JsonRpcResponse, MethodCapability,
+        PROJECTION_EVENT_SCHEMA_VERSION, ProtocolLimits, method_descriptor, methods,
     };
     use futures::future::BoxFuture;
 
@@ -1271,7 +1271,8 @@ mod tests {
             protocol_version: atman_proto::PROTOCOL_VERSION,
             daemon_version: "test".into(),
             daemon_generation: DaemonGeneration(generation.into()),
-            event_schema_version: EVENT_SCHEMA_VERSION,
+            snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
+            event_schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
             methods: [
                 method_descriptor::<rpc::DaemonCapabilities>(),
                 method_descriptor::<rpc::GetSessionSnapshot>(),

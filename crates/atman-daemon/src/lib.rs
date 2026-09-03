@@ -205,7 +205,8 @@ pub async fn dispatch_as(
                         protocol_version: atman_proto::PROTOCOL_VERSION,
                         daemon_version: env!("CARGO_PKG_VERSION").into(),
                         daemon_generation: DaemonGeneration(state.daemon_generation().to_owned()),
-                        event_schema_version: atman_proto::EVENT_SCHEMA_VERSION,
+                        snapshot_schema_version: atman_proto::SNAPSHOT_SCHEMA_VERSION,
+                        event_schema_version: atman_proto::PROJECTION_EVENT_SCHEMA_VERSION,
                         methods: SUPPORTED_METHODS
                             .iter()
                             .map(|method| MethodCapability {

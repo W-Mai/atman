@@ -389,9 +389,15 @@ pub struct CapabilitiesResponse {
     pub protocol_version: u32,
     pub daemon_version: String,
     pub daemon_generation: DaemonGeneration,
+    #[serde(default = "current_snapshot_schema_version")]
+    pub snapshot_schema_version: u32,
     pub event_schema_version: u32,
     pub methods: Vec<MethodCapability>,
     pub limits: ProtocolLimits,
+}
+
+const fn current_snapshot_schema_version() -> u32 {
+    SNAPSHOT_SCHEMA_VERSION
 }
 
 impl CapabilitiesResponse {
@@ -1327,7 +1333,8 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: "test".into(),
             daemon_generation: DaemonGeneration("generation".into()),
-            event_schema_version: EVENT_SCHEMA_VERSION,
+            snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
+            event_schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
             methods: methods::ALL
                 .iter()
                 .map(|method| MethodCapability {
@@ -1345,6 +1352,14 @@ mod tests {
         assert!(capabilities.supports::<rpc::ResolvePermissionRequests>());
         assert!(capabilities.supports::<rpc::RetainResource>());
         assert!(capabilities.supports::<rpc::ReleaseResource>());
+
+        let mut legacy = serde_json::to_value(&capabilities).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot_schema_version");
+        let decoded: CapabilitiesResponse = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.snapshot_schema_version, SNAPSHOT_SCHEMA_VERSION);
     }
 
     #[test]
