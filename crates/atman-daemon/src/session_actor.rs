@@ -36,6 +36,7 @@ pub(crate) struct SessionActorView {
     pub projection_revision: atman_proto::Revision,
     pub runtime_event_seq: u64,
     pub runs: HashMap<FlowRunId, LiveRunView>,
+    pub idle_since: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +109,11 @@ impl SessionActorView {
 
     pub fn first_run_started_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.runs.values().map(|run| run.started_at).min()
+    }
+
+    pub fn has_been_idle_for(&self, duration: std::time::Duration) -> bool {
+        self.idle_since
+            .is_some_and(|idle_since| idle_since.elapsed() >= duration)
     }
 }
 
@@ -190,11 +196,12 @@ impl SessionActorHandle {
         let leases = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
-        let runs = initial_runs
+        let runs: HashMap<_, _> = initial_runs
             .into_iter()
             .map(|run| (run.run_id.clone(), run))
             .collect();
-        let (view_tx, view) = watch::channel(view_for(1, &runs, &projection));
+        let idle_since = runs.is_empty().then(std::time::Instant::now);
+        let (view_tx, view) = watch::channel(view_for(1, &runs, &projection, idle_since));
         let actor = SessionActor {
             session_id,
             session: session.clone(),
@@ -204,6 +211,7 @@ impl SessionActorHandle {
             form_terminals: VecDeque::new(),
             compact_review_terminals: VecDeque::new(),
             revision: 1,
+            idle_since,
             projection,
             event_cursor,
             daemon_generation,
@@ -631,6 +639,7 @@ struct SessionActor {
     form_terminals: VecDeque<(String, FormResolutionStatus)>,
     compact_review_terminals: VecDeque<(String, CompactReviewResolutionStatus)>,
     revision: u64,
+    idle_since: Option<std::time::Instant>,
     projection: SessionProjector,
     event_cursor: EventCursor,
     daemon_generation: DaemonGeneration,
@@ -666,6 +675,7 @@ impl SessionActor {
                 changed = self.forms_rx.changed() => ActorInput::Forms(changed),
                 changed = self.compact_review_rx.changed() => ActorInput::CompactReview(changed),
             };
+            self.record_activity();
             match input {
                 ActorInput::Command(None) => break,
                 ActorInput::Command(Some(Command::TryUnload { reply })) => {
@@ -895,9 +905,28 @@ impl SessionActor {
     }
 
     fn publish(&mut self) {
+        if self.runs.is_empty() {
+            self.idle_since.get_or_insert_with(std::time::Instant::now);
+        } else {
+            self.idle_since = None;
+        }
         self.revision = self.revision.saturating_add(1);
-        self.view_tx
-            .send_replace(view_for(self.revision, &self.runs, &self.projection));
+        self.view_tx.send_replace(view_for(
+            self.revision,
+            &self.runs,
+            &self.projection,
+            self.idle_since,
+        ));
+    }
+
+    fn record_activity(&mut self) {
+        if self.runs.is_empty() {
+            let idle_since = std::time::Instant::now();
+            self.idle_since = Some(idle_since);
+            self.view_tx.send_modify(|view| {
+                view.idle_since = Some(idle_since);
+            });
+        }
     }
 
     fn prepare_unload(&mut self) -> Result<bool> {
@@ -1746,11 +1775,13 @@ fn view_for(
     revision: u64,
     runs: &HashMap<FlowRunId, LiveRun>,
     projection: &SessionProjector,
+    idle_since: Option<std::time::Instant>,
 ) -> SessionActorView {
     SessionActorView {
         revision,
         projection_revision: projection.projection().revision,
         runtime_event_seq: projection.last_runtime_seq(),
+        idle_since,
         runs: runs
             .iter()
             .map(|(id, run)| {

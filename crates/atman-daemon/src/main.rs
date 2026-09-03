@@ -10,6 +10,9 @@ use atman_daemon::{
 };
 use tokio_util::sync::CancellationToken;
 
+const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const SESSION_IDLE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let data_dir = default_data_dir()?;
@@ -78,6 +81,11 @@ async fn main() -> Result<()> {
     println!("[atman-daemon] http listening on http://{addr}");
 
     let shutdown = CancellationToken::new();
+    let idle_eviction_task = tokio::spawn(state.clone().run_idle_eviction(
+        SESSION_IDLE_TIMEOUT,
+        SESSION_IDLE_SWEEP_INTERVAL,
+        shutdown.clone(),
+    ));
     let unix_task = {
         let sh = shutdown.clone();
         let st = state.clone();
@@ -99,6 +107,7 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(async move { shutdown.cancelled().await });
     serve.await?;
     let _ = unix_task.await;
+    let _ = idle_eviction_task.await;
     pidfile::remove_pid(&pid_path);
     Ok(())
 }

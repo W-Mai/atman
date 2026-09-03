@@ -483,6 +483,46 @@ impl DaemonState {
         Ok(false)
     }
 
+    pub async fn evict_idle_sessions(&self, idle_for: std::time::Duration) -> usize {
+        let candidates = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, actor)| actor.view().has_been_idle_for(idle_for))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut evicted = 0;
+        for session_id in candidates {
+            match self.unload_session_if_idle(&session_id).await {
+                Ok(true) => evicted += 1,
+                Ok(false) => {}
+                Err(error) => atman_runtime::notify!(
+                    warn,
+                    location = Log,
+                    "idle session {session_id} could not be unloaded: {error:#}"
+                ),
+            }
+        }
+        evicted
+    }
+
+    pub async fn run_idle_eviction(
+        self: std::sync::Arc<Self>,
+        idle_for: std::time::Duration,
+        interval: std::time::Duration,
+        shutdown: CancellationToken,
+    ) {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(interval) => {
+                    self.evict_idle_sessions(idle_for).await;
+                }
+            }
+        }
+    }
+
     pub fn has_live_runs(&self, id: &SessionId) -> bool {
         self.sessions
             .lock()
@@ -906,5 +946,43 @@ mod tests {
 
         assert!(state.unload_session_if_idle(&session_id).await.unwrap());
         assert!(state.session_revision(&session_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_sweep_evicts_only_quiescent_session_actors() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let idle = Arc::new(atman_runtime::Session::open_ephemeral());
+        let idle_id = SessionId(idle.id().0);
+        state
+            .register_session(idle_id.clone(), idle, "owner")
+            .await
+            .unwrap();
+        let attached = Arc::new(atman_runtime::Session::open_ephemeral());
+        let attached_id = SessionId(attached.id().0);
+        state
+            .register_session(attached_id.clone(), attached, "owner")
+            .await
+            .unwrap();
+        let (updates, _) = state
+            .subscribe_session_updates(&attached_id, "owner")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            state.evict_idle_sessions(std::time::Duration::ZERO).await,
+            1
+        );
+        assert!(state.session_revision(&idle_id).is_none());
+        assert!(state.session_revision(&attached_id).is_some());
+
+        drop(updates);
+        assert_eq!(
+            state.evict_idle_sessions(std::time::Duration::ZERO).await,
+            1
+        );
+        assert!(state.session_revision(&attached_id).is_none());
     }
 }
