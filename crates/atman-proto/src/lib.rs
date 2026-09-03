@@ -299,6 +299,7 @@ pub mod methods {
     pub const GET_SESSION_UPDATES: &str = "session.get_updates";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
     pub const SUBMIT_FORM: &str = "form.submit";
+    pub const RESOLVE_COMPACT_REVIEW: &str = "compact_review.resolve";
     pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
     pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
@@ -320,6 +321,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::GetSessionUpdates>(),
         super::method_descriptor::<super::rpc::ResolvePrompt>(),
         super::method_descriptor::<super::rpc::SubmitForm>(),
+        super::method_descriptor::<super::rpc::ResolveCompactReview>(),
         super::method_descriptor::<super::rpc::ListPermissionRequests>(),
         super::method_descriptor::<super::rpc::CreatePermissionGroup>(),
         super::method_descriptor::<super::rpc::ResolvePermissionRequests>(),
@@ -560,6 +562,42 @@ pub struct SubmitFormResponse {
     pub status: FormResolutionStatus,
     pub session_id: SessionId,
     pub form_id: String,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum CompactReviewDecision {
+    AcceptAsIs,
+    AcceptEdited { summary: String },
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResolveCompactReviewRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub review_id: String,
+    pub decision: CompactReviewDecision,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactReviewResolutionStatus {
+    Resolved,
+    AlreadyResolved,
+    Abandoned,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ResolveCompactReviewResponse {
+    pub resolved: bool,
+    pub status: CompactReviewResolutionStatus,
+    pub session_id: SessionId,
+    pub review_id: String,
     pub revision: Revision,
     pub cursor: EventCursor,
 }
@@ -923,6 +961,13 @@ pub mod rpc {
         Command,
         SubmitFormRequest,
         SubmitFormResponse
+    );
+    method!(
+        ResolveCompactReview,
+        methods::RESOLVE_COMPACT_REVIEW,
+        Command,
+        ResolveCompactReviewRequest,
+        ResolveCompactReviewResponse
     );
     method!(
         ListPermissionRequests,

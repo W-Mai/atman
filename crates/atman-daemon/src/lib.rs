@@ -3,8 +3,9 @@ use atman_proto::{
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, InterjectSessionResponse, JsonRpcError,
     JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
     PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionResponse, RequestId,
-    ResolvePromptResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
-    StartRunResponse, SubmitFormResponse, method_descriptor, methods, rpc,
+    ResolveCompactReviewResponse, ResolvePromptResponse, RpcMethod, RpcMethodDescriptor,
+    RunFlowResponse, SendMessageResponse, StartRunResponse, SubmitFormResponse, method_descriptor,
+    methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -152,6 +153,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::GetSessionUpdates>(),
     method_descriptor::<rpc::ResolvePrompt>(),
     method_descriptor::<rpc::SubmitForm>(),
+    method_descriptor::<rpc::ResolveCompactReview>(),
     method_descriptor::<rpc::ListPermissionRequests>(),
     method_descriptor::<rpc::CreatePermissionGroup>(),
     method_descriptor::<rpc::ResolvePermissionRequests>(),
@@ -591,6 +593,47 @@ pub async fn dispatch_as(
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::RESOLVE_COMPACT_REVIEW => {
+            match parse_params::<rpc::ResolveCompactReview>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::ResolveCompactReview, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let commit = operation_state
+                                .resolve_compact_review(
+                                    &operation_params.session_id,
+                                    operation_params.review_id.clone(),
+                                    operation_params.decision,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(ResolveCompactReviewResponse {
+                                resolved: commit.status
+                                    == atman_proto::CompactReviewResolutionStatus::Resolved,
+                                status: commit.status,
+                                session_id: operation_params.session_id,
+                                review_id: operation_params.review_id,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                        },
+                    )
+                    .await
+                    {
+                        Ok(response) => method_response::<rpc::ResolveCompactReview>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::LIST_PERMISSION_REQUESTS => {
             match parse_params::<rpc::ListPermissionRequests>(req.params) {
                 Ok(p) => match state

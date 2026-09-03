@@ -83,6 +83,8 @@ async fn openapi_json_returns_301_document_with_expected_shape() {
         "CancelRunRequest",
         "ResolvePromptRequest",
         "PromptResolutionStatus",
+        "ResolveCompactReviewRequest",
+        "CompactReviewResolutionStatus",
         "GetEventsRequest",
         "SessionSummary",
         "SessionStatus",

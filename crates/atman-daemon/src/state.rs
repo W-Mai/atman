@@ -141,6 +141,19 @@ impl DaemonState {
         actor.submit_form(id, submission).await
     }
 
+    pub(crate) async fn resolve_compact_review(
+        &self,
+        session_id: &SessionId,
+        id: String,
+        decision: atman_proto::CompactReviewDecision,
+        principal: &str,
+    ) -> Result<crate::session_actor::CompactReviewResolutionCommit> {
+        let actor = self
+            .authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.resolve_compact_review(id, decision).await
+    }
+
     pub fn sessions_root(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }

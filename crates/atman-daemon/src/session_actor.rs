@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus,
-    FormSubmission, GetSessionUpdatesResponse, ListPermissionRequestsResponse,
-    PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView, PermissionRequestView,
-    PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    PromptResolutionStatus, ResolvePermissionRequestsResponse, ResyncRequired,
-    RunCancellationStatus, ServerEvent, SessionId, SessionProjection, SessionSummary,
+    CompactReviewDecision, CompactReviewResolutionStatus, CreatePermissionGroupResponse,
+    DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus, FormSubmission,
+    GetSessionUpdatesResponse, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
+    PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
+    ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
+    ResyncRequired, RunCancellationStatus, ServerEvent, SessionId, SessionProjection,
+    SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -19,6 +20,7 @@ const UPDATE_RETENTION: usize = 2_048;
 const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
 const PROMPT_TERMINAL_RETENTION: usize = 256;
 const FORM_TERMINAL_RETENTION: usize = 256;
+const COMPACT_REVIEW_TERMINAL_RETENTION: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunAdmission {
@@ -59,6 +61,12 @@ pub(crate) struct PromptResolutionCommit {
 
 pub(crate) struct FormResolutionCommit {
     pub status: FormResolutionStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct CompactReviewResolutionCommit {
+    pub status: CompactReviewResolutionStatus,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -138,6 +146,7 @@ impl SessionActorHandle {
             prompts: HashMap::new(),
             prompt_terminals: VecDeque::new(),
             form_terminals: VecDeque::new(),
+            compact_review_terminals: VecDeque::new(),
             revision: 1,
             projection,
             event_cursor,
@@ -255,6 +264,19 @@ impl SessionActorHandle {
         request(&self.tx, |reply| Command::SubmitForm {
             id,
             submission,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn resolve_compact_review(
+        &self,
+        id: String,
+        decision: CompactReviewDecision,
+    ) -> Result<CompactReviewResolutionCommit> {
+        request(&self.tx, |reply| Command::ResolveCompactReview {
+            id,
+            decision,
             reply,
         })
         .await?
@@ -392,6 +414,11 @@ enum Command {
         submission: FormSubmission,
         reply: oneshot::Sender<Result<FormResolutionCommit>>,
     },
+    ResolveCompactReview {
+        id: String,
+        decision: CompactReviewDecision,
+        reply: oneshot::Sender<Result<CompactReviewResolutionCommit>>,
+    },
     Rename {
         title: String,
         reply: oneshot::Sender<Result<RenameSessionCommit>>,
@@ -446,6 +473,7 @@ struct SessionActor {
     prompts: HashMap<PromptId, PendingPrompt>,
     prompt_terminals: VecDeque<(PromptId, PromptResolutionStatus)>,
     form_terminals: VecDeque<(String, FormResolutionStatus)>,
+    compact_review_terminals: VecDeque<(String, CompactReviewResolutionStatus)>,
     revision: u64,
     projection: SessionProjector,
     event_cursor: EventCursor,
@@ -597,6 +625,14 @@ impl SessionActor {
                 reply,
             } => {
                 let result = self.submit_form(id, submission);
+                let _ = reply.send(result);
+            }
+            Command::ResolveCompactReview {
+                id,
+                decision,
+                reply,
+            } => {
+                let result = self.resolve_compact_review(id, decision);
                 let _ = reply.send(result);
             }
             Command::Rename { title, reply } => {
@@ -835,6 +871,53 @@ impl SessionActor {
         }
     }
 
+    fn resolve_compact_review(
+        &mut self,
+        id: String,
+        decision: CompactReviewDecision,
+    ) -> Result<CompactReviewResolutionCommit> {
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(published_seq)?;
+        let status = match self
+            .session
+            .compact_reviews()
+            .decide_with_commit(&id, runtime_compact_review_decision(decision))
+        {
+            Some(commit) => {
+                let event = commit.event.ok_or_else(|| {
+                    anyhow::anyhow!("session compact review resolution was not persisted")
+                })?;
+                self.catch_up_through(event.seq)?;
+                CompactReviewResolutionStatus::Resolved
+            }
+            None => self
+                .compact_review_terminals
+                .iter()
+                .rev()
+                .find(|(review_id, _)| review_id == &id)
+                .map(|(_, status)| *status)
+                .unwrap_or(CompactReviewResolutionStatus::NotFound),
+        };
+        Ok(CompactReviewResolutionCommit {
+            status,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn remember_compact_review_terminal(
+        &mut self,
+        id: String,
+        status: CompactReviewResolutionStatus,
+    ) {
+        self.compact_review_terminals
+            .retain(|(review_id, _)| review_id != &id);
+        self.compact_review_terminals.push_back((id, status));
+        while self.compact_review_terminals.len() > COMPACT_REVIEW_TERMINAL_RETENTION {
+            self.compact_review_terminals.pop_front();
+        }
+    }
+
     fn apply_runtime_event(&mut self, event: &atman_runtime::event::EventEnvelope) {
         if let atman_runtime::event::Event::FormResolved {
             form_id, abandoned, ..
@@ -846,6 +929,21 @@ impl SessionActor {
                     FormResolutionStatus::Abandoned
                 } else {
                     FormResolutionStatus::AlreadyResolved
+                },
+            );
+        }
+        if let atman_runtime::event::Event::CompactReviewResolved {
+            review_id,
+            abandoned,
+            ..
+        } = &event.event
+        {
+            self.remember_compact_review_terminal(
+                review_id.clone(),
+                if *abandoned {
+                    CompactReviewResolutionStatus::Abandoned
+                } else {
+                    CompactReviewResolutionStatus::AlreadyResolved
                 },
             );
         }
@@ -1114,6 +1212,20 @@ fn runtime_form_submission(submission: FormSubmission) -> atman_runtime::form::F
             answers: answers.into_iter().map(runtime_form_answer).collect(),
         },
         FormSubmission::Rejected => atman_runtime::form::FormSubmission::Rejected,
+    }
+}
+
+fn runtime_compact_review_decision(
+    decision: CompactReviewDecision,
+) -> atman_runtime::session::CompactReviewDecision {
+    match decision {
+        CompactReviewDecision::AcceptAsIs => {
+            atman_runtime::session::CompactReviewDecision::AcceptAsIs
+        }
+        CompactReviewDecision::AcceptEdited { summary } => {
+            atman_runtime::session::CompactReviewDecision::AcceptEdited { summary }
+        }
+        CompactReviewDecision::Reject => atman_runtime::session::CompactReviewDecision::Reject,
     }
 }
 
