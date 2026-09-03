@@ -285,6 +285,16 @@ pub enum Event {
         prompt_id: uuid::Uuid,
         answer: serde_json::Value,
     },
+    FormRequested {
+        form: crate::form::PendingForm,
+    },
+    FormResolved {
+        form_id: String,
+        run_id: FlowRunId,
+        submission: crate::form::FormSubmission,
+        #[serde(default)]
+        abandoned: bool,
+    },
     FlowGraph {
         run_id: FlowRunId,
         graph: crate::nodegraph::FlowGraph,

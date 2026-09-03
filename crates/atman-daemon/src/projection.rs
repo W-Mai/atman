@@ -466,6 +466,33 @@ impl SessionProjector {
                     });
                 }
             }
+            Event::FormRequested { form } => {
+                let form = pending_form_projection(form);
+                self.projection
+                    .interactions
+                    .forms
+                    .retain(|item| item.id != form.id);
+                self.projection.interactions.forms.push(form);
+                self.projection
+                    .interactions
+                    .forms
+                    .sort_by_key(|item| item.emitted_at);
+                changes.push(ProjectionChange::InteractionsSet {
+                    interactions: self.projection.interactions.clone(),
+                });
+            }
+            Event::FormResolved { form_id, .. } => {
+                let before = self.projection.interactions.forms.len();
+                self.projection
+                    .interactions
+                    .forms
+                    .retain(|item| item.id != *form_id);
+                if before != self.projection.interactions.forms.len() {
+                    changes.push(ProjectionChange::InteractionsSet {
+                        interactions: self.projection.interactions.clone(),
+                    });
+                }
+            }
             Event::UserInject { injection, .. } => {
                 let interjection = interjection_projection(injection);
                 self.projection

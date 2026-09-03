@@ -179,11 +179,11 @@ pub struct InteractionServices {
 }
 
 impl InteractionServices {
-    fn new() -> Self {
+    fn new(sink: &EventSink) -> Self {
         Self {
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
-            forms: std::sync::Arc::new(FormRegistry::new()),
+            forms: std::sync::Arc::new(FormRegistry::new_with_event_sink(sink.clone())),
         }
     }
 }
@@ -342,11 +342,16 @@ pub enum ApprovalDecision {
 pub struct FormRegistry {
     entries: std::sync::Mutex<Vec<FormEntry>>,
     watch_tx: watch::Sender<Vec<crate::form::PendingForm>>,
+    event_sink: Option<EventSink>,
 }
 
 struct FormEntry {
     pending: crate::form::PendingForm,
     responder: tokio::sync::oneshot::Sender<crate::form::FormSubmission>,
+}
+
+pub struct FormResolutionCommit {
+    pub event: Option<crate::event::EventEnvelope>,
 }
 
 impl Default for FormRegistry {
@@ -361,7 +366,14 @@ impl FormRegistry {
         Self {
             entries: std::sync::Mutex::new(Vec::new()),
             watch_tx,
+            event_sink: None,
         }
+    }
+
+    fn new_with_event_sink(event_sink: EventSink) -> Self {
+        let mut registry = Self::new();
+        registry.event_sink = Some(event_sink);
+        registry
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Vec<crate::form::PendingForm>> {
@@ -399,11 +411,33 @@ impl FormRegistry {
                 responder: tx,
             });
         }
+        if let Some(sink) = &self.event_sink {
+            sink.emit(crate::event::Event::FormRequested {
+                form: pending.clone(),
+            });
+        }
         self.broadcast_snapshot();
         rx
     }
 
     pub fn submit(&self, form_id: &str, submission: crate::form::FormSubmission) -> bool {
+        self.submit_with_commit(form_id, submission).is_some()
+    }
+
+    pub fn submit_with_commit(
+        &self,
+        form_id: &str,
+        submission: crate::form::FormSubmission,
+    ) -> Option<FormResolutionCommit> {
+        self.resolve(form_id, submission, false)
+    }
+
+    fn resolve(
+        &self,
+        form_id: &str,
+        submission: crate::form::FormSubmission,
+        abandoned: bool,
+    ) -> Option<FormResolutionCommit> {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             let pos = entries.iter().position(|e| e.pending.form_id == form_id);
@@ -411,11 +445,19 @@ impl FormRegistry {
         };
         match entry {
             Some(e) => {
+                let event = self.event_sink.as_ref().map(|sink| {
+                    sink.emit_returning_envelope(crate::event::Event::FormResolved {
+                        form_id: form_id.to_owned(),
+                        run_id: e.pending.run_id.clone(),
+                        submission: submission.clone(),
+                        abandoned,
+                    })
+                });
                 let _ = e.responder.send(submission);
                 self.broadcast_snapshot();
-                true
+                Some(FormResolutionCommit { event })
             }
-            None => false,
+            None => None,
         }
     }
 
@@ -428,8 +470,16 @@ impl FormRegistry {
             let mut entries = self.entries.lock().unwrap();
             std::mem::take(&mut *entries)
         };
-        for e in drained {
-            let _ = e.responder.send(crate::form::FormSubmission::Rejected);
+        for entry in drained {
+            if let Some(sink) = &self.event_sink {
+                sink.emit(crate::event::Event::FormResolved {
+                    form_id: entry.pending.form_id,
+                    run_id: entry.pending.run_id,
+                    submission: crate::form::FormSubmission::Rejected,
+                    abandoned: true,
+                });
+            }
+            let _ = entry.responder.send(crate::form::FormSubmission::Rejected);
         }
         self.broadcast_snapshot();
     }
@@ -919,6 +969,7 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
+        let interactions = InteractionServices::new(&sink);
         Ok(Self {
             id,
             dir,
@@ -946,7 +997,7 @@ impl Session {
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
-            interactions: InteractionServices::new(),
+            interactions,
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             last_image_user_msg: Mutex::new(None),
@@ -1153,6 +1204,7 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
+        let interactions = InteractionServices::new(&sink);
         let session = Self {
             id,
             dir,
@@ -1194,7 +1246,7 @@ impl Session {
                 }
                 c
             },
-            interactions: InteractionServices::new(),
+            interactions,
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             last_image_user_msg: Mutex::new(None),
@@ -1220,6 +1272,7 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
+        let interactions = InteractionServices::new(&sink);
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -1247,7 +1300,7 @@ impl Session {
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
-            interactions: InteractionServices::new(),
+            interactions,
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             last_image_user_msg: Mutex::new(None),
@@ -3660,6 +3713,45 @@ mod tests {
             }
         );
         assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn session_form_registry_emits_ordered_durable_events() {
+        let session = Session::open_ephemeral();
+        let _sub = session.forms().subscribe();
+        let pending = mk_form("durable", "Continue?");
+        let run_id = pending.run_id.clone();
+        let response = session.forms().request(pending);
+        let commit = session
+            .forms()
+            .submit_with_commit(
+                "durable",
+                crate::form::FormSubmission::Submitted {
+                    answers: vec![crate::form::FormAnswer::Confirmed { value: true }],
+                },
+            )
+            .unwrap();
+
+        assert_eq!(commit.event.unwrap().seq, 2);
+        assert!(matches!(
+            response.blocking_recv().unwrap(),
+            crate::form::FormSubmission::Submitted { .. }
+        ));
+        let events = session.sink().snapshot_envelopes();
+        assert!(matches!(
+            &events[0].event,
+            crate::event::Event::FormRequested { form }
+                if form.form_id == "durable" && form.run_id == run_id
+        ));
+        assert!(matches!(
+            &events[1].event,
+            crate::event::Event::FormResolved {
+                form_id,
+                run_id: resolved_run_id,
+                abandoned: false,
+                ..
+            } if form_id == "durable" && resolved_run_id == &run_id
+        ));
     }
 
     #[test]

@@ -71,7 +71,7 @@ pub enum FormSubmission {
     Rejected,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PendingForm {
     pub form_id: String,
     pub run_id: FlowRunId,

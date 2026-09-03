@@ -484,6 +484,8 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::WatchWarn { .. } => "watch_warn",
         Event::PendingPrompt { .. } => "pending_prompt",
         Event::PromptResolved { .. } => "prompt_resolved",
+        Event::FormRequested { .. } => "form_requested",
+        Event::FormResolved { .. } => "form_resolved",
         Event::LlmPartialCall { .. } => "llm_partial_call",
         Event::FlowGraph { .. } => "flow_graph",
         Event::FlowNodeStart { .. } => "flow_node_start",
@@ -636,6 +638,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             None,
             flow_run_id.as_ref().map(|run_id| run_id.0.to_string()),
         ),
+        Event::FormRequested { form } => (None, Some(form.run_id.0.to_string())),
+        Event::FormResolved { run_id, .. } => (None, Some(run_id.0.to_string())),
         Event::LlmCall { .. }
         | Event::PendingPrompt { .. }
         | Event::PromptResolved { .. }
