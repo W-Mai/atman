@@ -6,6 +6,7 @@ import {
 import type {
   CancelRunResponse,
   CompactReviewDecision,
+  CreatePermissionGroupResponse,
   DaemonGeneration,
   EventCursor,
   FlowRunId,
@@ -14,9 +15,14 @@ import type {
   InlineImage,
   InterjectionLevel,
   InterjectSessionResponse,
+  ListPermissionRequestsResponse,
+  PermissionRpcAction,
+  PermissionRpcScope,
+  PermissionRpcSelector,
   PromptId,
   RenameSessionResponse,
   ResolveCompactReviewResponse,
+  ResolvePermissionRequestsResponse,
   ResolvePromptResponse,
   SendMessageResponse,
   SessionId,
@@ -60,6 +66,11 @@ export interface StartRunOptions extends MessageOptions {
 
 export interface InterjectOptions extends TransportRequestOptions {
   redirectTarget?: string | null
+}
+
+export interface ResolvePermissionsOptions extends TransportRequestOptions {
+  scope?: PermissionRpcScope | null
+  reason?: string | null
 }
 
 export class SessionClient {
@@ -313,6 +324,63 @@ export class SessionClient {
       response.review_id,
       reviewId,
     )
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async listPermissions(
+    options: TransportRequestOptions = {},
+  ): Promise<ListPermissionRequestsResponse> {
+    const response = await this.#client.call(
+      'list_permission_requests',
+      { session_id: this.#sessionId },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async createPermissionGroup(
+    requestIds: readonly string[],
+    expectedRequestRevisions: Readonly<Record<string, number>>,
+    label: string,
+    options: TransportRequestOptions = {},
+  ): Promise<CreatePermissionGroupResponse> {
+    const response = await this.#client.command(
+      'create_permission_group',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        request_ids: [...requestIds],
+        expected_request_revisions: { ...expectedRequestRevisions },
+        label,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async resolvePermissions(
+    selector: PermissionRpcSelector,
+    action: PermissionRpcAction,
+    options: ResolvePermissionsOptions = {},
+  ): Promise<ResolvePermissionRequestsResponse> {
+    const response = await this.#client.command(
+      'resolve_permission_requests',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        selector,
+        action,
+        ...(options.scope !== undefined ? { scope: options.scope } : {}),
+        ...(options.reason !== undefined ? { reason: options.reason } : {}),
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
     await this.#refreshThrough(response.cursor, options)
     return response
   }

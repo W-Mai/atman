@@ -396,6 +396,83 @@ describe('SessionClient', () => {
     await session.submitForm('form-1', { status: 'rejected' })
     expect(session.current.cursor).toBe(1)
   })
+
+  test('preserves permission revisions across grouped decisions', async () => {
+    const transport = new SessionTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'list_permission_requests', kind: 'query', revision: 2 },
+              { name: 'create_permission_group', kind: 'command', revision: 2 },
+              { name: 'resolve_permission_requests', kind: 'command', revision: 2 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'list_permission_requests':
+          return result(request, {
+            session_id: sessionId,
+            requests: [],
+            groups: [],
+            revision: 1,
+            cursor: 1,
+          })
+        case 'create_permission_group':
+          return result(request, {
+            session_id: sessionId,
+            group_id: 'group-1',
+            label: 'filesystem edits',
+            request_ids: ['permission-1'],
+            revision: 1,
+            session_revision: 2,
+            cursor: 2,
+          })
+        case 'resolve_permission_requests':
+          return result(request, {
+            session_id: sessionId,
+            resolutions: [{ request_id: 'permission-1', outcome: 'resolved' }],
+            revision: 3,
+            cursor: 3,
+          })
+        case 'session.get_updates': {
+          const afterCursor = Number(request.params.after_cursor ?? 0)
+          return result(
+            request,
+            page('generation-1', afterCursor, [
+              event('generation-1', afterCursor + 1, { type: 'heartbeat' }),
+            ]),
+          )
+        }
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    await session.listPermissions()
+    const group = await session.createPermissionGroup(
+      ['permission-1'],
+      { 'permission-1': 7 },
+      'filesystem edits',
+    )
+    await session.resolvePermissions(
+      { group_id: group.group_id, expected_group_revision: group.revision },
+      'approve',
+      { scope: 'current_call', reason: 'reviewed' },
+    )
+
+    const create = transport.requests.find(
+      (request) => request.method === 'create_permission_group',
+    )
+    expect(create?.params.expected_request_revisions).toEqual({ 'permission-1': 7 })
+    expect(session.current.cursor).toBe(3)
+  })
 })
 
 async function* oneEvent(
