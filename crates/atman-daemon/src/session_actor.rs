@@ -368,11 +368,7 @@ impl SessionActor {
                 ActorInput::Command(None) => break,
                 ActorInput::Command(Some(command)) => self.handle_command(command),
                 ActorInput::Event(event) => match *event {
-                    Ok(event) => {
-                        if let Some(delta) = self.projection.apply_envelope(&event) {
-                            self.publish_projection_delta(delta);
-                        }
-                    }
+                    Ok(event) => self.apply_runtime_event(&event),
                     Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up_projection(),
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
@@ -540,10 +536,7 @@ impl SessionActor {
                 Some(atman_runtime::event::FlowRunId(run_id.0)),
             )
             .map_err(anyhow::Error::from)?;
-        let delta = self.projection.apply_envelope(&event).ok_or_else(|| {
-            anyhow::anyhow!("interjection event did not advance the session projection")
-        })?;
-        self.publish_projection_delta(delta);
+        self.catch_up_through(event.seq)?;
         if level == atman_runtime::injection::InjectionLevel::L4HardStop {
             cancel.cancel();
         }
@@ -552,6 +545,30 @@ impl SessionActor {
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })
+    }
+
+    fn apply_runtime_event(&mut self, event: &atman_runtime::event::EventEnvelope) {
+        if let Some(delta) = self.projection.apply_envelope(event) {
+            self.publish_projection_delta(delta);
+        }
+    }
+
+    fn catch_up_through(&mut self, target_seq: u64) -> Result<()> {
+        while self.projection.last_runtime_seq() < target_seq {
+            match self.events_rx.try_recv() {
+                Ok(event) => self.apply_runtime_event(&event),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => self.catch_up_projection(),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    anyhow::bail!(
+                        "runtime event {target_seq} was published but is not available to the session actor"
+                    );
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    anyhow::bail!("runtime event stream closed before event {target_seq}");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn publish_projection_delta(&mut self, delta: ProjectionDelta) {

@@ -389,6 +389,13 @@ async fn interjection_targets_one_run_and_retries_without_duplication() {
     assert_eq!(projected.id, committed.injection_id);
     assert_eq!(projected.run_id.as_ref(), Some(&running.run_id));
     assert_eq!(projected.state, atman_proto::InterjectionState::Cancelled);
+    assert!(projection.transcript.iter().any(|item| {
+        matches!(
+            item,
+            atman_proto::TranscriptItem::Message { message, .. }
+                if message.role == atman_proto::MessageRole::User
+        )
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
