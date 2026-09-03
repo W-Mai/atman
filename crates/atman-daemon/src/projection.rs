@@ -1905,7 +1905,7 @@ fn resource_is_terminal(state: &str) -> bool {
 }
 
 pub(crate) fn task_resource_id(task_id: &atman_runtime::TaskId) -> ResourceId {
-    ResourceId(format!("task:{task_id}"))
+    ResourceId::task(task_id.0)
 }
 
 fn task_resource_state(status: atman_runtime::TaskStatus) -> ResourceState {

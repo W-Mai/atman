@@ -22,6 +22,18 @@ pub struct TurnId(pub Uuid);
 #[serde(transparent)]
 pub struct ResourceId(pub String);
 
+impl ResourceId {
+    pub fn task(task_id: Uuid) -> Self {
+        Self(format!("task:{task_id}"))
+    }
+
+    pub fn task_id(&self) -> Option<Uuid> {
+        self.0
+            .strip_prefix("task:")
+            .and_then(|id| Uuid::parse_str(id).ok())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SessionSnapshot {
     pub schema_version: u32,
@@ -965,6 +977,16 @@ mod tests {
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.projection.metadata.id, session_id);
         assert_eq!(decoded.cursor, EventCursor(42));
+    }
+
+    #[test]
+    fn task_resource_identity_round_trips() {
+        let task_id = Uuid::now_v7();
+        let resource_id = ResourceId::task(task_id);
+        assert_eq!(resource_id.0, format!("task:{task_id}"));
+        assert_eq!(resource_id.task_id(), Some(task_id));
+        assert_eq!(ResourceId("workspace:test".into()).task_id(), None);
+        assert_eq!(ResourceId("task:invalid".into()).task_id(), None);
     }
 
     #[test]

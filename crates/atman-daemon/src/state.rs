@@ -1399,7 +1399,7 @@ mod tests {
             .unwrap();
         let entry = terminal_registry.get(&handle).unwrap();
         let task_id = entry.task_id.lock().unwrap().clone().unwrap();
-        let resource_id = atman_proto::ResourceId(format!("task:{task_id}"));
+        let resource_id = atman_proto::ResourceId::task(task_id.0);
 
         let request = atman_proto::ResizeTerminalResourceRequest {
             request_id: Some(atman_proto::RequestId::now()),

@@ -2281,11 +2281,7 @@ fn resource_state_is_terminal(state: ResourceState) -> bool {
 }
 
 fn task_id_from_resource_id(resource_id: &ResourceId) -> Option<atman_runtime::TaskId> {
-    resource_id
-        .0
-        .strip_prefix("task:")
-        .and_then(|id| uuid::Uuid::parse_str(id).ok())
-        .map(atman_runtime::TaskId)
+    resource_id.task_id().map(atman_runtime::TaskId)
 }
 
 fn parse_run_id(run_id: &str) -> Option<FlowRunId> {
