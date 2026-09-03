@@ -298,6 +298,7 @@ pub mod methods {
     pub const GET_SESSION_SNAPSHOT: &str = "session.get_snapshot";
     pub const GET_SESSION_UPDATES: &str = "session.get_updates";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
+    pub const SUBMIT_FORM: &str = "form.submit";
     pub const LIST_PERMISSION_REQUESTS: &str = "list_permission_requests";
     pub const CREATE_PERMISSION_GROUP: &str = "create_permission_group";
     pub const RESOLVE_PERMISSION_REQUESTS: &str = "resolve_permission_requests";
@@ -318,6 +319,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::GetSessionSnapshot>(),
         super::method_descriptor::<super::rpc::GetSessionUpdates>(),
         super::method_descriptor::<super::rpc::ResolvePrompt>(),
+        super::method_descriptor::<super::rpc::SubmitForm>(),
         super::method_descriptor::<super::rpc::ListPermissionRequests>(),
         super::method_descriptor::<super::rpc::CreatePermissionGroup>(),
         super::method_descriptor::<super::rpc::ResolvePermissionRequests>(),
@@ -485,6 +487,61 @@ pub enum PromptResolutionStatus {
     AlreadyResolved,
     Abandoned,
     NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FormSubmission {
+    Submitted { answers: Vec<FormAnswer> },
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FormAnswer {
+    Confirmed {
+        value: bool,
+    },
+    Selected {
+        index: usize,
+        label: String,
+    },
+    MultiSelected {
+        indices: Vec<usize>,
+        labels: Vec<String>,
+    },
+    TextEntered {
+        text: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SubmitFormRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub form_id: String,
+    pub submission: FormSubmission,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FormResolutionStatus {
+    Resolved,
+    AlreadyResolved,
+    Abandoned,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SubmitFormResponse {
+    pub resolved: bool,
+    pub status: FormResolutionStatus,
+    pub session_id: SessionId,
+    pub form_id: String,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -836,6 +893,13 @@ pub mod rpc {
         ResolvePromptRequest,
         ResolvePromptResponse,
         2
+    );
+    method!(
+        SubmitForm,
+        methods::SUBMIT_FORM,
+        Command,
+        SubmitFormRequest,
+        SubmitFormResponse
     );
     method!(
         ListPermissionRequests,

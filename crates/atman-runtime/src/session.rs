@@ -421,14 +421,14 @@ impl FormRegistry {
     }
 
     pub fn submit(&self, form_id: &str, submission: crate::form::FormSubmission) -> bool {
-        self.submit_with_commit(form_id, submission).is_some()
+        matches!(self.submit_with_commit(form_id, submission), Ok(Some(_)))
     }
 
     pub fn submit_with_commit(
         &self,
         form_id: &str,
         submission: crate::form::FormSubmission,
-    ) -> Option<FormResolutionCommit> {
+    ) -> Result<Option<FormResolutionCommit>, String> {
         self.resolve(form_id, submission, false)
     }
 
@@ -437,11 +437,17 @@ impl FormRegistry {
         form_id: &str,
         submission: crate::form::FormSubmission,
         abandoned: bool,
-    ) -> Option<FormResolutionCommit> {
+    ) -> Result<Option<FormResolutionCommit>, String> {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             let pos = entries.iter().position(|e| e.pending.form_id == form_id);
-            pos.map(|p| entries.remove(p))
+            match pos {
+                Some(pos) => {
+                    entries[pos].pending.form.validate_submission(&submission)?;
+                    Some(entries.remove(pos))
+                }
+                None => None,
+            }
         };
         match entry {
             Some(e) => {
@@ -455,9 +461,9 @@ impl FormRegistry {
                 });
                 let _ = e.responder.send(submission);
                 self.broadcast_snapshot();
-                Some(FormResolutionCommit { event })
+                Ok(Some(FormResolutionCommit { event }))
             }
-            None => None,
+            None => Ok(None),
         }
     }
 
@@ -3730,6 +3736,7 @@ mod tests {
                     answers: vec![crate::form::FormAnswer::Confirmed { value: true }],
                 },
             )
+            .unwrap()
             .unwrap();
 
         assert_eq!(commit.event.unwrap().seq, 2);

@@ -128,6 +128,19 @@ impl DaemonState {
         actor.resolve_prompt(id, answer).await
     }
 
+    pub(crate) async fn submit_form(
+        &self,
+        session_id: &SessionId,
+        id: String,
+        submission: atman_proto::FormSubmission,
+        principal: &str,
+    ) -> Result<crate::session_actor::FormResolutionCommit> {
+        let actor = self
+            .authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.submit_form(id, submission).await
+    }
+
     pub fn sessions_root(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }

@@ -3,8 +3,8 @@ use atman_proto::{
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, InterjectSessionResponse, JsonRpcError,
     JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
     PermissionRpcScope, PingResponse, ProtocolLimits, RequestId, ResolvePromptResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse, method_descriptor,
-    methods, rpc,
+    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
+    SubmitFormResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -150,6 +150,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::GetSessionSnapshot>(),
     method_descriptor::<rpc::GetSessionUpdates>(),
     method_descriptor::<rpc::ResolvePrompt>(),
+    method_descriptor::<rpc::SubmitForm>(),
     method_descriptor::<rpc::ListPermissionRequests>(),
     method_descriptor::<rpc::CreatePermissionGroup>(),
     method_descriptor::<rpc::ResolvePermissionRequests>(),
@@ -526,6 +527,44 @@ pub async fn dispatch_as(
                 .await
                 {
                     Ok(response) => method_response::<rpc::ResolvePrompt>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::SUBMIT_FORM => match parse_params::<rpc::SubmitForm>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::SubmitForm, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let commit = operation_state
+                            .submit_form(
+                                &operation_params.session_id,
+                                operation_params.form_id.clone(),
+                                operation_params.submission,
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(SubmitFormResponse {
+                            resolved: commit.status == atman_proto::FormResolutionStatus::Resolved,
+                            status: commit.status,
+                            session_id: operation_params.session_id,
+                            form_id: operation_params.form_id,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
+                        })
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::SubmitForm>(id, response),
                     Err(error) => JsonRpcResponse::err(id, error),
                 }
             }

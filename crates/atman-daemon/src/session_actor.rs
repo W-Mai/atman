@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId,
-    GetSessionUpdatesResponse, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
-    PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
-    ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
-    ResyncRequired, ServerEvent, SessionId, SessionProjection, SessionSummary,
+    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus,
+    FormSubmission, GetSessionUpdatesResponse, ListPermissionRequestsResponse,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView, PermissionRequestView,
+    PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope, PromptId,
+    PromptResolutionStatus, ResolvePermissionRequestsResponse, ResyncRequired, ServerEvent,
+    SessionId, SessionProjection, SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -17,6 +18,7 @@ use crate::state::LiveRun;
 const UPDATE_RETENTION: usize = 2_048;
 const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
 const PROMPT_TERMINAL_RETENTION: usize = 256;
+const FORM_TERMINAL_RETENTION: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunAdmission {
@@ -45,6 +47,12 @@ pub(crate) struct InterjectionCommit {
 
 pub(crate) struct PromptResolutionCommit {
     pub status: PromptResolutionStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct FormResolutionCommit {
+    pub status: FormResolutionStatus,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -115,6 +123,7 @@ impl SessionActorHandle {
             runs,
             prompts: HashMap::new(),
             prompt_terminals: VecDeque::new(),
+            form_terminals: VecDeque::new(),
             revision: 1,
             projection,
             event_cursor,
@@ -218,6 +227,19 @@ impl SessionActorHandle {
         request(&self.tx, |reply| Command::ResolvePrompt {
             id,
             answer,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn submit_form(
+        &self,
+        id: String,
+        submission: FormSubmission,
+    ) -> Result<FormResolutionCommit> {
+        request(&self.tx, |reply| Command::SubmitForm {
+            id,
+            submission,
             reply,
         })
         .await?
@@ -350,6 +372,11 @@ enum Command {
         answer: serde_json::Value,
         reply: oneshot::Sender<Result<PromptResolutionCommit>>,
     },
+    SubmitForm {
+        id: String,
+        submission: FormSubmission,
+        reply: oneshot::Sender<Result<FormResolutionCommit>>,
+    },
     Rename {
         title: String,
         reply: oneshot::Sender<Result<SessionSummary>>,
@@ -402,6 +429,7 @@ struct SessionActor {
     runs: HashMap<FlowRunId, LiveRun>,
     prompts: HashMap<PromptId, PendingPrompt>,
     prompt_terminals: VecDeque<(PromptId, PromptResolutionStatus)>,
+    form_terminals: VecDeque<(String, FormResolutionStatus)>,
     revision: u64,
     projection: SessionProjector,
     event_cursor: EventCursor,
@@ -539,6 +567,14 @@ impl SessionActor {
             Command::DropPrompt { id } => self.drop_prompt(id),
             Command::ResolvePrompt { id, answer, reply } => {
                 let result = self.resolve_prompt(id, answer);
+                let _ = reply.send(result);
+            }
+            Command::SubmitForm {
+                id,
+                submission,
+                reply,
+            } => {
+                let result = self.submit_form(id, submission);
                 let _ = reply.send(result);
             }
             Command::Rename { title, reply } => {
@@ -712,7 +748,62 @@ impl SessionActor {
         }
     }
 
+    fn submit_form(
+        &mut self,
+        id: String,
+        submission: FormSubmission,
+    ) -> Result<FormResolutionCommit> {
+        let submission = runtime_form_submission(submission);
+        let status = match self
+            .session
+            .forms()
+            .submit_with_commit(&id, submission)
+            .map_err(anyhow::Error::msg)?
+        {
+            Some(commit) => {
+                let event = commit
+                    .event
+                    .ok_or_else(|| anyhow::anyhow!("session form resolution was not persisted"))?;
+                self.catch_up_through(event.seq)?;
+                FormResolutionStatus::Resolved
+            }
+            None => self
+                .form_terminals
+                .iter()
+                .rev()
+                .find(|(form_id, _)| form_id == &id)
+                .map(|(_, status)| *status)
+                .unwrap_or(FormResolutionStatus::NotFound),
+        };
+        Ok(FormResolutionCommit {
+            status,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn remember_form_terminal(&mut self, id: String, status: FormResolutionStatus) {
+        self.form_terminals.retain(|(form_id, _)| form_id != &id);
+        self.form_terminals.push_back((id, status));
+        while self.form_terminals.len() > FORM_TERMINAL_RETENTION {
+            self.form_terminals.pop_front();
+        }
+    }
+
     fn apply_runtime_event(&mut self, event: &atman_runtime::event::EventEnvelope) {
+        if let atman_runtime::event::Event::FormResolved {
+            form_id, abandoned, ..
+        } = &event.event
+        {
+            self.remember_form_terminal(
+                form_id.clone(),
+                if *abandoned {
+                    FormResolutionStatus::Abandoned
+                } else {
+                    FormResolutionStatus::AlreadyResolved
+                },
+            );
+        }
         if let Some(delta) = self.projection.apply_envelope(event) {
             self.publish_projection_delta(delta);
         }
@@ -963,6 +1054,33 @@ impl SessionActor {
                 })
                 .collect(),
         })
+    }
+}
+
+fn runtime_form_submission(submission: FormSubmission) -> atman_runtime::form::FormSubmission {
+    match submission {
+        FormSubmission::Submitted { answers } => atman_runtime::form::FormSubmission::Submitted {
+            answers: answers.into_iter().map(runtime_form_answer).collect(),
+        },
+        FormSubmission::Rejected => atman_runtime::form::FormSubmission::Rejected,
+    }
+}
+
+fn runtime_form_answer(answer: atman_proto::FormAnswer) -> atman_runtime::form::FormAnswer {
+    match answer {
+        atman_proto::FormAnswer::Confirmed { value } => {
+            atman_runtime::form::FormAnswer::Confirmed { value }
+        }
+        atman_proto::FormAnswer::Selected { index, label } => {
+            atman_runtime::form::FormAnswer::Selected { index, label }
+        }
+        atman_proto::FormAnswer::MultiSelected { indices, labels } => {
+            atman_runtime::form::FormAnswer::MultiSelected { indices, labels }
+        }
+        atman_proto::FormAnswer::TextEntered { text } => {
+            atman_runtime::form::FormAnswer::TextEntered { text }
+        }
+        atman_proto::FormAnswer::Cancelled => atman_runtime::form::FormAnswer::Cancelled,
     }
 }
 

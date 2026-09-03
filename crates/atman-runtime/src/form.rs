@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::event::FlowRunId;
 
@@ -63,6 +64,92 @@ pub struct FormQuestion {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompositeForm {
     pub questions: Vec<FormQuestion>,
+}
+
+impl CompositeForm {
+    pub fn validate_submission(&self, submission: &FormSubmission) -> Result<(), String> {
+        let FormSubmission::Submitted { answers } = submission else {
+            return Ok(());
+        };
+        if answers.len() != self.questions.len() {
+            return Err(format!(
+                "expected {} form answers, received {}",
+                self.questions.len(),
+                answers.len()
+            ));
+        }
+        for (question, answer) in self.questions.iter().zip(answers) {
+            validate_answer(question, answer)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_answer(question: &FormQuestion, answer: &FormAnswer) -> Result<(), String> {
+    if matches!(answer, FormAnswer::Cancelled) {
+        return Ok(());
+    }
+    match (&question.kind, answer) {
+        (FormKind::Confirm { .. }, FormAnswer::Confirmed { .. })
+        | (FormKind::Text { .. }, FormAnswer::TextEntered { .. }) => Ok(()),
+        (FormKind::SingleSelect { options, .. }, FormAnswer::Selected { index, label }) => {
+            validate_option(&question.id, options, *index, label)
+        }
+        (
+            FormKind::MultiSelect {
+                options, min, max, ..
+            },
+            FormAnswer::MultiSelected { indices, labels },
+        ) => {
+            if indices.len() != labels.len() {
+                return Err(format!(
+                    "question `{}` received mismatched multi-select indices and labels",
+                    question.id
+                ));
+            }
+            if min.is_some_and(|min| indices.len() < min)
+                || max.is_some_and(|max| indices.len() > max)
+            {
+                return Err(format!(
+                    "question `{}` received an invalid number of selections",
+                    question.id
+                ));
+            }
+            let mut unique = HashSet::with_capacity(indices.len());
+            for (index, label) in indices.iter().zip(labels) {
+                if !unique.insert(*index) {
+                    return Err(format!(
+                        "question `{}` received duplicate selection index {index}",
+                        question.id
+                    ));
+                }
+                validate_option(&question.id, options, *index, label)?;
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "answer kind does not match question `{}` ({})",
+            question.id,
+            question.kind.discriminator()
+        )),
+    }
+}
+
+fn validate_option(
+    question_id: &str,
+    options: &[String],
+    index: usize,
+    label: &str,
+) -> Result<(), String> {
+    match options.get(index) {
+        Some(option) if option == label => Ok(()),
+        Some(_) => Err(format!(
+            "question `{question_id}` received a label that does not match selection index {index}"
+        )),
+        None => Err(format!(
+            "question `{question_id}` received out-of-range selection index {index}"
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -185,5 +272,49 @@ mod tests {
             "text"
         );
         assert_eq!(FormAnswer::Cancelled.discriminator(), "cancelled");
+    }
+
+    #[test]
+    fn composite_form_rejects_spoofed_selection_labels() {
+        let form = CompositeForm {
+            questions: vec![FormQuestion {
+                id: "target".into(),
+                kind: FormKind::SingleSelect {
+                    prompt: "Pick".into(),
+                    options: vec!["safe".into()],
+                },
+            }],
+        };
+        let result = form.validate_submission(&FormSubmission::Submitted {
+            answers: vec![FormAnswer::Selected {
+                index: 0,
+                label: "different".into(),
+            }],
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn composite_form_accepts_matching_multi_selection() {
+        let form = CompositeForm {
+            questions: vec![FormQuestion {
+                id: "targets".into(),
+                kind: FormKind::MultiSelect {
+                    prompt: "Pick".into(),
+                    options: vec!["a".into(), "b".into()],
+                    min: Some(1),
+                    max: Some(2),
+                },
+            }],
+        };
+        assert!(
+            form.validate_submission(&FormSubmission::Submitted {
+                answers: vec![FormAnswer::MultiSelected {
+                    indices: vec![0, 1],
+                    labels: vec!["a".into(), "b".into()],
+                }],
+            })
+            .is_ok()
+        );
     }
 }
