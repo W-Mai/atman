@@ -306,6 +306,8 @@ pub mod methods {
     pub const LIST_RESOURCES: &str = "resource.list";
     pub const INSPECT_RESOURCE: &str = "resource.inspect";
     pub const TERMINATE_RESOURCE: &str = "resource.terminate";
+    pub const RETAIN_RESOURCE: &str = "resource.retain";
+    pub const RELEASE_RESOURCE: &str = "resource.release";
     pub const PING: &str = "ping";
 
     pub const ALL: &[super::RpcMethodDescriptor] = &[
@@ -331,6 +333,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::ListResources>(),
         super::method_descriptor::<super::rpc::InspectResource>(),
         super::method_descriptor::<super::rpc::TerminateResource>(),
+        super::method_descriptor::<super::rpc::RetainResource>(),
+        super::method_descriptor::<super::rpc::ReleaseResource>(),
     ];
 }
 
@@ -902,6 +906,38 @@ pub struct TerminateResourceResponse {
     pub cursor: EventCursor,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RetainResourceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RetainResourceResponse {
+    pub session_id: SessionId,
+    pub resource: ResourceProjection,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReleaseResourceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReleaseResourceResponse {
+    pub session_id: SessionId,
+    pub resource: ResourceProjection,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
 pub mod rpc {
     use super::*;
 
@@ -1083,6 +1119,20 @@ pub mod rpc {
         TerminateResourceRequest,
         TerminateResourceResponse
     );
+    method!(
+        RetainResource,
+        methods::RETAIN_RESOURCE,
+        Command,
+        RetainResourceRequest,
+        RetainResourceResponse
+    );
+    method!(
+        ReleaseResource,
+        methods::RELEASE_RESOURCE,
+        Command,
+        ReleaseResourceRequest,
+        ReleaseResourceResponse
+    );
 }
 
 #[cfg(test)]
@@ -1188,5 +1238,21 @@ mod tests {
         };
         assert!(capabilities.supports::<rpc::DaemonCapabilities>());
         assert!(capabilities.supports::<rpc::ResolvePermissionRequests>());
+        assert!(capabilities.supports::<rpc::RetainResource>());
+        assert!(capabilities.supports::<rpc::ReleaseResource>());
+    }
+
+    #[test]
+    fn workspace_resource_actions_do_not_expose_force_deletion() {
+        let request = ReleaseResourceRequest {
+            request_id: Some(RequestId::now()),
+            session_id: SessionId(uuid::Uuid::now_v7()),
+            resource_id: ResourceId("workspace:flow-run".into()),
+        };
+        let encoded = serde_json::to_value(request).unwrap();
+
+        assert!(encoded.get("request_id").is_some());
+        assert!(encoded.get("force").is_none());
+        assert_eq!(rpc::ReleaseResource::NAME, methods::RELEASE_RESOURCE);
     }
 }
