@@ -1,4 +1,9 @@
-import type { JsonRpcResponse } from './generated/types.generated'
+import type {
+  EventCursor,
+  JsonRpcResponse,
+  ProjectionEventEnvelope,
+  SessionId,
+} from './generated/types.generated'
 import type {
   RpcMethodName,
   RpcMethodParams,
@@ -20,4 +25,10 @@ export interface RpcTransport {
     request: RpcRequestEnvelope<M>,
     options?: TransportRequestOptions,
   ): Promise<JsonRpcResponse>
+
+  sessionEvents?(
+    sessionId: SessionId,
+    afterCursor: EventCursor,
+    options?: TransportRequestOptions,
+  ): AsyncIterable<ProjectionEventEnvelope>
 }

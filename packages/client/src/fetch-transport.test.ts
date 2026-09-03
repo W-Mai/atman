@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 
 import { AtmanHttpError } from './errors'
 import { FetchTransport } from './fetch-transport'
+import { EVENT_SCHEMA_VERSION } from './generated/methods.generated'
+import type { ProjectionEventEnvelope } from './generated/types.generated'
 
 describe('FetchTransport', () => {
   test('uses an authorization header without putting credentials in the URL', async () => {
@@ -83,5 +85,74 @@ describe('FetchTransport', () => {
         { signal: controller.signal },
       ),
     ).rejects.toHaveProperty('name', 'AbortError')
+  })
+
+  test('streams split projection SSE frames without putting the bearer in the URL', async () => {
+    const encoder = new TextEncoder()
+    const envelope: ProjectionEventEnvelope = {
+      schema_version: EVENT_SCHEMA_VERSION,
+      daemon_generation: 'generation',
+      session_id: 'session-1',
+      cursor: 8,
+      ts: '2026-09-03T00:00:00Z',
+      event: { type: 'heartbeat', note: '读取' },
+    }
+    const source = `retry: 1000\r\n\r\nevent: session_event\r\nid: 8\r\ndata: ${JSON.stringify(envelope)}\r\n\r\n`
+    let capturedUrl = ''
+    let capturedHeaders = new Headers()
+    const transport = new FetchTransport({
+      baseUrl: 'http://127.0.0.1:7777/api',
+      token: 'secret-token',
+      fetch: async (input, init) => {
+        capturedUrl = String(input)
+        capturedHeaders = new Headers(init?.headers)
+        const bytes = encoder.encode(source)
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const byte of bytes) {
+                controller.enqueue(Uint8Array.of(byte))
+              }
+              controller.close()
+            },
+          }),
+        )
+      },
+    })
+
+    const events = []
+    for await (const event of transport.sessionEvents('session-1', 7)) {
+      events.push(event)
+    }
+
+    expect(events).toEqual([envelope])
+    expect(capturedUrl).toBe(
+      'http://127.0.0.1:7777/api/session-events?session_id=session-1&after_cursor=7',
+    )
+    expect(capturedUrl).not.toContain('secret-token')
+    expect(capturedHeaders.get('authorization')).toBe('Bearer secret-token')
+    expect(capturedHeaders.get('last-event-id')).toBe('7')
+  })
+
+  test('rejects SSE cursor identity mismatches', async () => {
+    const envelope: ProjectionEventEnvelope = {
+      schema_version: EVENT_SCHEMA_VERSION,
+      daemon_generation: 'generation',
+      session_id: 'session-1',
+      cursor: 8,
+      ts: '2026-09-03T00:00:00Z',
+      event: { type: 'heartbeat' },
+    }
+    const source = `id: 9\ndata: ${JSON.stringify(envelope)}\n\n`
+    const transport = new FetchTransport({
+      baseUrl: 'http://127.0.0.1:7777',
+      fetch: async () => new Response(source),
+    })
+
+    await expect(async () => {
+      for await (const _event of transport.sessionEvents('session-1', 7)) {
+        // Consume the stream.
+      }
+    }).toThrow('does not match')
   })
 })

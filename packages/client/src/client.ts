@@ -15,7 +15,10 @@ import {
 import type {
   CapabilitiesRequest,
   CapabilitiesResponse,
+  EventCursor,
   MethodCapability,
+  ProjectionEventEnvelope,
+  SessionId,
 } from './generated/types.generated'
 import type {
   RpcRequestEnvelope,
@@ -82,6 +85,14 @@ export class AtmanClient {
 
   supports(method: RpcMethodName): boolean {
     return supports(this.#capabilities, method)
+  }
+
+  sessionEvents(
+    sessionId: SessionId,
+    afterCursor: EventCursor,
+    options: TransportRequestOptions = {},
+  ): AsyncIterable<ProjectionEventEnvelope> | undefined {
+    return this.#transport.sessionEvents?.(sessionId, afterCursor, options)
   }
 
   async refreshCapabilities(
