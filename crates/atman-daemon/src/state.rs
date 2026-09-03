@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse, ListProjectsResponse,
-    ProjectSummary, PromptId, ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SessionId, SessionSnapshot,
-    SessionStatus, SessionSummary,
+    CloseSessionResponse, DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse,
+    ListProjectsResponse, ProjectSummary, PromptId, ResyncRequired, SNAPSHOT_SCHEMA_VERSION,
+    SessionCloseStatus, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +34,13 @@ pub struct DaemonShutdownReport {
     pub graceful: usize,
     pub forced: usize,
     pub remaining: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionUnloadOutcome {
+    Unloaded,
+    NotLoaded,
+    Busy,
 }
 
 pub(crate) struct LoadedSession {
@@ -499,12 +506,62 @@ impl DaemonState {
             .or_default()
             .clone();
         let _guard = load_gate.lock().await;
+        Ok(matches!(
+            self.unload_session_while_locked(id, None).await?,
+            SessionUnloadOutcome::Unloaded
+        ))
+    }
+
+    pub async fn close_session(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<CloseSessionResponse> {
+        let load_gate = self
+            .session_loads
+            .lock()
+            .unwrap()
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        let _guard = load_gate.lock().await;
+        let status = match self
+            .unload_session_while_locked(id, Some(principal))
+            .await?
+        {
+            SessionUnloadOutcome::Unloaded => SessionCloseStatus::Closed,
+            SessionUnloadOutcome::Busy => SessionCloseStatus::Busy,
+            SessionUnloadOutcome::NotLoaded => {
+                anyhow::ensure!(
+                    self.sessions_root()
+                        .join(id.to_string())
+                        .join("events.jsonl")
+                        .is_file(),
+                    "session not found: {id}"
+                );
+                SessionCloseStatus::AlreadyClosed
+            }
+        };
+        Ok(CloseSessionResponse {
+            session_id: id.clone(),
+            status,
+        })
+    }
+
+    async fn unload_session_while_locked(
+        &self,
+        id: &SessionId,
+        principal: Option<&str>,
+    ) -> Result<SessionUnloadOutcome> {
         let actor = self.sessions.lock().unwrap().get(id).cloned();
         let Some(actor) = actor else {
-            return Ok(false);
+            return Ok(SessionUnloadOutcome::NotLoaded);
         };
+        if let Some(principal) = principal {
+            anyhow::ensure!(actor.owns(principal), "permission denied for session");
+        }
         if !actor.try_unload().await? {
-            return Ok(false);
+            return Ok(SessionUnloadOutcome::Busy);
         }
         let mut sessions = self.sessions.lock().unwrap();
         if sessions
@@ -512,9 +569,9 @@ impl DaemonState {
             .is_some_and(|registered| registered.is_same_actor(&actor))
         {
             sessions.remove(id);
-            return Ok(true);
+            return Ok(SessionUnloadOutcome::Unloaded);
         }
-        Ok(false)
+        Ok(SessionUnloadOutcome::Busy)
     }
 
     pub async fn evict_idle_sessions(&self, idle_for: std::time::Duration) -> usize {
@@ -1143,6 +1200,30 @@ mod tests {
 
         assert!(state.unload_session_if_idle(&session_id).await.unwrap());
         assert!(state.session_revision(&session_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_close_reports_busy_without_interrupting_clients() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session, "owner")
+            .await
+            .unwrap();
+        let (updates, _) = state
+            .subscribe_session_updates(&session_id, "owner")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let response = state.close_session(&session_id, "owner").await.unwrap();
+
+        assert_eq!(response.status, SessionCloseStatus::Busy);
+        assert!(state.session_revision(&session_id).is_some());
+        drop(updates);
     }
 
     #[tokio::test]

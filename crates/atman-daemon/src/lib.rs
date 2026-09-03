@@ -148,6 +148,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::DaemonCapabilities>(),
     method_descriptor::<rpc::Ping>(),
     method_descriptor::<rpc::CreateSession>(),
+    method_descriptor::<rpc::CloseSession>(),
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::ListProjects>(),
@@ -280,6 +281,31 @@ pub async fn dispatch_as(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        methods::CLOSE_SESSION => match parse_params::<rpc::CloseSession>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::CloseSession, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .close_session(&operation_params.session_id, &operation_principal)
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::CloseSession>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::LIST_SESSIONS => match parse_params::<rpc::ListSessions>(req.params) {
             Ok(ListSessionsRequest {
                 project_root,

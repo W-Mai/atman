@@ -33,6 +33,7 @@ async fn capabilities_are_typed_and_match_the_registry() {
     assert!(capabilities.supports::<atman_proto::rpc::GetSessionUpdates>());
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
     assert!(capabilities.supports::<atman_proto::rpc::ListProjects>());
+    assert!(capabilities.supports::<atman_proto::rpc::CloseSession>());
 }
 
 #[tokio::test]
@@ -175,6 +176,91 @@ async fn create_session_returns_an_idle_snapshot_and_replays_retries() {
             .join(first.projection.metadata.id.to_string())
             .join("events.jsonl")
             .is_file()
+    );
+}
+
+#[tokio::test]
+async fn close_session_unloads_runtime_and_keeps_history_recoverable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root, Some(config_dir), None).unwrap(),
+    ));
+    let created = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(
+            1,
+            &atman_proto::CreateSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                project_root: None,
+                title: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let session_id = created.projection.metadata.id;
+    let close = atman_proto::CloseSessionRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: session_id.clone(),
+    };
+
+    let closed = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CloseSession>(2, &close).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CloseSession>()
+    .unwrap();
+    assert_eq!(closed.status, atman_proto::SessionCloseStatus::Closed);
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CloseSession>(3, &close).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CloseSession>()
+    .unwrap();
+    assert_eq!(retry, closed);
+
+    let already_closed = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CloseSession>(
+            4,
+            &atman_proto::CloseSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: session_id.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CloseSession>()
+    .unwrap();
+    assert_eq!(
+        already_closed.status,
+        atman_proto::SessionCloseStatus::AlreadyClosed
+    );
+
+    let snapshot = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::GetSessionSnapshot>(
+            5,
+            &atman_proto::GetSessionSnapshotRequest { session_id },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::GetSessionSnapshot>()
+    .unwrap();
+    assert_eq!(
+        snapshot.projection.lifecycle,
+        atman_proto::SessionLifecycle::Idle
     );
 }
 
