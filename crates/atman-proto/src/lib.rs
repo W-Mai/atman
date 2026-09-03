@@ -296,6 +296,8 @@ pub mod methods {
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const CREATE_SESSION: &str = "session.create";
+    pub const CLOSE_SESSION: &str = "session.close";
+    pub const DELETE_SESSION: &str = "session.delete";
     pub const SEND_MESSAGE: &str = "session.send_message";
     pub const INTERJECT_SESSION: &str = "session.interject";
     pub const LIST_PROJECTS: &str = "project.list";
@@ -321,6 +323,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::DaemonCapabilities>(),
         super::method_descriptor::<super::rpc::Ping>(),
         super::method_descriptor::<super::rpc::CreateSession>(),
+        super::method_descriptor::<super::rpc::CloseSession>(),
+        super::method_descriptor::<super::rpc::DeleteSession>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::ListProjects>(),
@@ -441,6 +445,51 @@ pub struct CreateSessionRequest {
     pub project_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CloseSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCloseStatus {
+    Closed,
+    AlreadyClosed,
+    Busy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct CloseSessionResponse {
+    pub session_id: SessionId,
+    pub status: SessionCloseStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeleteSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionDeleteStatus {
+    Deleted,
+    NotFound,
+    Busy,
+    UnsafeResources,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct DeleteSessionResponse {
+    pub session_id: SessionId,
+    pub status: SessionDeleteStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_resources: Vec<ResourceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1019,6 +1068,20 @@ pub mod rpc {
         Command,
         CreateSessionRequest,
         SessionSnapshot
+    );
+    method!(
+        CloseSession,
+        methods::CLOSE_SESSION,
+        Command,
+        CloseSessionRequest,
+        CloseSessionResponse
+    );
+    method!(
+        DeleteSession,
+        methods::DELETE_SESSION,
+        Command,
+        DeleteSessionRequest,
+        DeleteSessionResponse
     );
     method!(
         SendMessage,
