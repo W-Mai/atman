@@ -1601,6 +1601,7 @@ fn workspace_state(state: &str) -> ResourceState {
     match state {
         "starting" | "allocating" => ResourceState::Starting,
         "active" | "running" => ResourceState::Running,
+        "dirty" => ResourceState::Dirty,
         "retained" => ResourceState::Retained,
         "releasing" | "terminating" => ResourceState::Terminating,
         "released" => ResourceState::Released,
@@ -1757,6 +1758,31 @@ mod tests {
         assert!(projector.apply_envelope(&event).is_none());
         assert_eq!(projector.last_runtime_seq(), 7);
         assert_eq!(projector.projection().revision, Revision(0));
+    }
+
+    #[test]
+    fn dirty_workspace_remains_actionable_in_the_resource_projection() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let run_id = RuntimeRunId::now();
+        let mut projector = SessionProjector::new(session_id, None);
+
+        projector.apply_envelope(&envelope(
+            1,
+            chrono::Utc::now(),
+            Event::WorkspaceLifecycle {
+                run_id: run_id.clone(),
+                workspace_id: "flow-workspace".into(),
+                path: "/tmp/flow-workspace".into(),
+                state: "dirty".into(),
+                cleanup_error: None,
+            },
+        ));
+
+        let resource = &projector.projection().resources[0];
+        assert_eq!(resource.kind, ResourceKind::Workspace);
+        assert_eq!(resource.state, ResourceState::Dirty);
+        assert_eq!(resource.owner_run_id, FlowRunId(run_id.0));
+        assert_eq!(resource.finished_at, None);
     }
 
     #[test]

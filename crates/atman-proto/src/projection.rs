@@ -628,6 +628,7 @@ pub enum ResourceKind {
 pub enum ResourceState {
     Starting,
     Running,
+    Dirty,
     Exited,
     Failed,
     Terminating,
