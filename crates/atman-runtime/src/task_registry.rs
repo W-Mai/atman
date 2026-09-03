@@ -106,6 +106,31 @@ pub struct TaskSnapshot {
     pub termination: Option<TaskTermination>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskOwner {
+    pub session_id: String,
+    pub flow_run_id: Option<crate::event::FlowRunId>,
+    pub workspace_id: Option<String>,
+}
+
+impl TaskOwner {
+    pub fn new(
+        session_id: impl Into<String>,
+        flow_run_id: Option<crate::event::FlowRunId>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            flow_run_id,
+            workspace_id: None,
+        }
+    }
+
+    pub fn with_workspace(mut self, workspace_id: Option<String>) -> Self {
+        self.workspace_id = workspace_id;
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDisplay {
     pub label: String,
@@ -209,6 +234,7 @@ struct TaskEntry {
 #[derive(Clone)]
 pub struct TaskRegistry {
     inner: Arc<std::sync::Mutex<HashMap<TaskId, TaskEntry>>>,
+    session_events: Arc<std::sync::Mutex<HashMap<String, crate::event::EventSink>>>,
     event_tx: broadcast::Sender<TaskEvent>,
 }
 
@@ -217,6 +243,7 @@ impl Default for TaskRegistry {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            session_events: Arc::new(std::sync::Mutex::new(HashMap::new())),
             event_tx,
         }
     }
@@ -226,9 +253,7 @@ fn running_snapshot(
     kind: TaskKind,
     display: TaskDisplay,
     source_handle: String,
-    session_id: String,
-    workspace_id: Option<String>,
-    flow_run_id: Option<crate::event::FlowRunId>,
+    owner: TaskOwner,
 ) -> TaskSnapshot {
     TaskSnapshot {
         id: TaskId::now(),
@@ -239,9 +264,9 @@ fn running_snapshot(
         started_at: Instant::now(),
         ended_at: None,
         source_handle,
-        session_id,
-        workspace_id,
-        flow_run_id,
+        session_id: owner.session_id,
+        workspace_id: owner.workspace_id,
+        flow_run_id: owner.flow_run_id,
         termination: None,
     }
 }
@@ -251,16 +276,23 @@ impl TaskRegistry {
         Self::default()
     }
 
+    pub fn bind_session(&self, session_id: impl Into<String>, events: crate::event::EventSink) {
+        self.session_events
+            .lock()
+            .unwrap()
+            .insert(session_id.into(), events);
+    }
+
     pub fn register(
         &self,
         kind: TaskKind,
         display: TaskDisplay,
         source_handle: String,
-        session_id: String,
+        owner: TaskOwner,
         cancel: CancellationToken,
     ) -> TaskId {
         self.register_snapshot(
-            running_snapshot(kind, display, source_handle, session_id, None, None),
+            running_snapshot(kind, display, source_handle, owner),
             cancel,
             None,
         )
@@ -279,9 +311,7 @@ impl TaskRegistry {
                 TaskKind::Flow,
                 label.into(),
                 source_handle,
-                session_id,
-                workspace_id,
-                None,
+                TaskOwner::new(session_id, None).with_workspace(workspace_id),
             ),
             cancel,
             None,
@@ -302,9 +332,7 @@ impl TaskRegistry {
                 TaskKind::Flow,
                 label.into(),
                 source_handle,
-                session_id,
-                workspace_id,
-                Some(flow_run_id),
+                TaskOwner::new(session_id, Some(flow_run_id)).with_workspace(workspace_id),
             ),
             cancel,
             None,
@@ -316,12 +344,12 @@ impl TaskRegistry {
         kind: TaskKind,
         display: TaskDisplay,
         source_handle: String,
-        session_id: String,
+        owner: TaskOwner,
         cancel: CancellationToken,
         kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     ) -> TaskId {
         self.register_snapshot(
-            running_snapshot(kind, display, source_handle, session_id, None, None),
+            running_snapshot(kind, display, source_handle, owner),
             cancel,
             kill_hook,
         )
@@ -340,8 +368,31 @@ impl TaskRegistry {
             kill_hook,
         };
         self.inner.lock().unwrap().insert(id.clone(), entry);
+        self.emit_lifecycle(&snapshot);
         let _ = self.event_tx.send(TaskEvent::Registered(snapshot));
         id
+    }
+
+    fn emit_lifecycle(&self, snapshot: &TaskSnapshot) {
+        let events = self
+            .session_events
+            .lock()
+            .unwrap()
+            .get(&snapshot.session_id)
+            .cloned();
+        if let Some(events) = events {
+            events.emit(crate::event::Event::TaskLifecycle {
+                task_id: snapshot.id.clone(),
+                kind: snapshot.kind,
+                run_id: snapshot.flow_run_id.clone(),
+                source_handle: snapshot.source_handle.clone(),
+                label: snapshot.label.clone(),
+                command: snapshot.command.clone(),
+                workspace_id: snapshot.workspace_id.clone(),
+                status: snapshot.status,
+                termination: snapshot.termination,
+            });
+        }
     }
 
     pub fn lookup(&self, id: &TaskId) -> Option<TaskSnapshot> {
@@ -430,6 +481,7 @@ impl TaskRegistry {
         let kind = entry.snapshot.kind;
         entry.snapshot.status = TaskStatus::Killing;
         entry.snapshot.termination = Some(termination);
+        let snapshot = entry.snapshot.clone();
         let cancel = entry.cancel.clone();
         let hook = entry.kill_hook.clone();
         drop(inner);
@@ -437,6 +489,7 @@ impl TaskRegistry {
         if let Some(hook) = hook {
             hook();
         }
+        self.emit_lifecycle(&snapshot);
         let _ = self.event_tx.send(TaskEvent::StatusChanged {
             id: id.clone(),
             kind,
@@ -465,9 +518,11 @@ impl TaskRegistry {
         };
         entry.snapshot.status = status;
         entry.snapshot.ended_at = Some(Instant::now());
+        let snapshot = entry.snapshot.clone();
         let kind = entry.snapshot.kind;
         let termination = entry.snapshot.termination;
         drop(inner);
+        self.emit_lifecycle(&snapshot);
         let _ = self.event_tx.send(TaskEvent::StatusChanged {
             id: id.clone(),
             kind,
@@ -479,13 +534,24 @@ impl TaskRegistry {
 
     pub fn reap(&self, id: &TaskId) {
         let mut inner = self.inner.lock().unwrap();
-        let should_remove = inner
+        let removed = inner
             .get(id)
-            .map(|e| e.snapshot.status.is_terminal())
-            .unwrap_or(false);
-        if should_remove {
+            .filter(|entry| entry.snapshot.status.is_terminal())
+            .map(|entry| entry.snapshot.session_id.clone());
+        if let Some(session_id) = removed {
             inner.remove(id);
             drop(inner);
+            let events = self
+                .session_events
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .cloned();
+            if let Some(events) = events {
+                events.emit(crate::event::Event::TaskReaped {
+                    task_id: id.clone(),
+                });
+            }
             let _ = self.event_tx.send(TaskEvent::Reaped { id: id.clone() });
         }
     }
@@ -519,7 +585,7 @@ mod tests {
             TaskKind::Bash,
             "cargo build".into(),
             "bg_1".into(),
-            "sess".into(),
+            TaskOwner::new("sess", None),
             cancel(),
         );
         let snap = reg.lookup(&id).expect("found");
@@ -539,7 +605,7 @@ mod tests {
                 command: Some("cargo test --workspace".into()),
             },
             "bg_1".into(),
-            "sess".into(),
+            TaskOwner::new("sess", None),
             cancel(),
         );
         let snap = reg.lookup(&id).expect("found");
@@ -554,7 +620,7 @@ mod tests {
             TaskKind::Terminal,
             "vim".into(),
             "term_1".into(),
-            "sess".into(),
+            TaskOwner::new("sess", None),
             cancel(),
         );
         let snap = reg.lookup_by_handle("term_1").expect("found");
@@ -569,21 +635,21 @@ mod tests {
             TaskKind::Bash,
             "a".into(),
             "bg_1".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         let _t1 = reg.register(
             TaskKind::Terminal,
             "vim".into(),
             "term_1".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         let _b2 = reg.register(
             TaskKind::Bash,
             "ls".into(),
             "bg_2".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
 
@@ -606,7 +672,7 @@ mod tests {
             TaskKind::Bash,
             "x".into(),
             "bg".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             tok.clone(),
         );
         assert_eq!(
@@ -699,14 +765,14 @@ mod tests {
             TaskKind::Terminal,
             "first".into(),
             "term_shared".into(),
-            "session_a".into(),
+            TaskOwner::new("session_a", None),
             cancel(),
         );
         let second = reg.register(
             TaskKind::Terminal,
             "second".into(),
             "term_shared".into(),
-            "session_b".into(),
+            TaskOwner::new("session_b", None),
             cancel(),
         );
 
@@ -727,7 +793,7 @@ mod tests {
             TaskKind::Terminal,
             "terminal".into(),
             "term_1".into(),
-            "session".into(),
+            TaskOwner::new("session", None),
             cancel(),
         );
 
@@ -771,7 +837,7 @@ mod tests {
             TaskKind::Bash,
             "x".into(),
             "bg".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         reg.finish(&id, TaskStatus::Ok);
@@ -785,7 +851,7 @@ mod tests {
             TaskKind::Bash,
             "x".into(),
             "bg".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         reg.finish(&id, TaskStatus::Ok);
@@ -801,7 +867,7 @@ mod tests {
             TaskKind::Bash,
             "x".into(),
             "bg".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         reg.reap(&id);
@@ -819,7 +885,7 @@ mod tests {
             TaskKind::Bash,
             "x".into(),
             "bg".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         let ev = rx.try_recv().expect("got event");
@@ -837,7 +903,7 @@ mod tests {
             TaskKind::Bash,
             "x".into(),
             "bg".into(),
-            "s".into(),
+            TaskOwner::new("s", None),
             cancel(),
         );
         let _ = rx.try_recv();
@@ -847,6 +913,53 @@ mod tests {
             TaskEvent::StatusChanged { new, .. } => assert_eq!(new, TaskStatus::Ok),
             _ => panic!("wrong event"),
         }
+    }
+
+    #[test]
+    fn bound_session_receives_durable_task_lifecycle() {
+        let reg = TaskRegistry::new();
+        let events = crate::event::EventSink::new();
+        let run_id = crate::event::FlowRunId::now();
+        reg.bind_session("session", events.clone());
+
+        let id = reg.register(
+            TaskKind::Bash,
+            TaskDisplay {
+                label: "build workspace".into(),
+                command: Some("cargo build".into()),
+            },
+            "bg_1".into(),
+            TaskOwner::new("session", Some(run_id.clone())),
+            cancel(),
+        );
+        reg.finish(&id, TaskStatus::Ok);
+        reg.reap(&id);
+
+        let recorded = events.snapshot_envelopes();
+        assert_eq!(recorded.len(), 3);
+        assert!(matches!(
+            &recorded[0].event,
+            crate::event::Event::TaskLifecycle {
+                task_id,
+                kind: TaskKind::Bash,
+                run_id: Some(owner),
+                source_handle,
+                status: TaskStatus::Running,
+                ..
+            } if task_id == &id && owner == &run_id && source_handle == "bg_1"
+        ));
+        assert!(matches!(
+            &recorded[1].event,
+            crate::event::Event::TaskLifecycle {
+                task_id,
+                status: TaskStatus::Ok,
+                ..
+            } if task_id == &id
+        ));
+        assert!(matches!(
+            &recorded[2].event,
+            crate::event::Event::TaskReaped { task_id } if task_id == &id
+        ));
     }
 
     #[test]

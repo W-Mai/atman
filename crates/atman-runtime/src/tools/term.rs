@@ -401,7 +401,7 @@ impl TermRegistry {
         tool_use_id: Option<String>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
-        flow_run_id: Option<String>,
+        flow_run_id: Option<crate::event::FlowRunId>,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError> {
         self.spawn_entry_with_log_opener(
             rows,
@@ -436,7 +436,7 @@ impl TermRegistry {
         tool_use_id: Option<String>,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
-        flow_run_id: Option<String>,
+        flow_run_id: Option<crate::event::FlowRunId>,
         open_log: F,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError>
     where
@@ -513,7 +513,7 @@ impl TermRegistry {
                     command: Some(command),
                 },
                 handle_str.clone(),
-                session_id.clone(),
+                crate::task_registry::TaskOwner::new(session_id.clone(), flow_run_id.clone()),
                 cancel,
                 Some(hook),
             )
@@ -534,7 +534,7 @@ impl TermRegistry {
                 task_registry,
                 task_id,
                 events,
-                flow_run_id,
+                flow_run_id.map(|run_id| run_id.0.to_string()),
                 call_intent,
                 tool_use_id,
                 profile,
@@ -857,7 +857,7 @@ async fn spawn_impl(
             tc.child_token()
         },
         ctx.events.clone(),
-        ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+        ctx.flow_run_id.clone(),
     )?;
 
     let state = entry.current_state();

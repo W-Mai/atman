@@ -365,7 +365,7 @@ impl BgRegistry {
                     command: Some(cmd.clone()),
                 },
                 handle_str.clone(),
-                session_id.clone(),
+                crate::task_registry::TaskOwner::new(session_id.clone(), ctx.flow_run_id.clone()),
                 task_cancel.clone(),
             )
         });

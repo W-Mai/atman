@@ -466,6 +466,8 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::FlowEnd { .. } => "flow_end",
         Event::RunCancelRequested { .. } => "run_cancel_requested",
         Event::WorkspaceLifecycle { .. } => "workspace_lifecycle",
+        Event::TaskLifecycle { .. } => "task_lifecycle",
+        Event::TaskReaped { .. } => "task_reaped",
         Event::LlmCall { .. } => "llm_call",
         Event::TurnStart { .. } => "turn_start",
         Event::TurnEnd { .. } => "turn_end",
@@ -521,6 +523,9 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         | Event::FlowEnd { run_id, .. }
         | Event::RunCancelRequested { run_id }
         | Event::WorkspaceLifecycle { run_id, .. } => (None, Some(run_id.0.to_string())),
+        Event::TaskLifecycle { run_id, .. } => {
+            (None, run_id.as_ref().map(|run_id| run_id.0.to_string()))
+        }
         Event::TurnStart { turn_id, .. } | Event::TurnEnd { turn_id, .. } => {
             (Some(turn_id.0.to_string()), None)
         }
@@ -650,7 +655,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         | Event::CompactReviewRequested { .. }
         | Event::CompactReviewResolved { .. }
         | Event::TerminalFinalState { .. }
-        | Event::MermaidDiagram { .. } => (None, None),
+        | Event::MermaidDiagram { .. }
+        | Event::TaskReaped { .. } => (None, None),
     }
 }
 

@@ -114,6 +114,24 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cleanup_error: Option<String>,
     },
+    TaskLifecycle {
+        task_id: crate::task_registry::TaskId,
+        kind: crate::task_registry::TaskKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<FlowRunId>,
+        source_handle: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        status: crate::task_registry::TaskStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        termination: Option<crate::task_registry::TaskTermination>,
+    },
+    TaskReaped {
+        task_id: crate::task_registry::TaskId,
+    },
     LlmCall {
         model: String,
         provider: String,

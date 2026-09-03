@@ -231,6 +231,8 @@ impl DaemonState {
             if let Some(entry) = sessions.get(&id) {
                 Some(entry.clone())
             } else {
+                self.task_registry
+                    .bind_session(id.to_string(), session.sink().clone());
                 sessions.insert(
                     id.clone(),
                     SessionActorHandle::spawn(

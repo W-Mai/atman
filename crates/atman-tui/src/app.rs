@@ -6203,7 +6203,7 @@ mod terminal_stream_tests {
                 command: Some("htop --sort-key PERCENT_CPU".into()),
             },
             "term_s_0".into(),
-            "s".into(),
+            atman_runtime::TaskOwner::new("s", None),
             tokio_util::sync::CancellationToken::new(),
         );
         let mut app = AppState::new("s".into(), None).with_task_registry(registry);
