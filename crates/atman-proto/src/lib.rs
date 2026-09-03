@@ -471,6 +471,20 @@ pub struct CancelRunResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePromptResponse {
     pub resolved: bool,
+    pub status: PromptResolutionStatus,
+    pub session_id: SessionId,
+    pub prompt_id: PromptId,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptResolutionStatus {
+    Resolved,
+    AlreadyResolved,
+    Abandoned,
+    NotFound,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -573,6 +587,7 @@ pub struct GetEventsRequest {
 pub struct ResolvePromptRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
     pub prompt_id: PromptId,
     #[schema(value_type = Object)]
     pub answer: serde_json::Value,
@@ -716,6 +731,17 @@ pub mod rpc {
                 type Output = $output;
             }
         };
+        ($marker:ident, $name:expr, $kind:ident, $params:ty, $output:ty, $revision:expr) => {
+            pub struct $marker;
+
+            impl RpcMethod for $marker {
+                const NAME: &'static str = $name;
+                const KIND: RpcKind = RpcKind::$kind;
+                const REVISION: u32 = $revision;
+                type Params = $params;
+                type Output = $output;
+            }
+        };
     }
 
     method!(
@@ -808,7 +834,8 @@ pub mod rpc {
         methods::RESOLVE_PROMPT,
         Command,
         ResolvePromptRequest,
-        ResolvePromptResponse
+        ResolvePromptResponse,
+        2
     );
     method!(
         ListPermissionRequests,

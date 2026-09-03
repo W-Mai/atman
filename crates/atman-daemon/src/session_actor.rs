@@ -6,8 +6,8 @@ use atman_proto::{
     CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId,
     GetSessionUpdatesResponse, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
     PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
-    ProjectionEventEnvelope, ResolvePermissionRequestsResponse, ResyncRequired, ServerEvent,
-    SessionId, SessionProjection, SessionSummary,
+    ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
+    ResyncRequired, ServerEvent, SessionId, SessionProjection, SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -16,6 +16,7 @@ use crate::state::LiveRun;
 
 const UPDATE_RETENTION: usize = 2_048;
 const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
+const PROMPT_TERMINAL_RETENTION: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunAdmission {
@@ -40,6 +41,16 @@ pub(crate) struct InterjectionCommit {
     pub injection_id: uuid::Uuid,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
+}
+
+pub(crate) struct PromptResolutionCommit {
+    pub status: PromptResolutionStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+struct PendingPrompt {
+    responder: oneshot::Sender<serde_json::Value>,
 }
 
 impl SessionActorView {
@@ -100,6 +111,8 @@ impl SessionActorHandle {
             session_id,
             session: session.clone(),
             runs,
+            prompts: HashMap::new(),
+            prompt_terminals: VecDeque::new(),
             revision: 1,
             projection,
             event_cursor,
@@ -169,6 +182,39 @@ impl SessionActorHandle {
             text,
             level,
             redirect_target,
+            reply,
+        })
+        .await?
+    }
+
+    pub fn register_prompt(
+        &self,
+        id: PromptId,
+        kind: String,
+        payload: serde_json::Value,
+    ) -> oneshot::Receiver<serde_json::Value> {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.tx.send(Command::RegisterPrompt {
+            id,
+            kind,
+            payload,
+            responder,
+        });
+        receiver
+    }
+
+    pub fn drop_prompt(&self, id: PromptId) {
+        let _ = self.tx.send(Command::DropPrompt { id });
+    }
+
+    pub async fn resolve_prompt(
+        &self,
+        id: PromptId,
+        answer: serde_json::Value,
+    ) -> Result<PromptResolutionCommit> {
+        request(&self.tx, |reply| Command::ResolvePrompt {
+            id,
+            answer,
             reply,
         })
         .await?
@@ -288,6 +334,20 @@ enum Command {
         redirect_target: Option<String>,
         reply: oneshot::Sender<Result<InterjectionCommit>>,
     },
+    RegisterPrompt {
+        id: PromptId,
+        kind: String,
+        payload: serde_json::Value,
+        responder: oneshot::Sender<serde_json::Value>,
+    },
+    DropPrompt {
+        id: PromptId,
+    },
+    ResolvePrompt {
+        id: PromptId,
+        answer: serde_json::Value,
+        reply: oneshot::Sender<Result<PromptResolutionCommit>>,
+    },
     Rename {
         title: String,
         reply: oneshot::Sender<Result<SessionSummary>>,
@@ -337,6 +397,8 @@ struct SessionActor {
     session_id: SessionId,
     session: Arc<atman_runtime::Session>,
     runs: HashMap<FlowRunId, LiveRun>,
+    prompts: HashMap<PromptId, PendingPrompt>,
+    prompt_terminals: VecDeque<(PromptId, PromptResolutionStatus)>,
     revision: u64,
     projection: SessionProjector,
     event_cursor: EventCursor,
@@ -456,6 +518,17 @@ impl SessionActor {
                 let result = self.interject(run_id, text, level, redirect_target);
                 let _ = reply.send(result);
             }
+            Command::RegisterPrompt {
+                id,
+                kind,
+                payload,
+                responder,
+            } => self.register_prompt(id, kind, payload, responder),
+            Command::DropPrompt { id } => self.drop_prompt(id),
+            Command::ResolvePrompt { id, answer, reply } => {
+                let result = self.resolve_prompt(id, answer);
+                let _ = reply.send(result);
+            }
             Command::Rename { title, reply } => {
                 let result = self.rename(title);
                 let _ = reply.send(result);
@@ -545,6 +618,86 @@ impl SessionActor {
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })
+    }
+
+    fn register_prompt(
+        &mut self,
+        id: PromptId,
+        kind: String,
+        payload: serde_json::Value,
+        responder: oneshot::Sender<serde_json::Value>,
+    ) {
+        if self.prompts.contains_key(&id) {
+            atman_runtime::notify!(error, "duplicate pending prompt id {id}");
+            return;
+        }
+        self.prompts.insert(id.clone(), PendingPrompt { responder });
+        let event = self.session.sink().emit_returning_envelope(
+            atman_runtime::event::Event::PendingPrompt {
+                prompt_id: id.0,
+                kind,
+                payload,
+            },
+        );
+        if let Err(error) = self.catch_up_through(event.seq) {
+            self.prompts.remove(&id);
+            atman_runtime::notify!(error, "project pending prompt {id} failed: {error:#}");
+        }
+    }
+
+    fn drop_prompt(&mut self, id: PromptId) {
+        let Some(entry) = self.prompts.remove(&id) else {
+            return;
+        };
+        drop(entry);
+        let event = self.session.sink().emit_returning_envelope(
+            atman_runtime::event::Event::PromptResolved {
+                prompt_id: id.0,
+                answer: serde_json::Value::Null,
+            },
+        );
+        if let Err(error) = self.catch_up_through(event.seq) {
+            atman_runtime::notify!(error, "project abandoned prompt {id} failed: {error:#}");
+        }
+        self.remember_prompt_terminal(id, PromptResolutionStatus::Abandoned);
+    }
+
+    fn resolve_prompt(
+        &mut self,
+        id: PromptId,
+        answer: serde_json::Value,
+    ) -> Result<PromptResolutionCommit> {
+        let status = if let Some(entry) = self.prompts.remove(&id) {
+            let event = self.session.sink().emit_returning_envelope(
+                atman_runtime::event::Event::PromptResolved {
+                    prompt_id: id.0,
+                    answer: answer.clone(),
+                },
+            );
+            self.catch_up_through(event.seq)?;
+            let _ = entry.responder.send(answer);
+            self.remember_prompt_terminal(id, PromptResolutionStatus::AlreadyResolved);
+            PromptResolutionStatus::Resolved
+        } else {
+            self.prompt_terminals
+                .iter()
+                .rev()
+                .find(|(prompt_id, _)| prompt_id == &id)
+                .map(|(_, status)| *status)
+                .unwrap_or(PromptResolutionStatus::NotFound)
+        };
+        Ok(PromptResolutionCommit {
+            status,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn remember_prompt_terminal(&mut self, id: PromptId, status: PromptResolutionStatus) {
+        self.prompt_terminals.push_back((id, status));
+        while self.prompt_terminals.len() > PROMPT_TERMINAL_RETENTION {
+            self.prompt_terminals.pop_front();
+        }
     }
 
     fn apply_runtime_event(&mut self, event: &atman_runtime::event::EventEnvelope) {

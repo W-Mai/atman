@@ -10,15 +10,21 @@ use tempfile::TempDir;
 async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
     let tmp = TempDir::new().unwrap();
     let daemon_state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let session_id = atman_proto::SessionId(session.id().0);
+    daemon_state
+        .register_session(session_id.clone(), session.clone(), "local-daemon")
+        .await
+        .unwrap();
 
     let file_path = tmp.path().join("input.txt");
     std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
 
-    let mut ex = Executor::new();
+    let mut ex = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&ex.tools);
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
-        sink: atman_runtime::event::EventSink::new(),
+        session_id: session_id.clone(),
     }));
 
     let src = format!(
@@ -37,12 +43,32 @@ async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
     let file = parse_file(&src).unwrap();
 
     let state_for_resolver = daemon_state.clone();
+    let session_for_resolver = session_id.clone();
     let resolver_task = tokio::spawn(async move {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
-            let pending = state_for_resolver.pending_prompt_ids();
-            if let Some(pid) = pending.first() {
-                assert!(state_for_resolver.resolve_prompt(pid, serde_json::json!({"hunks": [1]})));
+            let snapshot = state_for_resolver
+                .session_snapshot(&session_for_resolver, "local-daemon")
+                .await
+                .unwrap();
+            if let Some(prompt) = snapshot.projection.interactions.prompts.first() {
+                let result = atman_daemon::dispatch(
+                    state_for_resolver.clone(),
+                    atman_proto::JsonRpcRequest::for_method::<atman_proto::rpc::ResolvePrompt>(
+                        1,
+                        &atman_proto::ResolvePromptRequest {
+                            request_id: Some(atman_proto::RequestId::now()),
+                            session_id: session_for_resolver.clone(),
+                            prompt_id: prompt.id.clone(),
+                            answer: serde_json::json!({"hunks": [1]}),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .into_method_output::<atman_proto::rpc::ResolvePrompt>()
+                .unwrap();
+                assert!(result.resolved);
                 return;
             }
             if std::time::Instant::now() >= deadline {

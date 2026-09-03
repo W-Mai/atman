@@ -7,25 +7,17 @@ use atman_proto::{
     DaemonGeneration, EventCursor, FlowRunId, GetSessionUpdatesResponse, PromptId, ResyncRequired,
     SNAPSHOT_SCHEMA_VERSION, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
 };
-use atman_runtime::event::{Event, EventSink};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::idempotency::IdempotencyRegistry;
 use crate::projection::SessionProjector;
 use crate::session_actor::{RunAdmission, SessionActorHandle};
 
-struct PendingPrompt {
-    tx: oneshot::Sender<serde_json::Value>,
-    broadcast_sink: Option<EventSink>,
-}
-
 pub struct DaemonState {
     data_dir: PathBuf,
     daemon_generation: String,
     sessions: Mutex<HashMap<SessionId, SessionActorHandle>>,
     session_loads: Mutex<HashMap<SessionId, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
     provider_lifecycles: Mutex<HashMap<PathBuf, atman_runtime::ProviderLifecycle>>,
     pub(crate) idempotency: IdempotencyRegistry,
@@ -59,7 +51,6 @@ impl DaemonState {
             daemon_generation,
             sessions: Mutex::new(HashMap::new()),
             session_loads: Mutex::new(HashMap::new()),
-            prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
             provider_lifecycles: Mutex::new(HashMap::new()),
             idempotency: IdempotencyRegistry::default(),
@@ -100,67 +91,41 @@ impl DaemonState {
         &self.data_dir
     }
 
-    pub fn register_pending_prompt(&self, id: PromptId) -> oneshot::Receiver<serde_json::Value> {
-        let (tx, rx) = oneshot::channel();
-        self.prompts.lock().unwrap().insert(
-            id,
-            PendingPrompt {
-                tx,
-                broadcast_sink: None,
-            },
-        );
-        rx
-    }
-
-    pub fn register_pending_prompt_broadcast(
+    pub fn register_pending_prompt(
         &self,
+        session_id: &SessionId,
         id: PromptId,
         kind: &str,
         payload: serde_json::Value,
-        sink: EventSink,
-    ) -> oneshot::Receiver<serde_json::Value> {
-        let (tx, rx) = oneshot::channel();
-        self.prompts.lock().unwrap().insert(
-            id.clone(),
-            PendingPrompt {
-                tx,
-                broadcast_sink: Some(sink.clone()),
-            },
-        );
-        sink.emit(Event::PendingPrompt {
-            prompt_id: id.0,
-            kind: kind.to_string(),
-            payload,
-        });
-        rx
-    }
-
-    pub fn resolve_prompt(&self, id: &PromptId, answer: serde_json::Value) -> bool {
-        let Some(entry) = self.prompts.lock().unwrap().remove(id) else {
-            return false;
-        };
-        if let Some(sink) = &entry.broadcast_sink {
-            sink.emit(Event::PromptResolved {
-                prompt_id: id.0,
-                answer: answer.clone(),
-            });
-        }
-        entry.tx.send(answer).is_ok()
-    }
-
-    pub fn drop_pending_prompt(&self, id: &PromptId) {
-        if let Some(entry) = self.prompts.lock().unwrap().remove(id)
-            && let Some(sink) = &entry.broadcast_sink
-        {
-            sink.emit(Event::PromptResolved {
-                prompt_id: id.0,
-                answer: serde_json::Value::Null,
-            });
+    ) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+        let actor = self.sessions.lock().unwrap().get(session_id).cloned();
+        match actor {
+            Some(actor) => actor.register_prompt(id, kind.to_owned(), payload),
+            None => {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                drop(sender);
+                receiver
+            }
         }
     }
 
-    pub fn pending_prompt_ids(&self) -> Vec<PromptId> {
-        self.prompts.lock().unwrap().keys().cloned().collect()
+    pub fn drop_pending_prompt(&self, session_id: &SessionId, id: &PromptId) {
+        if let Some(actor) = self.sessions.lock().unwrap().get(session_id).cloned() {
+            actor.drop_prompt(id.clone());
+        }
+    }
+
+    pub(crate) async fn resolve_prompt(
+        &self,
+        session_id: &SessionId,
+        id: PromptId,
+        answer: serde_json::Value,
+        principal: &str,
+    ) -> Result<crate::session_actor::PromptResolutionCommit> {
+        let actor = self
+            .authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.resolve_prompt(id, answer).await
     }
 
     pub fn sessions_root(&self) -> PathBuf {

@@ -495,6 +495,7 @@ pub async fn dispatch_as(
         methods::RESOLVE_PROMPT => match parse_params::<rpc::ResolvePrompt>(req.params) {
             Ok(params) => {
                 let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
                 let operation_params = params.clone();
                 match execute_command::<rpc::ResolvePrompt, _>(
                     &state,
@@ -502,11 +503,23 @@ pub async fn dispatch_as(
                     params.request_id.clone(),
                     &params,
                     async move {
-                        Ok(ResolvePromptResponse {
-                            resolved: operation_state.resolve_prompt(
-                                &operation_params.prompt_id,
+                        let commit = operation_state
+                            .resolve_prompt(
+                                &operation_params.session_id,
+                                operation_params.prompt_id.clone(),
                                 operation_params.answer,
-                            ),
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(ResolvePromptResponse {
+                            resolved: commit.status
+                                == atman_proto::PromptResolutionStatus::Resolved,
+                            status: commit.status,
+                            session_id: operation_params.session_id,
+                            prompt_id: operation_params.prompt_id,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
                         })
                     },
                 )

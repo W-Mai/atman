@@ -4,7 +4,7 @@ use std::time::Duration;
 use atman_daemon::DaemonState;
 use atman_daemon::prompt_bridge::DaemonPromptResolver;
 use atman_dsl::parse::parse_file;
-use atman_runtime::event::{Event, EventSink};
+use atman_runtime::event::Event;
 use atman_runtime::{Executor, tools};
 use tempfile::TempDir;
 
@@ -12,7 +12,13 @@ use tempfile::TempDir;
 async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     let tmp = TempDir::new().unwrap();
     let daemon_state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
-    let sink = EventSink::new();
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let session_id = atman_proto::SessionId(session.id().0);
+    daemon_state
+        .register_session(session_id.clone(), session.clone(), "local-daemon")
+        .await
+        .unwrap();
+    let sink = session.sink().clone();
 
     let file_path = tmp.path().join("input.txt");
     std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
@@ -21,7 +27,7 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     tools::register_tier_zero(&ex.tools);
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
-        sink: sink.clone(),
+        session_id: session_id.clone(),
     }));
 
     let src = format!(
@@ -39,15 +45,34 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     let file = parse_file(&src).unwrap();
 
     let state_for_resolver = daemon_state.clone();
+    let session_for_resolver = session_id.clone();
     let resolver_answer = serde_json::json!({"hunks": [1]});
     let answer_clone = resolver_answer.clone();
     let resolver_task = tokio::spawn(async move {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
-            let pending = state_for_resolver.pending_prompt_ids();
-            if let Some(pid) = pending.first() {
-                let ok = state_for_resolver.resolve_prompt(pid, answer_clone);
-                assert!(ok, "resolve should succeed");
+            let snapshot = state_for_resolver
+                .session_snapshot(&session_for_resolver, "local-daemon")
+                .await
+                .unwrap();
+            if let Some(prompt) = snapshot.projection.interactions.prompts.first() {
+                let response = atman_daemon::dispatch(
+                    state_for_resolver.clone(),
+                    atman_proto::JsonRpcRequest::for_method::<atman_proto::rpc::ResolvePrompt>(
+                        1,
+                        &atman_proto::ResolvePromptRequest {
+                            request_id: Some(atman_proto::RequestId::now()),
+                            session_id: session_for_resolver.clone(),
+                            prompt_id: prompt.id.clone(),
+                            answer: answer_clone,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .into_method_output::<atman_proto::rpc::ResolvePrompt>()
+                .unwrap();
+                assert!(response.resolved, "resolve should succeed");
                 return;
             }
             if std::time::Instant::now() >= deadline {
@@ -129,17 +154,33 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
 async fn drop_pending_prompt_emits_null_answer_event() {
     let tmp = TempDir::new().unwrap();
     let daemon_state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
-    let sink = EventSink::new();
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let session_id = atman_proto::SessionId(session.id().0);
+    daemon_state
+        .register_session(session_id.clone(), session.clone(), "local-daemon")
+        .await
+        .unwrap();
+    let sink = session.sink().clone();
 
     let pid = atman_proto::PromptId(uuid::Uuid::now_v7());
-    let _rx = daemon_state.register_pending_prompt_broadcast(
+    let _rx = daemon_state.register_pending_prompt(
+        &session_id,
         pid.clone(),
         "user_ask",
         serde_json::json!({"prompt": "still there?"}),
-        sink.clone(),
     );
 
-    daemon_state.drop_pending_prompt(&pid);
+    daemon_state.drop_pending_prompt(&session_id, &pid);
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        if sink.snapshot().iter().any(
+            |event| matches!(event, Event::PromptResolved { prompt_id, .. } if *prompt_id == pid.0),
+        ) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        tokio::task::yield_now().await;
+    }
 
     let events = sink.snapshot();
     let has_pending = events
