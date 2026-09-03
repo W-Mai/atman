@@ -10,8 +10,9 @@
   "scripts": {
     "generate": "bun run scripts/generate.ts",
     "check:generated": "bun run scripts/generate.ts --check",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "quality": "bun run check:generated && bun run typecheck"
+    "quality": "bun run check:generated && bun run typecheck && bun run test"
   },
   "devDependencies": {
     "@types/bun": "^1.4.0",

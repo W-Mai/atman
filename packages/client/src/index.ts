@@ -1,2 +1,6 @@
+export * from './client'
+export * from './errors'
+export * from './fetch-transport'
 export * from './generated/methods.generated'
 export * from './generated/types.generated'
+export * from './transport'
