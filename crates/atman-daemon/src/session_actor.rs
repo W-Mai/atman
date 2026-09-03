@@ -17,6 +17,12 @@ use crate::state::LiveRun;
 const UPDATE_RETENTION: usize = 2_048;
 const MAX_UPDATE_PAGE_SIZE: usize = 1_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunAdmission {
+    Concurrent,
+    IdleSession,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionActorView {
     pub revision: u64,
@@ -121,8 +127,17 @@ impl SessionActorHandle {
         self.view.borrow().clone()
     }
 
-    pub async fn add_run(&self, run: LiveRun) -> Result<()> {
-        request(&self.tx, |reply| Command::AddRun { run, reply }).await?
+    pub async fn add_run(&self, run: LiveRun, admission: RunAdmission) -> Result<()> {
+        request(&self.tx, |reply| Command::AddRun {
+            run,
+            admission,
+            reply,
+        })
+        .await?
+    }
+
+    pub fn runtime_session(&self) -> Arc<atman_runtime::Session> {
+        self.session.clone()
     }
 
     pub fn finish_run(&self, run_id: FlowRunId) -> bool {
@@ -230,6 +245,7 @@ async fn request<T>(
 enum Command {
     AddRun {
         run: LiveRun,
+        admission: RunAdmission,
         reply: oneshot::Sender<Result<()>>,
     },
     FinishRun {
@@ -361,9 +377,18 @@ impl SessionActor {
 
     fn handle_command(&mut self, command: Command) {
         match command {
-            Command::AddRun { run, reply } => {
+            Command::AddRun {
+                run,
+                admission,
+                reply,
+            } => {
                 let result = if self.runs.contains_key(&run.run_id) {
                     Err(anyhow::anyhow!("run {} is already registered", run.run_id))
+                } else if admission == RunAdmission::IdleSession && !self.runs.is_empty() {
+                    Err(anyhow::anyhow!(
+                        "session {} already has an active root run",
+                        self.session_id
+                    ))
                 } else {
                     let delta = self.projection.register_run(
                         run.run_id.clone(),

@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::idempotency::IdempotencyRegistry;
-use crate::session_actor::SessionActorHandle;
+use crate::session_actor::{RunAdmission, SessionActorHandle};
 
 struct PendingPrompt {
     tx: oneshot::Sender<serde_json::Value>,
@@ -166,8 +166,31 @@ impl DaemonState {
         run: LiveRun,
         owner_principal: impl Into<String>,
     ) -> Result<()> {
-        self.register_session_with_runs(id, session, vec![run], owner_principal.into())
-            .await
+        self.register_session_with_runs(
+            id,
+            session,
+            vec![run],
+            owner_principal.into(),
+            RunAdmission::Concurrent,
+        )
+        .await
+    }
+
+    pub async fn register_session_root_run(
+        &self,
+        id: SessionId,
+        session: std::sync::Arc<atman_runtime::Session>,
+        run: LiveRun,
+        owner_principal: impl Into<String>,
+    ) -> Result<()> {
+        self.register_session_with_runs(
+            id,
+            session,
+            vec![run],
+            owner_principal.into(),
+            RunAdmission::IdleSession,
+        )
+        .await
     }
 
     pub async fn register_session(
@@ -176,8 +199,14 @@ impl DaemonState {
         session: std::sync::Arc<atman_runtime::Session>,
         owner_principal: impl Into<String>,
     ) -> Result<()> {
-        self.register_session_with_runs(id, session, Vec::new(), owner_principal.into())
-            .await
+        self.register_session_with_runs(
+            id,
+            session,
+            Vec::new(),
+            owner_principal.into(),
+            RunAdmission::Concurrent,
+        )
+        .await
     }
 
     async fn register_session_with_runs(
@@ -186,6 +215,7 @@ impl DaemonState {
         session: std::sync::Arc<atman_runtime::Session>,
         initial_runs: Vec<LiveRun>,
         owner_principal: String,
+        admission: RunAdmission,
     ) -> Result<()> {
         let existing = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -215,7 +245,7 @@ impl DaemonState {
                 "session {id} is already registered with another runtime"
             );
             for run in initial_runs {
-                entry.add_run(run).await?;
+                entry.add_run(run, admission).await?;
             }
         }
         Ok(())
@@ -228,6 +258,16 @@ impl DaemonState {
             .get(id)
             .filter(|entry| entry.owns(principal))
             .cloned()
+    }
+
+    pub(crate) fn runtime_session(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<std::sync::Arc<atman_runtime::Session>> {
+        self.authorized_actor(id, principal)
+            .map(|actor| actor.runtime_session())
+            .ok_or_else(|| anyhow::anyhow!("session is not open or permission was denied: {id}"))
     }
 
     pub fn owns_live_session(&self, id: &SessionId, principal: &str) -> bool {

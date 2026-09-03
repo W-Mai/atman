@@ -2275,7 +2275,23 @@ impl Session {
     }
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
-        BeginTurnCommand { user_msg }.execute(self)
+        BeginTurnCommand {
+            user_msg,
+            flow_cancel: None,
+        }
+        .execute(self)
+    }
+
+    pub fn begin_turn_with_cancel(
+        &self,
+        user_msg: Message,
+        flow_cancel: CancellationToken,
+    ) -> TurnId {
+        BeginTurnCommand {
+            user_msg,
+            flow_cancel: Some(flow_cancel),
+        }
+        .execute(self)
     }
 
     pub fn mark_streamed(&self) {
@@ -2542,13 +2558,14 @@ impl AppendMessageCommand {
 
 pub struct BeginTurnCommand {
     pub user_msg: Message,
+    pub flow_cancel: Option<CancellationToken>,
 }
 
 impl BeginTurnCommand {
     pub fn execute(&self, session: &Session) -> TurnId {
         let turn_id = self.user_msg.turn_id.clone();
         *session.turn.current_turn.lock().unwrap() = Some(turn_id.clone());
-        *session.turn.flow_cancel.lock().unwrap() = tokio_util::sync::CancellationToken::new();
+        *session.turn.flow_cancel.lock().unwrap() = self.flow_cancel.clone().unwrap_or_default();
         session.sink.emit(Event::TurnStart {
             turn_id: turn_id.clone(),
         });

@@ -101,14 +101,15 @@ fn invocation_env_from_reasoning(
     }
 }
 
-fn queue_run_images(
+fn prepare_run_images(
     session: &atman_runtime::Session,
     images: Vec<atman_proto::InlineImage>,
-) -> Result<()> {
-    for image in images {
-        session.queue_image_base64(&image.data_base64, image.name.as_deref())?;
-    }
-    Ok(())
+) -> Result<Vec<atman_runtime::message::ImageSource>> {
+    images
+        .into_iter()
+        .map(|image| session.import_image_base64(&image.data_base64, image.name.as_deref()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 struct RegistryCleanup {
@@ -303,6 +304,73 @@ impl RunLauncher {
         owner_principal: &str,
         options: RunOptions,
     ) -> Result<SpawnedRun> {
+        let project_root = self.resolve_project_root(None)?;
+        let (session, scope_root) = self.open_new_session(&state, &project_root)?;
+        self.spawn_session_as_with_options(
+            state,
+            session,
+            project_root,
+            scope_root,
+            flow_path,
+            args,
+            owner_principal,
+            options,
+            false,
+        )
+        .await
+    }
+
+    pub async fn start_in_session_as_with_options(
+        &self,
+        state: Arc<DaemonState>,
+        session_id: &ProtoSessionId,
+        flow_path: &str,
+        args: Vec<(String, atman_runtime::Value)>,
+        owner_principal: &str,
+        options: RunOptions,
+    ) -> Result<SpawnedRun> {
+        let session = state.runtime_session(session_id, owner_principal)?;
+        let project_root = match session.meta().and_then(|meta| meta.project_root) {
+            Some(root) => self.resolve_project_root(root.to_str())?,
+            None => self.resolve_project_root(None)?,
+        };
+        let hub = match &self.config_dir {
+            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
+            None => atman_runtime::config_hub::ConfigHub::global()
+                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
+        };
+        let scope_root = atman_runtime::storage::resolve_project_scope_with(
+            &hub,
+            &project_root,
+            state.data_dir(),
+        )?;
+        self.spawn_session_as_with_options(
+            state,
+            session,
+            project_root,
+            scope_root,
+            flow_path,
+            args,
+            owner_principal,
+            options,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_session_as_with_options(
+        &self,
+        state: Arc<DaemonState>,
+        session: Arc<atman_runtime::Session>,
+        project_root: PathBuf,
+        scope_root: PathBuf,
+        flow_path: &str,
+        args: Vec<(String, atman_runtime::Value)>,
+        owner_principal: &str,
+        options: RunOptions,
+        require_idle: bool,
+    ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
         let RunOptions { reasoning, images } = options;
@@ -315,27 +383,38 @@ impl RunLauncher {
             lifecycle: provider_lifecycle.clone(),
         };
 
-        let project_root = self.resolve_project_root(None)?;
-        let (session, scope_root) = self.open_new_session(&state, &project_root)?;
-        queue_run_images(&session, images)?;
+        let images = prepare_run_images(&session, images)?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
 
-        let cancel = session.flow_cancel_token();
-        state
-            .register_session_run(
-                sid_proto.clone(),
-                session.clone(),
-                LiveRun {
-                    run_id: run_id_proto.clone(),
-                    flow_name: String::new(),
-                    cancel,
-                    started_at: chrono::Utc::now(),
-                },
-                owner_principal,
-            )
-            .await?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let live_run = LiveRun {
+            run_id: run_id_proto.clone(),
+            flow_name: String::new(),
+            cancel: cancel.clone(),
+            started_at: chrono::Utc::now(),
+        };
+        if require_idle {
+            state
+                .register_session_root_run(
+                    sid_proto.clone(),
+                    session.clone(),
+                    live_run,
+                    owner_principal,
+                )
+                .await?;
+        } else {
+            state
+                .register_session_run(
+                    sid_proto.clone(),
+                    session.clone(),
+                    live_run,
+                    owner_principal,
+                )
+                .await?;
+        }
+        session.restore_pending_images(images);
 
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
@@ -376,6 +455,7 @@ impl RunLauncher {
                         Some(state_for_run),
                         provider_catalog_refresh,
                         invocation_env,
+                        cancel,
                     )
                     .await
                     {
@@ -386,7 +466,7 @@ impl RunLauncher {
             },
         );
         if let Err(error) = spawn_result {
-            state.remove_session(&sid_proto);
+            state.finish_run(&sid_proto, &run_id_proto);
             return Err(error).context("spawn run thread");
         }
 
@@ -410,6 +490,7 @@ async fn run_flow_inner(
     daemon_state: Option<Arc<crate::DaemonState>>,
     provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
     invocation_env: atman_runtime::InvocationEnv,
+    flow_cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
         if let Some(dir) = &config_dir {
@@ -513,7 +594,7 @@ async fn run_flow_inner(
     };
     {
         let _compact_guard = session.acquire_compact_lock().await;
-        session.begin_turn(user_msg);
+        session.begin_turn_with_cancel(user_msg, flow_cancel);
     }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
@@ -956,10 +1037,10 @@ mod tests {
     }
 
     #[test]
-    fn run_options_isolate_reasoning_and_queue_image_inputs() {
+    fn run_options_isolate_reasoning_and_prepare_image_inputs() {
         let session = atman_runtime::Session::open_ephemeral();
         let invocation_env = invocation_env_from_reasoning(Some("high@pro".into())).unwrap();
-        queue_run_images(
+        let images = prepare_run_images(
             &session,
             vec![atman_proto::InlineImage {
                 data_base64: "iVBORw0KGgo=".into(),
@@ -972,7 +1053,8 @@ mod tests {
             invocation_env.get("effort"),
             Some(atman_runtime::Value::Str(value)) if value == "high@pro"
         ));
-        assert_eq!(session.pending_image_count(), 1);
+        assert_eq!(images.len(), 1);
+        assert_eq!(session.pending_image_count(), 0);
 
         let next_invocation_env = invocation_env_from_reasoning(None).unwrap();
         assert!(next_invocation_env.get("effort").is_none());

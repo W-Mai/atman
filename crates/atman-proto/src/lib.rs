@@ -286,6 +286,7 @@ impl JsonRpcError {
 
 pub mod methods {
     pub const DAEMON_CAPABILITIES: &str = "daemon.capabilities";
+    pub const START_RUN: &str = "run.start";
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const CREATE_SESSION: &str = "session.create";
@@ -306,6 +307,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::CreateSession>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
+        super::method_descriptor::<super::rpc::StartRun>(),
         super::method_descriptor::<super::rpc::RunFlow>(),
         super::method_descriptor::<super::rpc::CancelRun>(),
         super::method_descriptor::<super::rpc::GetEvents>(),
@@ -433,6 +435,29 @@ pub struct InlineImage {
 pub struct RunFlowResponse {
     pub session_id: SessionId,
     pub run_id: FlowRunId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StartRunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub flow_path: String,
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub args: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<InlineImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StartRunResponse {
+    pub session_id: SessionId,
+    pub run_id: FlowRunId,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -665,6 +690,13 @@ pub mod rpc {
         Command,
         RunFlowRequest,
         RunFlowResponse
+    );
+    method!(
+        StartRun,
+        methods::START_RUN,
+        Command,
+        StartRunRequest,
+        StartRunResponse
     );
     method!(
         CancelRun,

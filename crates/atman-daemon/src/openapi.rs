@@ -5,6 +5,7 @@ use atman_proto::{
     ListPermissionRequestsRequest, ListSessionsRequest, MethodCapability, ProtocolLimits,
     RenameSessionRequest, ResolvePermissionRequestsRequest, ResolvePromptRequest,
     ResolvePromptResponse, RunFlowRequest, RunFlowResponse, ServerEventEnvelope, SessionSummary,
+    StartRunRequest, StartRunResponse,
 };
 use utoipa::OpenApi;
 
@@ -76,7 +77,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: daemon.capabilities, ping, session.create, list_sessions, rename_session, run_flow, cancel_run, get_events, session.get_snapshot, session.get_updates, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
+Methods dispatched at POST /rpc: daemon.capabilities, ping, session.create, list_sessions, rename_session, run.start, run_flow, cancel_run, get_events, session.get_snapshot, session.get_updates, resolve_prompt, list_permission_requests, create_permission_group, resolve_permission_requests. \
 Raw event-log SSE is available at GET /events. Convergent session projection SSE is available at GET /session-events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, session_sse_endpoint, openapi_endpoint),
@@ -91,6 +92,8 @@ Raw event-log SSE is available at GET /events. Convergent session projection SSE
         CreateSessionRequest,
         RunFlowRequest,
         RunFlowResponse,
+        StartRunRequest,
+        StartRunResponse,
         CancelRunRequest,
         CancelRunResponse,
         ResolvePromptRequest,

@@ -150,6 +150,115 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let flow_path = project_root.join("wait.at");
+    std::fs::write(
+        &flow_path,
+        "flow wait() -> string {\n    sleep(ms: 500)\n    return \"done\"\n}\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(data_dir));
+    state.set_launcher(Arc::new(
+        RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap(),
+    ));
+    let created = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CreateSession>(
+            1,
+            &atman_proto::CreateSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                project_root: Some(project_root.to_string_lossy().into_owned()),
+                title: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CreateSession>()
+    .unwrap();
+    let start = atman_proto::StartRunRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: created.projection.metadata.id.clone(),
+        flow_path: flow_path.to_string_lossy().into_owned(),
+        args: serde_json::Map::new(),
+        reasoning: None,
+        images: Vec::new(),
+    };
+    let running = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(2, &start).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::StartRun>()
+    .unwrap();
+    let retry = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(3, &start).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::StartRun>()
+    .unwrap();
+    assert_eq!(retry.run_id, running.run_id);
+    assert_eq!(retry.session_id, created.projection.metadata.id);
+
+    let concurrent = atman_proto::StartRunRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        ..start.clone()
+    };
+    let error = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(4, &concurrent).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::StartRun>()
+    .unwrap_err();
+    assert!(error.message.contains("active root run"));
+
+    let cancelled = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::CancelRun>(
+            5,
+            &atman_proto::CancelRunRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                run_id: running.run_id.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::CancelRun>()
+    .unwrap();
+    assert!(cancelled.cancelled);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while state.has_live_runs(&running.session_id) {
+        assert!(std::time::Instant::now() < deadline, "run did not cancel");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let events = std::fs::read_to_string(
+        state
+            .sessions_root()
+            .join(running.session_id.to_string())
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        events.contains("\"status\":{\"kind\":\"cancelled\"}"),
+        "{events}"
+    );
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

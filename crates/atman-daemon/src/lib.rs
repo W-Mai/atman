@@ -3,7 +3,7 @@ use atman_proto::{
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
     PermissionRpcScope, PingResponse, ProtocolLimits, RequestId, ResolvePromptResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, method_descriptor, methods, rpc,
+    RpcMethodDescriptor, RunFlowResponse, StartRunResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -38,6 +38,14 @@ fn permission_scope(
             workspace_relative_path,
         },
     })
+}
+
+fn runtime_args(
+    args: serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, atman_runtime::Value)> {
+    args.into_iter()
+        .map(|(key, value)| (key, atman_runtime::Value::from_json(value)))
+        .collect()
 }
 
 fn parse_params<M: RpcMethod>(
@@ -115,6 +123,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::CreateSession>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
+    method_descriptor::<rpc::StartRun>(),
     method_descriptor::<rpc::RunFlow>(),
     method_descriptor::<rpc::CancelRun>(),
     method_descriptor::<rpc::GetEvents>(),
@@ -453,6 +462,59 @@ pub async fn dispatch_as(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        methods::START_RUN => {
+            let Some(launcher) = state.launcher() else {
+                return JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                );
+            };
+            match parse_params::<rpc::StartRun>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    let outcome = execute_command::<rpc::StartRun, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let spawned = launcher
+                                .start_in_session_as_with_options(
+                                    operation_state.clone(),
+                                    &operation_params.session_id,
+                                    &operation_params.flow_path,
+                                    runtime_args(operation_params.args),
+                                    &operation_principal,
+                                    crate::run::RunOptions {
+                                        reasoning: operation_params.reasoning,
+                                        images: operation_params.images,
+                                    },
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            let snapshot = operation_state
+                                .session_snapshot(&spawned.session_id, &operation_principal)
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(StartRunResponse {
+                                session_id: spawned.session_id,
+                                run_id: spawned.run_id,
+                                revision: snapshot.projection.revision,
+                                cursor: snapshot.cursor,
+                            })
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(response) => method_response::<rpc::StartRun>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::RUN_FLOW => {
             let Some(launcher) = state.launcher() else {
                 return JsonRpcResponse::err(
@@ -471,11 +533,7 @@ pub async fn dispatch_as(
                         params.request_id.clone(),
                         &params,
                         async move {
-                            let args: Vec<(String, atman_runtime::Value)> = operation_params
-                                .args
-                                .into_iter()
-                                .map(|(k, v)| (k, atman_runtime::Value::from_json(v)))
-                                .collect();
+                            let args = runtime_args(operation_params.args);
                             launcher
                                 .spawn_as_with_options(
                                     operation_state,
