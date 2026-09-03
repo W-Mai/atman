@@ -132,6 +132,7 @@ pub mod http;
 mod idempotency;
 pub mod openapi;
 pub mod pidfile;
+pub mod project_registry;
 mod projection;
 pub mod prompt_bridge;
 pub mod run;
