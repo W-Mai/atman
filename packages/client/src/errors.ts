@@ -90,3 +90,20 @@ export class SessionReconcileError extends AtmanProtocolError {
     )
   }
 }
+
+export type SessionCommandErrorCode =
+  | 'committed_cursor_unavailable'
+  | 'command_session'
+  | 'command_run'
+
+export class SessionCommandError extends AtmanProtocolError {
+  override readonly name: string = 'SessionCommandError'
+
+  constructor(
+    readonly code: SessionCommandErrorCode,
+    message: string,
+    readonly details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message)
+  }
+}

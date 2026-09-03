@@ -1,11 +1,23 @@
-import { AtmanTransportError, SessionReconcileError } from './errors'
+import {
+  AtmanTransportError,
+  SessionCommandError,
+  SessionReconcileError,
+} from './errors'
 import type {
+  CancelRunResponse,
   DaemonGeneration,
   EventCursor,
+  FlowRunId,
   GetSessionUpdatesResponse,
+  InlineImage,
+  InterjectionLevel,
+  InterjectSessionResponse,
+  RenameSessionResponse,
+  SendMessageResponse,
   SessionId,
   SessionSignal,
   SessionSnapshot,
+  StartRunResponse,
 } from './generated/types.generated'
 import { SessionStore, type SessionView } from './session-store'
 import type { TransportRequestOptions } from './transport'
@@ -29,6 +41,19 @@ export interface SynchronizeOptions extends TransportRequestOptions {
   pollIntervalMs?: number
   minReconnectDelayMs?: number
   maxReconnectDelayMs?: number
+}
+
+export interface MessageOptions extends TransportRequestOptions {
+  reasoning?: string | null
+  images?: readonly InlineImage[]
+}
+
+export interface StartRunOptions extends MessageOptions {
+  args?: Readonly<Record<string, unknown>>
+}
+
+export interface InterjectOptions extends TransportRequestOptions {
+  redirectTarget?: string | null
 }
 
 export class SessionClient {
@@ -112,6 +137,110 @@ export class SessionClient {
         return { kind: 'applied', events, signals, hasMore: false }
       }
     }
+  }
+
+  async sendMessage(
+    text: string,
+    options: MessageOptions = {},
+  ): Promise<SendMessageResponse> {
+    const response = await this.#client.command(
+      'session.send_message',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        text,
+        ...(options.reasoning !== undefined ? { reasoning: options.reasoning } : {}),
+        ...(options.images ? { images: [...options.images] } : {}),
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async startRun(
+    flowPath: string,
+    options: StartRunOptions = {},
+  ): Promise<StartRunResponse> {
+    const response = await this.#client.command(
+      'run.start',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        flow_path: flowPath,
+        ...(options.args ? { args: { ...options.args } } : {}),
+        ...(options.reasoning !== undefined ? { reasoning: options.reasoning } : {}),
+        ...(options.images ? { images: [...options.images] } : {}),
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async rename(
+    title: string,
+    options: TransportRequestOptions = {},
+  ): Promise<RenameSessionResponse> {
+    const response = await this.#client.command(
+      'rename_session',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        title,
+      },
+      options,
+    )
+    this.#validateSession(response.session.id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async interject(
+    runId: FlowRunId,
+    text: string,
+    level: InterjectionLevel,
+    options: InterjectOptions = {},
+  ): Promise<InterjectSessionResponse> {
+    const response = await this.#client.command(
+      'session.interject',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        run_id: runId,
+        text,
+        level,
+        ...(options.redirectTarget !== undefined
+          ? { redirect_target: options.redirectTarget }
+          : {}),
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateRun(response.run_id, runId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async cancelRun(
+    runId: FlowRunId,
+    options: TransportRequestOptions = {},
+  ): Promise<CancelRunResponse> {
+    const response = await this.#client.command(
+      'cancel_run',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        run_id: runId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateRun(response.run_id, runId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
   }
 
   async synchronize(options: SynchronizeOptions = {}): Promise<never> {
@@ -254,6 +383,50 @@ export class SessionClient {
       throwIfAborted(options.signal)
     }
     return 'ended'
+  }
+
+  async #refreshThrough(
+    target: EventCursor,
+    options: TransportRequestOptions,
+  ): Promise<void> {
+    let stalled = 0
+    while (this.#store.current.cursor < target) {
+      const before = this.#store.current.cursor
+      await this.refresh(options)
+      const after = this.#store.current.cursor
+      if (after === before) {
+        stalled += 1
+        if (stalled >= 2) {
+          throw new SessionCommandError(
+            'committed_cursor_unavailable',
+            `daemon acknowledged cursor ${target}, but the session remained at ${after}`,
+            { target, current: after },
+          )
+        }
+      } else {
+        stalled = 0
+      }
+    }
+  }
+
+  #validateSession(received: SessionId): void {
+    if (received !== this.#sessionId) {
+      throw new SessionCommandError(
+        'command_session',
+        `command result belongs to session ${received}, expected ${this.#sessionId}`,
+        { expected: this.#sessionId, received },
+      )
+    }
+  }
+
+  #validateRun(received: FlowRunId, expected: FlowRunId): void {
+    if (received !== expected) {
+      throw new SessionCommandError(
+        'command_run',
+        `command result belongs to run ${received}, expected ${expected}`,
+        { expected, received },
+      )
+    }
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {

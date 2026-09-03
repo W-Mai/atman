@@ -1,6 +1,7 @@
 import {
   AtmanProtocolError,
   AtmanRpcError,
+  AtmanTransportError,
   UnsupportedMethodError,
 } from './errors'
 import {
@@ -9,6 +10,7 @@ import {
   RPC_METHODS,
   SNAPSHOT_SCHEMA_VERSION,
   type RpcMethodName,
+  type RpcMethodMap,
   type RpcMethodParams,
   type RpcMethodResult,
 } from './generated/methods.generated'
@@ -32,6 +34,10 @@ export interface ClientIdentity {
   name: string
   version: string
 }
+
+type RpcCommandMethodName = {
+  [M in RpcMethodName]: RpcMethodMap[M]['kind'] extends 'command' ? M : never
+}[RpcMethodName]
 
 export class AtmanClient {
   readonly #transport: RpcTransport
@@ -132,6 +138,25 @@ export class AtmanClient {
     options: TransportRequestOptions = {},
   ): Promise<RpcMethodResult<M>> {
     return this.#invoke(method, params, options, true)
+  }
+
+  /** @internal Commands retry once with the caller-provided business request ID. */
+  async command<M extends RpcCommandMethodName>(
+    method: M,
+    params: RpcMethodParams<M>,
+    options: TransportRequestOptions = {},
+  ): Promise<RpcMethodResult<M>> {
+    if (RPC_METHODS[method].kind !== 'command') {
+      throw new AtmanProtocolError(`${method} is not a command`)
+    }
+    try {
+      return await this.call(method, params, options)
+    } catch (error) {
+      if (!(error instanceof AtmanTransportError) || !error.retryable) {
+        throw error
+      }
+      return this.call(method, params, options)
+    }
   }
 
   async #invoke<M extends RpcMethodName>(

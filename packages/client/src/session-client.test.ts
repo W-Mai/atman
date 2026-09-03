@@ -68,6 +68,7 @@ function capabilities(generation: string): CapabilitiesResponse {
       { name: 'daemon.capabilities', kind: 'query', revision: 1 },
       { name: 'session.get_snapshot', kind: 'query', revision: 1 },
       { name: 'session.get_updates', kind: 'query', revision: 1 },
+      { name: 'session.send_message', kind: 'command', revision: 1 },
     ],
     limits: { max_event_page_size: 100, subscriber_buffer: 256 },
   }
@@ -299,6 +300,53 @@ describe('SessionClient', () => {
     expect(transport.streamCursors).toEqual([0, 2])
     expect(session.current.cursor).toBe(3)
     expect(session.current.projection.metadata.title).toBe('caught up')
+  })
+
+  test('retries a command with one business request ID and reconciles its cursor', async () => {
+    let commandAttempts = 0
+    const committedEvents = [
+      event('generation-1', 1, { type: 'heartbeat' }),
+      event('generation-1', 2, { type: 'heartbeat' }),
+    ]
+    const transport = new SessionTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(request, capabilities('generation-1'))
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'session.send_message':
+          commandAttempts += 1
+          if (commandAttempts === 1) {
+            throw new AtmanTransportError('connection reset after commit', true)
+          }
+          return result(request, {
+            session_id: sessionId,
+            run_id: 'run-1',
+            revision: 1,
+            cursor: 2,
+          })
+        case 'session.get_updates':
+          return result(request, page('generation-1', 0, committedEvents))
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    const response = await session.sendMessage('hello')
+
+    const attempts = transport.requests.filter(
+      (request) => request.method === 'session.send_message',
+    )
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]?.id).not.toBe(attempts[1]?.id)
+    expect(attempts[0]?.params.request_id).toBe(attempts[1]?.params.request_id)
+    expect(response.run_id).toBe('run-1')
+    expect(session.current.cursor).toBe(2)
   })
 })
 
