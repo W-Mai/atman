@@ -127,6 +127,7 @@ pub fn protocol_openapi_components()
     for (name, definition) in definitions {
         let mut definition = definition.clone();
         rewrite_definition_refs(&mut definition, "#/$defs/", "#/components/schemas/");
+        rewrite_openapi_any_value_schemas(&mut definition);
         schemas.push((
             name.clone(),
             serde_json::from_value::<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>(
@@ -137,6 +138,27 @@ pub fn protocol_openapi_components()
     Ok(utoipa::openapi::schema::ComponentsBuilder::new()
         .schemas_from_iter(schemas)
         .build())
+}
+
+fn rewrite_openapi_any_value_schemas(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) if fields.is_empty() => {
+            *value = serde_json::json!({
+                "type": ["object", "array", "string", "number", "integer", "boolean", "null"]
+            });
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                rewrite_openapi_any_value_schemas(value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_openapi_any_value_schemas(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn materialize_method<M: RpcMethod>() -> Result<RpcMethodSchema, ProtocolSchemaError> {
@@ -312,6 +334,35 @@ mod tests {
                 "missing schema definition `{name}`"
             );
         }
+    }
+
+    #[test]
+    fn arbitrary_json_wire_fields_are_not_restricted_to_objects() {
+        let generated = generate_protocol_artifacts().unwrap();
+        let schema: serde_json::Value = serde_json::from_str(&generated.schema).unwrap();
+        for pointer in [
+            "/$defs/JsonRpcRequest/properties/id",
+            "/$defs/JsonRpcResponse/properties/id",
+            "/$defs/JsonRpcResponse/properties/result",
+            "/$defs/JsonRpcError/properties/data",
+            "/$defs/ResolvePromptRequest/properties/answer",
+        ] {
+            assert_eq!(schema.pointer(pointer), Some(&serde_json::json!({})));
+        }
+    }
+
+    #[test]
+    fn arbitrary_json_wire_fields_remain_valid_openapi_components() {
+        let components = protocol_openapi_components().unwrap();
+        let components = serde_json::to_value(components).unwrap();
+        let types = components
+            .pointer("/schemas/JsonRpcResponse/properties/result/type")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(types.iter().any(|value| value == "array"));
+        assert!(types.iter().any(|value| value == "object"));
+        assert!(types.iter().any(|value| value == "string"));
+        assert!(types.iter().any(|value| value == "null"));
     }
 
     fn collect_references<'a>(value: &'a serde_json::Value, references: &mut Vec<&'a str>) {

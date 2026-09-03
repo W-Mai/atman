@@ -1482,12 +1482,7 @@
           "type": "integer",
           "format": "int32"
         },
-        "data": {
-          "type": [
-            "object",
-            "null"
-          ]
-        },
+        "data": {},
         "message": {
           "type": "string"
         }
@@ -1500,12 +1495,7 @@
         "method"
       ],
       "properties": {
-        "id": {
-          "type": [
-            "object",
-            "null"
-          ]
-        },
+        "id": {},
         "jsonrpc": {
           "type": "string"
         },
@@ -1536,21 +1526,11 @@
             }
           ]
         },
-        "id": {
-          "type": [
-            "object",
-            "null"
-          ]
-        },
+        "id": {},
         "jsonrpc": {
           "type": "string"
         },
-        "result": {
-          "type": [
-            "object",
-            "null"
-          ]
-        }
+        "result": {}
       }
     },
     "ListPermissionRequestsRequest": {
@@ -3268,9 +3248,7 @@
         "answer"
       ],
       "properties": {
-        "answer": {
-          "type": "object"
-        },
+        "answer": {},
         "prompt_id": {
           "$ref": "#/$defs/PromptId"
         },

@@ -1153,9 +1153,7 @@ export interface ResyncRequired {
   [k: string]: unknown
 }
 export interface ResolvePromptRequest {
-  answer: {
-    [k: string]: unknown
-  }
+  answer: unknown
   prompt_id: PromptId
   request_id?: null | RequestId
   session_id: SessionId
@@ -1337,9 +1335,7 @@ export interface ReleaseResourceResponse {
   [k: string]: unknown
 }
 export interface JsonRpcRequest {
-  id?: {
-    [k: string]: unknown
-  } | null
+  id?: unknown
   jsonrpc: string
   method: string
   params?: {
@@ -1349,20 +1345,14 @@ export interface JsonRpcRequest {
 }
 export interface JsonRpcResponse {
   error?: null | JsonRpcError
-  id?: {
-    [k: string]: unknown
-  } | null
+  id?: unknown
   jsonrpc: string
-  result?: {
-    [k: string]: unknown
-  } | null
+  result?: unknown
   [k: string]: unknown
 }
 export interface JsonRpcError {
   code: number
-  data?: {
-    [k: string]: unknown
-  } | null
+  data?: unknown
   message: string
   [k: string]: unknown
 }

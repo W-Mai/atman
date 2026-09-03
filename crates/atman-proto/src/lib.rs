@@ -173,7 +173,6 @@ pub const fn method_descriptor<M: RpcMethod>() -> RpcMethodDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
-    #[schema(value_type = Option<Object>)]
     pub id: Option<serde_json::Value>,
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,10 +205,8 @@ impl JsonRpcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
-    #[schema(value_type = Option<Object>)]
     pub id: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
     pub result: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
@@ -252,7 +249,6 @@ pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
     pub data: Option<serde_json::Value>,
 }
 
@@ -820,7 +816,6 @@ pub struct ResolvePromptRequest {
     pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub prompt_id: PromptId,
-    #[schema(value_type = Object)]
     pub answer: serde_json::Value,
 }
 
