@@ -3152,7 +3152,7 @@ fn render_stream_frame(
         | StreamFrame::MermaidDiagram { .. }
         | StreamFrame::SubAgentStarted { .. }
         | StreamFrame::SubAgentDone { .. }
-        | StreamFrame::LlmRetry
+        | StreamFrame::LlmRetry { .. }
         | StreamFrame::Unknown => {}
     }
 }

@@ -665,7 +665,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         signature_retries += 1;
                         if signature_retries < 3 {
                             if let Some(tx) = stream_tx.as_ref() {
-                                let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
+                                let _ = tx.send(crate::stream::StreamFrame::LlmRetry {
+                                    run_id: ctx.flow_run_id.as_ref().map(ToString::to_string),
+                                });
                             }
                             crate::notify!(
                                 info,
@@ -681,7 +683,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         }
                         reasoning = crate::provider::ReasoningSelection::Disabled;
                         if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
+                            let _ = tx.send(crate::stream::StreamFrame::LlmRetry {
+                                run_id: ctx.flow_run_id.as_ref().map(ToString::to_string),
+                            });
                         }
                         crate::notify!(
                             warn,

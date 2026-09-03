@@ -63,7 +63,10 @@ pub enum StreamFrame {
         run_id: Option<String>,
     },
     /// Discard streaming output from the previous attempt before retrying.
-    LlmRetry,
+    LlmRetry {
+        #[serde(default)]
+        run_id: Option<String>,
+    },
     LlmCallStats {
         model: String,
         #[serde(default)]

@@ -532,6 +532,11 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
             run_id: Some(run_id.clone().to_string()),
         })
         .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::LlmRetry {
+            run_id: Some(run_id.to_string()),
+        })
+        .unwrap();
 
     let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -539,7 +544,7 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
                 .session_updates(&sid, "alice", before.cursor, None)
                 .await
                 .unwrap();
-            if updates.events.len() == 3 {
+            if updates.events.len() == 4 {
                 break updates;
             }
             tokio::task::yield_now().await;
@@ -556,7 +561,8 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
         vec![
             before.cursor.0 + 1,
             before.cursor.0 + 2,
-            before.cursor.0 + 3
+            before.cursor.0 + 3,
+            before.cursor.0 + 4
         ]
     );
     assert!(matches!(
@@ -576,6 +582,12 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
         atman_proto::ServerEvent::Signal {
             signal: atman_proto::SessionSignal::ToolCallDraft { run_id: id, name, .. }
         } if id == &run_id && name == "fs.read"
+    ));
+    assert!(matches!(
+        &updates.events[3].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::LlmRetry { run_id: id }
+        } if id == &run_id
     ));
     let after = state.session_snapshot(&sid, "alice").await.unwrap();
     assert_eq!(after.projection.revision, before.projection.revision);

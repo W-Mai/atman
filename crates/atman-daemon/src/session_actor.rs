@@ -1435,6 +1435,11 @@ impl SessionActor {
                     name,
                     arguments_delta,
                 }),
+            StreamFrame::LlmRetry {
+                run_id: Some(run_id),
+            } => self
+                .known_run_id(&run_id)
+                .map(|run_id| SessionSignal::LlmRetry { run_id }),
             StreamFrame::TerminalChunk { handle, bytes, .. } if !bytes.is_empty() => self
                 .resource_id_for_handle(&handle)
                 .map(|resource_id| SessionSignal::TerminalBytes { resource_id, bytes }),

@@ -793,6 +793,9 @@ pub enum SessionSignal {
         name: String,
         arguments_delta: String,
     },
+    LlmRetry {
+        run_id: FlowRunId,
+    },
     TerminalBytes {
         resource_id: ResourceId,
         bytes: Vec<u8>,

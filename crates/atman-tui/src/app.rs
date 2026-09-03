@@ -2853,7 +2853,7 @@ impl AppState {
                     self.terminal_throttle = Some(Instant::now());
                 }
             }
-            StreamFrame::LlmRetry => {
+            StreamFrame::LlmRetry { .. } => {
                 while self.items.last().is_some_and(|item| {
                     matches!(item, OutputItem::ToolDispatch { calls } if calls.iter().all(|call| call.draft_index.is_some()))
                 }) {
@@ -5041,7 +5041,7 @@ mod tests {
             run_id: None,
         });
         assert_eq!(app.items.len(), 2);
-        app.apply_stream_frame(StreamFrame::LlmRetry);
+        app.apply_stream_frame(StreamFrame::LlmRetry { run_id: None });
         assert_eq!(app.items.len(), 2, "LlmRetry keeps items but marks them");
         match &app.items[0] {
             OutputItem::Thinking { retried, done, .. } => {
@@ -5091,7 +5091,7 @@ mod tests {
             run_id: None,
         });
         assert_eq!(app.items.len(), 3);
-        app.apply_stream_frame(StreamFrame::LlmRetry);
+        app.apply_stream_frame(StreamFrame::LlmRetry { run_id: None });
         assert_eq!(
             app.items.len(),
             3,

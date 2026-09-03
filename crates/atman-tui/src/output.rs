@@ -7969,7 +7969,7 @@ mod tests {
         assert!(cache.entries[0].streaming_markdown.is_some());
         app.layout_cache = cache;
 
-        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmRetry);
+        app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmRetry { run_id: None });
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(alternate_key, &app.items, &narrow_ctx, request);
         let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
