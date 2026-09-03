@@ -316,7 +316,7 @@ impl RunLauncher {
         Ok((session, scope_root))
     }
 
-    fn open_existing_session(
+    pub(crate) fn open_existing_session(
         &self,
         state: &DaemonState,
         session_id: &ProtoSessionId,

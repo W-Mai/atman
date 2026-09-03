@@ -277,6 +277,17 @@ async fn rename_session_retries_return_the_original_committed_result() {
         .save(&session_dir)
         .unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(tmp.path().to_path_buf(), Some(config_dir), None)
+            .unwrap(),
+    ));
     let request_id = atman_proto::RequestId::now();
     let request = atman_proto::RenameSessionRequest {
         request_id: Some(request_id.clone()),
@@ -291,7 +302,13 @@ async fn rename_session_retries_return_the_original_committed_result() {
     .await
     .into_method_output::<atman_proto::rpc::RenameSession>()
     .unwrap();
-    assert_eq!(first.title, "Committed title");
+    assert_eq!(first.session.title, "Committed title");
+    let snapshot = state
+        .session_snapshot(&atman_proto::SessionId(sid), "local-daemon")
+        .await
+        .unwrap();
+    assert_eq!(first.revision, snapshot.projection.revision);
+    assert_eq!(first.cursor, snapshot.cursor);
 
     atman_runtime::session_meta::SessionMeta::set_title(
         &session_dir,
@@ -305,7 +322,9 @@ async fn rename_session_retries_return_the_original_committed_result() {
     .await
     .into_method_output::<atman_proto::rpc::RenameSession>()
     .unwrap();
-    assert_eq!(retry.title, "Committed title");
+    assert_eq!(retry.session.title, "Committed title");
+    assert_eq!(retry.revision, first.revision);
+    assert_eq!(retry.cursor, first.cursor);
     assert_eq!(
         atman_runtime::session_meta::SessionMeta::load(&session_dir)
             .unwrap()

@@ -407,6 +407,13 @@ pub struct RenameSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RenameSessionResponse {
+    pub session: SessionSummary,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
@@ -856,7 +863,8 @@ pub mod rpc {
         methods::RENAME_SESSION,
         Command,
         RenameSessionRequest,
-        SessionSummary
+        RenameSessionResponse,
+        2
     );
     method!(
         RunFlow,

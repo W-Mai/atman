@@ -492,11 +492,11 @@ async fn list_sessions_includes_live_only_entry_as_running() {
 async fn rename_session_updates_metadata_and_list_summary() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
-    let sid = SessionId(Uuid::now_v7());
-    let dir = tmp.path().join("sessions").join(sid.0.to_string());
-    std::fs::create_dir_all(&dir).unwrap();
-    atman_runtime::session_meta::SessionMeta::default()
-        .save(&dir)
+    let session = Arc::new(atman_runtime::Session::open(tmp.path()).unwrap());
+    let sid = SessionId(session.id().0);
+    state
+        .register_session(sid.clone(), session, "local-daemon")
+        .await
         .unwrap();
 
     let req = JsonRpcRequest::new(
@@ -504,8 +504,12 @@ async fn rename_session_updates_metadata_and_list_summary() {
         methods::RENAME_SESSION,
         serde_json::json!({"session_id": sid, "title": "Login fix"}),
     );
-    let resp = dispatch(state, req).await;
-    let summary = resp.result.expect("rename returns summary");
-    assert_eq!(summary["title"], "Login fix");
-    assert_eq!(summary["name_source"], "user");
+    let resp = dispatch(state.clone(), req).await;
+    let response: atman_proto::RenameSessionResponse =
+        serde_json::from_value(resp.result.expect("rename returns response")).unwrap();
+    assert_eq!(response.session.title, "Login fix");
+    assert_eq!(response.session.name_source, atman_proto::NameSource::User);
+    let snapshot = state.session_snapshot(&sid, "local-daemon").await.unwrap();
+    assert_eq!(response.revision, snapshot.projection.revision);
+    assert_eq!(response.cursor, snapshot.cursor);
 }

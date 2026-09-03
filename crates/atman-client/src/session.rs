@@ -5,9 +5,9 @@ use atman_proto::{
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
     InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
     PROJECTION_EVENT_SCHEMA_VERSION, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
-    RequestId, Revision, SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse,
-    ServerEvent, SessionId, SessionProjection, SessionSignal, SessionSnapshot, SubmitFormRequest,
-    SubmitFormResponse, rpc,
+    RenameSessionRequest, RenameSessionResponse, RequestId, Revision, SNAPSHOT_SCHEMA_VERSION,
+    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
+    SessionSignal, SessionSnapshot, SubmitFormRequest, SubmitFormResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -381,6 +381,23 @@ impl SessionClient {
             })
             .await?;
         self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn rename(
+        &self,
+        title: impl Into<String>,
+    ) -> Result<RenameSessionResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::RenameSession>(&RenameSessionRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                title: title.into(),
+            })
+            .await?;
+        self.validate_command_session(&response.session.id)?;
         self.refresh_through(response.cursor).await?;
         Ok(response)
     }
@@ -1355,6 +1372,7 @@ mod tests {
                         for method in [
                             method_descriptor::<rpc::SendMessage>(),
                             method_descriptor::<rpc::SubmitForm>(),
+                            method_descriptor::<rpc::RenameSession>(),
                         ] {
                             capabilities.methods.push(MethodCapability {
                                 name: method.name.into(),
@@ -1385,6 +1403,23 @@ mod tests {
                             status: atman_proto::FormResolutionStatus::Resolved,
                             session_id: self.session_id.clone(),
                             form_id: params["form_id"].as_str().unwrap().into(),
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
+                    methods::RENAME_SESSION => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(RenameSessionResponse {
+                            session: atman_proto::SessionSummary {
+                                id: self.session_id.clone(),
+                                event_count: 1,
+                                first_ts: None,
+                                status: atman_proto::SessionStatus::Running,
+                                title: params["title"].as_str().unwrap().into(),
+                                goal: None,
+                                project_root: None,
+                                name_source: atman_proto::NameSource::User,
+                            },
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?
@@ -1482,5 +1517,9 @@ mod tests {
             .unwrap();
         assert_eq!(form.form_id, "form-1");
         assert_eq!(form.cursor, EventCursor(2));
+
+        let renamed = session.rename("Renamed").await.unwrap();
+        assert_eq!(renamed.session.title, "Renamed");
+        assert_eq!(renamed.cursor, EventCursor(2));
     }
 }

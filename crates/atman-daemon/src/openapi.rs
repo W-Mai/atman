@@ -4,9 +4,10 @@ use atman_proto::{
     GetEventsRequest, GetEventsResponse, InterjectSessionRequest, InterjectSessionResponse,
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListPermissionRequestsRequest,
     ListSessionsRequest, MethodCapability, ProtocolLimits, RenameSessionRequest,
-    ResolvePermissionRequestsRequest, ResolvePromptRequest, ResolvePromptResponse, RunFlowRequest,
-    RunFlowResponse, SendMessageRequest, SendMessageResponse, ServerEventEnvelope, SessionSummary,
-    StartRunRequest, StartRunResponse, SubmitFormRequest, SubmitFormResponse,
+    RenameSessionResponse, ResolvePermissionRequestsRequest, ResolvePromptRequest,
+    ResolvePromptResponse, RunFlowRequest, RunFlowResponse, SendMessageRequest,
+    SendMessageResponse, ServerEventEnvelope, SessionSummary, StartRunRequest, StartRunResponse,
+    SubmitFormRequest, SubmitFormResponse,
 };
 use utoipa::OpenApi;
 
@@ -123,6 +124,7 @@ Raw event-log SSE is available at GET /events. Convergent session projection SSE
         atman_proto::ResyncRequired,
         ListSessionsRequest,
         RenameSessionRequest,
+        RenameSessionResponse,
         ListPermissionRequestsRequest,
         CreatePermissionGroupRequest,
         CreatePermissionGroupResponse,

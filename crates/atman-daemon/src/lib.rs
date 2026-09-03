@@ -2,9 +2,9 @@ use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, InterjectSessionResponse, JsonRpcError,
     JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
-    PermissionRpcScope, PingResponse, ProtocolLimits, RequestId, ResolvePromptResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
-    SubmitFormResponse, method_descriptor, methods, rpc,
+    PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionResponse, RequestId,
+    ResolvePromptResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
+    StartRunResponse, SubmitFormResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -133,7 +133,7 @@ mod session_actor;
 pub mod state;
 pub mod unix;
 
-pub use session_actor::RunCancellationCommit;
+pub use session_actor::{RenameSessionCommit, RunCancellationCommit};
 pub use state::{DaemonState, LiveRun};
 
 pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
@@ -400,6 +400,11 @@ pub async fn dispatch_as(
                                 &operation_principal,
                             )
                             .await
+                            .map(|commit| RenameSessionResponse {
+                                session: commit.session,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
                             .map_err(|error| JsonRpcError::application(error.to_string()))
                     },
                 )

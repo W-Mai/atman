@@ -510,26 +510,30 @@ impl DaemonState {
     }
 
     pub async fn rename_session(
-        &self,
+        self: &std::sync::Arc<Self>,
         sid: &SessionId,
         title: &str,
         principal: &str,
-    ) -> Result<SessionSummary> {
-        let actor = self.sessions.lock().unwrap().get(sid).cloned();
-        if let Some(actor) = actor {
-            anyhow::ensure!(
-                actor.owns(principal),
-                "session {sid} is owned by another principal"
-            );
-            return actor.rename(title.to_owned()).await;
+    ) -> Result<crate::RenameSessionCommit> {
+        if self.sessions.lock().unwrap().get(sid).is_none() {
+            let launcher = self
+                .launcher()
+                .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+            let state = self.clone();
+            let load_id = sid.clone();
+            self.get_or_load_session(sid, principal, move || async move {
+                tokio::task::spawn_blocking(move || {
+                    launcher.open_existing_session(&state, &load_id)
+                })
+                .await
+                .context("join session replay task")?
+            })
+            .await?;
         }
-        let path = self.sessions_root().join(sid.0.to_string());
-        atman_runtime::session_meta::SessionMeta::rename(&path, title)
-            .with_context(|| format!("rename session {sid}"))?;
-        self.list_sessions()?
-            .into_iter()
-            .find(|summary| &summary.id == sid)
-            .ok_or_else(|| anyhow::anyhow!("session not found: {sid}"))
+        let actor = self
+            .authorized_actor(sid, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        actor.rename(title.to_owned()).await
     }
 
     pub async fn list_permission_requests(

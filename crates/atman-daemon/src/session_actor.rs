@@ -63,6 +63,12 @@ pub(crate) struct FormResolutionCommit {
     pub cursor: EventCursor,
 }
 
+pub struct RenameSessionCommit {
+    pub session: SessionSummary,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
 struct PendingPrompt {
     responder: oneshot::Sender<serde_json::Value>,
 }
@@ -251,7 +257,7 @@ impl SessionActorHandle {
         .await?
     }
 
-    pub async fn rename(&self, title: String) -> Result<SessionSummary> {
+    pub async fn rename(&self, title: String) -> Result<RenameSessionCommit> {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
     }
 
@@ -385,7 +391,7 @@ enum Command {
     },
     Rename {
         title: String,
-        reply: oneshot::Sender<Result<SessionSummary>>,
+        reply: oneshot::Sender<Result<RenameSessionCommit>>,
     },
     Snapshot {
         reply: oneshot::Sender<(EventCursor, SessionProjection)>,
@@ -872,10 +878,10 @@ impl SessionActor {
         self.publish();
     }
 
-    fn rename(&mut self, title: String) -> Result<SessionSummary> {
+    fn rename(&mut self, title: String) -> Result<RenameSessionCommit> {
         atman_runtime::session_meta::SessionMeta::rename(self.session.dir(), title)
             .with_context(|| format!("rename session {}", self.session_id))?;
-        let summary = session_summary(
+        let session = session_summary(
             self.session.dir(),
             self.session_id.clone(),
             self.runs.values(),
@@ -883,7 +889,11 @@ impl SessionActor {
         if let Some(delta) = self.projection.set_metadata(self.session.meta()) {
             self.publish_projection_delta(delta);
         }
-        Ok(summary)
+        Ok(RenameSessionCommit {
+            session,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
     }
 
     fn catch_up_projection(&mut self) {
