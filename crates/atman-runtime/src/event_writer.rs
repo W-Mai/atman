@@ -13,9 +13,39 @@ use crate::redact::Redactor;
 pub struct EventWriter {
     thread: Option<std::thread::JoinHandle<()>>,
     tx: mpsc::UnboundedSender<EventEnvelope>,
-    flush_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
+    flush_tx: mpsc::UnboundedSender<oneshot::Sender<EventWriterWatermark>>,
     stop_tx: Option<oneshot::Sender<()>>,
     events_path: PathBuf,
+    watermark: Arc<std::sync::Mutex<EventWriterWatermark>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventWriterWatermark {
+    pub seq: u64,
+    pub offset: u64,
+}
+
+struct WriterPosition {
+    offset: u64,
+    watermark: Arc<std::sync::Mutex<EventWriterWatermark>>,
+}
+
+struct WriterChannels {
+    events: mpsc::UnboundedReceiver<EventEnvelope>,
+    flushes: mpsc::UnboundedReceiver<oneshot::Sender<EventWriterWatermark>>,
+    stop: oneshot::Receiver<()>,
+}
+
+impl WriterPosition {
+    fn new(offset: u64, watermark: Arc<std::sync::Mutex<EventWriterWatermark>>) -> Self {
+        watermark.lock().unwrap().offset = offset;
+        Self { offset, watermark }
+    }
+
+    fn commit(&mut self, seq: u64, offset: u64) {
+        self.offset = offset;
+        *self.watermark.lock().unwrap() = EventWriterWatermark { seq, offset };
+    }
 }
 
 impl EventWriter {
@@ -42,9 +72,12 @@ impl EventWriter {
         let events_path = session_dir.join("events.jsonl");
         std::fs::create_dir_all(&session_dir)?;
         let (tx, rx) = mpsc::unbounded_channel::<EventEnvelope>();
-        let (flush_tx, flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let (flush_tx, flush_rx) =
+            mpsc::unbounded_channel::<oneshot::Sender<EventWriterWatermark>>();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
+        let watermark = Arc::new(std::sync::Mutex::new(EventWriterWatermark::default()));
+        let writer_watermark = watermark.clone();
         let thread = std::thread::Builder::new()
             .name("atman-event-writer".into())
             .spawn(move || {
@@ -60,13 +93,16 @@ impl EventWriter {
                 };
                 rt.block_on(async move {
                     if let Err(e) = writer_loop(
-                        rx,
-                        flush_rx,
-                        stop_rx,
+                        WriterChannels {
+                            events: rx,
+                            flushes: flush_rx,
+                            stop: stop_rx,
+                        },
                         &file_path,
                         project_index,
                         session_id,
                         redactor,
+                        writer_watermark,
                     )
                     .await
                     {
@@ -80,15 +116,20 @@ impl EventWriter {
             flush_tx,
             stop_tx: Some(stop_tx),
             events_path,
+            watermark,
         })
     }
 
-    pub async fn flush(&self) {
-        let (tx, rx) = oneshot::channel::<()>();
+    pub async fn flush(&self) -> Option<EventWriterWatermark> {
+        let (tx, rx) = oneshot::channel::<EventWriterWatermark>();
         if self.flush_tx.send(tx).is_err() {
-            return;
+            return None;
         }
-        let _ = rx.await;
+        rx.await.ok()
+    }
+
+    pub(crate) fn restore_durable_seq(&self, seq: u64) {
+        self.watermark.lock().unwrap().seq = seq;
     }
 
     pub fn sender(&self) -> mpsc::UnboundedSender<EventEnvelope> {
@@ -166,13 +207,12 @@ impl DegradedBuffer {
 }
 
 async fn writer_loop(
-    mut rx: mpsc::UnboundedReceiver<EventEnvelope>,
-    mut flush_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
-    mut stop_rx: oneshot::Receiver<()>,
+    mut channels: WriterChannels,
     path: &Path,
     project_index: Option<Arc<AnchorIndex>>,
     session_id: Option<String>,
     redactor: Option<Arc<Redactor>>,
+    watermark: Arc<std::sync::Mutex<EventWriterWatermark>>,
 ) -> std::io::Result<()> {
     // O_APPEND prevents seek-based overwrites required for idempotent retries.
     #[allow(clippy::suspicious_open_options)]
@@ -182,7 +222,8 @@ async fn writer_loop(
         .write(true)
         .open(path)
         .await?;
-    let mut offset = file.seek(SeekFrom::End(0)).await?;
+    let offset = file.seek(SeekFrom::End(0)).await?;
+    let mut position = WriterPosition::new(offset, watermark.clone());
     let session_dir = path.parent().unwrap_or(path);
     let indexer = project_index.zip(session_id);
     let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
@@ -191,11 +232,11 @@ async fn writer_loop(
     loop {
         tokio::select! {
             biased;
-            _ = &mut stop_rx => {
-                while let Ok(event) = rx.try_recv() {
+            _ = &mut channels.stop => {
+                while let Ok(event) = channels.events.try_recv() {
                     handle_event(
                         &mut file,
-                        &mut offset,
+                        &mut position,
                         event,
                         &mut degraded,
                         indexer.as_ref(),
@@ -203,27 +244,27 @@ async fn writer_loop(
                         session_dir,
                     ).await;
                 }
-                while let Ok(waiter) = flush_rx.try_recv() {
-                    let _ = waiter.send(());
+                while let Ok(waiter) = channels.flushes.try_recv() {
+                    let _ = waiter.send(*watermark.lock().unwrap());
                 }
                 break;
             }
             _ = recovery_tick.tick() => {
                 retry_degraded_on_tick(
                     &mut file,
-                    &mut offset,
+                    &mut position,
                     &mut degraded,
                     indexer.as_ref(),
                     redactor.as_deref(),
                     session_dir,
                 ).await;
             }
-            maybe_event = rx.recv() => {
+            maybe_event = channels.events.recv() => {
                 match maybe_event {
                     Some(event) => {
                         handle_event(
                             &mut file,
-                            &mut offset,
+                            &mut position,
                             event,
                             &mut degraded,
                             indexer.as_ref(),
@@ -234,13 +275,13 @@ async fn writer_loop(
                     None => break,
                 }
             }
-            maybe_flush = flush_rx.recv() => {
+            maybe_flush = channels.flushes.recv() => {
                 match maybe_flush {
                     Some(waiter) => {
-                        while let Ok(event) = rx.try_recv() {
+                        while let Ok(event) = channels.events.try_recv() {
                             handle_event(
                                 &mut file,
-                                &mut offset,
+                                &mut position,
                                 event,
                                 &mut degraded,
                                 indexer.as_ref(),
@@ -250,7 +291,7 @@ async fn writer_loop(
                         }
                         retry_buffered(
                             &mut file,
-                            &mut offset,
+                            &mut position,
                             &mut degraded,
                             indexer.as_ref(),
                             redactor.as_deref(),
@@ -259,7 +300,7 @@ async fn writer_loop(
                         if let Err(e) = file.sync_data().await {
                             crate::notify!(error, "event writer flush failed: {e}");
                         }
-                        let _ = waiter.send(());
+                        let _ = waiter.send(*watermark.lock().unwrap());
                     }
                     None => break,
                 }
@@ -268,7 +309,7 @@ async fn writer_loop(
     }
     retry_buffered(
         &mut file,
-        &mut offset,
+        &mut position,
         &mut degraded,
         indexer.as_ref(),
         redactor.as_deref(),
@@ -292,7 +333,7 @@ async fn writer_loop(
 
 async fn handle_event(
     file: &mut tokio::fs::File,
-    offset: &mut u64,
+    position: &mut WriterPosition,
     event: EventEnvelope,
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
@@ -303,7 +344,7 @@ async fn handle_event(
         degraded.buffer(event);
         return;
     }
-    if let Err(e) = write_event(file, offset, &event, indexer, redactor, session_dir).await {
+    if let Err(e) = write_event(file, position, &event, indexer, redactor, session_dir).await {
         crate::notify!(
             error,
             "event writer write failed (seq={}): {e}; buffering events in memory",
@@ -315,7 +356,7 @@ async fn handle_event(
 
 async fn retry_degraded_on_tick(
     file: &mut tokio::fs::File,
-    offset: &mut u64,
+    position: &mut WriterPosition,
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
@@ -325,7 +366,7 @@ async fn retry_degraded_on_tick(
         return;
     }
 
-    retry_buffered(file, offset, degraded, indexer, redactor, session_dir).await;
+    retry_buffered(file, position, degraded, indexer, redactor, session_dir).await;
     if !degraded.is_degraded() {
         crate::notify!(info, location = Status, "事件写入已恢复");
     }
@@ -333,14 +374,14 @@ async fn retry_degraded_on_tick(
 
 async fn retry_buffered(
     file: &mut tokio::fs::File,
-    offset: &mut u64,
+    position: &mut WriterPosition,
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
     session_dir: &Path,
 ) {
     while let Some(event) = degraded.events.pop_front() {
-        if let Err(e) = write_event(file, offset, &event, indexer, redactor, session_dir).await {
+        if let Err(e) = write_event(file, position, &event, indexer, redactor, session_dir).await {
             crate::notify!(
                 error,
                 "event writer retry failed (seq={}): {e}; {} event(s) remain buffered",
@@ -357,29 +398,29 @@ async fn retry_buffered(
 
 async fn write_event(
     file: &mut tokio::fs::File,
-    offset: &mut u64,
+    position: &mut WriterPosition,
     envelope: &EventEnvelope,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
     session_dir: &Path,
 ) -> std::io::Result<()> {
     let line = serialize_event(envelope, redactor);
-    let start = *offset;
+    let start = position.offset;
     file.seek(SeekFrom::Start(start)).await?;
     if let Err(e) = file.write_all(line.as_bytes()).await {
-        *offset = start;
+        position.offset = start;
         return Err(e);
     }
     if let Err(e) = file.write_all(b"\n").await {
-        *offset = start;
+        position.offset = start;
         return Err(e);
     }
     let end = file.stream_position().await?;
     if let Err(e) = file.sync_data().await {
-        *offset = start;
+        position.offset = start;
         return Err(e);
     }
-    *offset = end;
+    position.commit(envelope.seq, end);
     if let Err(error) =
         crate::session_meta::SessionStats::record_persisted_event(session_dir, start, end, envelope)
     {
@@ -798,12 +839,13 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         tokio::fs::write(&path, b"").await.unwrap();
         let mut file = tokio::fs::File::open(&path).await.unwrap();
-        let mut offset = 0;
         let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
+        let watermark = Arc::new(std::sync::Mutex::new(EventWriterWatermark::default()));
+        let mut position = WriterPosition::new(0, watermark.clone());
 
         handle_event(
             &mut file,
-            &mut offset,
+            &mut position,
             flow_start(1),
             &mut degraded,
             None,
@@ -823,10 +865,10 @@ mod tests {
             .open(&path)
             .await
             .unwrap();
-        let mut offset = 0;
+        let mut position = WriterPosition::new(0, watermark);
         retry_degraded_on_tick(
             &mut file,
-            &mut offset,
+            &mut position,
             &mut degraded,
             None,
             None,
@@ -859,9 +901,10 @@ mod tests {
         file.write_all(&line.as_bytes()[..line.len() / 2])
             .await
             .unwrap();
-        let mut offset = 0;
+        let watermark = Arc::new(std::sync::Mutex::new(EventWriterWatermark::default()));
+        let mut position = WriterPosition::new(0, watermark);
 
-        write_event(&mut file, &mut offset, &event, None, None, dir.path())
+        write_event(&mut file, &mut position, &event, None, None, dir.path())
             .await
             .unwrap();
 
@@ -877,7 +920,7 @@ mod tests {
         let tx = writer.sender();
         for i in 0..5 {
             tx.send(EventEnvelope::new(
-                i as u64,
+                i as u64 + 1,
                 Event::FlowStart {
                     run_id: FlowRunId::now(),
                     flow_name: format!("flow_{i}"),
@@ -888,6 +931,13 @@ mod tests {
             ))
             .unwrap();
         }
+        let watermark = writer.flush().await.expect("writer is running");
+        let persisted_len = tokio::fs::metadata(dir.path().join("events.jsonl"))
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(watermark.seq, 5);
+        assert_eq!(watermark.offset, persisted_len);
         drop(tx);
         writer.shutdown().await;
         let path = dir.path().join("events.jsonl");

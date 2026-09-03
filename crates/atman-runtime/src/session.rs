@@ -1232,6 +1232,7 @@ impl Session {
         let events = replay.events;
         if let Some(last_seq) = replay.last_seq {
             sink.restore_seq(last_seq);
+            writer.restore_durable_seq(last_seq);
         }
         let mut initial_context = replay.context;
         let persisted = PersistedContextState::load(&dir);
@@ -2601,12 +2602,10 @@ impl Session {
     // Rides FIFO queue ordering: once flush's own barrier is written,
     // every earlier sink.emit is on disk too.
     #[allow(clippy::await_holding_lock)]
-    pub async fn flush_writer(&self) {
+    pub async fn flush_writer(&self) -> Option<crate::event_writer::EventWriterWatermark> {
         let guard = self.writer.lock().unwrap();
-        let Some(ref writer) = *guard else {
-            return;
-        };
-        writer.flush().await;
+        let writer = (*guard).as_ref()?;
+        writer.flush().await
     }
 }
 
