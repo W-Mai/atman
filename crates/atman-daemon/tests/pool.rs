@@ -711,6 +711,101 @@ async fn process_signal_follows_its_durable_resource_projection() {
 }
 
 #[tokio::test]
+async fn compaction_progress_is_session_scoped_and_ephemeral() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    let run_id = FlowRunId(Uuid::now_v7());
+    state
+        .register_session_run(
+            sid.clone(),
+            session.clone(),
+            LiveRun {
+                run_id,
+                flow_name: "agent".into(),
+                cancel: CancellationToken::new(),
+                started_at: chrono::Utc::now(),
+            },
+            "alice",
+        )
+        .await
+        .unwrap();
+    let before = state.session_snapshot(&sid, "alice").await.unwrap();
+    let stream = session.stream_tx();
+    stream
+        .send(atman_runtime::stream::StreamFrame::CompactionSummary {
+            phase: atman_runtime::stream::CompactionPhase::Running,
+            range_start: 2,
+            range_end: 8,
+            summary: String::new(),
+            before_tokens: 10_000,
+            after_tokens: 0,
+            compacted_count: 7,
+        })
+        .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::CompactionDelta {
+            range_start: 2,
+            range_end: 8,
+            text: "summary chunk".into(),
+        })
+        .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::CompactionSummary {
+            phase: atman_runtime::stream::CompactionPhase::Failed,
+            range_start: 2,
+            range_end: 8,
+            summary: "review rejected".into(),
+            before_tokens: 10_000,
+            after_tokens: 10_000,
+            compacted_count: 7,
+        })
+        .unwrap();
+
+    let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let updates = state
+                .session_updates(&sid, "alice", before.cursor, None)
+                .await
+                .unwrap();
+            if updates.events.len() == 3 {
+                break updates;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        &updates.events[0].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::CompactionStarted {
+                range_start: 2,
+                range_end: 8,
+                before_tokens: 10_000,
+                compacted_count: 7,
+            }
+        }
+    ));
+    assert!(matches!(
+        &updates.events[1].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::CompactionText { text, .. }
+        } if text == "summary chunk"
+    ));
+    assert!(matches!(
+        &updates.events[2].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::CompactionFailed { reason, .. }
+        } if reason == "review rejected"
+    ));
+    let after = state.session_snapshot(&sid, "alice").await.unwrap();
+    assert_eq!(after.projection.revision, before.projection.revision);
+    assert_eq!(after.cursor, updates.next_cursor);
+}
+
+#[tokio::test]
 async fn list_sessions_accepts_search_and_limit_query() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

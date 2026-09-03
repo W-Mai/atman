@@ -1443,6 +1443,39 @@ impl SessionActor {
             StreamFrame::Notification(frame) => self
                 .notification_signal(frame)
                 .map(|notification| SessionSignal::Notification { notification }),
+            StreamFrame::CompactionSummary {
+                phase: atman_runtime::stream::CompactionPhase::Running,
+                range_start,
+                range_end,
+                before_tokens,
+                compacted_count,
+                ..
+            } => Some(SessionSignal::CompactionStarted {
+                range_start: range_start as u64,
+                range_end: range_end as u64,
+                before_tokens,
+                compacted_count: compacted_count as u64,
+            }),
+            StreamFrame::CompactionDelta {
+                range_start,
+                range_end,
+                text,
+            } if !text.is_empty() => Some(SessionSignal::CompactionText {
+                range_start: range_start as u64,
+                range_end: range_end as u64,
+                text,
+            }),
+            StreamFrame::CompactionSummary {
+                phase: atman_runtime::stream::CompactionPhase::Failed,
+                range_start,
+                range_end,
+                summary,
+                ..
+            } => Some(SessionSignal::CompactionFailed {
+                range_start: range_start as u64,
+                range_end: range_end as u64,
+                reason: summary,
+            }),
             StreamFrame::TerminalChunk { handle, bytes, .. } if !bytes.is_empty() => self
                 .resource_id_for_handle(&handle)
                 .map(|resource_id| SessionSignal::TerminalBytes { resource_id, bytes }),

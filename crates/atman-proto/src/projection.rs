@@ -799,6 +799,22 @@ pub enum SessionSignal {
     Notification {
         notification: SessionNotification,
     },
+    CompactionStarted {
+        range_start: u64,
+        range_end: u64,
+        before_tokens: u64,
+        compacted_count: u64,
+    },
+    CompactionText {
+        range_start: u64,
+        range_end: u64,
+        text: String,
+    },
+    CompactionFailed {
+        range_start: u64,
+        range_end: u64,
+        reason: String,
+    },
     TerminalBytes {
         resource_id: ResourceId,
         bytes: Vec<u8>,
