@@ -451,6 +451,75 @@ impl SessionProjector {
                 self.upsert_resource(resource.clone());
                 changes.push(ProjectionChange::ResourceUpsert { resource });
             }
+            Event::TaskLifecycle {
+                task_id,
+                kind,
+                run_id: Some(run_id),
+                source_handle,
+                label,
+                command,
+                workspace_id,
+                status,
+                termination,
+            } if !matches!(kind, atman_runtime::TaskKind::Flow) => {
+                let id = task_resource_id(task_id);
+                let started_at = self
+                    .projection
+                    .resources
+                    .iter()
+                    .find(|resource| resource.id == id)
+                    .and_then(|resource| resource.started_at)
+                    .or(Some(envelope.ts));
+                let state = task_resource_state(*status);
+                let mut details = std::collections::BTreeMap::from([(
+                    "source_handle".into(),
+                    source_handle.clone(),
+                )]);
+                if let Some(command) = command {
+                    details.insert("command".into(), command.clone());
+                }
+                if let Some(workspace_id) = workspace_id {
+                    details.insert("workspace_id".into(), workspace_id.clone());
+                }
+                if let Some(termination) = termination {
+                    details.insert(
+                        "termination".into(),
+                        match termination {
+                            atman_runtime::task_registry::TaskTermination::Killed => "killed",
+                            atman_runtime::task_registry::TaskTermination::Suicide => "suicide",
+                        }
+                        .into(),
+                    );
+                }
+                let resource = ResourceProjection {
+                    id,
+                    kind: match kind {
+                        atman_runtime::TaskKind::Bash => ResourceKind::BackgroundProcess,
+                        atman_runtime::TaskKind::Terminal => ResourceKind::Terminal,
+                        atman_runtime::TaskKind::Flow => unreachable!(),
+                    },
+                    state,
+                    owner_run_id: FlowRunId(run_id.0),
+                    tool_use_id: None,
+                    label: label.clone(),
+                    started_at,
+                    finished_at: task_resource_is_terminal(*status).then_some(envelope.ts),
+                    details,
+                };
+                self.upsert_resource(resource.clone());
+                changes.push(ProjectionChange::ResourceUpsert { resource });
+            }
+            Event::TaskLifecycle { .. } => {}
+            Event::TaskReaped { task_id } => {
+                let resource_id = task_resource_id(task_id);
+                let previous_len = self.projection.resources.len();
+                self.projection
+                    .resources
+                    .retain(|resource| resource.id != resource_id);
+                if self.projection.resources.len() != previous_len {
+                    changes.push(ProjectionChange::ResourceRemove { resource_id });
+                }
+            }
             Event::PendingPrompt {
                 prompt_id,
                 kind,
@@ -1546,6 +1615,28 @@ fn resource_is_terminal(state: &str) -> bool {
     matches!(state, "released" | "failed" | "error" | "lost" | "orphaned")
 }
 
+fn task_resource_id(task_id: &atman_runtime::TaskId) -> ResourceId {
+    ResourceId(format!("task:{task_id}"))
+}
+
+fn task_resource_state(status: atman_runtime::TaskStatus) -> ResourceState {
+    match status {
+        atman_runtime::TaskStatus::Running => ResourceState::Running,
+        atman_runtime::TaskStatus::Killing => ResourceState::Terminating,
+        atman_runtime::TaskStatus::Ok | atman_runtime::TaskStatus::Killed => ResourceState::Exited,
+        atman_runtime::TaskStatus::Err => ResourceState::Failed,
+    }
+}
+
+fn task_resource_is_terminal(status: atman_runtime::TaskStatus) -> bool {
+    matches!(
+        status,
+        atman_runtime::TaskStatus::Ok
+            | atman_runtime::TaskStatus::Err
+            | atman_runtime::TaskStatus::Killed
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1666,6 +1757,60 @@ mod tests {
         assert!(projector.apply_envelope(&event).is_none());
         assert_eq!(projector.last_runtime_seq(), 7);
         assert_eq!(projector.projection().revision, Revision(0));
+    }
+
+    #[test]
+    fn task_lifecycle_projects_and_reaps_managed_resources() {
+        let mut projector = SessionProjector::new(SessionId(uuid::Uuid::now_v7()), None);
+        let task_id = atman_runtime::TaskId::now();
+        let run_id = RuntimeRunId::now();
+        let started_at = chrono::Utc::now() - chrono::Duration::seconds(2);
+        let finished_at = chrono::Utc::now();
+        let running = Event::TaskLifecycle {
+            task_id: task_id.clone(),
+            kind: atman_runtime::TaskKind::Bash,
+            run_id: Some(run_id.clone()),
+            source_handle: "bg_1".into(),
+            label: "build workspace".into(),
+            command: Some("cargo build".into()),
+            workspace_id: None,
+            status: atman_runtime::TaskStatus::Running,
+            termination: None,
+        };
+        let finished = Event::TaskLifecycle {
+            task_id: task_id.clone(),
+            kind: atman_runtime::TaskKind::Bash,
+            run_id: Some(run_id.clone()),
+            source_handle: "bg_1".into(),
+            label: "build workspace".into(),
+            command: Some("cargo build".into()),
+            workspace_id: None,
+            status: atman_runtime::TaskStatus::Ok,
+            termination: None,
+        };
+
+        projector.apply_envelope(&envelope(1, started_at, running));
+        projector.apply_envelope(&envelope(2, finished_at, finished));
+        let resource = &projector.projection().resources[0];
+        assert_eq!(resource.id, task_resource_id(&task_id));
+        assert_eq!(resource.kind, ResourceKind::BackgroundProcess);
+        assert_eq!(resource.state, ResourceState::Exited);
+        assert_eq!(resource.owner_run_id, FlowRunId(run_id.0));
+        assert_eq!(resource.started_at, Some(started_at));
+        assert_eq!(resource.finished_at, Some(finished_at));
+        assert_eq!(
+            resource.details.get("command").map(String::as_str),
+            Some("cargo build")
+        );
+
+        let delta = projector
+            .apply_envelope(&envelope(3, finished_at, Event::TaskReaped { task_id }))
+            .unwrap();
+        assert!(projector.projection().resources.is_empty());
+        assert!(matches!(
+            delta.changes.as_slice(),
+            [ProjectionChange::ResourceRemove { .. }]
+        ));
     }
 
     #[test]
