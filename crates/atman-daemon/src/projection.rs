@@ -13,7 +13,9 @@ use atman_proto::{
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
 use atman_runtime::projection::workflow::WorkflowProjection as RuntimeWorkflowProjection;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct SessionProjector {
     projection: SessionProjection,
     current_turn: Option<atman_runtime::event::TurnId>,
@@ -1088,29 +1090,47 @@ pub(crate) async fn load_historical_projection(
 ) -> anyhow::Result<SessionProjection> {
     let replay_dir = session_dir.to_path_buf();
     let replay_session_id = session_id.clone();
-    let (meta, events, goal) = tokio::task::spawn_blocking(move || {
+    let (meta, mut projector, context, goal) = tokio::task::spawn_blocking(move || {
         let events_path = replay_dir.join("events.jsonl");
         anyhow::ensure!(
             events_path.is_file(),
             "session not found: {replay_session_id}"
         );
         let meta = atman_runtime::session_meta::SessionMeta::load(&replay_dir);
-        let events = atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
+        let (projector, context) =
+            match crate::projection_snapshot::load(&replay_session_id, &replay_dir)? {
+                Some(projector) => (projector, None),
+                None => {
+                    let events =
+                        atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
+                    let context =
+                        atman_runtime::event_log::reader::context_snapshot_from_envelopes(&events);
+                    (
+                        SessionProjector::from_events(
+                            replay_session_id.clone(),
+                            meta.clone(),
+                            &events,
+                        ),
+                        Some(context),
+                    )
+                }
+            };
         let goal = atman_runtime::memory::goal::GoalStore::at(&replay_dir).get()?;
-        Ok::<_, anyhow::Error>((meta, events, goal))
+        Ok::<_, anyhow::Error>((meta, projector, context, goal))
     })
     .await
     .map_err(|error| anyhow::anyhow!("historical session replay task failed: {error}"))??;
 
-    let context = atman_runtime::event_log::reader::context_snapshot_from_envelopes(&events);
     let todo_store = atman_runtime::memory::todo::TodoStore::at(session_dir);
     let plan_store = atman_runtime::memory::plan::PlanStore::at(session_dir);
     let (todos, plans) = tokio::join!(todo_store.list(), plan_store.list());
-    let mut projector = SessionProjector::from_events(session_id, meta, &events);
+    projector.set_metadata(meta);
     projector.set_goal((!goal.is_empty()).then_some(goal));
     projector.set_todos(todos?);
     projector.set_plans(plans?);
-    projector.set_context(context);
+    if let Some(context) = context {
+        projector.set_context(context);
+    }
     projector.reconcile_disconnected();
     Ok(projector.snapshot())
 }

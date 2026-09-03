@@ -699,6 +699,12 @@ impl SessionActor {
                     let result = self.prepare_unload();
                     let should_stop = matches!(result, Ok(true));
                     if should_stop {
+                        if let Err(error) = self.persist_projection_snapshot().await {
+                            eprintln!(
+                                "warning: failed to persist projection snapshot for {}: {error:#}",
+                                self.session_id
+                            );
+                        }
                         self.session.shutdown().await;
                         self.task_registry
                             .unbind_session(&self.session_id.to_string());
@@ -710,6 +716,12 @@ impl SessionActor {
                 }
                 ActorInput::Command(Some(Command::ForceShutdown { reply })) => {
                     let result = self.prepare_forced_shutdown();
+                    if let Err(error) = self.persist_projection_snapshot().await {
+                        eprintln!(
+                            "warning: failed to persist projection snapshot for {}: {error:#}",
+                            self.session_id
+                        );
+                    }
                     self.session.shutdown().await;
                     self.task_registry
                         .unbind_session(&self.session_id.to_string());
@@ -1003,6 +1015,33 @@ impl SessionActor {
             return Err(error);
         }
         Ok(true)
+    }
+
+    async fn persist_projection_snapshot(&mut self) -> Result<()> {
+        let watermark = self
+            .session
+            .flush_writer()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("session event writer is not running"))?;
+        self.catch_up_through(watermark.seq)?;
+        let session_id = self.session_id.clone();
+        let session_dir = self.session.dir().to_path_buf();
+        let projector = std::mem::replace(
+            &mut self.projection,
+            SessionProjector::new(self.session_id.clone(), None),
+        );
+        let redactor = self.session.sink().redactor();
+        tokio::task::spawn_blocking(move || {
+            crate::projection_snapshot::save(
+                &session_id,
+                &session_dir,
+                watermark,
+                &projector,
+                redactor.as_deref(),
+            )
+        })
+        .await
+        .context("join projection snapshot writer")?
     }
 
     fn begin_shutdown(&mut self) -> Result<()> {

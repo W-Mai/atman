@@ -1341,6 +1341,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_unload_persists_a_replayable_projection_snapshot() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(data_dir.path().to_path_buf()));
+        let session = Arc::new(atman_runtime::Session::open(data_dir.path()).unwrap());
+        let session_id = SessionId(session.id().0);
+        let turn_id = atman_runtime::event::TurnId::now();
+        session.append_message(
+            atman_runtime::message::Message::user_text(turn_id, "persisted transcript"),
+            None,
+        );
+        state
+            .register_session(session_id.clone(), session, "owner")
+            .await
+            .unwrap();
+        let live = state.session_snapshot(&session_id, "owner").await.unwrap();
+
+        assert!(state.unload_session_if_idle(&session_id).await.unwrap());
+        assert!(
+            data_dir
+                .path()
+                .join("sessions")
+                .join(session_id.to_string())
+                .join(".projection-snapshots")
+                .is_dir()
+        );
+        let restored = state.session_snapshot(&session_id, "owner").await.unwrap();
+        assert_eq!(restored.projection.transcript, live.projection.transcript);
+        assert_eq!(restored.projection.usage, live.projection.usage);
+    }
+
+    #[tokio::test]
     async fn explicit_close_reports_busy_without_interrupting_clients() {
         let state = Arc::new(DaemonState::new(
             tempfile::tempdir().unwrap().path().to_path_buf(),

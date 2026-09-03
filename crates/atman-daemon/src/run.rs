@@ -338,11 +338,15 @@ impl RunLauncher {
             trust,
         )
         .with_context(|| format!("opening existing session {session_id}"))?;
-        let mut projection = crate::projection::SessionProjector::from_events(
-            session_id.clone(),
-            restored.session.meta(),
-            &restored.events,
-        );
+        let mut projection = crate::projection_snapshot::load(session_id, &session_dir)?
+            .unwrap_or_else(|| {
+                crate::projection::SessionProjector::from_events(
+                    session_id.clone(),
+                    restored.session.meta(),
+                    &restored.events,
+                )
+            });
+        projection.set_metadata(restored.session.meta());
         projection.reconcile_disconnected();
         Ok(LoadedSession {
             session: Arc::new(restored.session),

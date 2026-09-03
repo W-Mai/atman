@@ -135,6 +135,7 @@ pub mod openapi;
 pub mod pidfile;
 pub mod project_registry;
 mod projection;
+mod projection_snapshot;
 pub mod prompt_bridge;
 pub mod run;
 mod session_actor;

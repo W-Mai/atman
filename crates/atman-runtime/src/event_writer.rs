@@ -121,11 +121,15 @@ impl EventWriter {
     }
 
     pub async fn flush(&self) -> Option<EventWriterWatermark> {
+        self.request_flush()?.await.ok()
+    }
+
+    pub(crate) fn request_flush(&self) -> Option<oneshot::Receiver<EventWriterWatermark>> {
         let (tx, rx) = oneshot::channel::<EventWriterWatermark>();
         if self.flush_tx.send(tx).is_err() {
             return None;
         }
-        rx.await.ok()
+        Some(rx)
     }
 
     pub(crate) fn restore_durable_seq(&self, seq: u64) {

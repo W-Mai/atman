@@ -2601,11 +2601,9 @@ impl Session {
 
     // Rides FIFO queue ordering: once flush's own barrier is written,
     // every earlier sink.emit is on disk too.
-    #[allow(clippy::await_holding_lock)]
     pub async fn flush_writer(&self) -> Option<crate::event_writer::EventWriterWatermark> {
-        let guard = self.writer.lock().unwrap();
-        let writer = (*guard).as_ref()?;
-        writer.flush().await
+        let pending = self.writer.lock().unwrap().as_ref()?.request_flush()?;
+        pending.await.ok()
     }
 }
 
