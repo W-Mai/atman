@@ -533,6 +533,12 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
         })
         .unwrap();
     stream
+        .send(atman_runtime::stream::StreamFrame::LlmDone {
+            total_tokens: 42,
+            run_id: Some(run_id.to_string()),
+        })
+        .unwrap();
+    stream
         .send(atman_runtime::stream::StreamFrame::LlmRetry {
             run_id: Some(run_id.to_string()),
         })
@@ -551,6 +557,11 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
             },
         ))
         .unwrap();
+    stream
+        .send(atman_runtime::stream::StreamFrame::Note(
+            "session notice".into(),
+        ))
+        .unwrap();
 
     let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -558,7 +569,7 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
                 .session_updates(&sid, "alice", before.cursor, None)
                 .await
                 .unwrap();
-            if updates.events.len() == 5 {
+            if updates.events.len() == 7 {
                 break updates;
             }
             tokio::task::yield_now().await;
@@ -577,7 +588,9 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
             before.cursor.0 + 2,
             before.cursor.0 + 3,
             before.cursor.0 + 4,
-            before.cursor.0 + 5
+            before.cursor.0 + 5,
+            before.cursor.0 + 6,
+            before.cursor.0 + 7
         ]
     );
     assert!(matches!(
@@ -601,16 +614,33 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
     assert!(matches!(
         &updates.events[3].event,
         atman_proto::ServerEvent::Signal {
-            signal: atman_proto::SessionSignal::LlmRetry { run_id: id }
+            signal: atman_proto::SessionSignal::LlmDone {
+                run_id: id,
+                total_tokens: 42,
+            }
         } if id == &run_id
     ));
     assert!(matches!(
         &updates.events[4].event,
         atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::LlmRetry { run_id: id }
+        } if id == &run_id
+    ));
+    assert!(matches!(
+        &updates.events[5].event,
+        atman_proto::ServerEvent::Signal {
             signal: atman_proto::SessionSignal::Notification { notification }
         } if notification.run_id.as_ref() == Some(&run_id)
             && notification.level == atman_proto::NoticeLevel::Error
             && notification.message == "request failed"
+    ));
+    assert!(matches!(
+        &updates.events[6].event,
+        atman_proto::ServerEvent::Signal {
+            signal: atman_proto::SessionSignal::Notification { notification }
+        } if notification.run_id.is_none()
+            && notification.level == atman_proto::NoticeLevel::Info
+            && notification.message == "session notice"
     ));
     let after = state.session_snapshot(&sid, "alice").await.unwrap();
     assert_eq!(after.projection.revision, before.projection.revision);

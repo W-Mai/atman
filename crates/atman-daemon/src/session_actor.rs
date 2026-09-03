@@ -1435,6 +1435,15 @@ impl SessionActor {
                     name,
                     arguments_delta,
                 }),
+            StreamFrame::LlmDone {
+                total_tokens,
+                run_id: Some(run_id),
+            } => self
+                .known_run_id(&run_id)
+                .map(|run_id| SessionSignal::LlmDone {
+                    run_id,
+                    total_tokens,
+                }),
             StreamFrame::LlmRetry {
                 run_id: Some(run_id),
             } => self
@@ -1443,6 +1452,16 @@ impl SessionActor {
             StreamFrame::Notification(frame) => self
                 .notification_signal(frame)
                 .map(|notification| SessionSignal::Notification { notification }),
+            StreamFrame::Note(message) => Some(SessionSignal::Notification {
+                notification: SessionNotification {
+                    run_id: None,
+                    level: atman_proto::NoticeLevel::Info,
+                    location: NotificationLocation::Inline,
+                    lifecycle: NotificationLifecycle::Persistent,
+                    stack: NotificationStack::Append,
+                    message,
+                },
+            }),
             StreamFrame::CompactionSummary {
                 phase: atman_runtime::stream::CompactionPhase::Running,
                 range_start,

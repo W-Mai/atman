@@ -569,11 +569,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     {
                         compact_after_overflow_used = true;
                         saw_context_overflow = true;
-                        if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::Note(
-                                "context overflow — compacting and retrying".into(),
-                            ));
-                        }
+                        send_llm_diagnostic(
+                            ctx,
+                            crate::notify::NotifyLevel::Info,
+                            "context overflow — compacting and retrying".into(),
+                        );
                         if let Some(session) = ctx.session_runtime.as_ref() {
                             session.request_manual_compact();
                             drop(compact_guard.take());
@@ -653,11 +653,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 action: "rewritten".to_string(),
                             });
                         }
-                        if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::Note(
-                                "safety auto-rewrite triggered".into(),
-                            ));
-                        }
+                        send_llm_diagnostic(
+                            ctx,
+                            crate::notify::NotifyLevel::Warn,
+                            "safety auto-rewrite triggered".into(),
+                        );
                         last_err = Some(e);
                         continue;
                     }
@@ -692,11 +692,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             location = Inline,
                             "thinking signature missing after 3 retries; disabling thinking…"
                         );
-                        if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::Note(
-                                "thinking disabled after 3 signature failures".into(),
-                            ));
-                        }
+                        send_llm_diagnostic(
+                            ctx,
+                            crate::notify::NotifyLevel::Warn,
+                            "thinking disabled after 3 signature failures".into(),
+                        );
                         last_err = Some(e);
                         continue 'llm_attempts;
                     }

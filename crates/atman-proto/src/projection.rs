@@ -793,6 +793,10 @@ pub enum SessionSignal {
         name: String,
         arguments_delta: String,
     },
+    LlmDone {
+        run_id: FlowRunId,
+        total_tokens: u64,
+    },
     LlmRetry {
         run_id: FlowRunId,
     },
