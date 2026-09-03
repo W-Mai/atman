@@ -4,15 +4,17 @@ use atman_proto::{
     CancelRunRequest, CancelRunResponse, CompactReviewDecision, CreatePermissionGroupRequest,
     CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormSubmission,
     GetSessionSnapshotRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage,
-    InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
-    ListPermissionRequestsRequest, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
-    PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector, ProjectionChange,
-    ProjectionDelta, ProjectionEventEnvelope, RenameSessionRequest, RenameSessionResponse,
-    RequestId, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
-    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, Revision,
-    SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
-    SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
-    SubmitFormRequest, SubmitFormResponse, rpc,
+    InspectResourceRequest, InspectResourceResponse, InterjectSessionRequest,
+    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
+    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
+    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope,
+    RenameSessionRequest, RenameSessionResponse, RequestId, ResolveCompactReviewRequest,
+    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    ResolvePermissionRequestsResponse, ResourceId, Revision, SNAPSHOT_SCHEMA_VERSION,
+    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
+    SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
+    SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -188,6 +190,11 @@ pub enum SessionClientError {
     CommandForm { expected: String, received: String },
     #[error("command result belongs to compact review {received}, expected {expected}")]
     CommandCompactReview { expected: String, received: String },
+    #[error("command result belongs to resource {received:?}, expected {expected:?}")]
+    CommandResource {
+        expected: ResourceId,
+        received: ResourceId,
+    },
 }
 
 impl SessionClientError {
@@ -200,7 +207,8 @@ impl SessionClientError {
             Self::CommandSession { .. }
             | Self::CommandRun { .. }
             | Self::CommandForm { .. }
-            | Self::CommandCompactReview { .. } => false,
+            | Self::CommandCompactReview { .. }
+            | Self::CommandResource { .. } => false,
         }
     }
 }
@@ -562,6 +570,55 @@ impl SessionClient {
         Ok(response)
     }
 
+    pub async fn list_resources(&self) -> Result<ListResourcesResponse, SessionClientError> {
+        let response = self
+            .client
+            .call::<rpc::ListResources>(&ListResourcesRequest {
+                session_id: self.session_id.clone(),
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn inspect_resource(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<InspectResourceResponse, SessionClientError> {
+        let expected_resource = resource_id.clone();
+        let response = self
+            .client
+            .call::<rpc::InspectResource>(&InspectResourceRequest {
+                session_id: self.session_id.clone(),
+                resource_id,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.validate_command_resource(&expected_resource, &response.resource.id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn terminate_resource(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<TerminateResourceResponse, SessionClientError> {
+        let expected_resource = resource_id.clone();
+        let response = self
+            .client
+            .command::<rpc::TerminateResource>(&TerminateResourceRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                resource_id,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.validate_command_resource(&expected_resource, &response.resource_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
     pub async fn create_permission_group(
         &self,
         request_ids: Vec<uuid::Uuid>,
@@ -631,6 +688,20 @@ impl SessionClient {
         if received != &self.session_id {
             return Err(SessionClientError::CommandSession {
                 expected: self.session_id.clone(),
+                received: received.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_command_resource(
+        &self,
+        expected: &ResourceId,
+        received: &ResourceId,
+    ) -> Result<(), SessionClientError> {
+        if received != expected {
+            return Err(SessionClientError::CommandResource {
+                expected: expected.clone(),
                 received: received.clone(),
             });
         }
@@ -1504,6 +1575,9 @@ mod tests {
                             method_descriptor::<rpc::CreatePermissionGroup>(),
                             method_descriptor::<rpc::ResolvePermissionRequests>(),
                             method_descriptor::<rpc::RenameSession>(),
+                            method_descriptor::<rpc::ListResources>(),
+                            method_descriptor::<rpc::InspectResource>(),
+                            method_descriptor::<rpc::TerminateResource>(),
                         ] {
                             capabilities.methods.push(MethodCapability {
                                 name: method.name.into(),
@@ -1621,6 +1695,28 @@ mod tests {
                             cursor: EventCursor(2),
                         })?
                     }
+                    methods::LIST_RESOURCES => serde_json::to_value(ListResourcesResponse {
+                        session_id: self.session_id.clone(),
+                        resources: vec![test_resource()],
+                        revision: Revision(2),
+                        cursor: EventCursor(2),
+                    })?,
+                    methods::INSPECT_RESOURCE => serde_json::to_value(InspectResourceResponse {
+                        session_id: self.session_id.clone(),
+                        resource: test_resource(),
+                        revision: Revision(2),
+                        cursor: EventCursor(2),
+                    })?,
+                    methods::TERMINATE_RESOURCE => {
+                        let params = request.params.as_ref().unwrap();
+                        serde_json::to_value(TerminateResourceResponse {
+                            session_id: self.session_id.clone(),
+                            resource_id: serde_json::from_value(params["resource_id"].clone())?,
+                            status: atman_proto::ResourceTerminationStatus::Terminating,
+                            revision: Revision(2),
+                            cursor: EventCursor(2),
+                        })?
+                    }
                     methods::GET_SESSION_UPDATES => {
                         let current = SessionState::new(
                             SessionSnapshot {
@@ -1654,6 +1750,22 @@ mod tests {
                 };
                 Ok(JsonRpcResponse::ok(request.id, result))
             })
+        }
+    }
+
+    fn test_resource() -> atman_proto::ResourceProjection {
+        atman_proto::ResourceProjection {
+            id: ResourceId("task:018f7f24-1ab2-7c3d-8e4f-123456789ada".into()),
+            kind: atman_proto::ResourceKind::BackgroundProcess,
+            state: atman_proto::ResourceState::Running,
+            owner_run_id: FlowRunId(
+                uuid::Uuid::parse_str("018f7f24-1ab2-7c3d-8e4f-123456789adb").unwrap(),
+            ),
+            tool_use_id: None,
+            label: "Inspect dependencies".into(),
+            started_at: None,
+            finished_at: None,
+            details: Default::default(),
         }
     }
 
@@ -1744,6 +1856,21 @@ mod tests {
         let permissions = session.list_permissions().await.unwrap();
         assert!(permissions.requests.is_empty());
         assert_eq!(permissions.cursor, EventCursor(2));
+
+        let resources = session.list_resources().await.unwrap();
+        assert_eq!(resources.resources, vec![test_resource()]);
+        let resource_id = test_resource().id;
+        let inspected = session.inspect_resource(resource_id.clone()).await.unwrap();
+        assert_eq!(inspected.resource.id, resource_id);
+        let terminated = session
+            .terminate_resource(resource_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(terminated.resource_id, resource_id);
+        assert_eq!(
+            terminated.status,
+            atman_proto::ResourceTerminationStatus::Terminating
+        );
 
         let permission_id = uuid::Uuid::now_v7();
         let group = session
