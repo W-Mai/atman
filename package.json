@@ -1,0 +1,12 @@
+{
+  "name": "atman-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "protocol:generate": "cargo run -p atman-proto --example generate_protocol && bun run --cwd packages/client generate",
+    "protocol:check": "cargo run -p atman-proto --example generate_protocol -- --check && bun run --cwd packages/client check:generated",
+    "quality": "bun run protocol:check && bun run --cwd packages/client typecheck"
+  }
+}
