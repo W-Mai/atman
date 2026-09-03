@@ -57,7 +57,10 @@ class SessionTransport implements RpcTransport {
   }
 }
 
-function capabilities(generation: string): CapabilitiesResponse {
+function capabilities(
+  generation: string,
+  additionalMethods: CapabilitiesResponse['methods'] = [],
+): CapabilitiesResponse {
   return {
     protocol_version: PROTOCOL_VERSION,
     daemon_version: 'test',
@@ -69,6 +72,7 @@ function capabilities(generation: string): CapabilitiesResponse {
       { name: 'session.get_snapshot', kind: 'query', revision: 1 },
       { name: 'session.get_updates', kind: 'query', revision: 1 },
       { name: 'session.send_message', kind: 'command', revision: 1 },
+      ...additionalMethods,
     ],
     limits: { max_event_page_size: 100, subscriber_buffer: 256 },
   }
@@ -347,6 +351,50 @@ describe('SessionClient', () => {
     expect(attempts[0]?.params.request_id).toBe(attempts[1]?.params.request_id)
     expect(response.run_id).toBe('run-1')
     expect(session.current.cursor).toBe(2)
+  })
+
+  test('keeps interaction responses reconciled with the session', async () => {
+    const transport = new SessionTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'form.submit', kind: 'command', revision: 1 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'form.submit':
+          return result(request, {
+            session_id: sessionId,
+            form_id: 'form-1',
+            resolved: true,
+            status: 'resolved',
+            revision: 1,
+            cursor: 1,
+          })
+        case 'session.get_updates': {
+          const afterCursor = Number(request.params.after_cursor ?? 0)
+          return result(
+            request,
+            page('generation-1', afterCursor, [
+              event('generation-1', afterCursor + 1, { type: 'heartbeat' }),
+            ]),
+          )
+        }
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    await session.submitForm('form-1', { status: 'rejected' })
+    expect(session.current.cursor).toBe(1)
   })
 })
 

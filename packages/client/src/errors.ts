@@ -95,6 +95,9 @@ export type SessionCommandErrorCode =
   | 'committed_cursor_unavailable'
   | 'command_session'
   | 'command_run'
+  | 'command_form'
+  | 'command_compact_review'
+  | 'command_prompt'
 
 export class SessionCommandError extends AtmanProtocolError {
   override readonly name: string = 'SessionCommandError'

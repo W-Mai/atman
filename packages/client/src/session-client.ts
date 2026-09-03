@@ -5,19 +5,25 @@ import {
 } from './errors'
 import type {
   CancelRunResponse,
+  CompactReviewDecision,
   DaemonGeneration,
   EventCursor,
   FlowRunId,
+  FormSubmission,
   GetSessionUpdatesResponse,
   InlineImage,
   InterjectionLevel,
   InterjectSessionResponse,
+  PromptId,
   RenameSessionResponse,
+  ResolveCompactReviewResponse,
+  ResolvePromptResponse,
   SendMessageResponse,
   SessionId,
   SessionSignal,
   SessionSnapshot,
   StartRunResponse,
+  SubmitFormResponse,
 } from './generated/types.generated'
 import { SessionStore, type SessionView } from './session-store'
 import type { TransportRequestOptions } from './transport'
@@ -243,6 +249,74 @@ export class SessionClient {
     return response
   }
 
+  async submitForm(
+    formId: string,
+    submission: FormSubmission,
+    options: TransportRequestOptions = {},
+  ): Promise<SubmitFormResponse> {
+    const response = await this.#client.command(
+      'form.submit',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        form_id: formId,
+        submission,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_form', 'form', response.form_id, formId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async resolvePrompt(
+    promptId: PromptId,
+    answer: unknown,
+    options: TransportRequestOptions = {},
+  ): Promise<ResolvePromptResponse> {
+    const response = await this.#client.command(
+      'resolve_prompt',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        prompt_id: promptId,
+        answer,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget('command_prompt', 'prompt', response.prompt_id, promptId)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async resolveCompactReview(
+    reviewId: string,
+    decision: CompactReviewDecision,
+    options: TransportRequestOptions = {},
+  ): Promise<ResolveCompactReviewResponse> {
+    const response = await this.#client.command(
+      'compact_review.resolve',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        review_id: reviewId,
+        decision,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    this.#validateTarget(
+      'command_compact_review',
+      'compact review',
+      response.review_id,
+      reviewId,
+    )
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
   async synchronize(options: SynchronizeOptions = {}): Promise<never> {
     const pollInterval = delayOption(
       options.pollIntervalMs,
@@ -424,6 +498,21 @@ export class SessionClient {
       throw new SessionCommandError(
         'command_run',
         `command result belongs to run ${received}, expected ${expected}`,
+        { expected, received },
+      )
+    }
+  }
+
+  #validateTarget(
+    code: 'command_form' | 'command_compact_review' | 'command_prompt',
+    target: string,
+    received: string,
+    expected: string,
+  ): void {
+    if (received !== expected) {
+      throw new SessionCommandError(
+        code,
+        `command result belongs to ${target} ${received}, expected ${expected}`,
         { expected, received },
       )
     }
