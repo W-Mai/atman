@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::git::GitCli;
 use crate::git_workspace::{
     WorkspaceBinding, WorkspaceError, WorkspaceFinalizeOutcome, WorkspaceManager, WorkspacePolicy,
-    WorkspaceState,
+    WorkspaceRecord, WorkspaceState,
 };
 
 #[derive(Debug, Clone)]
@@ -88,6 +88,26 @@ impl FlowWorkspaceService {
             .get(&binding.workspace_id)
             .ok()
             .map(|record| record.lifecycle_state())
+    }
+
+    pub fn retain(
+        &self,
+        workspace_id: &str,
+        owner_session: &str,
+        owner_flow: &str,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        self.manager()?
+            .retain(workspace_id, true, Some(owner_session), Some(owner_flow))
+    }
+
+    pub fn release(
+        &self,
+        workspace_id: &str,
+        owner_session: &str,
+        owner_flow: &str,
+    ) -> Result<WorkspaceRecord, WorkspaceError> {
+        self.manager()?
+            .release(workspace_id, Some(owner_session), Some(owner_flow), false)
     }
 
     fn manager(&self) -> Result<WorkspaceManager, WorkspaceError> {
@@ -237,11 +257,21 @@ mod tests {
             WorkspaceFinalizeOutcome::Dirty(_)
         ));
         assert!(dirty.path.exists());
+        assert!(
+            service
+                .release(&dirty.workspace_id, "session", "dirty")
+                .is_err()
+        );
+        assert!(dirty.path.exists());
 
         let retained = service
-            .allocate(WorkspacePolicy::Retain, "session", "retained", None)
+            .allocate(WorkspacePolicy::Auto, "session", "retained", None)
             .unwrap()
             .unwrap();
+        let record = service
+            .retain(&retained.workspace_id, "session", "retained")
+            .unwrap();
+        assert_eq!(record.lifecycle_state(), WorkspaceState::Retained);
         assert!(matches!(
             service.finalize(&retained, "session", "retained").unwrap(),
             WorkspaceFinalizeOutcome::Retained(_)
