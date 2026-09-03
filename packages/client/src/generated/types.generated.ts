@@ -54,6 +54,8 @@ export type AtmanDaemonProtocolPayloads =
   | InspectResourceResponse
   | TerminateResourceRequest
   | TerminateResourceResponse
+  | ResizeTerminalResourceRequest
+  | ResizeTerminalResourceResponse
   | RetainResourceRequest
   | RetainResourceResponse
   | ReleaseResourceRequest
@@ -638,6 +640,8 @@ export type PermissionRpcSelector =
     }
 export type ResourceTerminationStatus =
   'terminating' | 'already_terminal' | 'unavailable' | 'unsupported' | 'not_found'
+export type TerminalResizeStatus =
+  'resized' | 'already_terminal' | 'unavailable' | 'unsupported' | 'not_found'
 
 export interface CapabilitiesRequest {
   client_id?: null | ClientId
@@ -1336,6 +1340,24 @@ export interface TerminateResourceResponse {
   revision: Revision
   session_id: SessionId
   status: ResourceTerminationStatus
+  [k: string]: unknown
+}
+export interface ResizeTerminalResourceRequest {
+  cols: number
+  request_id?: null | RequestId
+  resource_id: ResourceId
+  rows: number
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface ResizeTerminalResourceResponse {
+  cols: number
+  cursor: EventCursor
+  resource_id: ResourceId
+  revision: Revision
+  rows: number
+  session_id: SessionId
+  status: TerminalResizeStatus
   [k: string]: unknown
 }
 export interface RetainResourceRequest {

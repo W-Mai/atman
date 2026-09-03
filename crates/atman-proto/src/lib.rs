@@ -328,6 +328,7 @@ pub mod methods {
     pub const LIST_RESOURCES: &str = "resource.list";
     pub const INSPECT_RESOURCE: &str = "resource.inspect";
     pub const TERMINATE_RESOURCE: &str = "resource.terminate";
+    pub const RESIZE_TERMINAL_RESOURCE: &str = "resource.resize_terminal";
     pub const RETAIN_RESOURCE: &str = "resource.retain";
     pub const RELEASE_RESOURCE: &str = "resource.release";
     pub const PING: &str = "ping";
@@ -360,6 +361,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::ListResources>(),
         super::method_descriptor::<super::rpc::InspectResource>(),
         super::method_descriptor::<super::rpc::TerminateResource>(),
+        super::method_descriptor::<super::rpc::ResizeTerminalResource>(),
         super::method_descriptor::<super::rpc::RetainResource>(),
         super::method_descriptor::<super::rpc::ReleaseResource>(),
     ];
@@ -1049,6 +1051,37 @@ pub struct TerminateResourceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResizeTerminalResourceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalResizeStatus {
+    Resized,
+    AlreadyTerminal,
+    Unavailable,
+    Unsupported,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResizeTerminalResourceResponse {
+    pub session_id: SessionId,
+    pub resource_id: ResourceId,
+    pub rows: u16,
+    pub cols: u16,
+    pub status: TerminalResizeStatus,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RetainResourceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
@@ -1297,6 +1330,13 @@ pub mod rpc {
         TerminateResourceResponse
     );
     method!(
+        ResizeTerminalResource,
+        methods::RESIZE_TERMINAL_RESOURCE,
+        Command,
+        ResizeTerminalResourceRequest,
+        ResizeTerminalResourceResponse
+    );
+    method!(
         RetainResource,
         methods::RETAIN_RESOURCE,
         Command,
@@ -1416,6 +1456,7 @@ mod tests {
         };
         assert!(capabilities.supports::<rpc::DaemonCapabilities>());
         assert!(capabilities.supports::<rpc::ResolvePermissionRequests>());
+        assert!(capabilities.supports::<rpc::ResizeTerminalResource>());
         assert!(capabilities.supports::<rpc::RetainResource>());
         assert!(capabilities.supports::<rpc::ReleaseResource>());
 

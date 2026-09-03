@@ -163,6 +163,12 @@
       "$ref": "#/$defs/TerminateResourceResponse"
     },
     {
+      "$ref": "#/$defs/ResizeTerminalResourceRequest"
+    },
+    {
+      "$ref": "#/$defs/ResizeTerminalResourceResponse"
+    },
+    {
       "$ref": "#/$defs/RetainResourceRequest"
     },
     {
@@ -3172,6 +3178,82 @@
       "type": "string",
       "format": "uuid"
     },
+    "ResizeTerminalResourceRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id",
+        "rows",
+        "cols"
+      ],
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ResizeTerminalResourceResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "resource_id",
+        "rows",
+        "cols",
+        "status",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cols": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "resource_id": {
+          "$ref": "#/$defs/ResourceId"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/TerminalResizeStatus"
+        }
+      }
+    },
     "ResolveCompactReviewRequest": {
       "type": "object",
       "required": [
@@ -4529,6 +4611,16 @@
           "$ref": "#/$defs/FormResolutionStatus"
         }
       }
+    },
+    "TerminalResizeStatus": {
+      "type": "string",
+      "enum": [
+        "resized",
+        "already_terminal",
+        "unavailable",
+        "unsupported",
+        "not_found"
+      ]
     },
     "TerminateResourceRequest": {
       "type": "object",

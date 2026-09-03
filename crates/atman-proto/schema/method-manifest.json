@@ -463,6 +463,23 @@
       }
     },
     {
+      "name": "resource.resize_terminal",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "ResizeTerminalResourceRequest",
+        "schema": {
+          "$ref": "#/$defs/ResizeTerminalResourceRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ResizeTerminalResourceResponse",
+        "schema": {
+          "$ref": "#/$defs/ResizeTerminalResourceResponse"
+        }
+      }
+    },
+    {
       "name": "resource.retain",
       "kind": "command",
       "revision": 1,

@@ -37,6 +37,8 @@ import type {
   ReleaseResourceResponse,
   RenameSessionRequest,
   RenameSessionResponse,
+  ResizeTerminalResourceRequest,
+  ResizeTerminalResourceResponse,
   ResolveCompactReviewRequest,
   ResolveCompactReviewResponse,
   ResolvePermissionRequestsRequest,
@@ -227,6 +229,12 @@ export interface RpcMethodMap {
     params: TerminateResourceRequest
     result: TerminateResourceResponse
   }
+  'resource.resize_terminal': {
+    kind: 'command'
+    revision: 1
+    params: ResizeTerminalResourceRequest
+    result: ResizeTerminalResourceResponse
+  }
   'resource.retain': {
     kind: 'command'
     revision: 1
@@ -273,6 +281,7 @@ export const RPC_METHODS = {
   'resource.list': { kind: 'query', revision: 1 },
   'resource.inspect': { kind: 'query', revision: 1 },
   'resource.terminate': { kind: 'command', revision: 1 },
+  'resource.resize_terminal': { kind: 'command', revision: 1 },
   'resource.retain': { kind: 'command', revision: 1 },
   'resource.release': { kind: 'command', revision: 1 },
 } as const satisfies Record<RpcMethodName, { kind: 'command' | 'query'; revision: number }>
