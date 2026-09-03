@@ -1,13 +1,15 @@
 use atman_proto::{
     CancelRunRequest, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
     CreatePermissionGroupRequest, CreatePermissionGroupResponse, CreateSessionRequest,
-    GetEventsRequest, GetEventsResponse, InterjectSessionRequest, InterjectSessionResponse,
-    JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListPermissionRequestsRequest,
+    GetEventsRequest, GetEventsResponse, InspectResourceRequest, InspectResourceResponse,
+    InterjectSessionRequest, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
+    JsonRpcResponse, ListPermissionRequestsRequest, ListResourcesRequest, ListResourcesResponse,
     ListSessionsRequest, MethodCapability, ProtocolLimits, RenameSessionRequest,
     RenameSessionResponse, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
     ResolvePermissionRequestsRequest, ResolvePromptRequest, ResolvePromptResponse, RunFlowRequest,
     RunFlowResponse, SendMessageRequest, SendMessageResponse, ServerEventEnvelope, SessionSummary,
     StartRunRequest, StartRunResponse, SubmitFormRequest, SubmitFormResponse,
+    TerminateResourceRequest, TerminateResourceResponse,
 };
 use utoipa::OpenApi;
 
@@ -79,7 +81,7 @@ fn openapi_endpoint() {}
         title = "atman daemon",
         version = env!("CARGO_PKG_VERSION"),
         description = "JSON-RPC 2.0 daemon for the atman flow runtime. \
-Methods dispatched at POST /rpc: daemon.capabilities, ping, session.create, session.send_message, session.interject, list_sessions, rename_session, run.start, run_flow, cancel_run, get_events, session.get_snapshot, session.get_updates, resolve_prompt, form.submit, compact_review.resolve, list_permission_requests, create_permission_group, resolve_permission_requests. \
+Methods dispatched at POST /rpc: daemon.capabilities, ping, session.create, session.send_message, session.interject, list_sessions, rename_session, run.start, run_flow, cancel_run, get_events, session.get_snapshot, session.get_updates, resolve_prompt, form.submit, compact_review.resolve, list_permission_requests, create_permission_group, resolve_permission_requests, resource.list, resource.inspect, resource.terminate. \
 Raw event-log SSE is available at GET /events. Convergent session projection SSE is available at GET /session-events. Every endpoint requires a bearer token."
     ),
     paths(rpc_endpoint, sse_endpoint, session_sse_endpoint, openapi_endpoint),
@@ -138,6 +140,17 @@ Raw event-log SSE is available at GET /events. Convergent session projection SSE
         atman_proto::PermissionGroupView,
         atman_proto::ResolvePermissionRequestsResponse,
         atman_proto::PermissionResolutionView,
+        ListResourcesRequest,
+        ListResourcesResponse,
+        InspectResourceRequest,
+        InspectResourceResponse,
+        TerminateResourceRequest,
+        TerminateResourceResponse,
+        atman_proto::ResourceTerminationStatus,
+        atman_proto::ResourceProjection,
+        atman_proto::ResourceKind,
+        atman_proto::ResourceState,
+        atman_proto::ResourceId,
         SessionSummary,
         atman_proto::SessionStatus,
         atman_proto::SessionId,

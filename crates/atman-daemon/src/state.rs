@@ -242,6 +242,7 @@ impl DaemonState {
                         owner_principal.clone(),
                         DaemonGeneration(self.daemon_generation.clone()),
                         restored_projection,
+                        self.task_registry.clone(),
                     ),
                 );
                 None
@@ -536,25 +537,43 @@ impl DaemonState {
         title: &str,
         principal: &str,
     ) -> Result<crate::RenameSessionCommit> {
-        if self.sessions.lock().unwrap().get(sid).is_none() {
-            let launcher = self
-                .launcher()
-                .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
-            let state = self.clone();
-            let load_id = sid.clone();
-            self.get_or_load_session(sid, principal, move || async move {
-                tokio::task::spawn_blocking(move || {
-                    launcher.open_existing_session(&state, &load_id)
-                })
+        let actor = self.get_or_load_actor(sid, principal).await?;
+        actor.rename(title.to_owned()).await
+    }
+
+    async fn get_or_load_actor(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        principal: &str,
+    ) -> Result<SessionActorHandle> {
+        if let Some(actor) = self.authorized_actor(session_id, principal) {
+            return Ok(actor);
+        }
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+        let state = self.clone();
+        let load_id = session_id.clone();
+        self.get_or_load_session(session_id, principal, move || async move {
+            tokio::task::spawn_blocking(move || launcher.open_existing_session(&state, &load_id))
                 .await
                 .context("join session replay task")?
-            })
-            .await?;
-        }
-        let actor = self
-            .authorized_actor(sid, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
-        actor.rename(title.to_owned()).await
+        })
+        .await?;
+        self.authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))
+    }
+
+    pub(crate) async fn terminate_resource(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        resource_id: atman_proto::ResourceId,
+        principal: &str,
+    ) -> Result<crate::session_actor::ResourceTerminationCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .terminate_resource(resource_id)
+            .await
     }
 
     pub async fn list_permission_requests(

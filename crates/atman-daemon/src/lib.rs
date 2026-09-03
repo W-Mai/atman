@@ -1,11 +1,12 @@
 use atman_proto::{
     CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, DaemonGeneration, EventCursor,
-    GetSessionSnapshotRequest, GetSessionUpdatesRequest, InterjectSessionResponse, JsonRpcError,
-    JsonRpcRequest, JsonRpcResponse, ListSessionsRequest, MethodCapability, PermissionRpcAction,
-    PermissionRpcScope, PingResponse, ProtocolLimits, RenameSessionResponse, RequestId,
-    ResolveCompactReviewResponse, ResolvePromptResponse, RpcMethod, RpcMethodDescriptor,
-    RunFlowResponse, SendMessageResponse, StartRunResponse, SubmitFormResponse, method_descriptor,
-    methods, rpc,
+    GetSessionSnapshotRequest, GetSessionUpdatesRequest, InspectResourceResponse,
+    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListResourcesResponse,
+    ListSessionsRequest, MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse,
+    ProtocolLimits, RenameSessionResponse, RequestId, ResolveCompactReviewResponse,
+    ResolvePromptResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
+    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, method_descriptor, methods,
+    rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -157,6 +158,9 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::ListPermissionRequests>(),
     method_descriptor::<rpc::CreatePermissionGroup>(),
     method_descriptor::<rpc::ResolvePermissionRequests>(),
+    method_descriptor::<rpc::ListResources>(),
+    method_descriptor::<rpc::InspectResource>(),
+    method_descriptor::<rpc::TerminateResource>(),
 ];
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
@@ -514,6 +518,98 @@ pub async fn dispatch_as(
                     JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                 }
             },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::LIST_RESOURCES => match parse_params::<rpc::ListResources>(req.params) {
+            Ok(params) => match state
+                .session_snapshot(&params.session_id, principal_id)
+                .await
+            {
+                Ok(snapshot) => method_response::<rpc::ListResources>(
+                    id,
+                    ListResourcesResponse {
+                        session_id: params.session_id,
+                        resources: snapshot.projection.resources,
+                        revision: snapshot.projection.revision,
+                        cursor: snapshot.cursor,
+                    },
+                ),
+                Err(error) => {
+                    JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                }
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::INSPECT_RESOURCE => match parse_params::<rpc::InspectResource>(req.params) {
+            Ok(params) => match state
+                .session_snapshot(&params.session_id, principal_id)
+                .await
+            {
+                Ok(snapshot) => {
+                    match snapshot
+                        .projection
+                        .resources
+                        .into_iter()
+                        .find(|resource| resource.id == params.resource_id)
+                    {
+                        Some(resource) => method_response::<rpc::InspectResource>(
+                            id,
+                            InspectResourceResponse {
+                                session_id: params.session_id,
+                                resource,
+                                revision: snapshot.projection.revision,
+                                cursor: snapshot.cursor,
+                            },
+                        ),
+                        None => JsonRpcResponse::err(
+                            id,
+                            JsonRpcError::application(format!(
+                                "resource not found: {}",
+                                params.resource_id.0
+                            )),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                }
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::TERMINATE_RESOURCE => match parse_params::<rpc::TerminateResource>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                match execute_command::<rpc::TerminateResource, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let commit = operation_state
+                            .terminate_resource(
+                                &operation_params.session_id,
+                                operation_params.resource_id.clone(),
+                                &operation_principal,
+                            )
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        Ok(TerminateResourceResponse {
+                            session_id: operation_params.session_id,
+                            resource_id: operation_params.resource_id,
+                            status: commit.status,
+                            revision: commit.revision,
+                            cursor: commit.cursor,
+                        })
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::TerminateResource>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::RESOLVE_PROMPT => match parse_params::<rpc::ResolvePrompt>(req.params) {

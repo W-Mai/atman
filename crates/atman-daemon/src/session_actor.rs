@@ -8,8 +8,8 @@ use atman_proto::{
     GetSessionUpdatesResponse, ListPermissionRequestsResponse, PROJECTION_EVENT_SCHEMA_VERSION,
     PermissionGroupView, PermissionRequestView, PermissionResolutionView, ProjectionDelta,
     ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
-    ResyncRequired, RunCancellationStatus, ServerEvent, SessionId, SessionProjection,
-    SessionSummary,
+    ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
+    RunCancellationStatus, ServerEvent, SessionId, SessionProjection, SessionSummary,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -77,6 +77,12 @@ pub struct RenameSessionCommit {
     pub cursor: EventCursor,
 }
 
+pub(crate) struct ResourceTerminationCommit {
+    pub status: ResourceTerminationStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
 struct PendingPrompt {
     responder: oneshot::Sender<serde_json::Value>,
 }
@@ -107,6 +113,7 @@ impl SessionActorHandle {
         owner_principal: String,
         daemon_generation: DaemonGeneration,
         restored_projection: Option<SessionProjector>,
+        task_registry: atman_runtime::TaskRegistry,
     ) -> Self {
         let events_rx = session.sink().subscribe();
         let goal_rx = session.subscribe_goal();
@@ -162,6 +169,7 @@ impl SessionActorHandle {
             context_rx,
             forms_rx,
             compact_review_rx,
+            task_registry,
             _permission_client: session.permission_broker().register_client(),
         };
         tokio::spawn(actor.run());
@@ -286,8 +294,19 @@ impl SessionActorHandle {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
     }
 
+    pub async fn terminate_resource(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<ResourceTerminationCommit> {
+        request(&self.tx, |reply| Command::TerminateResource {
+            resource_id,
+            reply,
+        })
+        .await?
+    }
+
     pub async fn snapshot(&self) -> Result<(EventCursor, SessionProjection)> {
-        let (cursor, projection) = request(&self.tx, |reply| Command::Snapshot { reply }).await?;
+        let (cursor, projection) = request(&self.tx, |reply| Command::Snapshot { reply }).await??;
         let redactor = self.session.sink().redactor();
         Ok((
             cursor,
@@ -305,7 +324,7 @@ impl SessionActorHandle {
             limit,
             reply,
         })
-        .await?;
+        .await??;
         let redactor = self.session.sink().redactor();
         crate::projection::redacted_updates(&updates, redactor.as_deref())
     }
@@ -423,13 +442,17 @@ enum Command {
         title: String,
         reply: oneshot::Sender<Result<RenameSessionCommit>>,
     },
+    TerminateResource {
+        resource_id: ResourceId,
+        reply: oneshot::Sender<Result<ResourceTerminationCommit>>,
+    },
     Snapshot {
-        reply: oneshot::Sender<(EventCursor, SessionProjection)>,
+        reply: oneshot::Sender<Result<(EventCursor, SessionProjection)>>,
     },
     Updates {
         after_cursor: EventCursor,
         limit: Option<usize>,
-        reply: oneshot::Sender<GetSessionUpdatesResponse>,
+        reply: oneshot::Sender<Result<GetSessionUpdatesResponse>>,
     },
     SubscribeUpdates {
         reply: oneshot::Sender<broadcast::Receiver<ProjectionEventEnvelope>>,
@@ -489,6 +512,7 @@ struct SessionActor {
     context_rx: watch::Receiver<atman_runtime::ContextSnapshot>,
     forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
     compact_review_rx: watch::Receiver<Option<atman_runtime::session::PendingCompactReview>>,
+    task_registry: atman_runtime::TaskRegistry,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
 }
 
@@ -639,15 +663,27 @@ impl SessionActor {
                 let result = self.rename(title);
                 let _ = reply.send(result);
             }
+            Command::TerminateResource { resource_id, reply } => {
+                let result = self.terminate_resource(resource_id);
+                let _ = reply.send(result);
+            }
             Command::Snapshot { reply } => {
-                let _ = reply.send((self.event_cursor, self.projection.snapshot()));
+                let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+                let result = self
+                    .catch_up_through(target_seq)
+                    .map(|()| (self.event_cursor, self.projection.snapshot()));
+                let _ = reply.send(result);
             }
             Command::Updates {
                 after_cursor,
                 limit,
                 reply,
             } => {
-                let _ = reply.send(self.updates_response(after_cursor, limit));
+                let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+                let result = self
+                    .catch_up_through(target_seq)
+                    .map(|()| self.updates_response(after_cursor, limit));
+                let _ = reply.send(result);
             }
             Command::SubscribeUpdates { reply } => {
                 let _ = reply.send(self.updates_tx.subscribe());
@@ -1007,6 +1043,58 @@ impl SessionActor {
         })
     }
 
+    fn terminate_resource(&mut self, resource_id: ResourceId) -> Result<ResourceTerminationCommit> {
+        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        self.catch_up_through(published_seq)?;
+        let resource = self
+            .projection
+            .projection()
+            .resources
+            .iter()
+            .find(|resource| resource.id == resource_id);
+        let status = match resource {
+            None => ResourceTerminationStatus::NotFound,
+            Some(resource) if resource_state_is_terminal(resource.state) => {
+                ResourceTerminationStatus::AlreadyTerminal
+            }
+            Some(resource) if resource.state == ResourceState::Terminating => {
+                ResourceTerminationStatus::Terminating
+            }
+            Some(resource)
+                if !matches!(
+                    resource.kind,
+                    ResourceKind::Terminal | ResourceKind::BackgroundProcess
+                ) =>
+            {
+                ResourceTerminationStatus::Unsupported
+            }
+            Some(_) => match task_id_from_resource_id(&resource_id) {
+                Some(task_id) => match self.task_registry.kill_from_operator(&task_id) {
+                    atman_runtime::task_registry::KillOutcome::Killed { .. } => {
+                        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+                        self.catch_up_through(published_seq)?;
+                        ResourceTerminationStatus::Terminating
+                    }
+                    atman_runtime::task_registry::KillOutcome::NotRunning => {
+                        ResourceTerminationStatus::AlreadyTerminal
+                    }
+                    atman_runtime::task_registry::KillOutcome::NotFound => {
+                        ResourceTerminationStatus::Unavailable
+                    }
+                    atman_runtime::task_registry::KillOutcome::SelfKillRejected => unreachable!(
+                        "operator-triggered resource termination has no caller flow identity"
+                    ),
+                },
+                None => ResourceTerminationStatus::Unavailable,
+            },
+        };
+        Ok(ResourceTerminationCommit {
+            status,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
     fn catch_up_projection(&mut self) {
         let requested_after = self.event_cursor;
         let previous_revision = self.projection.projection().revision;
@@ -1226,6 +1314,25 @@ fn runtime_form_submission(submission: FormSubmission) -> atman_runtime::form::F
         },
         FormSubmission::Rejected => atman_runtime::form::FormSubmission::Rejected,
     }
+}
+
+fn resource_state_is_terminal(state: ResourceState) -> bool {
+    matches!(
+        state,
+        ResourceState::Exited
+            | ResourceState::Failed
+            | ResourceState::Released
+            | ResourceState::Lost
+            | ResourceState::Orphaned
+    )
+}
+
+fn task_id_from_resource_id(resource_id: &ResourceId) -> Option<atman_runtime::TaskId> {
+    resource_id
+        .0
+        .strip_prefix("task:")
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .map(atman_runtime::TaskId)
 }
 
 fn runtime_compact_review_decision(
