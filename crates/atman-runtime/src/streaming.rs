@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(partial_tokens, 1);
         assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 1);
         assert_eq!(entry.pending_injections().len(), 1);
-        assert!(entry.messages.lock().unwrap().is_empty());
+        assert!(entry.context.messages.lock().unwrap().is_empty());
         drop(claim);
         assert!(matches!(
             handle_pending_injections(&entry, ContextCallPurpose::General),
@@ -1037,7 +1037,7 @@ mod tests {
                 Err(StreamFailure::Error(RuntimeError::Cancelled(text))) if text == "hard stop: stop"));
             assert!(entry.cancel.is_cancelled());
             assert_eq!(entry.pending_injections(), original[..5]);
-            assert!(entry.messages.lock().unwrap().is_empty());
+            assert!(entry.context.messages.lock().unwrap().is_empty());
             for target in ["first", "second"] {
                 assert!(matches!(handle_pending_injections(&entry, purpose),
                     Err(StreamFailure::Error(RuntimeError::Redirect(actual))) if actual == target));
@@ -1051,19 +1051,19 @@ mod tests {
                         panic!("expected correction");
                     };
                     assert_eq!(claim.injection.text, text);
-                    claim.commit(Some(&entry.messages), || {}).unwrap();
+                    claim.commit(Some(&entry.context.messages), || {}).unwrap();
                 }
                 assert_eq!(entry.pending_injections(), original[..1]);
                 handle_pending_injections(&entry, purpose).unwrap();
                 assert_eq!(entry.pending_injections(), original[..1]);
-                let messages = entry.messages.lock().unwrap();
+                let messages = entry.context.messages.lock().unwrap();
                 assert_eq!(messages.len(), 2);
                 assert_eq!(messages[0].turn_id, original[1].turn_id);
                 assert_eq!(messages[1].turn_id, original[2].turn_id);
             } else {
                 handle_pending_injections(&entry, purpose).unwrap();
                 assert_eq!(entry.pending_injections(), original[..3]);
-                assert!(entry.messages.lock().unwrap().is_empty());
+                assert!(entry.context.messages.lock().unwrap().is_empty());
             }
         }
     }
@@ -1087,7 +1087,7 @@ mod tests {
             assert_eq!(stream.run().await.unwrap().text_concat(), "ok");
             assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 1);
             assert_eq!(entry.pending_injections(), pending);
-            assert!(entry.messages.lock().unwrap().is_empty());
+            assert!(entry.context.messages.lock().unwrap().is_empty());
             assert_eq!(*entry.output.lock().unwrap(), "ok");
             assert!(
                 std::iter::from_fn(|| frames.try_recv().ok()).any(
@@ -1138,12 +1138,12 @@ mod tests {
             .with_stream_tx(Some(stream_tx))
             .with_entry(&entry);
         assert_eq!(stream.run().await.unwrap().text_concat(), "ok");
-        assert!(entry.messages.lock().unwrap().is_empty());
+        assert!(entry.context.messages.lock().unwrap().is_empty());
         assert_eq!(entry.pending_injections().len(), 1);
         entry.drain_injections().await;
         assert!(entry.pending_injections().is_empty());
         assert!(
-            entry.messages.lock().unwrap()[0]
+            entry.context.messages.lock().unwrap()[0]
                 .text_concat()
                 .contains("note")
         );

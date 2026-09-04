@@ -61,8 +61,7 @@ pub struct FlowEntryOptions {
 }
 
 pub struct FlowEntryContext {
-    pub messages: Arc<Mutex<Vec<Message>>>,
-    pub compact_lock: Arc<tokio::sync::Mutex<()>>,
+    pub state: Arc<crate::context_state::ContextState>,
     pub injections: Arc<crate::injection::InjectionQueue>,
 }
 
@@ -75,12 +74,11 @@ pub struct FlowEntry {
     pub output: Arc<Mutex<String>>,
     pub cancel: tokio_util::sync::CancellationToken,
     pub stream_tx: tokio::sync::broadcast::Sender<FlowEvent>,
-    pub messages: Arc<Mutex<Vec<Message>>>,
+    pub context: Arc<crate::context_state::ContextState>,
     pub iteration: Arc<std::sync::atomic::AtomicU64>,
     pub child_run_id: FlowRunId,
     pub model: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
-    pub compact_lock: Arc<tokio::sync::Mutex<()>>,
     pub turn_id: crate::event::TurnId,
     pub injections: Arc<crate::injection::InjectionQueue>,
     pub frame_tx: tokio::sync::broadcast::Sender<crate::stream::StreamFrame>,
@@ -137,13 +135,13 @@ impl FlowEntry {
     }
 
     pub(crate) async fn drain_injections(&self) -> Vec<crate::injection::Injection> {
-        let _guard = self.compact_lock.lock().await;
+        let _guard = self.context.compact_lock().lock().await;
         let mut consumed = Vec::new();
         while let Some(claim) = self
             .injections
             .claim_steering(|injection| self.owns_injection(injection))
         {
-            if let Some(injection) = claim.commit(Some(&self.messages), || {}) {
+            if let Some(injection) = claim.commit(Some(self.context.messages_handle()), || {}) {
                 consumed.push(injection);
             }
         }
@@ -636,12 +634,10 @@ impl FlowRegistry {
             } = options;
             let turn_id = turn_id.unwrap_or_else(crate::event::TurnId::now);
             let FlowEntryContext {
-                messages,
-                compact_lock,
+                state: context,
                 injections,
             } = context.unwrap_or_else(|| FlowEntryContext {
-                messages: Arc::new(Mutex::new(Vec::new())),
-                compact_lock: Arc::new(tokio::sync::Mutex::new(())),
+                state: Arc::new(crate::context_state::ContextState::new(Vec::new())),
                 injections: crate::injection::InjectionQueue::new(events),
             });
             injections.bind_turn(&turn_id, &child_run_id);
@@ -658,12 +654,11 @@ impl FlowRegistry {
                 output: Arc::new(Mutex::new(String::new())),
                 cancel,
                 stream_tx,
-                messages,
+                context,
                 iteration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 child_run_id,
                 model,
                 started_at: chrono::Utc::now(),
-                compact_lock,
                 turn_id,
                 injections,
                 frame_tx: tokio::sync::broadcast::channel(256).0,
@@ -1145,8 +1140,9 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     child_ctx.flow_run_id = Some(run_id.clone());
     child_ctx.flow_identity = Some(child_identity);
     child_ctx.call_intent = None;
-    if inherit_context && let Some(parent) = &ctx.session_messages_handle {
-        *entry.messages.lock().unwrap() = inherited_context_snapshot(parent);
+    if inherit_context && let Some(parent) = ctx.context().map(|context| context.messages_handle())
+    {
+        *entry.context.messages.lock().unwrap() = inherited_context_snapshot(parent);
     }
     let result = run_prepared_flow_agent(
         prepared,
@@ -1203,9 +1199,9 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         Arc::clone(&entry.cleanup_error),
     );
     if inherit_context {
-        if let Some(parent) = &ctx.session_messages_handle {
+        if let Some(parent) = ctx.context().map(|context| context.messages_handle()) {
             let snapshot = inherited_context_snapshot(parent);
-            *entry.messages.lock().unwrap() = snapshot;
+            *entry.context.messages.lock().unwrap() = snapshot;
         }
     }
 
@@ -1565,13 +1561,8 @@ async fn run_prepared_flow_agent(
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
     child_ctx.cancel = entry.cancel.clone();
-    child_ctx.session_messages_handle = Some(Arc::clone(&entry.messages));
-    child_ctx.compact_lock_handle = Some(Arc::clone(&entry.compact_lock));
+    child_ctx = child_ctx.with_context(Arc::clone(&entry.context));
     child_ctx.agent_entry = Some(entry);
-    child_ctx.context_epoch_handle = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
-    child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
-        crate::context_plan::ContextPrefixTracker::default(),
-    )));
     seed_parent_handoff_context(
         &child_ctx,
         &flow,
@@ -1929,12 +1920,8 @@ fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
 
 fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
     let mut c = parent.clone();
-    c.session_runtime = None;
+    c.clear_context();
     c.history_segment = crate::tool::HistorySegment::Spawned;
-    c.session_messages_handle = None;
-    c.compact_lock_handle = None;
-    c.context_epoch_handle = None;
-    c.context_prefix_tracker = None;
     c.forms = None;
     c.on_memory_recent = None;
     c
@@ -2115,8 +2102,7 @@ mod tests {
                 super::FlowEntryOptions {
                     turn_id: Some(turn.clone()),
                     context: Some(super::FlowEntryContext {
-                        messages: session.messages_handle(),
-                        compact_lock: session.compact_lock_handle(),
+                        state: Arc::clone(session.context()),
                         injections: session.injection_queue(),
                     }),
                     ..Default::default()
@@ -2173,7 +2159,7 @@ mod tests {
         );
         assert_eq!(child_entry.pending_injections().len(), 1);
         child_entry.drain_injections().await;
-        assert_eq!(child_entry.messages.lock().unwrap().len(), 1);
+        assert_eq!(child_entry.context.messages.lock().unwrap().len(), 1);
         assert!(
             !session
                 .messages()
@@ -2187,7 +2173,9 @@ mod tests {
         registry.mark_terminal(&child);
         assert!(
             claim
-                .commit(Some(&child_entry.messages), || panic!("terminal run"))
+                .commit(Some(&child_entry.context.messages), || panic!(
+                    "terminal run"
+                ))
                 .is_none()
         );
         assert!(child_entry.pending_injections().is_empty());
@@ -2300,12 +2288,14 @@ mod tests {
                 let entry = ctx.agent_entry.as_ref().expect("child owns an entry");
                 assert_eq!(ctx.flow_run_id.as_ref(), Some(&entry.child_run_id));
                 assert!(Arc::ptr_eq(
-                    &entry.messages,
-                    ctx.session_messages_handle.as_ref().unwrap(),
+                    &entry.context.messages,
+                    ctx.context()
+                        .map(|context| context.messages_handle())
+                        .unwrap(),
                 ));
                 assert!(Arc::ptr_eq(
-                    &entry.compact_lock,
-                    ctx.compact_lock_handle.as_ref().unwrap(),
+                    &entry.context.compaction.lock,
+                    ctx.context().map(|context| context.compact_lock()).unwrap(),
                 ));
                 assert!(matches!(
                     crate::watch::HasPendingInjections
@@ -2315,8 +2305,8 @@ mod tests {
                     Value::Bool(false)
                 ));
                 let text = ctx
-                    .session_messages_handle
-                    .as_ref()
+                    .context()
+                    .map(|context| context.messages_handle())
                     .map(|handle| {
                         handle
                             .lock()
@@ -2608,7 +2598,7 @@ flow plain(user_prompt: string) -> string {
                 None,
             )
             .unwrap();
-        let parent_messages = Arc::new(std::sync::Mutex::new(vec![
+        let parent_context = Arc::new(crate::context_state::ContextState::new(vec![
             crate::message::Message::user_text(crate::event::TurnId::now(), "parent prompt"),
         ]));
         let mut ctx = ToolCtx::new()
@@ -2620,7 +2610,7 @@ flow plain(user_prompt: string) -> string {
             .with_session_id("test-session")
             .with_trust(trust)
             .with_agent_entry(Arc::clone(&root_entry))
-            .with_session_messages_handle(Arc::clone(&parent_messages));
+            .with_context(Arc::clone(&parent_context));
         ctx.flow_run_id = Some(root_run_id);
         ctx.flow_identity = Some(root_identity);
 
@@ -2668,9 +2658,9 @@ flow plain(user_prompt: string) -> string {
             "child cancellation must not cancel its parent"
         );
         assert!(root_entry.status.lock().unwrap().is_running());
-        assert_eq!(parent_messages.lock().unwrap().len(), 1);
+        assert_eq!(parent_context.messages.lock().unwrap().len(), 1);
         assert!(
-            root_entry.messages.lock().unwrap().is_empty(),
+            root_entry.context.messages.lock().unwrap().is_empty(),
             "sync child must not reuse the parent FlowEntry message segment"
         );
 
@@ -2749,7 +2739,7 @@ flow plain(user_prompt: string) -> string {
             status,
             FlowRunStatus::Ok { final_text, .. } if final_text == "async child prompt"
         ));
-        let entry_messages = entry.messages.lock().unwrap();
+        let entry_messages = entry.context.messages.lock().unwrap();
         assert_eq!(entry_messages.len(), 2);
         assert!(matches!(
             entry_messages[0].parts.as_slice(),
@@ -2764,8 +2754,8 @@ flow plain(user_prompt: string) -> string {
         assert!(!rendered_handoff.contains("async child prompt"));
         assert_eq!(entry_messages[1].text_concat(), "async child prompt");
         drop(entry_messages);
-        assert_eq!(parent_messages.lock().unwrap().len(), 1);
-        assert!(root_entry.messages.lock().unwrap().is_empty());
+        assert_eq!(parent_context.messages.lock().unwrap().len(), 1);
+        assert!(root_entry.context.messages.lock().unwrap().is_empty());
         assert!(
             event_session.messages_full().is_empty(),
             "spawned handoff records must not project into root history"

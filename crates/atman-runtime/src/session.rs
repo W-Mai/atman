@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use crate::context_state::{CompactionState, ContextState, checkpoint_epoch_digest};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -73,53 +74,6 @@ pub struct WatchHub {
     _keepalive: WatchKeepalive,
 }
 
-pub struct CompactionState {
-    pub manual_pending: std::sync::atomic::AtomicBool,
-    pub model_window_tokens: std::sync::atomic::AtomicU64,
-    pub review_mode: Mutex<CompactReviewMode>,
-    pub lock: std::sync::Arc<tokio::sync::Mutex<()>>,
-    last_context_usage: Mutex<LastContextUsageStore>,
-    last_context_prefix: Mutex<crate::context_plan::ContextPrefixTracker>,
-    context_epoch: Mutex<Option<String>>,
-}
-
-impl CompactionState {
-    fn new() -> Self {
-        Self {
-            manual_pending: std::sync::atomic::AtomicBool::new(false),
-            model_window_tokens: std::sync::atomic::AtomicU64::new(0),
-            review_mode: Mutex::new(CompactReviewMode::default()),
-            lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            last_context_usage: Mutex::new(LastContextUsageStore::default()),
-            last_context_prefix: Mutex::new(crate::context_plan::ContextPrefixTracker::default()),
-            context_epoch: Mutex::new(None),
-        }
-    }
-
-    fn restore_context_epoch(&self, epoch: Option<String>) {
-        *self
-            .context_epoch
-            .lock()
-            .expect("context epoch lock poisoned") = epoch;
-    }
-
-    fn update_context_epoch(&self, messages: &[Message]) {
-        self.restore_context_epoch(Some(checkpoint_epoch_digest(messages)));
-    }
-
-    fn context_epoch(&self) -> Option<String> {
-        self.context_epoch
-            .lock()
-            .expect("context epoch lock poisoned")
-            .clone()
-    }
-}
-
-fn checkpoint_epoch_digest(messages: &[Message]) -> String {
-    let bytes = serde_json::to_vec(messages).expect("checkpoint messages must serialize");
-    format!("blake3:{}", blake3::hash(&bytes).to_hex())
-}
-
 fn replayed_checkpoint_epoch(messages: &[(u64, Message)]) -> Option<String> {
     let checkpoint = messages
         .iter()
@@ -127,38 +81,6 @@ fn replayed_checkpoint_epoch(messages: &[(u64, Message)]) -> Option<String> {
         .map(|(_, message)| message.clone())
         .collect::<Vec<_>>();
     (!checkpoint.is_empty()).then(|| checkpoint_epoch_digest(&checkpoint))
-}
-
-const MAX_LAST_CONTEXT_USAGES: usize = 256;
-
-#[derive(Default)]
-struct LastContextUsageStore {
-    entries: HashMap<crate::context_plan::ContextUsageKey, crate::context_plan::ContextUsageRecord>,
-    order: VecDeque<crate::context_plan::ContextUsageKey>,
-}
-
-impl LastContextUsageStore {
-    fn insert(
-        &mut self,
-        key: crate::context_plan::ContextUsageKey,
-        record: crate::context_plan::ContextUsageRecord,
-    ) {
-        self.order.retain(|existing| existing != &key);
-        self.order.push_back(key.clone());
-        self.entries.insert(key, record);
-        while self.entries.len() > MAX_LAST_CONTEXT_USAGES {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
-        }
-    }
-
-    fn get(
-        &self,
-        key: &crate::context_plan::ContextUsageKey,
-    ) -> Option<crate::context_plan::ContextUsageRecord> {
-        self.entries.get(key).cloned()
-    }
 }
 
 pub struct InteractionServices {
@@ -184,8 +106,7 @@ pub struct Session {
     dir: PathBuf,
     writer: std::sync::Mutex<Option<EventWriter>>,
     sink: EventSink,
-    message_stream: crate::message_stream::MessageStream,
-    messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
+    context: std::sync::Arc<ContextState>,
     turns: Mutex<HashMap<TurnId, TurnState>>,
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
@@ -198,7 +119,6 @@ pub struct Session {
     /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
     successful_flow_count: std::sync::atomic::AtomicU64,
-    pub compaction: CompactionState,
     pub interactions: InteractionServices,
     injection_queue: std::sync::Arc<crate::injection::InjectionQueue>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
@@ -1020,8 +940,11 @@ impl Session {
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
             sink,
-            message_stream: crate::message_stream::MessageStream::new(events_handle),
-            messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            context: std::sync::Arc::new(ContextState::from_stream(
+                crate::message_stream::MessageStream::new(events_handle),
+                Vec::new(),
+                CompactionState::new(),
+            )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
@@ -1041,7 +964,6 @@ impl Session {
             trust_update_lock: std::sync::Mutex::new(()),
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
-            compaction: CompactionState::new(),
             interactions,
             injection_queue,
             last_image_user_msg: Mutex::new(None),
@@ -1256,12 +1178,25 @@ impl Session {
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
             sink,
-            message_stream: crate::message_stream::MessageStream::with_initial(
-                events_handle,
-                initial_msgs,
-                all_msgs,
-            ),
-            messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
+            context: std::sync::Arc::new(ContextState::from_stream(
+                crate::message_stream::MessageStream::with_initial(
+                    events_handle,
+                    initial_msgs,
+                    all_msgs,
+                ),
+                messages,
+                {
+                    let c = CompactionState::new();
+                    c.restore_context_epoch(checkpoint_epoch);
+                    if persisted.window_tokens > 0 {
+                        c.model_window_tokens.store(
+                            persisted.window_tokens,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    c
+                },
+            )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
@@ -1281,17 +1216,6 @@ impl Session {
             trust_update_lock: std::sync::Mutex::new(()),
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
-            compaction: {
-                let c = CompactionState::new();
-                c.restore_context_epoch(checkpoint_epoch);
-                if persisted.window_tokens > 0 {
-                    c.model_window_tokens.store(
-                        persisted.window_tokens,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-                c
-            },
             interactions,
             injection_queue,
             last_image_user_msg: Mutex::new(None),
@@ -1323,8 +1247,11 @@ impl Session {
             dir: PathBuf::new(),
             writer: std::sync::Mutex::new(None),
             sink,
-            message_stream: crate::message_stream::MessageStream::new(events_handle),
-            messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            context: std::sync::Arc::new(ContextState::from_stream(
+                crate::message_stream::MessageStream::new(events_handle),
+                Vec::new(),
+                CompactionState::new(),
+            )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
@@ -1344,7 +1271,6 @@ impl Session {
             trust_update_lock: std::sync::Mutex::new(()),
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
-            compaction: CompactionState::new(),
             interactions,
             injection_queue,
             last_image_user_msg: Mutex::new(None),
@@ -1412,11 +1338,11 @@ impl Session {
     }
 
     pub fn compact_review_mode(&self) -> CompactReviewMode {
-        *self.compaction.review_mode.lock().unwrap()
+        *self.context.compaction.review_mode.lock().unwrap()
     }
 
     pub fn set_compact_review_mode(&self, mode: CompactReviewMode) {
-        *self.compaction.review_mode.lock().unwrap() = mode;
+        *self.context.compaction.review_mode.lock().unwrap() = mode;
     }
 
     pub fn read_files(
@@ -1548,13 +1474,15 @@ impl Session {
     }
 
     pub fn request_manual_compact(&self) {
-        self.compaction
+        self.context
+            .compaction
             .manual_pending
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn take_manual_compact_request(&self) -> bool {
-        self.compaction
+        self.context
+            .compaction
             .manual_pending
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
@@ -1603,21 +1531,16 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        let key = crate::context_plan::ContextUsageKey {
-            provider: provider.to_string(),
-            model: model.to_string(),
+        self.context.record_call(
+            provider,
+            model,
             call_purpose,
-            call_identity: call_identity.clone(),
-        };
-        let record = crate::context_plan::ContextUsageRecord {
-            plan_id,
-            usage: usage.clone(),
-        };
-        self.compaction
-            .last_context_usage
-            .lock()
-            .expect("context usage lock poisoned")
-            .insert(key, record);
+            call_identity.clone(),
+            crate::context_plan::ContextUsageRecord {
+                plan_id,
+                usage: usage.clone(),
+            },
+        );
 
         let total_input = usage.prompt_input();
         self.watch.context.send_modify(|snap| {
@@ -1672,30 +1595,12 @@ impl Session {
         &self,
         key: &crate::context_plan::ContextUsageKey,
     ) -> Option<crate::context_plan::ContextUsageRecord> {
-        self.compaction
-            .last_context_usage
-            .lock()
-            .expect("context usage lock poisoned")
-            .get(key)
+        self.context.last_usage(key)
     }
 
-    pub(crate) fn observe_context_prefix(
-        &self,
-        provider: &str,
-        model: &str,
-        call_purpose: crate::context_plan::ContextCallPurpose,
-        call_identity: crate::context_plan::ContextCallIdentity,
-        snapshot: crate::context_plan::ContextPrefixSnapshot,
-    ) -> crate::context_plan::ContextCacheObservation {
-        self.compaction
-            .last_context_prefix
-            .lock()
-            .expect("context prefix lock poisoned")
-            .observe(call_purpose, call_identity, provider, model, snapshot)
-    }
-
+    #[cfg(test)]
     pub(crate) fn context_epoch(&self) -> Option<String> {
-        self.compaction.context_epoch()
+        self.context.compaction.context_epoch()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1712,7 +1617,8 @@ impl Session {
         updates_model_window: bool,
     ) {
         if updates_model_window && tokens_in > 0 {
-            self.compaction
+            self.context
+                .compaction
                 .model_window_tokens
                 .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1736,21 +1642,22 @@ impl Session {
     }
 
     pub fn last_input_tokens(&self) -> u64 {
-        self.compaction
+        self.context
+            .compaction
             .model_window_tokens
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.compaction.lock.lock().await
+        self.context.compaction.lock.lock().await
     }
 
     pub async fn acquire_compact_lock_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.compaction.lock.clone().lock_owned().await
+        self.context.compaction.lock.clone().lock_owned().await
     }
 
     pub fn compact_lock_handle(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        self.compaction.lock.clone()
+        self.context.compaction.lock.clone()
     }
 
     pub fn refresh_window_snapshot(&self) {
@@ -2036,7 +1943,7 @@ impl Session {
         turn_id: TurnId,
         specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
     ) -> Vec<crate::context_plan::ContextRecord> {
-        let mut messages = self.messages.lock().unwrap();
+        let mut messages = self.context.messages.lock().unwrap();
         let records = crate::context_plan::compile_context_records(&messages, specs);
         for record in &records {
             AppendMessageCommand {
@@ -2080,7 +1987,7 @@ impl Session {
                 reason: reason.into(),
             });
         }
-        if let Ok(mut messages) = self.messages.lock()
+        if let Ok(mut messages) = self.context.messages.lock()
             && let Some(message) = messages.iter_mut().find(|message| {
                 message.role == MessageRole::User && message.turn_id == entry.message_turn_id
             })
@@ -2099,15 +2006,19 @@ impl Session {
     }
 
     pub fn messages(&self) -> crate::message_stream::MessageWindow {
-        self.message_stream.window()
+        self.context.messages()
     }
 
     pub fn messages_full(&self) -> std::sync::Arc<Vec<Message>> {
-        self.message_stream.full_messages()
+        self.context.messages_full()
+    }
+
+    pub fn context(&self) -> &std::sync::Arc<ContextState> {
+        &self.context
     }
 
     pub fn messages_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<Message>>> {
-        self.messages.clone()
+        self.context.messages.clone()
     }
 
     pub fn message_count(&self) -> usize {
@@ -2180,8 +2091,12 @@ impl Session {
             "[atman: persistently compacted output from {rewritten_count} retained messages]"
         );
         self.sink.mark_compacted();
-        let mut messages = self.messages.lock().expect("session messages poisoned");
-        self.compaction.update_context_epoch(&replacement);
+        let mut messages = self
+            .context
+            .messages
+            .lock()
+            .expect("session messages poisoned");
+        self.context.compaction.update_context_epoch(&replacement);
         let mut batch = self.sink.batch();
         batch.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
@@ -2203,7 +2118,8 @@ impl Session {
             after_tokens,
             summary: summary.clone(),
         });
-        self.compaction
+        self.context
+            .compaction
             .model_window_tokens
             .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
         *messages = replacement.clone();
@@ -2253,8 +2169,12 @@ impl Session {
             return None;
         }
         self.sink.mark_compacted();
-        let mut messages = self.messages.lock().expect("session messages poisoned");
-        self.compaction.update_context_epoch(&replacement);
+        let mut messages = self
+            .context
+            .messages
+            .lock()
+            .expect("session messages poisoned");
+        self.context.compaction.update_context_epoch(&replacement);
         let mut batch = self.sink.batch();
         batch.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
@@ -2276,7 +2196,8 @@ impl Session {
             after_tokens,
             summary: summary.clone(),
         });
-        self.compaction
+        self.context
+            .compaction
             .model_window_tokens
             .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
         *messages = replacement.clone();
@@ -2340,8 +2261,12 @@ impl Session {
             )
         });
         self.sink.mark_compacted();
-        let mut messages = self.messages.lock().expect("session messages poisoned");
-        self.compaction.update_context_epoch(&after);
+        let mut messages = self
+            .context
+            .messages
+            .lock()
+            .expect("session messages poisoned");
+        self.context.compaction.update_context_epoch(&after);
         let mut batch = self.sink.batch();
         let replacement_seq = batch
             .emit(Event::SystemMsg {
@@ -2370,7 +2295,8 @@ impl Session {
             after_tokens,
             summary: summary.clone(),
         });
-        self.compaction
+        self.context
+            .compaction
             .model_window_tokens
             .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
         *messages = after.clone();
@@ -2580,7 +2506,7 @@ impl Session {
             .injection_queue
             .claim_steering(|inj| inj.turn_id == *turn_id)
         {
-            if let Some(injection) = claim.commit(Some(&self.messages), || {}) {
+            if let Some(injection) = claim.commit(Some(&self.context.messages), || {}) {
                 out.push(injection);
             }
         }
@@ -2650,7 +2576,7 @@ pub struct AppendMessageCommand {
 
 impl AppendMessageCommand {
     pub fn execute(&self, session: &Session) -> u64 {
-        let mut messages = session.messages.lock().unwrap();
+        let mut messages = session.context.messages.lock().unwrap();
         self.execute_with_messages(session, &mut messages)
     }
 
@@ -2828,34 +2754,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use tempfile::TempDir;
-
-    #[test]
-    fn last_context_usage_store_evicts_the_oldest_identity() {
-        let mut store = LastContextUsageStore::default();
-        for index in 0..=MAX_LAST_CONTEXT_USAGES {
-            store.insert(
-                crate::context_plan::ContextUsageKey {
-                    provider: "provider".into(),
-                    model: format!("model-{index}"),
-                    call_purpose: crate::context_plan::ContextCallPurpose::General,
-                    call_identity: crate::context_plan::ContextCallIdentity::detached(),
-                },
-                crate::context_plan::ContextUsageRecord {
-                    plan_id: crate::context_plan::ContextPlanId::now(),
-                    usage: crate::provider::TokenUsage::default(),
-                },
-            );
-        }
-
-        assert_eq!(store.entries.len(), MAX_LAST_CONTEXT_USAGES);
-        assert!(!store.entries.keys().any(|key| key.model == "model-0"));
-        assert!(
-            store
-                .entries
-                .keys()
-                .any(|key| key.model == format!("model-{MAX_LAST_CONTEXT_USAGES}"))
-        );
-    }
 
     fn permission_authority() -> crate::flow_authority::EffectiveAuthority {
         use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind};

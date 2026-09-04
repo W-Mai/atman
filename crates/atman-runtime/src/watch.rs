@@ -663,7 +663,7 @@ impl Tool for HasPendingInjections {
             if let Some(entry) = ctx.agent_entry.as_ref() {
                 return Ok(Value::Bool(!entry.pending_injections().is_empty()));
             }
-            let Some(session) = ctx.session_runtime.as_ref() else {
+            let Some(session) = ctx.session_runtime() else {
                 return Err(RuntimeError::ToolFailed(
                     "has_pending_injections: no current flow".into(),
                 ));

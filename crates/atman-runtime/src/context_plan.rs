@@ -990,8 +990,7 @@ impl ContextCallIdentity {
 
     pub(crate) fn from_tool_context(ctx: &crate::tool::ToolCtx) -> Self {
         let session_id = ctx.session_id.clone().or_else(|| {
-            ctx.session_runtime
-                .as_ref()
+            ctx.session_runtime()
                 .map(|session| session.id().to_string())
         });
         let scope = match ctx.history_segment {

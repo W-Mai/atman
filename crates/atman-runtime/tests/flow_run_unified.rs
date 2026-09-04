@@ -622,7 +622,7 @@ flow test_flow(goal: string) -> string {
     let entry = registry.lookup(&handle).unwrap();
     let status = entry.status.lock().unwrap().clone();
     let pending_count = entry.pending_injections().len();
-    let msgs = entry.messages.lock().unwrap();
+    let msgs = entry.context.messages_handle().lock().unwrap();
     let has_nudge = msgs
         .iter()
         .any(|m| m.text_concat().contains("NUDGE: check config"));

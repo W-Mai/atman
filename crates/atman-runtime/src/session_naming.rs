@@ -34,9 +34,8 @@ async fn generate_session_name(
     let mut naming_executor = executor.clone();
     naming_executor.events = crate::event::EventSink::new();
     naming_executor.tool_ctx.events = None;
-    naming_executor.tool_ctx.session_runtime = None;
+    naming_executor.tool_ctx.clear_context();
     naming_executor.tool_ctx.session_messages = None;
-    naming_executor.tool_ctx.session_messages_handle = None;
     naming_executor.tool_ctx.stdout_broadcast = None;
     let value = naming_executor
         .run(

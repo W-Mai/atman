@@ -775,11 +775,9 @@ async fn dispatch_tool_call<'a>(
     let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
         ctx_with_anchors
             .with_session_messages(session.messages_full())
-            .with_session_messages_handle(session.messages_handle())
             .with_session_runtime(session.clone())
             .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
             .with_flow_registry(std::sync::Arc::clone(&session.flow_registry))
-            .with_compact_lock_handle(session.compact_lock_handle())
     } else {
         ctx_with_anchors
     };

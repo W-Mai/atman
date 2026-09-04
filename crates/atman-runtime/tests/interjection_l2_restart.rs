@@ -115,7 +115,7 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
             None,
         )]))
         .await;
-    for inline in [false, true] {
+    for (inline, watched) in [(false, false), (false, true), (true, false), (true, true)] {
         for selection in [
             "context: \"session\"",
             "context: \"session_recent(1)\"",
@@ -132,14 +132,19 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
                 calls: calls.clone(),
                 target: None,
             }));
+            let watch = if watched {
+                "watch reply { on token(match: \"forbidden-marker\") { abort(\"unexpected token\") } }"
+            } else {
+                ""
+            };
+            let body =
+                format!("reply = llm.call(model: \"model\", {selection})\n{watch}\nreturn reply");
             let source = if inline {
                 format!(
-                    "flow main() -> string {{ return subflow(agent) }}\nflow agent() -> string {{ return llm.call(model: \"model\", {selection}) }}"
+                    "flow main() -> string {{ return subflow(agent) }}\nflow agent() -> string {{ {body} }}"
                 )
             } else {
-                format!(
-                    "flow main() -> string {{ return llm.call(model: \"model\", {selection}) }}"
-                )
+                format!("flow main() -> string {{ {body} }}")
             };
             let file = parse_file(&source).unwrap();
             let result = tokio::time::timeout(
@@ -195,9 +200,9 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
                 }
             }
             let entry = session.flow_registry.lookup("root").unwrap();
-            assert!(Arc::ptr_eq(&entry.messages, &session.messages_handle()));
+            assert!(Arc::ptr_eq(&entry.context, session.context()));
             assert!(Arc::ptr_eq(
-                &entry.compact_lock,
+                entry.context.compact_lock(),
                 &session.compact_lock_handle()
             ));
             assert!(entry.pending_injections().is_empty());
@@ -248,17 +253,18 @@ impl Tool for CaptureOwner {
 
     fn call<'a>(&'a self, _: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            assert!(ctx.session_runtime.is_none());
+            assert!(ctx.session_runtime().is_none());
             let entry = ctx.agent_entry.as_ref().unwrap();
+            assert!(Arc::ptr_eq(ctx.context().unwrap(), &entry.context));
             assert_eq!(ctx.flow_run_id.as_ref(), Some(&entry.child_run_id));
             assert_eq!(ctx.turn_id.as_ref(), Some(&entry.turn_id));
             assert!(Arc::ptr_eq(
-                ctx.session_messages_handle.as_ref().unwrap(),
-                &entry.messages
+                ctx.context().unwrap().messages_handle(),
+                entry.context.messages_handle()
             ));
             assert!(Arc::ptr_eq(
-                ctx.compact_lock_handle.as_ref().unwrap(),
-                &entry.compact_lock
+                ctx.context().unwrap().compact_lock(),
+                entry.context.compact_lock()
             ));
             self.0.send_replace(Some(entry.clone()));
             Ok(Value::Unit)
@@ -276,14 +282,22 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
             None,
         )]))
         .await;
-    for is_async in [false, true] {
+    for (is_async, watched) in [(false, false), (false, true), (true, false), (true, true)] {
         for selection in ["context: \"session\"", "prompt: \"explicit\""] {
+            if watched && selection.starts_with("prompt:") {
+                continue;
+            }
+            let watch = if watched {
+                "watch reply { on token(match: \"forbidden-marker\") { abort(\"unexpected token\") } }"
+            } else {
+                ""
+            };
             let dir = tempfile::tempdir().unwrap();
             let source_path = dir.path().join("child.at");
             std::fs::write(
                 &source_path,
                 format!(
-                    "flow child() -> string {{\n capture_owner()\n session.push(message.user(\"child task\"))\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n reply = llm.call(model: \"model\", {selection})\n return text_concat(reply)\n }}"
+                    "flow child() -> string {{\n capture_owner()\n session.push(message.user(\"child task\"))\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n reply = llm.call(model: \"model\", {selection})\n {watch}\n return text_concat(reply)\n }}"
                 ),
             )
             .unwrap();
@@ -321,11 +335,9 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
                 .with_trust(Default::default())
                 .with_session_id(session.id().to_string())
                 .with_session_runtime(session.clone())
-                .with_session_messages_handle(session.messages_handle())
                 .with_events(session.sink().clone())
                 .with_anchors(Some(turn.clone()), Some(parent_run.clone()), None);
             ctx.flow_identity = Some(parent_identity);
-            ctx.compact_lock_handle = Some(session.compact_lock_handle());
             let args = ToolArgs {
                 positional: vec![],
                 named: vec![
@@ -361,14 +373,26 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
             ));
             assert_eq!(entry.turn_id, turn);
             assert_ne!(entry.child_run_id, parent_run);
-            assert!(!Arc::ptr_eq(&entry.messages, &session.messages_handle()));
+            assert!(!Arc::ptr_eq(&entry.context, session.context()));
             assert!(!Arc::ptr_eq(
-                &entry.compact_lock,
+                entry.context.compact_lock(),
                 &session.compact_lock_handle()
             ));
             assert_eq!(session.messages().to_vec(), parent_messages);
             assert!(entry.pending_injections().is_empty());
             let managed = selection.starts_with("context:");
+            let usage_key = atman_runtime::context_plan::ContextUsageKey {
+                provider: "correcting".into(),
+                model: "model".into(),
+                call_purpose: atman_runtime::context_plan::ContextCallPurpose::General,
+                call_identity: atman_runtime::context_plan::ContextCallIdentity {
+                    scope: atman_runtime::context_plan::ContextCallScope::Child,
+                    session_id: Some(session.id().to_string()),
+                    flow_run_id: Some(entry.child_run_id.clone()),
+                },
+            };
+            assert_eq!(entry.context.last_usage(&usage_key).is_some(), managed);
+            assert!(session.last_context_usage(&usage_key).is_none());
             assert_eq!(
                 entry.output.lock().unwrap().as_str(),
                 if managed {
@@ -473,7 +497,10 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
                     .collect()
             };
             let child_messages = child_messages_from(&events);
-            assert_eq!(*entry.messages.lock().unwrap(), child_messages);
+            assert_eq!(
+                *entry.context.messages_handle().lock().unwrap(),
+                child_messages
+            );
             assert_eq!(
                 child_messages
                     .iter()

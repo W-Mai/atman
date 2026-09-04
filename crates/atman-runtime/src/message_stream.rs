@@ -35,6 +35,15 @@ impl Deref for MessageWindow {
     }
 }
 
+impl From<Vec<Message>> for MessageWindow {
+    fn from(messages: Vec<Message>) -> Self {
+        Self {
+            messages: Arc::new(messages),
+            start: 0,
+        }
+    }
+}
+
 struct Acc {
     compacted: Vec<(u64, Message)>,
     compacted_positions: HashMap<u64, usize>,

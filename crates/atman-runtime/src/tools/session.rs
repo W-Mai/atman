@@ -60,15 +60,12 @@ impl Tool for SessionPush {
                     });
                 }
             };
-            let Some(_handle) = &ctx.session_messages_handle else {
+            let Some(context) = ctx.context() else {
                 return Err(RuntimeError::ToolFailed(
                     "session.push: no session messages handle available".into(),
                 ));
             };
-            let _compact_guard = match &ctx.compact_lock_handle {
-                Some(lock) => Some(lock.lock().await),
-                None => None,
-            };
+            let _compact_guard = context.compact_lock().lock().await;
             for msg in msgs {
                 let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
                     &msg,
@@ -83,7 +80,7 @@ impl Tool for SessionPush {
 }
 
 pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(), RuntimeError> {
-    let Some(handle) = &ctx.session_messages_handle else {
+    let Some(handle) = ctx.context().map(|context| context.messages_handle()) else {
         return Err(RuntimeError::ToolFailed(
             "session message context is unavailable".into(),
         ));
@@ -156,17 +153,17 @@ mod tests {
 
     #[test]
     fn spawned_context_does_not_rewrite_messages_outside_compaction() {
-        let messages = std::sync::Arc::new(std::sync::Mutex::new(
+        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(
             (0..100)
                 .map(|index| {
                     Message::assistant_text(crate::event::TurnId::now(), format!("old-{index}"))
                 })
                 .collect(),
         ));
-        let mut ctx = ToolCtx::new()
+        let messages = owner.messages_handle();
+        let ctx = ToolCtx::new()
             .with_history_segment(crate::tool::HistorySegment::Spawned)
-            .with_session_messages_handle(std::sync::Arc::clone(&messages));
-        ctx.context_epoch_handle = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
+            .with_context(std::sync::Arc::clone(&owner));
 
         append_message_to_context(
             &ctx,
@@ -176,7 +173,7 @@ mod tests {
 
         assert_eq!(messages.lock().unwrap().len(), 101);
         assert_eq!(messages.lock().unwrap()[0].text_concat(), "old-0");
-        assert_eq!(ctx.context_epoch_seed().as_deref(), Some("generation:0"));
+        assert_eq!(ctx.context().unwrap().epoch(), None);
     }
 
     #[test]
@@ -198,7 +195,6 @@ mod tests {
         let ctx = ToolCtx::new()
             .with_anchors(Some(TurnId::now()), Some(run_id.clone()), None)
             .with_events(session.sink().clone())
-            .with_session_messages_handle(session.messages_handle())
             .with_session_runtime(session.clone())
             .with_stream_tx(stream_tx);
         let message = Message {
@@ -256,12 +252,12 @@ mod tests {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         let run_id = FlowRunId::now();
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
-        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(Vec::new()));
         let ctx = ToolCtx::new()
             .with_anchors(Some(TurnId::now()), Some(run_id.clone()), None)
             .with_history_segment(crate::tool::HistorySegment::Spawned)
             .with_events(session.sink().clone())
-            .with_session_messages_handle(messages)
+            .with_context(owner)
             .with_stream_tx(stream_tx);
         let message = Message::context_record(
             TurnId::now(),

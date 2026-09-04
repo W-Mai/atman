@@ -333,7 +333,7 @@ impl Executor {
         let mut root_entry = None;
         if let Some(sess) = session.as_ref() {
             tool_ctx.stream_tx = Some(sess.stream_tx());
-            tool_ctx.session_messages_handle = Some(sess.messages_handle());
+            tool_ctx = tool_ctx.with_session_runtime(sess.clone());
             // Root controls and context share the session's canonical storage.
             let entry = sess.flow_registry.create_entry(
                 "root".to_string(),
@@ -344,8 +344,7 @@ impl Executor {
                     cancel: flow_cancel.clone(),
                     turn_id: turn_id.clone(),
                     context: Some(crate::tools::agent_ctrl::FlowEntryContext {
-                        messages: sess.messages_handle(),
-                        compact_lock: sess.compact_lock_handle(),
+                        state: std::sync::Arc::clone(sess.context()),
                         injections: sess.injection_queue(),
                     }),
                     ..Default::default()

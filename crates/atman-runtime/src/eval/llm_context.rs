@@ -33,20 +33,13 @@ pub fn validate_context(args: &LlmNodeArgs, context_mode: ContextMode) -> Result
 pub fn build_llm_context(
     args: &LlmNodeArgs,
     context_mode: ContextMode,
-    session: Option<&std::sync::Arc<crate::session::Session>>,
-    session_messages_handle: Option<
-        &std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
-    >,
+    context: Option<&std::sync::Arc<crate::context_state::ContextState>>,
     turn_id: &crate::event::TurnId,
     events: Option<&crate::event::EventSink>,
     flow_run_id: Option<&crate::event::FlowRunId>,
 ) -> Result<LlmContext, Value> {
     validate_context(args, context_mode).map_err(Value::Err)?;
-    let session_snapshot = if let Some(session) = session {
-        Some(session.messages().to_vec())
-    } else {
-        session_messages_handle.map(|handle| handle.lock().unwrap().clone())
-    };
+    let session_snapshot = context.map(|context| context.messages());
     let live_records = session_snapshot
         .as_deref()
         .map(crate::context_plan::latest_live_context_record_messages)
@@ -161,14 +154,18 @@ mod tests {
     fn root_context_uses_session_window_over_stale_handle() {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         session.append_message(message("canonical"), None);
-        let stale = std::sync::Arc::new(std::sync::Mutex::new(vec![message("stale")]));
+        let stale = std::sync::Arc::new(crate::context_state::ContextState::new(vec![message(
+            "stale",
+        )]));
+        let ctx = crate::tool::ToolCtx::new()
+            .with_context(stale)
+            .with_session_runtime(session.clone());
         let turn_id = TurnId::now();
 
         let context = build_llm_context(
             &args(),
             ContextMode::Session,
-            Some(&session),
-            Some(&stale),
+            ctx.context(),
             &turn_id,
             None,
             None,
@@ -184,18 +181,20 @@ mod tests {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         session.append_message(message("first"), None);
         session.append_message(message("second"), None);
-        let stale = std::sync::Arc::new(std::sync::Mutex::new(vec![
+        let stale = std::sync::Arc::new(crate::context_state::ContextState::new(vec![
             message("stale-one"),
             message("stale-two"),
             message("stale-three"),
         ]));
+        let ctx = crate::tool::ToolCtx::new()
+            .with_context(stale)
+            .with_session_runtime(session.clone());
         let turn_id = TurnId::now();
 
         let context = build_llm_context(
             &args(),
             ContextMode::SessionRecent(1),
-            Some(&session),
-            Some(&stale),
+            ctx.context(),
             &turn_id,
             None,
             None,
@@ -208,14 +207,22 @@ mod tests {
 
     #[test]
     fn child_context_uses_local_handle_without_session() {
-        let local = std::sync::Arc::new(std::sync::Mutex::new(vec![message("child")]));
+        let local = std::sync::Arc::new(crate::context_state::ContextState::new(vec![message(
+            "child",
+        )]));
+        let ctx = crate::tool::ToolCtx::new()
+            .with_session_runtime(std::sync::Arc::new(
+                crate::session::Session::open_ephemeral(),
+            ))
+            .with_context(local.clone());
+        assert!(ctx.session_runtime().is_none());
+        assert!(std::sync::Arc::ptr_eq(ctx.context().unwrap(), &local));
         let turn_id = TurnId::now();
 
         let context = build_llm_context(
             &args(),
             ContextMode::Session,
-            None,
-            Some(&local),
+            ctx.context(),
             &turn_id,
             None,
             None,

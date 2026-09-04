@@ -59,7 +59,7 @@ impl Tool for ContextRecordAppend {
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            let _compact_guard = match &ctx.compact_lock_handle {
+            let _compact_guard = match ctx.context().map(|context| context.compact_lock()) {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
@@ -105,10 +105,10 @@ pub(crate) fn append_context_records(
     turn_id: crate::event::TurnId,
     specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
 ) -> Result<Vec<crate::context_plan::ContextRecord>, RuntimeError> {
-    if let Some(session) = ctx.session_runtime.as_ref() {
+    if let Some(session) = ctx.session_runtime() {
         return Ok(session.append_context_records(turn_id, specs));
     }
-    let Some(messages) = ctx.session_messages_handle.as_ref() else {
+    let Some(messages) = ctx.context().map(|context| context.messages_handle()) else {
         return Err(RuntimeError::ToolFailed(
             "context.record: no session message context available".into(),
         ));

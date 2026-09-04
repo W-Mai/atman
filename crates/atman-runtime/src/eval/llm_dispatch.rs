@@ -72,9 +72,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .turn_id
         .clone()
         .unwrap_or_else(crate::event::TurnId::now);
-    if ctx.session_runtime.is_some()
+    if ctx.session_runtime().is_some()
         || (matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
-            && ctx.session_messages_handle.is_some())
+            && ctx.context().is_some())
     {
         append_system_context(
             &mut system,
@@ -104,7 +104,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let injections = if args.call_purpose.accepts_steering_messages() {
         if let Some(entry) = ctx.agent_entry.as_ref() {
             entry.drain_injections().await
-        } else if let Some(session) = ctx.session_runtime.as_ref() {
+        } else if let Some(session) = ctx.session_runtime() {
             session.drain_injections(&turn_id).await
         } else {
             Vec::new()
@@ -126,7 +126,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     };
     if !matches!(context_mode, ContextMode::None)
         && !has_messages_override
-        && let Some(session) = ctx.session_runtime.as_ref()
+        && let Some(session) = ctx.session_runtime()
     {
         crate::compaction::start_auto_compact_with_budget(
             session.clone(),
@@ -138,26 +138,20 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     }
     let uses_managed_context = !matches!(context_mode, ContextMode::None) && !has_messages_override;
     let uses_spawned_context = uses_managed_context
-        && ctx.session_runtime.is_none()
+        && ctx.session_runtime().is_none()
         && matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
-        && ctx.session_messages_handle.is_some();
+        && ctx.context().is_some();
     let mut compact_guard = if uses_managed_context {
-        if let Some(session) = ctx.session_runtime.as_ref() {
-            Some(session.acquire_compact_lock().await)
-        } else if uses_spawned_context {
-            match ctx.compact_lock_handle.as_ref() {
-                Some(lock) => Some(lock.lock().await),
-                None => None,
-            }
-        } else {
-            None
+        match ctx.context() {
+            Some(context) => Some(context.compact_lock().lock().await),
+            None => None,
         }
     } else {
         None
     };
     if uses_spawned_context
         && compact_guard.is_some()
-        && let Some(messages) = ctx.session_messages_handle.as_ref()
+        && let Some(messages) = ctx.context().map(|context| context.messages_handle())
         && let Some(result) = crate::compaction::maybe_auto_compact_handle_locked(
             messages,
             &model,
@@ -172,8 +166,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let llm_context = match llm_context::build_llm_context(
         &args,
         context_mode,
-        ctx.session_runtime.as_ref(),
-        ctx.session_messages_handle.as_ref(),
+        ctx.context(),
         &turn_id,
         ctx.events.as_ref(),
         ctx.flow_run_id.as_ref(),
@@ -193,8 +186,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let control = if let Some(entry) = ctx.agent_entry.as_ref() {
         entry.take_pending_control()
     } else {
-        ctx.session_runtime
-            .as_ref()
+        ctx.session_runtime()
             .and_then(|session| session.take_pending_control(&turn_id))
     };
     if let Some(control) = control {
@@ -242,7 +234,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         }
     }
     let can_rebuild_from_managed_context = uses_managed_context
-        && (ctx.session_runtime.is_some() || (uses_spawned_context && compact_guard.is_some()));
+        && (ctx.session_runtime().is_some() || (uses_spawned_context && compact_guard.is_some()));
     let mut compact_after_overflow_used = false;
     let mut saw_context_overflow = false;
     let mut last_err: Option<RuntimeError> = None;
@@ -339,11 +331,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 reasoning: reasoning.clone(),
                 stall_timeout_secs,
             };
-            let context_epoch = ctx
-                .session_runtime
-                .as_ref()
-                .and_then(|session| session.context_epoch())
-                .or_else(|| ctx.context_epoch_seed());
+            let context_epoch = ctx.context().and_then(|context| context.epoch());
             let context_plan = crate::context_plan::ModelContextPlan::for_provider_call(
                 req,
                 args.call_purpose,
@@ -365,25 +353,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     )
                 })
                 .expect("provider-neutral context prefix serialization");
-            let context_cache = if let Some(session) = ctx.session_runtime.as_ref() {
-                session.observe_context_prefix(
+            let context_cache = if let Some(context) = ctx.context() {
+                context.observe_prefix(
                     provider.name(),
                     &api_model,
                     context_call_purpose,
                     context_call_identity.clone(),
                     context_prefix,
                 )
-            } else if let Some(tracker) = ctx.context_prefix_tracker.as_ref() {
-                tracker
-                    .lock()
-                    .expect("context prefix lock poisoned")
-                    .observe(
-                        context_call_purpose,
-                        context_call_identity.clone(),
-                        provider.name(),
-                        &api_model,
-                        context_prefix,
-                    )
             } else {
                 context_prefix.initial_observation()
             };
@@ -394,7 +371,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 context_plan.into_request(),
                 StreamCallCtx {
                     call_purpose: context_call_purpose,
-                    session: ctx.session_runtime.as_deref(),
+                    session: ctx.session_runtime().map(std::convert::AsRef::as_ref),
                     flow_cancel: ctx.flow_cancel.clone(),
                     stream_tx: stream_tx.clone(),
                     flow_run_id: ctx.flow_run_id.as_ref(),
@@ -414,7 +391,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     let entry = ctx.agent_entry.as_ref().expect("stream correction owner");
                     // The current managed call already holds this owner's compaction lock.
                     let write_guard = if compact_guard.is_none() {
-                        Some(entry.compact_lock.lock().await)
+                        Some(entry.context.compaction.lock.lock().await)
                     } else {
                         None
                     };
@@ -422,16 +399,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         crate::message::Message::assistant_text(turn_id.clone(), partial_output)
                     });
                     if partial.is_some()
-                        && ctx.session_runtime.is_none()
-                        && ctx.session_messages_handle.is_none()
+                        && ctx.session_runtime().is_none()
+                        && ctx.context().is_none()
                     {
                         return Value::Err(RuntimeError::ToolFailed(
                             "correction requires its run message context".into(),
                         ));
                     }
-                    let consumed = claim.commit(Some(&entry.messages), || {
+                    let consumed = claim.commit(Some(&entry.context.messages), || {
                         if let Some(message) = partial.as_ref() {
-                            if let Some(session) = ctx.session_runtime.as_ref() {
+                            if let Some(session) = ctx.session_runtime() {
                                 session.append_message(message.clone(), ctx.flow_run_id.clone());
                             } else {
                                 crate::tools::session::append_message_to_context(
@@ -455,8 +432,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     match llm_context::build_llm_context(
                         &args,
                         context_mode,
-                        ctx.session_runtime.as_ref(),
-                        ctx.session_messages_handle.as_ref(),
+                        ctx.context(),
                         &turn_id,
                         ctx.events.as_ref(),
                         ctx.flow_run_id.as_ref(),
@@ -559,7 +535,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     node_id: ctx.current_node_id.clone(),
                 });
             }
-            if let Some(session) = ctx.session_runtime.as_ref()
+            if let Some(session) = ctx.session_runtime()
                 && !matches!(context_mode, ContextMode::None)
             {
                 session.record_context_plan_call(
@@ -571,6 +547,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     &usage,
                     ttft_ms,
                     tps,
+                );
+            } else if let Some(context) = ctx.context()
+                && !matches!(context_mode, ContextMode::None)
+            {
+                context.record_call(
+                    provider.name(),
+                    &model,
+                    context_call_purpose,
+                    context_call_identity,
+                    crate::context_plan::ContextUsageRecord {
+                        plan_id: context_plan_id,
+                        usage: usage.clone(),
+                    },
                 );
             }
             let outcome = match (outcome, response_error) {
@@ -593,7 +582,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             "LLM call recovered after retry".into(),
                         );
                     }
-                    if let Some(session) = ctx.session_runtime.as_ref()
+                    if let Some(session) = ctx.session_runtime()
                         && !matches!(context_mode, ContextMode::None)
                     {
                         if !has_messages_override {
@@ -648,7 +637,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             crate::notify::NotifyLevel::Info,
                             "context overflow — compacting and retrying".into(),
                         );
-                        if let Some(session) = ctx.session_runtime.as_ref() {
+                        if let Some(session) = ctx.session_runtime() {
                             session.request_manual_compact();
                             drop(compact_guard.take());
                             crate::compaction::maybe_auto_compact_with_budget(
@@ -662,8 +651,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             match llm_context::build_llm_context(
                                 &args,
                                 context_mode,
-                                Some(session),
-                                ctx.session_messages_handle.as_ref(),
+                                ctx.context(),
                                 &turn_id,
                                 ctx.events.as_ref(),
                                 ctx.flow_run_id.as_ref(),
@@ -674,7 +662,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             last_err = Some(e);
                             continue 'llm_attempts;
                         }
-                        if let Some(messages) = ctx.session_messages_handle.as_ref()
+                        if let Some(messages) =
+                            ctx.context().map(|context| context.messages_handle())
                             && let Some(result) =
                                 crate::compaction::maybe_auto_compact_handle_locked(
                                     messages,
@@ -689,8 +678,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             match llm_context::build_llm_context(
                                 &args,
                                 context_mode,
-                                None,
-                                Some(messages),
+                                ctx.context(),
                                 &turn_id,
                                 ctx.events.as_ref(),
                                 ctx.flow_run_id.as_ref(),
@@ -828,7 +816,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         );
         return fb;
     }
-    if let Some(session) = ctx.session_runtime.as_ref()
+    if let Some(session) = ctx.session_runtime()
         && !saw_context_overflow
     {
         crate::compaction::start_auto_compact_with_budget(
@@ -849,7 +837,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
 }
 
 fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAutoCompactResult) {
-    ctx.advance_context_epoch();
+    if let Some(context) = ctx.context() {
+        context.update_epoch(&result.checkpoint_messages);
+    }
     let Some(flow_run_id) = ctx.message_flow_run_id() else {
         return;
     };
@@ -892,8 +882,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
 
 fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message: String) {
     let tx = ctx
-        .session_runtime
-        .as_ref()
+        .session_runtime()
         .map(|session| session.stream_tx())
         .or_else(|| ctx.stream_tx.clone());
     let Some(tx) = tx else {
@@ -921,8 +910,7 @@ fn send_llm_diagnostic(ctx: &ToolCtx, level: crate::notify::NotifyLevel, message
 }
 
 fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
-    ctx.session_runtime
-        .as_ref()
+    ctx.session_runtime()
         .and_then(|session| session.meta())
         .and_then(|meta| meta.start_path.or(meta.project_root))
         .or_else(|| ctx.resolve_cwd(None).ok())
@@ -932,7 +920,7 @@ async fn sync_runtime_context_records(
     ctx: &ToolCtx,
     turn_id: &crate::event::TurnId,
 ) -> Result<(), RuntimeError> {
-    if let Some(session) = ctx.session_runtime.as_ref() {
+    if let Some(session) = ctx.session_runtime() {
         session
             .append_context_records(turn_id.clone(), session_context_record_specs(session).await);
         return Ok(());
@@ -950,7 +938,7 @@ async fn sync_runtime_context_records(
             crate::context_plan::ContextRecordBody::text,
         ),
     );
-    let _compact_guard = match ctx.compact_lock_handle.as_ref() {
+    let _compact_guard = match ctx.context().map(|context| context.compact_lock()) {
         Some(lock) => Some(lock.lock().await),
         None => None,
     };
@@ -1049,11 +1037,13 @@ mod tests {
             1,
             2,
         )];
-        let mut ctx = ToolCtx::new()
+        let ctx = ToolCtx::new()
             .with_history_segment(crate::tool::HistorySegment::Spawned)
             .with_anchors(None, Some(expected_run_id.clone()), None)
-            .with_events(sink.clone());
-        ctx.context_epoch_handle = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
+            .with_events(sink.clone())
+            .with_context(std::sync::Arc::new(
+                crate::context_state::ContextState::new(Vec::new()),
+            ));
         let result = crate::compaction::HandleAutoCompactResult {
             before_tokens: 100,
             after_tokens: 10,
@@ -1080,18 +1070,22 @@ mod tests {
             &events[2],
             crate::event::Event::Checkpoint { messages, .. } if messages == &checkpoint
         ));
-        assert_eq!(ctx.context_epoch_seed().as_deref(), Some("generation:1"));
+        assert_eq!(
+            ctx.context().unwrap().epoch(),
+            Some(crate::context_state::checkpoint_epoch_digest(&checkpoint))
+        );
     }
 
     #[tokio::test]
     async fn spawned_workspace_context_is_append_only_per_local_history() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(Vec::new()));
+        let messages = owner.messages_handle();
         let context = |path: &std::path::Path| {
             ToolCtx::new()
                 .with_history_segment(crate::tool::HistorySegment::Spawned)
-                .with_session_messages_handle(std::sync::Arc::clone(&messages))
+                .with_context(std::sync::Arc::clone(&owner))
                 .with_workspace(crate::git_workspace::WorkspaceBinding {
                     workspace_id: path.display().to_string(),
                     path: path.to_path_buf(),

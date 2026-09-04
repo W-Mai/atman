@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Runtime context ownership** — `ToolCtx::with_context` and `with_session_runtime` bind a complete context owner instead of independent message and lock handles. `Session::context` and `FlowEntry::context` expose the shared state; `ToolCtx::session_runtime()` returns a session only for a session-bound owner.
 - **Context replay windows** — `ContextReplay::window()` exposes the active window as a borrowed slice while retaining the complete reducer state for live continuation.
 - **Context creation events** — `Event::ContextCreated` records an optional typed `ContextBase`, distinguishing empty history, legacy root history, and a bounded source context.
 - **Event context identity** — `EventEnvelope` includes an optional typed `ContextId`. `EventSink::with_context` labels emitted envelopes while sharing sequence assignment and delivery with sibling sinks. Unscoped JSONL records retain their existing representation.
@@ -35,6 +36,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Context state isolation** — message views, compaction locks, checkpoint epochs, recent usage, and cache-prefix observations share one owner across ordinary and watched calls. Inline execution retains that owner; spawned flows bind independent state and record their own usage.
 - **Retained-turn context records** — output rewriting preserves current dynamic records and tombstones when a retained turn exceeds its budget. Summary, omission, and minimum-window policies share the same record-preserving replacement path.
 - **Compaction event boundaries** — root and child compaction records publish under one shared-log lock. Snapshot readers cannot capture a partial batch, and root completion frames are sent after the replacement checkpoint is published.
 - **Compaction context retention** — direct session compaction commits the complete replacement window, including retained context records and tombstones, to live handles and checkpoints. Window metrics refresh after that checkpoint is visible.

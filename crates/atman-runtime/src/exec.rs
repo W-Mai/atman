@@ -470,11 +470,9 @@ async fn eval_bind_with_watches(
     if let Some(session) = ctx.session_runtime.as_ref() {
         tool_ctx = tool_ctx
             .with_session_messages(session.messages_full())
-            .with_session_messages_handle(session.messages_handle())
             .with_session_runtime(session.clone())
             .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
-            .with_flow_registry(std::sync::Arc::clone(&session.flow_registry))
-            .with_compact_lock_handle(session.compact_lock_handle());
+            .with_flow_registry(std::sync::Arc::clone(&session.flow_registry));
     }
     if let Some(safety) = ctx.safety.cloned() {
         tool_ctx = tool_ctx.with_safety(safety);

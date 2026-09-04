@@ -94,6 +94,8 @@ child requests.
 
 ## Message selection
 
+`ContextState` owns the message view, mutable message handle, compaction lock, checkpoint epoch, recent usage, and prefix observations. `ToolCtx` selects either a session-bound owner or an independent context; binding one replaces the other. Ordinary execution, watched calls, correction rebuilds, and inline calls retain that selection. Spawned flows share their complete state with their flow entry instead of separately constructing message, lock, and cache handles. Session views still use the event-backed window, and raw history remains separate from compaction. Root and child checkpoint epochs use the checkpoint contents rather than a process-local child counter.
+
 `projection::context::replay_context` accepts an explicit `ContextBase` and reconstructs one bounded ancestry from event envelopes. `ContextCreated` without a base starts empty; a `legacy_root` base selects unscoped root history, while a `context` base requires an existing context identity and an earlier cutoff. Descendants inherit the source's active window at that cutoff, not later parent output. Scoped checkpoints and compaction affect only the selected ancestry; raw messages remain available independently. Creation records contain references, not repeated copies of complete history. This replay API does not change the session's default execution or enable concurrent root admission.
 
 `MessageStream::from_context` creates a live view from that validated ancestry while holding the shared log lock across initialization. It records the consumed log position and subsequently processes only newly appended events owned by its context. Other branches do not rebuild its cached window or raw history. The existing default constructors retain their legacy behavior.
@@ -270,6 +272,7 @@ This is retrieval before the main loop plus full active-session context inside t
 
 ## Implementation references
 
+- `crates/atman-runtime/src/context_state.rs` — message views, compaction locks, checkpoint epochs, usage, and prefix observations
 - `crates/atman-runtime/src/eval/llm_context.rs` — message-source selection
 - `crates/atman-runtime/src/eval/llm_dispatch.rs` — final request assembly and compaction entry
 - `crates/atman-runtime/src/eval/mod.rs` — runtime system context

@@ -107,13 +107,7 @@ pub struct ToolCtx {
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
-    pub session_messages_handle:
-        Option<std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>>,
-    pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
-    pub compact_lock_handle: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
-    pub(crate) context_epoch_handle: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
-    pub(crate) context_prefix_tracker:
-        Option<std::sync::Arc<std::sync::Mutex<crate::context_plan::ContextPrefixTracker>>>,
+    pub(crate) context_owner: Option<ContextOwner>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     pub read_files:
@@ -152,6 +146,12 @@ pub struct ToolCtx {
     pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
     pub agent_entry: Option<std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
     pub tool_output_budget: crate::tools::tool_output::ToolOutputBudget,
+}
+
+#[derive(Clone)]
+pub(crate) enum ContextOwner {
+    Session(std::sync::Arc<crate::session::Session>),
+    Detached(std::sync::Arc<crate::context_state::ContextState>),
 }
 
 #[derive(Clone, Default)]
@@ -303,11 +303,11 @@ impl ToolCtx {
         self
     }
 
-    pub fn with_session_messages_handle(
+    pub fn with_context(
         mut self,
-        handle: std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
+        context: std::sync::Arc<crate::context_state::ContextState>,
     ) -> Self {
-        self.session_messages_handle = Some(handle);
+        self.context_owner = Some(ContextOwner::Detached(context));
         self
     }
 
@@ -315,31 +315,26 @@ impl ToolCtx {
         mut self,
         session: std::sync::Arc<crate::session::Session>,
     ) -> Self {
-        self.session_runtime = Some(session);
+        self.context_owner = Some(ContextOwner::Session(session));
         self
     }
 
-    pub fn with_compact_lock_handle(
-        mut self,
-        handle: std::sync::Arc<tokio::sync::Mutex<()>>,
-    ) -> Self {
-        self.compact_lock_handle = Some(handle);
-        self
+    pub(crate) fn clear_context(&mut self) {
+        self.context_owner = None;
     }
 
-    pub(crate) fn context_epoch_seed(&self) -> Option<String> {
-        self.context_epoch_handle.as_ref().map(|epoch| {
-            format!(
-                "generation:{}",
-                epoch.load(std::sync::atomic::Ordering::Relaxed)
-            )
-        })
-    }
-
-    pub(crate) fn advance_context_epoch(&self) {
-        if let Some(epoch) = self.context_epoch_handle.as_ref() {
-            epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pub fn session_runtime(&self) -> Option<&std::sync::Arc<crate::session::Session>> {
+        match self.context_owner.as_ref()? {
+            ContextOwner::Session(session) => Some(session),
+            ContextOwner::Detached(_) => None,
         }
+    }
+
+    pub fn context(&self) -> Option<&std::sync::Arc<crate::context_state::ContextState>> {
+        Some(match self.context_owner.as_ref()? {
+            ContextOwner::Session(session) => session.context(),
+            ContextOwner::Detached(context) => context,
+        })
     }
 
     pub fn with_current_node(mut self, node_id: Option<String>) -> Self {
@@ -563,7 +558,7 @@ impl ToolCtx {
     /// this snapshot to mint an invocation authorization carrying the selected
     /// execution boundary.
     pub fn for_tool_invocation(mut self, _tier: Tier) -> Self {
-        if let Some(session) = self.session_runtime.as_ref() {
+        if let Some(session) = self.session_runtime() {
             self.trust = Some(session.trust_config());
         }
         self
