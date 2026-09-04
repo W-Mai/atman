@@ -18,6 +18,98 @@ async fn wait_for_runtime_event(state: &DaemonState, session_id: &SessionId, seq
 }
 
 #[tokio::test]
+async fn interjections_and_cleanup_follow_registered_turns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let sid = SessionId(session.id().0);
+    let mut anchors = Vec::new();
+    for label in ["first", "second"] {
+        let cancel = CancellationToken::new();
+        let turn_id = session.begin_turn_with_cancel(
+            atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), label),
+            cancel.clone(),
+        );
+        let run_id = FlowRunId(Uuid::now_v7());
+        state
+            .register_session_run(
+                sid.clone(),
+                session.clone(),
+                LiveRun {
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                    flow_name: label.into(),
+                    cancel,
+                    started_at: chrono::Utc::now(),
+                },
+                "local-daemon",
+            )
+            .await
+            .unwrap();
+        anchors.push((run_id, turn_id));
+    }
+    for (run_id, turn_id) in &anchors {
+        let response = dispatch(
+            state.clone(),
+            JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(
+                1,
+                &atman_proto::InterjectSessionRequest {
+                    request_id: Some(atman_proto::RequestId::now()),
+                    session_id: sid.clone(),
+                    run_id: run_id.clone(),
+                    text: "nudge".into(),
+                    level: atman_proto::InterjectionLevel::Nudge,
+                    redirect_target: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::InterjectSession>()
+        .unwrap();
+        let pending = session.list_pending_injections();
+        let injection = pending
+            .iter()
+            .find(|injection| injection.id.0 == response.injection_id)
+            .unwrap();
+        assert_eq!(&injection.turn_id, turn_id);
+        assert_eq!(
+            injection.flow_run_id.as_ref().map(|id| id.0),
+            Some(run_id.0)
+        );
+    }
+    session.end_turn(&anchors[0].1);
+    let stale = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(
+            2,
+            &atman_proto::InterjectSessionRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: sid.clone(),
+                run_id: anchors[0].0.clone(),
+                text: "stale".into(),
+                level: atman_proto::InterjectionLevel::Nudge,
+                redirect_target: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    assert!(stale.error.is_some());
+    assert!(state.finish_run(&sid, &anchors[0].0));
+    state.session_snapshot(&sid, "local-daemon").await.unwrap();
+    assert_eq!(session.current_turn(), Some(anchors[1].1.clone()));
+    let pending = session.list_pending_injections();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].turn_id, anchors[1].1);
+    assert!(state.finish_run(&sid, &anchors[1].0));
+    wait_until_finished(&state, &sid).await;
+    assert!(session.current_turn().is_none());
+    assert!(session.list_pending_injections().is_empty());
+    state.shutdown(std::time::Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn cancel_run_hits_matching_live_session() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
@@ -31,6 +123,7 @@ async fn cancel_run_hits_matching_live_session() {
             sid.clone(),
             session,
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: run_id.clone(),
                 flow_name: "hello".into(),
                 cancel: cancel.clone(),
@@ -92,6 +185,7 @@ async fn finished_run_keeps_the_owned_session_attachable() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: run_id.clone(),
                 flow_name: "hello".into(),
                 cancel: CancellationToken::new(),
@@ -127,6 +221,7 @@ async fn finishing_one_run_preserves_other_runs_in_the_same_session() {
                 sid.clone(),
                 session.clone(),
                 LiveRun {
+                    turn_id: atman_runtime::event::TurnId::now(),
                     run_id,
                     flow_name: "hello".into(),
                     cancel: CancellationToken::new(),
@@ -176,6 +271,7 @@ async fn session_actor_projects_durable_events_and_watch_state() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: run_id.clone(),
                 flow_name: "hello".into(),
                 cancel: CancellationToken::new(),
@@ -358,6 +454,7 @@ async fn live_snapshot_is_actor_consistent_and_redacted() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: run_id.clone(),
                 flow_name: "hello".into(),
                 cancel: CancellationToken::new(),
@@ -431,6 +528,7 @@ async fn session_updates_page_in_order_and_report_retention_gaps() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: FlowRunId(Uuid::now_v7()),
                 flow_name: "hello".into(),
                 cancel: CancellationToken::new(),
@@ -499,6 +597,7 @@ async fn runtime_stream_frames_publish_ordered_ephemeral_signals() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: run_id.clone(),
                 flow_name: "agent".into(),
                 cancel: CancellationToken::new(),
@@ -659,6 +758,7 @@ async fn process_signal_follows_its_durable_resource_projection() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: run_id.clone(),
                 flow_name: "agent".into(),
                 cancel: CancellationToken::new(),
@@ -752,6 +852,7 @@ async fn compaction_progress_is_session_scoped_and_ephemeral() {
             sid.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id,
                 flow_name: "agent".into(),
                 cancel: CancellationToken::new(),
@@ -877,6 +978,7 @@ async fn list_sessions_includes_live_only_entry_as_running() {
             sid.clone(),
             session,
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: FlowRunId(Uuid::now_v7()),
                 flow_name: "hello".into(),
                 cancel: CancellationToken::new(),

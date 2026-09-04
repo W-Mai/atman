@@ -63,6 +63,7 @@ async fn sse_accepts_a_short_lived_session_ticket() {
             atman_proto::SessionId(sid),
             session,
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: atman_proto::FlowRunId(Uuid::now_v7()),
                 flow_name: "sse-ticket-test".into(),
                 cancel: CancellationToken::new(),

@@ -30,6 +30,7 @@ async fn register_session(
             session_id.clone(),
             session.clone(),
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: atman_proto::FlowRunId(Uuid::now_v7()),
                 flow_name: "permission-test".into(),
                 cancel: CancellationToken::new(),
@@ -322,6 +323,7 @@ async fn permission_rpcs_fail_closed_for_wrong_principal_and_cross_session() {
             orphan_id.clone(),
             orphan,
             LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: orphan_run.clone(),
                 flow_name: "finished".into(),
                 cancel: CancellationToken::new(),

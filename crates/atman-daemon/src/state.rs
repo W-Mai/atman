@@ -53,6 +53,7 @@ pub(crate) struct LoadedSession {
 #[derive(Clone)]
 pub struct LiveRun {
     pub run_id: FlowRunId,
+    pub turn_id: atman_runtime::event::TurnId,
     pub flow_name: String,
     pub cancel: CancellationToken,
     pub started_at: chrono::DateTime<chrono::Utc>,
@@ -1678,6 +1679,7 @@ mod tests {
                 active,
                 LiveRun {
                     run_id: FlowRunId(uuid::Uuid::now_v7()),
+                    turn_id: atman_runtime::event::TurnId::now(),
                     flow_name: "stuck".into(),
                     cancel: cancel.clone(),
                     started_at: chrono::Utc::now(),

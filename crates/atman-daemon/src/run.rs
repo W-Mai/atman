@@ -600,6 +600,7 @@ impl RunLauncher {
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
+        let turn_id = atman_runtime::event::TurnId::now();
         let flow_name = prepared_flow
             .as_ref()
             .map(|prepared| prepared.flow_name.clone())
@@ -608,6 +609,7 @@ impl RunLauncher {
         let cancel = tokio_util::sync::CancellationToken::new();
         let live_run = LiveRun {
             run_id: run_id_proto.clone(),
+            turn_id: turn_id.clone(),
             flow_name,
             cancel: cancel.clone(),
             started_at: chrono::Utc::now(),
@@ -663,6 +665,7 @@ impl RunLauncher {
                         &path,
                         args,
                         run_id_runtime,
+                        turn_id,
                         project_root,
                         scope_root,
                         config_dir,
@@ -701,6 +704,7 @@ async fn run_flow_inner(
     path: &std::path::Path,
     args: Vec<(String, atman_runtime::Value)>,
     run_id: RuntimeRunId,
+    turn_id: atman_runtime::event::TurnId,
     project_root: PathBuf,
     scope_root: PathBuf,
     config_dir: Option<PathBuf>,
@@ -804,7 +808,6 @@ async fn run_flow_inner(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
         .await;
 
-    let turn_id = atman_runtime::event::TurnId::now();
     let (user_text, origin) = turn.map_or_else(
         || {
             let text = if args.is_empty() {
@@ -953,12 +956,17 @@ mod tests {
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let session_id = ProtoSessionId(session.id().0);
         let run_id = ProtoRunId(uuid::Uuid::now_v7());
+        let turn_id = session.begin_turn(atman_runtime::message::Message::user_text(
+            atman_runtime::event::TurnId::now(),
+            "panic test",
+        ));
         state
             .register_session_run(
                 session_id.clone(),
                 session.clone(),
                 LiveRun {
                     run_id: run_id.clone(),
+                    turn_id,
                     flow_name: "panic-test".into(),
                     cancel: tokio_util::sync::CancellationToken::new(),
                     started_at: chrono::Utc::now(),
@@ -989,6 +997,7 @@ mod tests {
         assert!(state.can_read_session(&session_id, "test-principal"));
         assert!(state.is_authorized_session(&session_id, "test-principal"));
         assert!(!state.owns_live_session(&session_id, "test-principal"));
+        assert!(session.current_turn().is_none());
     }
 
     #[test]

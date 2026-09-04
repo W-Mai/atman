@@ -2496,13 +2496,21 @@ impl Session {
         text: impl Into<String>,
         level: crate::injection::InjectionLevel,
         redirect_target: Option<String>,
-        flow_run_id: Option<crate::event::FlowRunId>,
+        target: Option<(&TurnId, FlowRunId)>,
     ) -> Result<(InjectionId, crate::event::EventEnvelope), EnqueueError> {
         let turns = self.turns.lock().unwrap();
-        let turn_id = match turns.len() {
-            0 => return Err(EnqueueError::NoActiveTurn),
-            1 => turns.keys().next().expect("one active turn").clone(),
-            _ => return Err(EnqueueError::AmbiguousTurn),
+        let (turn_id, flow_run_id) = match target {
+            Some((turn_id, run_id)) => {
+                if !turns.contains_key(turn_id) {
+                    return Err(EnqueueError::InactiveTurn(turn_id.clone()));
+                }
+                (turn_id.clone(), Some(run_id))
+            }
+            None => match turns.len() {
+                0 => return Err(EnqueueError::NoActiveTurn),
+                1 => (turns.keys().next().expect("one active turn").clone(), None),
+                _ => return Err(EnqueueError::AmbiguousTurn),
+            },
         };
         let inj = Injection::with_level_for_run(
             turn_id.clone(),
@@ -2629,6 +2637,8 @@ pub enum EnqueueError {
     NoActiveTurn,
     #[error("enqueue_injection requires an explicit turn when multiple turns are active")]
     AmbiguousTurn,
+    #[error("turn {0} is not active")]
+    InactiveTurn(TurnId),
 }
 
 pub struct AppendMessageCommand {

@@ -36,6 +36,7 @@ async fn spawn_server(
             session_id,
             session,
             atman_daemon::LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: atman_proto::FlowRunId(uuid::Uuid::now_v7()),
                 flow_name: "logs-stream-test".into(),
                 cancel: tokio_util::sync::CancellationToken::new(),

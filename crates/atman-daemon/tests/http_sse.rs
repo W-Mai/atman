@@ -21,6 +21,7 @@ async fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<H
                 id,
                 session,
                 atman_daemon::LiveRun {
+                    turn_id: atman_runtime::event::TurnId::now(),
                     run_id: atman_proto::FlowRunId(Uuid::now_v7()),
                     flow_name: "sse-test".into(),
                     cancel: tokio_util::sync::CancellationToken::new(),
@@ -253,6 +254,7 @@ async fn session_sse_streams_projection_updates_after_snapshot_cursor() {
             sid.clone(),
             session.clone(),
             atman_daemon::LiveRun {
+                turn_id: atman_runtime::event::TurnId::now(),
                 run_id: atman_proto::FlowRunId(Uuid::now_v7()),
                 flow_name: "projection-sse-test".into(),
                 cancel: tokio_util::sync::CancellationToken::new(),

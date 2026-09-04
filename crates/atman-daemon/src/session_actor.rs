@@ -885,7 +885,8 @@ impl SessionActor {
                 let _ = reply.send(result);
             }
             Command::FinishRun { run_id } => {
-                if self.runs.remove(&run_id).is_some() {
+                if let Some(run) = self.runs.remove(&run_id) {
+                    self.session.end_turn(&run.turn_id);
                     self.publish();
                 }
             }
@@ -1221,7 +1222,7 @@ impl SessionActor {
                 text,
                 level,
                 redirect_target,
-                Some(atman_runtime::event::FlowRunId(run_id.0)),
+                Some((&run.turn_id, atman_runtime::event::FlowRunId(run_id.0))),
             )
             .map_err(anyhow::Error::from)?;
         self.catch_up_through(event.seq)?;
