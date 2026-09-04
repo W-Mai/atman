@@ -2370,13 +2370,14 @@ mod tests {
         .unwrap();
         assert_eq!(stored.access_token, "access-v2");
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-v2"));
-        let _next_opener = RefreshFileLock(
-            open_refresh_file_lock_with_timeout(
-                &refresh_lock,
-                std::time::Duration::from_millis(50),
-            )
-            .unwrap(),
-        );
+        // The detached commit needs the async executor to release its lock.
+        let _next_opener = tokio::task::spawn_blocking(move || {
+            open_refresh_file_lock_with_timeout(&refresh_lock, std::time::Duration::from_millis(50))
+                .map(RefreshFileLock)
+        })
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(
             *refresh_inputs
                 .lock()
