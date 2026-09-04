@@ -923,11 +923,12 @@ impl Session {
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
-            sink,
+            sink: sink.clone(),
             context: std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::new(events_handle),
                 Vec::new(),
                 CompactionState::new(),
+                sink,
             )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
@@ -1160,7 +1161,7 @@ impl Session {
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
-            sink,
+            sink: sink.clone(),
             context: std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::with_initial(
                     events_handle,
@@ -1179,6 +1180,7 @@ impl Session {
                     }
                     c
                 },
+                sink,
             )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
@@ -1228,11 +1230,12 @@ impl Session {
             id: SessionId::now(),
             dir: PathBuf::new(),
             writer: std::sync::Mutex::new(None),
-            sink,
+            sink: sink.clone(),
             context: std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::new(events_handle),
                 Vec::new(),
                 CompactionState::new(),
+                sink,
             )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
@@ -2365,7 +2368,7 @@ impl Session {
             .injection_queue
             .claim_steering(|inj| inj.turn_id == *turn_id)
         {
-            if let Some(injection) = claim.commit(Some(&self.context.messages), || {}) {
+            if let Some(injection) = claim.commit(Some(&self.context), || {}) {
                 out.push(injection);
             }
         }
@@ -3342,13 +3345,7 @@ mod tests {
                         assert!(
                             session
                                 .context
-                                .degrade_attachment(
-                                    id,
-                                    "invalid_image",
-                                    session.sink(),
-                                    Some(turn.clone()),
-                                    None
-                                )
+                                .degrade_attachment(id, "invalid_image", Some(turn.clone()), None)
                                 .is_some()
                         );
                     }

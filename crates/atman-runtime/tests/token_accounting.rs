@@ -112,7 +112,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         ContextCallPurpose::General,
         ContextCallPurpose::Classification,
     ] {
-        let other = atman_runtime::context_state::ContextState::new(Vec::new());
+        let other = atman_runtime::context_state::ContextState::new(Vec::new(), None);
         let plan = ContextPlanId::now();
         let key = ContextUsageKey {
             provider: "other-provider".into(),

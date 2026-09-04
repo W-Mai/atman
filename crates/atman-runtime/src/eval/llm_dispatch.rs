@@ -418,7 +418,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             "correction requires its run message context".into(),
                         ));
                     }
-                    let consumed = claim.commit(Some(&entry.context.messages), || {
+                    let consumed = claim.commit(Some(&entry.context), || {
                         if let Some(message) = partial.as_ref() {
                             crate::tools::session::append_message_to_context(ctx, message.clone())
                                 .expect("validated run context");
@@ -625,7 +625,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 }
                 Err(e) => {
                     if uses_managed_context
-                        && let (Some(context), Some(sink)) = (ctx.context(), ctx.context_sink())
+                        && let Some(context) = ctx.context()
                         && let RuntimeError::AttachmentError { reason, part_id } = &e
                     {
                         let target = match part_id {
@@ -646,7 +646,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             && let Some(patch) = context.degrade_attachment(
                                 part_id,
                                 reason,
-                                sink,
                                 ctx.turn_id.clone(),
                                 ctx.flow_run_id.clone(),
                             )
@@ -1095,7 +1094,7 @@ mod tests {
             .with_anchors(None, Some(expected_run_id.clone()), None)
             .with_events(sink.clone())
             .with_context(std::sync::Arc::new(
-                crate::context_state::ContextState::new(Vec::new()),
+                crate::context_state::ContextState::new(Vec::new(), Some(sink.clone())),
             ));
         let result = crate::compaction::ContextCompactResult {
             before_tokens: 100,
@@ -1135,7 +1134,7 @@ mod tests {
     async fn spawned_workspace_context_is_append_only_per_local_history() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(Vec::new()));
+        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(Vec::new(), None));
         let messages = owner.messages_handle();
         let context = |path: &std::path::Path| {
             ToolCtx::new()

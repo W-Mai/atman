@@ -107,7 +107,7 @@ impl InjectionQueue {
 
     pub(crate) fn enqueue(&self, injection: Injection) -> Option<crate::event::EventEnvelope> {
         let mut state = self.state.lock().unwrap();
-        let envelope = self.publish(&injection, None);
+        let envelope = self.publish(&injection, None, self.events.as_ref());
         state.pending.push(injection);
         self.changed.send_replace(());
         envelope
@@ -117,8 +117,9 @@ impl InjectionQueue {
         &self,
         injection: &Injection,
         context_message: Option<crate::message::Message>,
+        events: Option<&crate::event::EventSink>,
     ) -> Option<crate::event::EventEnvelope> {
-        let envelope = self.events.as_ref().map(|events| {
+        let envelope = events.map(|events| {
             events.emit_returning_envelope(crate::event::Event::UserInject {
                 turn_id: injection.turn_id.clone(),
                 injection: injection.clone(),
@@ -146,7 +147,7 @@ impl InjectionQueue {
         for injection in &mut state.pending {
             if injection.turn_id == *turn_id && injection.flow_run_id.is_none() {
                 injection.flow_run_id = Some(run_id.clone());
-                self.publish(injection, None);
+                self.publish(injection, None, self.events.as_ref());
             }
         }
         self.changed.send_replace(());
@@ -166,7 +167,7 @@ impl InjectionQueue {
         for mut injection in cancelled {
             state.claimed.remove(&injection.id);
             injection.state = InjectionState::Cancelled;
-            self.publish(&injection, None);
+            self.publish(&injection, None, self.events.as_ref());
         }
         self.changed.send_replace(());
     }
@@ -229,7 +230,7 @@ impl std::fmt::Debug for InjectionClaim {
 impl InjectionClaim {
     pub(crate) fn commit(
         self,
-        context: Option<&Mutex<Vec<crate::message::Message>>>,
+        context: Option<&crate::context_state::ContextState>,
         before: impl FnOnce(),
     ) -> Option<Injection> {
         let mut state = self.queue.state.lock().unwrap();
@@ -241,9 +242,13 @@ impl InjectionClaim {
         let mut injection = state.pending.remove(index);
         state.claimed.remove(&injection.id);
         injection.state = InjectionState::Injected;
-        let mut messages = context.map(|messages| messages.lock().unwrap());
+        let mut messages = context.map(|context| context.messages_handle().lock().unwrap());
         let message = context.map(|_| injection.context_message());
-        self.queue.publish(&injection, message.clone());
+        let events = match context {
+            Some(context) => context.sink(),
+            None => self.queue.events.as_ref(),
+        };
+        self.queue.publish(&injection, message.clone(), events);
         if let (Some(messages), Some(message)) = (&mut messages, message) {
             messages.push(message);
         }
@@ -395,13 +400,13 @@ mod tests {
         drop(claim);
         let claim = queue.claim_interruption(|_| true).unwrap();
         assert_eq!(claim.injection.id, first.id);
-        let messages = Mutex::new(Vec::new());
-        claim.commit(Some(&messages), || {}).unwrap();
-        assert_eq!(messages.lock().unwrap().len(), 1);
+        let context = crate::context_state::ContextState::new(Vec::new(), Some(sink.clone()));
+        claim.commit(Some(&context), || {}).unwrap();
+        assert_eq!(context.messages().len(), 1);
         queue.cancel(|_| true);
         assert!(
             other
-                .commit(Some(&messages), || panic!(
+                .commit(Some(&context), || panic!(
                     "cancelled claim must not publish partial output"
                 ))
                 .is_none()
@@ -514,5 +519,74 @@ mod tests {
         let s = serde_json::to_string(&inj).unwrap();
         let back: Injection = serde_json::from_str(&s).unwrap();
         assert_eq!(inj, back);
+    }
+    #[test]
+    fn steering_publication_uses_the_context_sink_and_preserves_queue_updates() {
+        use crate::event::{ContextBase, ContextId, ContextInheritance, Event, EventSink};
+        let sink = EventSink::new();
+        let queue = InjectionQueue::new(Some(sink.clone()));
+        let mut updates = queue.subscribe();
+        let mut owners = Vec::new();
+        for text in ["left", "right"] {
+            let id = ContextId::now();
+            let scoped = sink.clone().with_context(id.clone());
+            scoped.emit(Event::ContextCreated {
+                base: None,
+                inheritance: ContextInheritance::Full,
+            });
+            let context = crate::context_state::ContextState::new(Vec::new(), Some(scoped));
+            let stream = crate::message_stream::MessageStream::from_context(
+                sink.events_handle(),
+                id.clone(),
+            )
+            .unwrap();
+            let injection = Injection::new_pending(TurnId::now(), text);
+            queue.enqueue(injection.clone());
+            assert_eq!(updates.try_recv().unwrap(), injection);
+            let claim = queue
+                .claim_steering(|pending| pending.id == injection.id)
+                .unwrap();
+            let committed = claim.commit(Some(&context), || {}).unwrap();
+            assert_eq!(committed.state, InjectionState::Injected);
+            assert_eq!(updates.try_recv().unwrap(), committed);
+            owners.push((id, context, stream));
+        }
+        assert!(queue.pending().is_empty());
+        let events = sink.snapshot_envelopes();
+        for (id, context, stream) in owners {
+            let live = context.messages();
+            assert_eq!(live.len(), 1);
+            assert_eq!(stream.window().to_vec(), live.to_vec());
+            assert_eq!(stream.full_messages().as_slice(), &*live);
+            let replay = crate::projection::context::replay_context(
+                &events,
+                &ContextBase::Context {
+                    context_id: id.clone(),
+                    through_seq: sink.published_seq(),
+                },
+            )
+            .unwrap();
+            assert_eq!(replay.window().len(), 1);
+            assert_eq!(replay.window()[0].1, live[0]);
+            assert_eq!(replay.raw[0].1, live[0]);
+            assert!(events.iter().any(|envelope| {
+                envelope.context_id.as_ref() == Some(&id)
+                    && matches!(&envelope.event,
+                        Event::UserInject { context_message: Some(message), .. }
+                            if message == &live[0])
+            }));
+        }
+        assert!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    Event::UserInject {
+                        context_message: None,
+                        ..
+                    }
+                ))
+                .all(|event| event.context_id.is_none())
+        );
     }
 }

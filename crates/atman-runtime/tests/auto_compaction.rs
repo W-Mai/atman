@@ -163,7 +163,7 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
             })
             .collect::<Vec<_>>(),
     );
-    let context = atman_runtime::context_state::ContextState::new(history.clone());
+    let context = atman_runtime::context_state::ContextState::new(history.clone(), None);
     let messages = context.messages_handle().clone();
     let providers = ProviderRegistry::new();
     let provider = Arc::new(SummaryProvider {

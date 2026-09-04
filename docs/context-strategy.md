@@ -12,6 +12,8 @@ Root handles use the invocation's cancellation token, including an explicitly su
 
 Execution binds its message context once through `ToolCtx`; evaluators and individual nodes do not select the session default again. Inline flows retain the caller's context, while spawned flows select their own. `memory.recent_turns` reads the bound context's current raw history directly, including messages added after binding and history retained across checkpoints. Invocation-time trust checks remain independent of this fixed message binding.
 
+The context also binds its canonical event sink at construction. Changing a tool's diagnostic sink does not redirect messages, records, compaction publication, or attachment patches. Steering consumption publishes its captured message through the destination context under the message lock, while pending and control-only transitions continue through the shared queue. Queue subscribers still receive the same state transitions. In-memory contexts explicitly omit a journal sink.
+
 Usage records and measured general-call window sizes belong to the bound context. Session aggregation keeps provider/model/purpose/scope buckets and cumulative input, output, and cache usage; only a general root call belonging to the session's default context updates its model, window, and latency display. Auxiliary calls and results from another context do not replace those default-context statistics.
 
 Every `llm.call` is assembled from four independent inputs:

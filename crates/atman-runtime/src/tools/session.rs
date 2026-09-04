@@ -191,6 +191,7 @@ mod tests {
                     Message::assistant_text(crate::event::TurnId::now(), format!("old-{index}"))
                 })
                 .collect(),
+            None,
         ));
         let messages = owner.messages_handle();
         let ctx = ToolCtx::new()
@@ -220,8 +221,8 @@ mod tests {
     fn owner_writes_preserve_identity_records_and_root_diagrams() {
         use crate::event::{ContextBase, ContextId, ContextInheritance, Event, FlowRunId, TurnId};
         use std::sync::Arc;
-        for owner_kind in ["root", "root-traced", "spawned"] {
-            let spawned = owner_kind == "spawned";
+        for owner_kind in ["root", "root-traced", "spawned", "spawned-traced"] {
+            let spawned = owner_kind.starts_with("spawned");
             let trace = crate::event::EventSink::new();
             let session = Arc::new(crate::Session::open_ephemeral());
             let run = FlowRunId::now();
@@ -235,9 +236,10 @@ mod tests {
                     inheritance: ContextInheritance::Full,
                 });
                 ToolCtx::new()
-                    .with_context(Arc::new(
-                        crate::context_state::ContextState::new(Vec::new()),
-                    ))
+                    .with_context(Arc::new(crate::context_state::ContextState::new(
+                        Vec::new(),
+                        Some(sink.clone()),
+                    )))
                     .with_history_segment(crate::tool::HistorySegment::Spawned)
                     .with_events(sink)
             } else {
@@ -245,7 +247,7 @@ mod tests {
             }
             .with_stream_tx(tx)
             .with_anchors(Some(turn.clone()), Some(run.clone()), None);
-            let ctx = if owner_kind == "root-traced" {
+            let ctx = if owner_kind.ends_with("-traced") {
                 ctx.with_events(trace.clone())
             } else {
                 ctx
@@ -410,7 +412,10 @@ mod tests {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         let run_id = FlowRunId::now();
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
-        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(Vec::new()));
+        let owner = std::sync::Arc::new(crate::context_state::ContextState::new(
+            Vec::new(),
+            Some(session.sink().clone()),
+        ));
         let ctx = ToolCtx::new()
             .with_anchors(Some(TurnId::now()), Some(run_id.clone()), None)
             .with_history_segment(crate::tool::HistorySegment::Spawned)

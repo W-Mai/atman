@@ -140,8 +140,8 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
 
     let _registry = common::SyncModelRegistryGuard::mock("m");
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    for owner_kind in ["root", "root-traced", "spawned", "inline"] {
-        let spawned_context = matches!(owner_kind, "spawned" | "inline");
+    for owner_kind in ["root", "root-traced", "spawned", "spawned-traced", "inline"] {
+        let spawned_context = matches!(owner_kind, "spawned" | "spawned-traced" | "inline");
         for (mode, image_count, location, outcome, changed) in [
             ("session", 2, "first", "error", true),
             ("session", 1, "remote", "error", true),
@@ -221,7 +221,7 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
             providers.register(provider.clone());
             let run = match owner_kind {
                 "root" | "root-traced" => &root_run,
-                "spawned" => &child_run,
+                "spawned" | "spawned-traced" => &child_run,
                 "inline" => &inline_run,
                 _ => unreachable!(),
             };
@@ -233,9 +233,6 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                 .with_events(session.sink().clone())
                 .with_stream_tx(tx)
                 .with_anchors(Some(turn.clone()), Some(run.clone()), None);
-            if owner_kind == "root-traced" {
-                ctx = ctx.with_events(trace.clone());
-            }
             let context_id = spawned_context.then(ContextId::now);
             if let Some(id) = &context_id {
                 let sink = session.sink().clone().with_context(id.clone());
@@ -244,7 +241,7 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                     inheritance: atman_runtime::event::ContextInheritance::Full,
                 });
                 ctx = ctx
-                    .with_context(Arc::new(ContextState::new(Vec::new())))
+                    .with_context(Arc::new(ContextState::new(Vec::new(), Some(sink.clone()))))
                     .with_history_segment(HistorySegment::Spawned)
                     .with_events(sink);
                 runtime
@@ -258,6 +255,9 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                         &ctx,
                     ))
                     .unwrap();
+            }
+            if owner_kind.ends_with("-traced") {
+                ctx = ctx.with_events(trace.clone());
             }
             let mut args = ToolArgs {
                 positional: vec![],
@@ -323,7 +323,7 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                 event.context_message().is_none()
                     && !matches!(event, Event::AttachmentDegraded { .. })
             }));
-            if owner_kind == "root-traced" {
+            if owner_kind.ends_with("-traced") {
                 assert!(
                     trace
                         .snapshot()

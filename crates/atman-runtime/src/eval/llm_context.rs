@@ -154,9 +154,10 @@ mod tests {
     fn root_context_uses_session_window_over_stale_handle() {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         session.append_message(message("canonical"), None);
-        let stale = std::sync::Arc::new(crate::context_state::ContextState::new(vec![message(
-            "stale",
-        )]));
+        let stale = std::sync::Arc::new(crate::context_state::ContextState::new(
+            vec![message("stale")],
+            None,
+        ));
         let ctx = crate::tool::ToolCtx::new()
             .with_context(stale)
             .with_session_runtime(session.clone());
@@ -181,11 +182,14 @@ mod tests {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         session.append_message(message("first"), None);
         session.append_message(message("second"), None);
-        let stale = std::sync::Arc::new(crate::context_state::ContextState::new(vec![
-            message("stale-one"),
-            message("stale-two"),
-            message("stale-three"),
-        ]));
+        let stale = std::sync::Arc::new(crate::context_state::ContextState::new(
+            vec![
+                message("stale-one"),
+                message("stale-two"),
+                message("stale-three"),
+            ],
+            None,
+        ));
         let ctx = crate::tool::ToolCtx::new()
             .with_context(stale)
             .with_session_runtime(session.clone());
@@ -207,9 +211,10 @@ mod tests {
 
     #[test]
     fn child_context_uses_local_handle_without_session() {
-        let local = std::sync::Arc::new(crate::context_state::ContextState::new(vec![message(
-            "child",
-        )]));
+        let local = std::sync::Arc::new(crate::context_state::ContextState::new(
+            vec![message("child")],
+            None,
+        ));
         let ctx = crate::tool::ToolCtx::new()
             .with_session_runtime(std::sync::Arc::new(
                 crate::session::Session::open_ephemeral(),

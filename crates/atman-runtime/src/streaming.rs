@@ -1051,7 +1051,7 @@ mod tests {
                         panic!("expected correction");
                     };
                     assert_eq!(claim.injection.text, text);
-                    claim.commit(Some(&entry.context.messages), || {}).unwrap();
+                    claim.commit(Some(&entry.context), || {}).unwrap();
                 }
                 assert_eq!(entry.pending_injections(), original[..1]);
                 handle_pending_injections(&entry, purpose).unwrap();

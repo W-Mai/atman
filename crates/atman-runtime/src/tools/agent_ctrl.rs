@@ -141,7 +141,7 @@ impl FlowEntry {
             .injections
             .claim_steering(|injection| self.owns_injection(injection))
         {
-            if let Some(injection) = claim.commit(Some(self.context.messages_handle()), || {}) {
+            if let Some(injection) = claim.commit(Some(&self.context), || {}) {
                 consumed.push(injection);
             }
         }
@@ -637,7 +637,10 @@ impl FlowRegistry {
                 state: context,
                 injections,
             } = context.unwrap_or_else(|| FlowEntryContext {
-                state: Arc::new(crate::context_state::ContextState::new(Vec::new())),
+                state: Arc::new(crate::context_state::ContextState::new(
+                    Vec::new(),
+                    events.clone(),
+                )),
                 injections: crate::injection::InjectionQueue::new(events),
             });
             injections.bind_turn(&turn_id, &child_run_id);
@@ -2172,9 +2175,7 @@ mod tests {
         registry.mark_terminal(&child);
         assert!(
             claim
-                .commit(Some(&child_entry.context.messages), || panic!(
-                    "terminal run"
-                ))
+                .commit(Some(&child_entry.context), || panic!("terminal run"))
                 .is_none()
         );
         assert!(child_entry.pending_injections().is_empty());
@@ -2597,9 +2598,13 @@ flow plain(user_prompt: string) -> string {
                 None,
             )
             .unwrap();
-        let parent_context = Arc::new(crate::context_state::ContextState::new(vec![
-            crate::message::Message::user_text(crate::event::TurnId::now(), "parent prompt"),
-        ]));
+        let parent_context = Arc::new(crate::context_state::ContextState::new(
+            vec![crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                "parent prompt",
+            )],
+            Some(event_session.sink().clone()),
+        ));
         let mut ctx = ToolCtx::new()
             .with_registry(tools)
             .with_providers(Arc::new(ProviderRegistry::new()))

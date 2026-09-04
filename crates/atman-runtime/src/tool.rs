@@ -293,10 +293,7 @@ impl ToolCtx {
     }
 
     pub(crate) fn context_sink(&self) -> Option<&crate::event::EventSink> {
-        match self.context_owner.as_ref()? {
-            ContextOwner::Session { session, .. } => Some(session.sink()),
-            ContextOwner::Detached(_) => self.events.as_ref(),
-        }
+        self.context()?.sink()
     }
 
     pub fn with_stdout_broadcast(mut self, tx: tokio::sync::broadcast::Sender<String>) -> Self {

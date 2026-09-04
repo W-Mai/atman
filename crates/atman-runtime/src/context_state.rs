@@ -11,17 +11,20 @@ use crate::session::CompactReviewMode;
 pub struct ContextState {
     pub(crate) messages: Arc<Mutex<Vec<Message>>>,
     stream: Option<MessageStream>,
+    sink: Option<crate::event::EventSink>,
     pub(crate) compaction: CompactionState,
 }
 
 impl ContextState {
-    pub fn new(mut messages: Vec<Message>) -> Self {
+    /// Binds canonical history publication independently of tool diagnostics.
+    pub fn new(mut messages: Vec<Message>, sink: Option<crate::event::EventSink>) -> Self {
         for message in &mut messages {
             message.ensure_part_ids();
         }
         Self {
             messages: Arc::new(Mutex::new(messages)),
             stream: None,
+            sink,
             compaction: CompactionState::new(),
         }
     }
@@ -30,12 +33,18 @@ impl ContextState {
         stream: MessageStream,
         messages: Vec<Message>,
         compaction: CompactionState,
+        sink: crate::event::EventSink,
     ) -> Self {
         Self {
             messages: Arc::new(Mutex::new(messages)),
             stream: Some(stream),
+            sink: Some(sink),
             compaction,
         }
+    }
+
+    pub(crate) fn sink(&self) -> Option<&crate::event::EventSink> {
+        self.sink.as_ref()
     }
 
     pub fn messages(&self) -> MessageWindow {
@@ -94,7 +103,6 @@ impl ContextState {
         &self,
         part_id: crate::message::MessagePartId,
         reason: &str,
-        sink: &crate::event::EventSink,
         turn_id: Option<crate::event::TurnId>,
         flow_run_id: Option<crate::event::FlowRunId>,
     ) -> Option<crate::message::AttachmentPatch> {
@@ -114,11 +122,13 @@ impl ContextState {
             file_basename: crate::attachment_store::display_name(source),
             reason: reason.into(),
         };
-        sink.emit(crate::event::Event::AttachmentDegraded {
-            turn_id,
-            flow_run_id,
-            patch: patch.clone(),
-        });
+        if let Some(sink) = self.sink() {
+            sink.emit(crate::event::Event::AttachmentDegraded {
+                turn_id,
+                flow_run_id,
+                patch: patch.clone(),
+            });
+        }
         for message in messages.iter_mut() {
             patch.apply(0, message);
         }
@@ -283,7 +293,7 @@ mod tests {
                 base: None,
                 inheritance: crate::event::ContextInheritance::Full,
             });
-            let context = Arc::new(ContextState::new(Vec::new()));
+            let context = Arc::new(ContextState::new(Vec::new(), Some(sink.clone())));
             let ctx = crate::tool::ToolCtx::new()
                 .with_context(context.clone())
                 .with_events(sink.clone());
@@ -374,7 +384,7 @@ mod tests {
             let context = if matches!(writer_kind, "root" | "root-record") {
                 session.context().clone()
             } else {
-                Arc::new(ContextState::new(Vec::new()))
+                Arc::new(ContextState::new(Vec::new(), Some(session.sink().clone())))
             };
             let sink = session.sink().clone();
             let turn = crate::event::TurnId::now();
@@ -435,20 +445,12 @@ mod tests {
                         .unwrap();
                     }
                     "injection" => {
-                        claim
-                            .commit(Some(context.messages_handle()), || {})
-                            .unwrap();
+                        claim.commit(Some(&context), || {}).unwrap();
                     }
                     "attachment" => {
                         assert!(
                             context
-                                .degrade_attachment(
-                                    image_id,
-                                    "invalid_image",
-                                    &sink,
-                                    Some(turn),
-                                    None
-                                )
+                                .degrade_attachment(image_id, "invalid_image", Some(turn), None)
                                 .is_some()
                         );
                     }
@@ -499,7 +501,7 @@ mod tests {
         };
         let session = Arc::new(crate::session::Session::open_ephemeral());
         let root = crate::tool::ToolCtx::new().with_session_runtime(session.clone());
-        let child_state = Arc::new(ContextState::new(Vec::new()));
+        let child_state = Arc::new(ContextState::new(Vec::new(), None));
         let child = root.clone().with_context(child_state.clone());
         let inline = child.clone();
         assert!(Arc::ptr_eq(root.context().unwrap(), session.context()));
@@ -652,7 +654,7 @@ mod tests {
                     let selected = Arc::new(ContextState::new(vec![Message::user_text(
                         turn.clone(),
                         "selected history",
-                    )]));
+                    )], Some(session.sink().clone())));
                     let run_id = FlowRunId::now();
                     let identity = session
                         .flow_registry
