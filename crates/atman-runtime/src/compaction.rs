@@ -413,12 +413,7 @@ async fn maybe_auto_compact_locked(
             );
             return;
         }
-        match session.commit_rewritten_window(
-            replacement,
-            window_tokens,
-            window_tokens,
-            rewritten_count,
-        ) {
+        match session.commit_rewritten_window(replacement, window_tokens, &msgs, rewritten_count) {
             Some(_) => {}
             None => {
                 session.emit_compact_warning(
@@ -426,7 +421,7 @@ async fn maybe_auto_compact_locked(
                     current,
                     trigger,
                     info.context_budget,
-                    "retained turn output rewrite did not shrink the transcript",
+                    "message window changed before retained output rewrite committed",
                 );
             }
         }
@@ -531,9 +526,9 @@ async fn maybe_auto_compact_locked(
     match session.commit_compacted_window(
         final_summary,
         replacement,
-        range,
+        range.clone(),
         window_tokens,
-        window_tokens,
+        &msgs,
     ) {
         Some(result) => {
             session.push_system_note(format!(
@@ -545,12 +540,16 @@ async fn maybe_auto_compact_locked(
             ));
         }
         None => {
+            send_failed(
+                session,
+                "message window changed before compaction committed",
+            );
             session.emit_compact_warning(
                 model,
                 current,
                 trigger,
                 info.context_budget,
-                "no compactible span — history too short or already fully compacted",
+                "message window changed before compaction committed",
             );
         }
     }
@@ -1032,10 +1031,10 @@ pub struct HandleCompactResult {
     pub compacted_end: usize,
 }
 
-/// Result of applying the automatic compaction policy to an isolated message
-/// handle. The caller must hold that handle's async compaction lock.
+/// A compacted window and its audit metadata. Range end is exclusive;
+/// retained-output rewrites use an empty range.
 #[derive(Debug, Clone, PartialEq)]
-pub struct HandleAutoCompactResult {
+pub struct ContextCompactResult {
     pub before_tokens: u64,
     pub after_tokens: u64,
     pub compacted_start: usize,
@@ -1046,19 +1045,19 @@ pub struct HandleAutoCompactResult {
 }
 
 /// Apply the root compaction budget, range, summary, and replacement policy to
-/// an isolated message handle. This function does not acquire the async lock
+/// an isolated context. This function does not acquire the async lock
 /// and delegates event publication to `commit`. The synchronous callback runs
 /// only after snapshot validation, under the message lock; it must not reenter
 /// the same handle. Summary requests run without the message lock.
-pub async fn maybe_auto_compact_handle_locked(
-    handle: &std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
+pub async fn maybe_auto_compact_context_locked(
+    context: &crate::context_state::ContextState,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
     forced: bool,
-    commit: impl FnOnce(&HandleAutoCompactResult),
-) -> Option<HandleAutoCompactResult> {
-    let snapshot = handle.lock().unwrap().clone();
+    commit: impl FnOnce(&ContextCompactResult),
+) -> Option<ContextCompactResult> {
+    let snapshot = context.messages_handle().lock().unwrap().clone();
     let info = crate::model_registry::model_info(model);
     let trigger = info.compaction_trigger_threshold();
     let target = budget_context
@@ -1089,7 +1088,7 @@ pub async fn maybe_auto_compact_handle_locked(
             let replacement =
                 build_budgeted_replacement(&snapshot, &range, &summary, target, model, providers)
                     .await;
-            let compacted_end = range.end.saturating_sub(1);
+            let compacted_end = range.end;
             let compacted_count = range.end - range.start;
             (
                 replacement,
@@ -1121,11 +1120,7 @@ pub async fn maybe_auto_compact_handle_locked(
         return None;
     }
 
-    let mut messages = handle.lock().unwrap();
-    if *messages != snapshot {
-        return None;
-    }
-    let result = HandleAutoCompactResult {
+    let result = ContextCompactResult {
         before_tokens,
         after_tokens,
         compacted_start,
@@ -1134,9 +1129,9 @@ pub async fn maybe_auto_compact_handle_locked(
         summary,
         checkpoint_messages: replacement,
     };
-    commit(&result);
-    *messages = result.checkpoint_messages.clone();
-    Some(result)
+    context
+        .commit_compaction(&snapshot, &result, || commit(&result))
+        .then_some(result)
 }
 
 /// Compact a messages_handle in place (data-layer primitive, operates on any

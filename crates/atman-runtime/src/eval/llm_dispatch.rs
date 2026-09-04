@@ -151,10 +151,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     };
     if uses_spawned_context
         && compact_guard.is_some()
-        && let Some(messages) = ctx.context().map(|context| context.messages_handle())
+        && let Some(context) = ctx.context()
     {
-        let _ = crate::compaction::maybe_auto_compact_handle_locked(
-            messages,
+        let _ = crate::compaction::maybe_auto_compact_context_locked(
+            context,
             &model,
             &providers_reg,
             compaction_budget,
@@ -718,10 +718,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             last_err = Some(e);
                             continue 'llm_attempts;
                         }
-                        if let Some(messages) =
-                            ctx.context().map(|context| context.messages_handle())
-                            && crate::compaction::maybe_auto_compact_handle_locked(
-                                messages,
+                        if let Some(context) = ctx.context()
+                            && crate::compaction::maybe_auto_compact_context_locked(
+                                context,
                                 &model,
                                 &providers_reg,
                                 compaction_budget,
@@ -893,10 +892,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     Value::Err(error)
 }
 
-fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAutoCompactResult) {
-    if let Some(context) = ctx.context() {
-        context.update_epoch(&result.checkpoint_messages);
-    }
+fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::ContextCompactResult) {
     let Some(flow_run_id) = ctx.message_flow_run_id() else {
         return;
     };
@@ -915,7 +911,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
         before_tokens: result.before_tokens,
         after_tokens: result.after_tokens,
         compacted_range_start: result.compacted_start as u64,
-        compacted_range_end: result.compacted_end as u64,
+        compacted_range_end: result.compacted_end.saturating_sub(1) as u64,
         summary_text: Some(result.summary.clone()),
         replacement_msg_seq: None,
     });
@@ -923,7 +919,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
         session_id: session_id.clone(),
         flow_run_id: Some(flow_run_id.clone()),
         range_start: result.compacted_start as u64,
-        range_end: result.compacted_end as u64,
+        range_end: result.compacted_end.saturating_sub(1) as u64,
         compacted_count: result.compacted_count,
         before_tokens: result.before_tokens,
         after_tokens: result.after_tokens,
@@ -1099,17 +1095,19 @@ mod tests {
             .with_context(std::sync::Arc::new(
                 crate::context_state::ContextState::new(Vec::new()),
             ));
-        let result = crate::compaction::HandleAutoCompactResult {
+        let result = crate::compaction::ContextCompactResult {
             before_tokens: 100,
             after_tokens: 10,
             compacted_start: 0,
-            compacted_end: 1,
+            compacted_end: 2,
             compacted_count: 2,
             summary: "summary".into(),
             checkpoint_messages: checkpoint.clone(),
         };
 
-        record_spawned_compaction(&ctx, &result);
+        assert!(ctx.context().unwrap().commit_compaction(&[], &result, || {
+            record_spawned_compaction(&ctx, &result);
+        }));
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 3);

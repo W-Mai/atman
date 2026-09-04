@@ -193,6 +193,8 @@ message, the goal, the active plan, or a tool result.
 
 ## Budget and compaction
 
+Root and child compaction commit against the exact source messages used to build the candidate. The shared context commit checks the source under the message lock before updating the checkpoint, window-token estimate, cache epoch, and live handle. Changes with the same message count, including attachment patches and other rewrites, invalidate the candidate. Summary generation and review do not hold the message or event-log lock. A stale automatic commit reports a terminal failure without overwriting newer messages; raw history and the existing direct-compaction summary remain available.
+
 For session-context calls without an explicit `messages:` override, the runtime
 computes a history budget from:
 

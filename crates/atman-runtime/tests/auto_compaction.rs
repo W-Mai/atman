@@ -89,9 +89,9 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
 }
 
 #[tokio::test]
-async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
+async fn context_compaction_rejects_changed_sources_before_publication() {
     use atman_runtime::compaction::{
-        CompactionBudgetContext, is_compaction_summary, maybe_auto_compact_handle_locked,
+        CompactionBudgetContext, is_compaction_summary, maybe_auto_compact_context_locked,
     };
     use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, ProviderRegistry};
     use atman_runtime::providers::mock::MockProvider;
@@ -104,6 +104,18 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
         mutate: std::sync::atomic::AtomicBool,
     }
 
+    impl SummaryProvider {
+        fn before_request(&self) {
+            let mut messages = self
+                .messages
+                .try_lock()
+                .expect("summary IO must not hold the message lock");
+            if self.mutate.load(std::sync::atomic::Ordering::SeqCst) {
+                messages.push(Message::user_text(TurnId::now(), "intervening input"));
+            }
+        }
+    }
+
     impl Provider for SummaryProvider {
         fn name(&self) -> &str {
             self.inner.name()
@@ -114,14 +126,7 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
             request: LlmRequest,
         ) -> atman_runtime::tool::BoxFut<'a, Result<AssistantMessage, atman_runtime::RuntimeError>>
         {
-            let mut messages = self
-                .messages
-                .try_lock()
-                .expect("summary IO must not hold the message lock");
-            if self.mutate.load(std::sync::atomic::Ordering::SeqCst) {
-                messages.push(Message::user_text(TurnId::now(), "intervening input"));
-            }
-            drop(messages);
+            self.before_request();
             self.inner.call(request)
         }
 
@@ -129,6 +134,7 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
             &self,
             request: LlmRequest,
         ) -> atman_runtime::Observable<AssistantMessage> {
+            self.before_request();
             self.inner.call_streaming(request)
         }
     }
@@ -157,7 +163,8 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
             })
             .collect::<Vec<_>>(),
     );
-    let messages = Arc::new(Mutex::new(history.clone()));
+    let context = atman_runtime::context_state::ContextState::new(history.clone());
+    let messages = context.messages_handle().clone();
     let providers = ProviderRegistry::new();
     let provider = Arc::new(SummaryProvider {
         inner: MockProvider::new("mock-summary")
@@ -168,8 +175,8 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
     providers.register(provider.clone());
 
     let mut published = None;
-    let result = maybe_auto_compact_handle_locked(
-        &messages,
+    let result = maybe_auto_compact_context_locked(
+        &context,
         "mock-summary",
         &providers,
         CompactionBudgetContext::default(),
@@ -209,8 +216,8 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
     provider
         .mutate
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let stale = maybe_auto_compact_handle_locked(
-        &messages,
+    let stale = maybe_auto_compact_context_locked(
+        &context,
         "mock-summary",
         &providers,
         CompactionBudgetContext::default(),
@@ -231,8 +238,8 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
     let short = vec![Message::user_text(TurnId::now(), "short")];
     *messages.lock().unwrap() = short.clone();
     assert!(
-        maybe_auto_compact_handle_locked(
-            &messages,
+        maybe_auto_compact_context_locked(
+            &context,
             "mock-summary",
             &providers,
             CompactionBudgetContext::default(),
@@ -243,6 +250,43 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
         .is_none()
     );
     assert_eq!(*messages.lock().unwrap(), short);
+
+    let session = Session::open_ephemeral();
+    build_long_history(&session, 60);
+    let original = session.messages().to_vec();
+    let provider = Arc::new(SummaryProvider {
+        inner: MockProvider::new("mock-summary").with_fallback(Value::Str("root summary".into())),
+        messages: session.messages_handle(),
+        mutate: std::sync::atomic::AtomicBool::new(true),
+    });
+    let providers = ProviderRegistry::new();
+    providers.register(provider.clone());
+    let mut frames = session.stream_subscribe();
+    atman_runtime::compaction::maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let messages = session.messages_handle().lock().unwrap().clone();
+    assert!(messages.len() > original.len());
+    assert_eq!(&messages[..original.len()], original.as_slice());
+    assert!(
+        !session
+            .sink()
+            .snapshot()
+            .iter()
+            .any(|event| matches!(event, atman_runtime::event::Event::Checkpoint { .. }))
+    );
+    assert!(session.sink().last_compact_ago_seconds().is_none());
+    let mut phases = Vec::new();
+    while let Ok(frame) = frames.try_recv() {
+        if let atman_runtime::stream::StreamFrame::CompactionSummary { phase, .. } = frame {
+            phases.push(phase);
+        }
+    }
+    assert_eq!(
+        phases,
+        [
+            atman_runtime::stream::CompactionPhase::Running,
+            atman_runtime::stream::CompactionPhase::Failed
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

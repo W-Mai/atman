@@ -70,6 +70,26 @@ impl ContextState {
         &self.compaction.lock
     }
 
+    /// Publishes only against an unchanged source, while holding the message lock.
+    pub(crate) fn commit_compaction(
+        &self,
+        expected: &[Message],
+        result: &crate::compaction::ContextCompactResult,
+        publish: impl FnOnce(),
+    ) -> bool {
+        let mut messages = self.messages.lock().expect("context messages poisoned");
+        if messages.as_slice() != expected {
+            return false;
+        }
+        self.update_epoch(&result.checkpoint_messages);
+        self.compaction
+            .model_window_tokens
+            .store(result.after_tokens, std::sync::atomic::Ordering::Relaxed);
+        publish();
+        *messages = result.checkpoint_messages.clone();
+        true
+    }
+
     pub(crate) fn degrade_attachment(
         &self,
         part_id: crate::message::MessagePartId,
@@ -296,7 +316,7 @@ mod tests {
             } else {
                 assert!(
                     session
-                        .commit_rewritten_window(replacement.clone(), 100_000, 100_000, 1)
+                        .commit_rewritten_window(replacement.clone(), 100_000, &original, 1)
                         .is_some()
                 );
             }
