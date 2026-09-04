@@ -82,6 +82,7 @@ export type ApprovalTarget =
       type: 'user'
       [k: string]: unknown
     }
+export type ContextId = string
 export type FormQuestionKind = 'confirm' | 'single_select' | 'multi_select' | 'text'
 export type InterjectionLevel = 'nudge' | 'course_correct' | 'redirect' | 'hard_stop'
 export type InterjectionSource =
@@ -200,7 +201,6 @@ export type TranscriptItem =
       type: 'extension'
       [k: string]: unknown
     }
-export type ContextId = string
 export type MessageOrigin = 'user' | 'watcher' | 'interjection' | 'internal'
 export type MessagePart =
   | {
@@ -736,7 +736,7 @@ export interface McpServerProjection {
 export interface InteractionProjection {
   approval_groups?: ApprovalGroupProjection[]
   approvals?: ApprovalRequestProjection[]
-  compact_review?: null | CompactReviewProjection
+  compact_reviews?: CompactReviewProjection[]
   forms?: PendingFormProjection[]
   interjections?: InterjectionProjection[]
   prompts?: PendingPromptProjection[]
@@ -760,6 +760,7 @@ export interface ApprovalRequestProjection {
   [k: string]: unknown
 }
 export interface CompactReviewProjection {
+  context_id?: null | ContextId
   emitted_at: string
   id: string
   range_end: number

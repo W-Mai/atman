@@ -5426,10 +5426,11 @@ async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway:
 
 async fn preview_scene_compact_review(session: std::sync::Arc<Session>) {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let _rx = session
+    let _ = session
         .compact_reviews()
         .request(atman_runtime::session::PendingCompactReview {
             review_id: "preview_review".into(),
+            context_id: session.context().context_id().cloned(),
             summary: "The user asked for a Rust CLI that lists sessions and prints their titles. \
 The assistant designed the storage layout, wrote the JSON parsing, added a `session list` \
 subcommand, and wired it into the daemon. All tests pass."
@@ -5440,8 +5441,8 @@ subcommand, and wired it into the daemon. All tests pass."
             range_end: 24,
             tokens_before: 12800,
             emitted_at: chrono::Utc::now(),
-        });
-    std::mem::forget(_rx);
+        })
+        .await;
 }
 
 async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {

@@ -616,6 +616,16 @@
         "emitted_at"
       ],
       "properties": {
+        "context_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ContextId"
+            }
+          ]
+        },
         "emitted_at": {
           "type": "string",
           "format": "date-time"
@@ -1329,15 +1339,11 @@
             "$ref": "#/$defs/ApprovalRequestProjection"
           }
         },
-        "compact_review": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "$ref": "#/$defs/CompactReviewProjection"
-            }
-          ]
+        "compact_reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactReviewProjection"
+          }
         },
         "forms": {
           "type": "array",

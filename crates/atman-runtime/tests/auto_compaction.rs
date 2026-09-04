@@ -550,12 +550,12 @@ async fn setup_review_env() -> (
 fn wait_for_pending_and_decide(
     session: std::sync::Arc<Session>,
     decision: atman_runtime::CompactReviewDecision,
-) -> tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>> {
+) -> tokio::sync::watch::Receiver<Vec<atman_runtime::PendingCompactReview>> {
     let sub = session.compact_reviews().subscribe();
     tokio::spawn(async move {
         let reviews = session.compact_reviews();
         for _ in 0..500 {
-            if let Some(pending) = reviews.list_pending() {
+            if let Some(pending) = reviews.list_pending().first() {
                 reviews.decide(&pending.review_id, decision.clone());
                 return;
             }

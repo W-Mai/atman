@@ -75,6 +75,12 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.plans_rx.as_ref() {
         app.app.plans = rx.borrow().clone();
     }
+    if let Some(rx) = handle.compact_review_rx.as_ref() {
+        crate::compact_review_modal::CompactReviewModal::reconcile(
+            &mut app.wm.modals.compact_review,
+            &rx.borrow(),
+        );
+    }
     if let Some(rx) = handle.trust_rx.as_ref() {
         let theme = app.app.trust.theme;
         app.app.trust = rx.borrow().clone();
@@ -1374,29 +1380,11 @@ pub(crate) async fn run_frames(
             }
             _ = wait_compact_review_change(handle.compact_review_rx.as_mut()) => {
                 if let Some(rx) = handle.compact_review_rx.as_mut() {
-                    let latest = rx.borrow().clone();
-                    match (latest, app.wm.modals.compact_review.is_some()) {
-                        (Some(pending), false) => {
-                            app.wm.modals.compact_review = Some(
-                                crate::compact_review_modal::CompactReviewModal::new(pending),
-                            );
-                        }
-                        (Some(pending), true) => {
-                            if app
-                                .wm
-                                .modals
-                                .compact_review
-                                .as_ref()
-                                .is_some_and(|m| m.pending.review_id != pending.review_id)
-                            {
-                                app.wm.modals.compact_review = Some(
-                                    crate::compact_review_modal::CompactReviewModal::new(pending),
-                                );
-                            }
-                        }
-                        (None, _) => {
-                            app.wm.modals.compact_review = None;
-                        }
+                    if crate::compact_review_modal::CompactReviewModal::reconcile(
+                        &mut app.wm.modals.compact_review,
+                        &rx.borrow(),
+                    ) {
+                        app.app.mark_visual_dirty();
                     }
                 }
             }
@@ -1736,7 +1724,7 @@ pub(crate) async fn wait_trust_change(
 }
 
 pub(crate) async fn wait_compact_review_change(
-    rx: Option<&mut tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
+    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::PendingCompactReview>>>,
 ) {
     match rx {
         Some(r) => {

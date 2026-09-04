@@ -43,6 +43,21 @@ impl CompactReviewModal {
         }
     }
 
+    pub fn reconcile(current: &mut Option<Self>, pending: &[PendingCompactReview]) -> bool {
+        if current.as_ref().is_some_and(|modal| {
+            pending
+                .iter()
+                .any(|review| review.review_id == modal.pending.review_id)
+        }) {
+            return false;
+        }
+        if current.is_none() && pending.is_empty() {
+            return false;
+        }
+        *current = pending.first().cloned().map(Self::new);
+        true
+    }
+
     pub fn enter_editing(&mut self) {
         self.mode = CompactReviewMode::Editing;
     }
@@ -303,6 +318,7 @@ mod tests {
     fn sample_pending() -> PendingCompactReview {
         PendingCompactReview {
             review_id: "r-test".into(),
+            context_id: None,
             summary: "initial summary text".into(),
             slice_preview: "[0] user: hi\n[1] assistant: yo\n".into(),
             slice_count: 2,
@@ -336,5 +352,28 @@ mod tests {
         modal.editor.replace_with("edited by user");
         assert_eq!(modal.edited_summary(), "edited by user");
         assert!(modal.summary_is_dirty());
+    }
+    #[test]
+    fn pending_updates_preserve_edits_and_advance_only_after_resolution() {
+        let first = sample_pending();
+        let mut second = sample_pending();
+        second.review_id = "second".into();
+        let mut current = Some(CompactReviewModal::new(first.clone()));
+        let modal = current.as_mut().unwrap();
+        modal.enter_editing();
+        modal.editor.replace_with("local draft");
+        modal.scroll = 8;
+        CompactReviewModal::reconcile(&mut current, &[second.clone(), first.clone()]);
+        let modal = current.as_ref().unwrap();
+        assert_eq!(modal.pending.review_id, first.review_id);
+        assert_eq!(modal.mode, CompactReviewMode::Editing);
+        assert_eq!(modal.editor.buf(), "local draft");
+        assert_eq!(modal.scroll, 8);
+        CompactReviewModal::reconcile(&mut current, std::slice::from_ref(&second));
+        let modal = current.as_ref().unwrap();
+        assert_eq!(modal.pending.review_id, second.review_id);
+        assert_eq!(modal.mode, CompactReviewMode::Viewing);
+        CompactReviewModal::reconcile(&mut current, &[]);
+        assert!(current.is_none());
     }
 }

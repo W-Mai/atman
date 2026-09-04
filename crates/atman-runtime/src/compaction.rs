@@ -526,18 +526,18 @@ async fn maybe_auto_compact_locked(
             )
         }
     };
-    let final_summary =
-        match request_review_if_enabled(session, forced, &filtered, &range, current, summary).await
-        {
-            ReviewOutcome::Commit(s) => s,
-            ReviewOutcome::Rejected => {
-                send_failed("compaction rejected by user; keeping full transcript");
-                session.push_system_note(
-                    "compaction rejected by user; keeping full transcript".into(),
-                );
-                return;
-            }
-        };
+    let final_summary = match request_review_if_enabled(
+        session, context, forced, &filtered, &range, current, summary,
+    )
+    .await
+    {
+        ReviewOutcome::Commit(s) => s,
+        ReviewOutcome::Rejected => {
+            send_failed("compaction rejected by user; keeping full transcript");
+            session.push_system_note("compaction rejected by user; keeping full transcript".into());
+            return;
+        }
+    };
     let replacement =
         build_budgeted_replacement(&msgs, &range, &final_summary, target, model, providers).await;
     let after_tokens = estimate_tokens_for_messages(&replacement);
@@ -590,13 +590,20 @@ enum ReviewOutcome {
 
 async fn request_review_if_enabled(
     session: &crate::session::Session,
+    context: &crate::context_state::ContextState,
     forced: bool,
     slice: &[Message],
     range: &CompactRange,
     tokens_before: u64,
     summary: String,
 ) -> ReviewOutcome {
-    if !session.compact_review_mode().should_review(forced) {
+    if !context
+        .compaction
+        .review_mode
+        .lock()
+        .unwrap()
+        .should_review(forced)
+    {
         return ReviewOutcome::Commit(summary);
     }
     let reviews = session.compact_reviews();
@@ -605,6 +612,7 @@ async fn request_review_if_enabled(
     }
     let pending = crate::session::PendingCompactReview {
         review_id: uuid::Uuid::now_v7().to_string(),
+        context_id: context.context_id().cloned(),
         summary: summary.clone(),
         slice_preview: format_slice_for_preview(slice),
         slice_count: slice.len(),
@@ -1232,6 +1240,64 @@ mod tests {
                 crate::context_plan::ContextRecordBody::tombstone(),
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn review_policy_and_cancellation_follow_the_context_owner() {
+        use crate::session::{CompactReviewMode, Session};
+        let session = Session::open_ephemeral();
+        session.set_compact_review_mode(CompactReviewMode::Never);
+        let child = session
+            .context()
+            .fork(crate::event::ContextInheritance::Full)
+            .unwrap();
+        *child.compaction.review_mode.lock().unwrap() = CompactReviewMode::Always;
+        let reviews = session.compact_reviews();
+        let subscriber = reviews.subscribe();
+        let range = CompactRange {
+            start: 0,
+            end: 1,
+            tokens_saved_estimate: 10,
+        };
+        let slice = [user("evidence")];
+        for forced in [false, true] {
+            assert!(matches!(
+                request_review_if_enabled(
+                    &session, session.context(), forced, &slice, &range, 100, "root".into()
+                ).await,
+                ReviewOutcome::Commit(summary) if summary == "root"
+            ));
+            let mut pending = Box::pin(request_review_if_enabled(
+                &session,
+                &child,
+                forced,
+                &slice,
+                &range,
+                100,
+                "child".into(),
+            ));
+            assert!(futures::poll!(&mut pending).is_pending());
+            let review = subscriber.borrow()[0].clone();
+            assert_eq!(review.context_id.as_ref(), child.context_id());
+            assert_eq!(review.summary, "child");
+            if forced {
+                assert!(reviews.decide(
+                    &review.review_id,
+                    crate::session::CompactReviewDecision::AcceptAsIs
+                ));
+                assert!(
+                    matches!(pending.await, ReviewOutcome::Commit(summary) if summary == "child")
+                );
+            } else {
+                drop(pending);
+                assert!(session.sink().snapshot().iter().any(|event| matches!(event,
+                    crate::event::Event::CompactReviewResolved { review_id, abandoned: true, .. }
+                        if review_id == &review.review_id
+                )));
+            }
+            assert!(reviews.list_pending().is_empty());
+            assert!(subscriber.borrow().is_empty());
+        }
     }
 
     #[test]

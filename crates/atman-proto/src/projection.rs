@@ -592,7 +592,7 @@ pub struct InteractionProjection {
     #[serde(default)]
     pub forms: Vec<PendingFormProjection>,
     #[serde(default)]
-    pub compact_review: Option<CompactReviewProjection>,
+    pub compact_reviews: Vec<CompactReviewProjection>,
     #[serde(default)]
     pub interjections: Vec<InterjectionProjection>,
 }
@@ -706,6 +706,7 @@ pub enum FormQuestionKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct CompactReviewProjection {
     pub id: String,
+    pub context_id: Option<ContextId>,
     pub summary: String,
     pub slice_preview: String,
     pub slice_count: usize,

@@ -400,6 +400,7 @@ async fn session_actor_projects_compact_review_until_decision() {
             .compact_reviews()
             .request(atman_runtime::session::PendingCompactReview {
                 review_id: review_id.clone(),
+                context_id: None,
                 summary: "summary".into(),
                 slice_preview: "preview".into(),
                 slice_count: 3,
@@ -411,7 +412,13 @@ async fn session_actor_projects_compact_review_until_decision() {
 
     let projected = loop {
         let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
-        if let Some(review) = snapshot.projection.interactions.compact_review {
+        if let Some(review) = snapshot
+            .projection
+            .interactions
+            .compact_reviews
+            .into_iter()
+            .next()
+        {
             break review;
         }
         tokio::task::yield_now().await;
@@ -436,7 +443,7 @@ async fn session_actor_projects_compact_review_until_decision() {
     ));
     loop {
         let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
-        if snapshot.projection.interactions.compact_review.is_none() {
+        if snapshot.projection.interactions.compact_reviews.is_empty() {
             break;
         }
         tokio::task::yield_now().await;

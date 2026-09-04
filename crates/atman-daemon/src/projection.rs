@@ -160,7 +160,7 @@ impl SessionProjector {
         let previous_interactions = self.projection.interactions.clone();
         self.projection.interactions.prompts.clear();
         self.projection.interactions.forms.clear();
-        self.projection.interactions.compact_review = None;
+        self.projection.interactions.compact_reviews.clear();
         for interjection in &mut self.projection.interactions.interjections {
             if interjection.state == atman_proto::InterjectionState::Pending {
                 interjection.state = atman_proto::InterjectionState::Cancelled;
@@ -710,20 +710,22 @@ impl SessionProjector {
             }
             Event::CompactReviewRequested { review } => {
                 let review = compact_review_projection(review);
-                self.projection.interactions.compact_review = Some(review);
+                self.projection
+                    .interactions
+                    .compact_reviews
+                    .retain(|item| item.id != review.id);
+                self.projection.interactions.compact_reviews.push(review);
                 changes.push(ProjectionChange::InteractionsSet {
                     interactions: self.projection.interactions.clone(),
                 });
             }
             Event::CompactReviewResolved { review_id, .. } => {
-                if self
-                    .projection
+                let before = self.projection.interactions.compact_reviews.len();
+                self.projection
                     .interactions
-                    .compact_review
-                    .as_ref()
-                    .is_some_and(|review| review.id == *review_id)
-                {
-                    self.projection.interactions.compact_review = None;
+                    .compact_reviews
+                    .retain(|item| item.id != *review_id);
+                if before != self.projection.interactions.compact_reviews.len() {
                     changes.push(ProjectionChange::InteractionsSet {
                         interactions: self.projection.interactions.clone(),
                     });
@@ -960,38 +962,6 @@ impl SessionProjector {
         }
         self.projection.trust = trust.clone();
         self.commit(vec![ProjectionChange::TrustSet { trust }])
-    }
-
-    pub(crate) fn set_forms(
-        &mut self,
-        forms: Vec<atman_runtime::form::PendingForm>,
-    ) -> Option<ProjectionDelta> {
-        let mut forms = forms
-            .iter()
-            .map(pending_form_projection)
-            .collect::<Vec<_>>();
-        forms.sort_by_key(|form| form.emitted_at);
-        if self.projection.interactions.forms == forms {
-            return None;
-        }
-        self.projection.interactions.forms = forms;
-        self.commit(vec![ProjectionChange::InteractionsSet {
-            interactions: self.projection.interactions.clone(),
-        }])
-    }
-
-    pub(crate) fn set_compact_review(
-        &mut self,
-        review: Option<atman_runtime::session::PendingCompactReview>,
-    ) -> Option<ProjectionDelta> {
-        let review = review.as_ref().map(compact_review_projection);
-        if self.projection.interactions.compact_review == review {
-            return None;
-        }
-        self.projection.interactions.compact_review = review;
-        self.commit(vec![ProjectionChange::InteractionsSet {
-            interactions: self.projection.interactions.clone(),
-        }])
     }
 
     fn refresh_usage(&mut self) {
@@ -1671,6 +1641,10 @@ fn compact_review_projection(
 ) -> atman_proto::CompactReviewProjection {
     atman_proto::CompactReviewProjection {
         id: pending.review_id.clone(),
+        context_id: pending
+            .context_id
+            .as_ref()
+            .map(|id| atman_proto::ContextId(id.0)),
         summary: pending.summary.clone(),
         slice_preview: pending.slice_preview.clone(),
         slice_count: pending.slice_count,

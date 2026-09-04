@@ -199,8 +199,8 @@ impl SessionActorHandle {
         let plans_rx = session.subscribe_plans();
         let context_rx = session.subscribe_context();
         let trust_rx = session.subscribe_trust();
-        let forms_rx = session.forms().subscribe();
-        let compact_review_rx = session.compact_reviews().subscribe();
+        let _forms_rx = session.forms().subscribe();
+        let _compact_review_rx = session.compact_reviews().subscribe();
         let (mut projection, restored_event_cursor) = match restored_projection {
             Some(restored) => (restored.projector, Some(restored.event_cursor)),
             None => (
@@ -217,8 +217,6 @@ impl SessionActorHandle {
         projection.set_plans(plans_rx.borrow().clone());
         projection.set_context(context_rx.borrow().clone());
         projection.set_trust(trust_rx.borrow().clone());
-        projection.set_forms(forms_rx.borrow().clone());
-        projection.set_compact_review(compact_review_rx.borrow().clone());
         for run in &initial_runs {
             projection.register_run(
                 run.run_id.clone(),
@@ -264,8 +262,8 @@ impl SessionActorHandle {
             plans_rx,
             context_rx,
             trust_rx,
-            forms_rx,
-            compact_review_rx,
+            _forms_rx,
+            _compact_review_rx,
             task_registry,
             workspace_service,
             workspace_mutations: HashSet::new(),
@@ -741,8 +739,6 @@ enum ActorInput {
     Plans(Result<(), watch::error::RecvError>),
     Context(Result<(), watch::error::RecvError>),
     Trust(Result<(), watch::error::RecvError>),
-    Forms(Result<(), watch::error::RecvError>),
-    CompactReview(Result<(), watch::error::RecvError>),
 }
 
 struct SessionActor {
@@ -769,8 +765,8 @@ struct SessionActor {
     plans_rx: watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>,
     context_rx: watch::Receiver<atman_runtime::ContextSnapshot>,
     trust_rx: watch::Receiver<atman_runtime::trust::TrustConfig>,
-    forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
-    compact_review_rx: watch::Receiver<Option<atman_runtime::session::PendingCompactReview>>,
+    _forms_rx: watch::Receiver<Vec<atman_runtime::form::PendingForm>>,
+    _compact_review_rx: watch::Receiver<Vec<atman_runtime::session::PendingCompactReview>>,
     task_registry: atman_runtime::TaskRegistry,
     workspace_service: Option<atman_runtime::flow_workspace::FlowWorkspaceService>,
     workspace_mutations: HashSet<ResourceId>,
@@ -791,8 +787,6 @@ impl SessionActor {
                 changed = self.plans_rx.changed() => ActorInput::Plans(changed),
                 changed = self.context_rx.changed() => ActorInput::Context(changed),
                 changed = self.trust_rx.changed() => ActorInput::Trust(changed),
-                changed = self.forms_rx.changed() => ActorInput::Forms(changed),
-                changed = self.compact_review_rx.changed() => ActorInput::CompactReview(changed),
             };
             self.record_activity();
             match input {
@@ -845,16 +839,12 @@ impl SessionActor {
                 | ActorInput::Todos(Ok(()))
                 | ActorInput::Plans(Ok(()))
                 | ActorInput::Context(Ok(()))
-                | ActorInput::Trust(Ok(()))
-                | ActorInput::Forms(Ok(()))
-                | ActorInput::CompactReview(Ok(())) => self.refresh_watch_projections(),
+                | ActorInput::Trust(Ok(())) => self.refresh_watch_projections(),
                 ActorInput::Goal(Err(_))
                 | ActorInput::Todos(Err(_))
                 | ActorInput::Plans(Err(_))
                 | ActorInput::Context(Err(_))
-                | ActorInput::Trust(Err(_))
-                | ActorInput::Forms(Err(_))
-                | ActorInput::CompactReview(Err(_)) => break,
+                | ActorInput::Trust(Err(_)) => break,
             }
         }
     }
@@ -1096,7 +1086,7 @@ impl SessionActor {
         let has_pending_interactions = !self.prompts.is_empty()
             || !interactions.prompts.is_empty()
             || !interactions.forms.is_empty()
-            || interactions.compact_review.is_some()
+            || !interactions.compact_reviews.is_empty()
             || interactions.approvals.iter().any(|approval| {
                 matches!(
                     approval.state,
@@ -1190,12 +1180,7 @@ impl SessionActor {
             self.drop_prompt(prompt_id);
         }
         self.session.forms().cancel_all();
-        if let Some(review) = self.session.compact_reviews().list_pending() {
-            self.session.compact_reviews().decide(
-                &review.review_id,
-                atman_runtime::session::CompactReviewDecision::Reject,
-            );
-        }
+        self.session.compact_reviews().cancel_all();
         let target_seq = self.session.sink().published_seq();
         self.catch_up_through(target_seq)
     }
@@ -1738,14 +1723,6 @@ impl SessionActor {
         if let Some(delta) = self.projection.set_trust(trust) {
             self.publish_projection_delta(delta);
         }
-        let forms = self.forms_rx.borrow_and_update().clone();
-        if let Some(delta) = self.projection.set_forms(forms) {
-            self.publish_projection_delta(delta);
-        }
-        let review = self.compact_review_rx.borrow_and_update().clone();
-        if let Some(delta) = self.projection.set_compact_review(review) {
-            self.publish_projection_delta(delta);
-        }
     }
 
     fn rename(&mut self, title: String) -> Result<RenameSessionCommit> {
@@ -2049,9 +2026,6 @@ impl SessionActor {
         self.projection
             .set_context(self.context_rx.borrow().clone());
         self.projection.set_trust(self.trust_rx.borrow().clone());
-        self.projection.set_forms(self.forms_rx.borrow().clone());
-        self.projection
-            .set_compact_review(self.compact_review_rx.borrow().clone());
         self.projection.rebase_after_rebuild(previous_revision);
         self.event_cursor.0 = self.event_cursor.0.saturating_add(1);
         self.updates.clear();

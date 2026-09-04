@@ -333,7 +333,7 @@ pub struct TuiHandle {
     pub plans_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
     pub trust_rx: Option<tokio::sync::watch::Receiver<atman_runtime::trust::TrustConfig>>,
     pub compact_review_rx:
-        Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
+        Option<tokio::sync::watch::Receiver<Vec<atman_runtime::PendingCompactReview>>>,
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
     pub injection_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::injection::Injection>>,
     pub flow_names: Vec<(String, String)>,

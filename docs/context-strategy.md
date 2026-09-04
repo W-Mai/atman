@@ -213,6 +213,8 @@ message, the goal, the active plan, or a tool result.
 
 Root and child compaction commit against the exact source messages used to build the candidate. The shared context commit checks the source under the message lock before updating the checkpoint, window-token estimate, cache epoch, and live handle. Changes with the same message count, including attachment patches and other rewrites, invalidate the candidate. Summary generation and review do not hold the message or event-log lock. A stale automatic commit reports a terminal failure without overwriting newer messages; raw history and the existing direct-compaction summary remain available.
 
+Compaction review policy belongs to the target context. Pending reviews form an ordered collection with independent IDs and context identities; accepting, rejecting, or abandoning one does not replace another. Registration publishes its canonical request and pending snapshot before returning the response future. Dropping that future records abandonment and removes the request. The TUI retains the current review's draft and scroll position across collection updates, then opens the next pending review after resolution. Initial attachment also reads existing pending reviews.
+
 For session-context calls without an explicit `messages:` override, the runtime
 computes a history budget from:
 
