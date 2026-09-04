@@ -2180,7 +2180,10 @@ impl Session {
             "[atman: persistently compacted output from {rewritten_count} retained messages]"
         );
         self.sink.mark_compacted();
-        self.sink.emit(Event::ContextCompact {
+        let mut messages = self.messages.lock().expect("session messages poisoned");
+        self.compaction.update_context_epoch(&replacement);
+        let mut batch = self.sink.batch();
+        batch.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
             flow_run_id: None,
             before_tokens,
@@ -2190,7 +2193,7 @@ impl Session {
             summary_text: Some(summary.clone()),
             replacement_msg_seq: None,
         });
-        self.sink.emit(Event::CompactionSummary {
+        batch.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
             flow_run_id: None,
             range_start: 0,
@@ -2200,6 +2203,18 @@ impl Session {
             after_tokens,
             summary: summary.clone(),
         });
+        self.compaction
+            .model_window_tokens
+            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+        *messages = replacement.clone();
+        batch.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            messages: replacement,
+            window_tokens: after_tokens,
+        });
+        drop(batch);
+        drop(messages);
         let _ = self
             .watch
             .stream_tx
@@ -2212,19 +2227,6 @@ impl Session {
                 after_tokens,
                 compacted_count: rewritten_count,
             });
-        self.compaction
-            .model_window_tokens
-            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(mut messages) = self.messages.lock() {
-            *messages = replacement.clone();
-        }
-        self.compaction.update_context_epoch(&replacement);
-        self.sink.emit(Event::Checkpoint {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            messages: replacement,
-            window_tokens: after_tokens,
-        });
         self.refresh_window_snapshot();
         Some(CompactResult {
             before_tokens,
@@ -2251,7 +2253,10 @@ impl Session {
             return None;
         }
         self.sink.mark_compacted();
-        self.sink.emit(Event::ContextCompact {
+        let mut messages = self.messages.lock().expect("session messages poisoned");
+        self.compaction.update_context_epoch(&replacement);
+        let mut batch = self.sink.batch();
+        batch.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
             flow_run_id: None,
             before_tokens,
@@ -2261,7 +2266,7 @@ impl Session {
             summary_text: Some(summary.clone()),
             replacement_msg_seq: None,
         });
-        self.sink.emit(Event::CompactionSummary {
+        batch.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
             flow_run_id: None,
             range_start: range.start as u64,
@@ -2271,6 +2276,18 @@ impl Session {
             after_tokens,
             summary: summary.clone(),
         });
+        self.compaction
+            .model_window_tokens
+            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+        *messages = replacement.clone();
+        batch.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            messages: replacement,
+            window_tokens: after_tokens,
+        });
+        drop(batch);
+        drop(messages);
         let _ = self
             .watch
             .stream_tx
@@ -2283,19 +2300,6 @@ impl Session {
                 after_tokens,
                 compacted_count: range.end - range.start,
             });
-        self.compaction
-            .model_window_tokens
-            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(mut messages) = self.messages.lock() {
-            *messages = replacement.clone();
-        }
-        self.compaction.update_context_epoch(&replacement);
-        self.sink.emit(Event::Checkpoint {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            messages: replacement,
-            window_tokens: after_tokens,
-        });
         self.refresh_window_snapshot();
         Some(CompactResult {
             before_tokens,
@@ -2336,12 +2340,17 @@ impl Session {
             )
         });
         self.sink.mark_compacted();
-        let replacement_seq = self.sink.emit_returning_seq(Event::SystemMsg {
-            turn_id: turn_id.clone(),
-            flow_run_id: None,
-            message: replacement_msg,
-        });
-        self.sink.emit(Event::ContextCompact {
+        let mut messages = self.messages.lock().expect("session messages poisoned");
+        self.compaction.update_context_epoch(&after);
+        let mut batch = self.sink.batch();
+        let replacement_seq = batch
+            .emit(Event::SystemMsg {
+                turn_id: turn_id.clone(),
+                flow_run_id: None,
+                message: replacement_msg,
+            })
+            .seq;
+        batch.emit(Event::ContextCompact {
             session_id: self.id.to_string(),
             flow_run_id: None,
             before_tokens,
@@ -2351,7 +2360,7 @@ impl Session {
             summary_text: Some(summary.clone()),
             replacement_msg_seq: Some(replacement_seq),
         });
-        self.sink.emit(Event::CompactionSummary {
+        batch.emit(Event::CompactionSummary {
             session_id: self.id.to_string(),
             flow_run_id: None,
             range_start: range.start as u64,
@@ -2361,6 +2370,18 @@ impl Session {
             after_tokens,
             summary: summary.clone(),
         });
+        self.compaction
+            .model_window_tokens
+            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+        *messages = after.clone();
+        batch.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            messages: after,
+            window_tokens: after_tokens,
+        });
+        drop(batch);
+        drop(messages);
         let _ = self
             .watch
             .stream_tx
@@ -2373,19 +2394,6 @@ impl Session {
                 after_tokens,
                 compacted_count: range.end - range.start,
             });
-        self.compaction
-            .model_window_tokens
-            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
-        self.compaction.update_context_epoch(&after);
-        if let Ok(mut vec) = self.messages.lock() {
-            *vec = after.clone();
-        }
-        self.sink.emit(Event::Checkpoint {
-            session_id: self.id.to_string(),
-            flow_run_id: None,
-            messages: after,
-            window_tokens: after_tokens,
-        });
         self.refresh_window_snapshot();
         Some(CompactResult {
             before_tokens,

@@ -405,17 +405,22 @@ mod tests {
         let gate = Arc::clone(&barrier);
         let writer = std::thread::spawn(move || {
             gate.wait();
-            for index in 0..64 {
-                let message = user(&format!("message {index}"));
-                scoped.emit(Event::UserMsg {
-                    turn_id: message.turn_id.clone(),
-                    flow_run_id: None,
-                    message,
-                });
+            for pair in 0..32 {
+                let mut batch = scoped.batch();
+                for offset in 0..2 {
+                    let message = user(&format!("message {}", pair * 2 + offset));
+                    batch.emit(Event::UserMsg {
+                        turn_id: message.turn_id.clone(),
+                        flow_run_id: None,
+                        message,
+                    });
+                    std::thread::yield_now();
+                }
             }
         });
         barrier.wait();
         let stream = MessageStream::from_context(sink.events_handle(), context_id.clone()).unwrap();
+        assert_eq!(stream.window().len() % 2, 0);
         writer.join().unwrap();
         let replay = crate::projection::context::replay_context(
             &sink.snapshot_envelopes(),

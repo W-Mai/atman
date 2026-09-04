@@ -100,6 +100,8 @@ child requests.
 
 Compaction commits the complete selected replacement window to both live message handles and its persisted checkpoint. Latest retained context records, including tombstones that clear a previous value, remain after the summary. Raw history remains independent of this replacement.
 
+Root and child compaction records hold the shared event-log lock across publication. Log snapshots and context-view initialization therefore see the batch before or after its complete publication, while event subscribers and the writer still receive individual records. This lock does not span provider requests and does not make multiple JSONL records a disk transaction.
+
 The flow chooses one message source:
 
 | Form | Messages sent |

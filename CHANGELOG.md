@@ -35,6 +35,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction event boundaries** — root and child compaction records publish under one shared-log lock. Snapshot readers cannot capture a partial batch, and root completion frames are sent after the replacement checkpoint is published.
 - **Compaction context retention** — direct session compaction commits the complete replacement window, including retained context records and tombstones, to live handles and checkpoints. Window metrics refresh after that checkpoint is visible.
 - **Compaction replay identity** — reconstructed summaries retain their persisted replacement-message turn identity instead of generating a new identity on each replay.
 - **Child context persistence** — spawned workspace, handoff, and retrieved records share a versioned append path that persists each change with its child owner. Repeated content remains a no-op, and replay retains the records used by corrected requests.

@@ -861,7 +861,8 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
         .clone()
         .or_else(|| ctx.turn_id.as_ref().map(ToString::to_string))
         .unwrap_or_default();
-    sink.emit(crate::event::Event::ContextCompact {
+    let mut batch = sink.batch();
+    batch.emit(crate::event::Event::ContextCompact {
         session_id: session_id.clone(),
         flow_run_id: Some(flow_run_id.clone()),
         before_tokens: result.before_tokens,
@@ -871,7 +872,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
         summary_text: Some(result.summary.clone()),
         replacement_msg_seq: None,
     });
-    sink.emit(crate::event::Event::CompactionSummary {
+    batch.emit(crate::event::Event::CompactionSummary {
         session_id: session_id.clone(),
         flow_run_id: Some(flow_run_id.clone()),
         range_start: result.compacted_start as u64,
@@ -881,7 +882,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
         after_tokens: result.after_tokens,
         summary: result.summary.clone(),
     });
-    sink.emit(crate::event::Event::Checkpoint {
+    batch.emit(crate::event::Event::Checkpoint {
         session_id,
         flow_run_id: Some(flow_run_id),
         messages: result.checkpoint_messages.clone(),

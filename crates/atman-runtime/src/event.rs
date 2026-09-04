@@ -650,6 +650,34 @@ pub struct EventSink {
     last_compact_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
 
+/// Serializes related records against other emitters and shared-log readers.
+/// Records are still individually delivered and persisted; this is not a disk transaction.
+pub(crate) struct EventBatch<'a> {
+    sink: &'a EventSink,
+    events: std::sync::MutexGuard<'a, Vec<EventEnvelope>>,
+}
+
+impl EventBatch<'_> {
+    pub(crate) fn emit(&mut self, event: Event) -> EventEnvelope {
+        let next = self
+            .sink
+            .seq_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let mut envelope = EventEnvelope::new(next, event);
+        envelope.context_id.clone_from(&self.sink.context_id);
+        if let Some(tx) = &self.sink.forwarder {
+            let _ = tx.send(envelope.clone());
+        }
+        self.events.push(envelope.clone());
+        let _ = self.sink.event_tx.send(envelope.clone());
+        self.sink
+            .published_seq
+            .store(next, std::sync::atomic::Ordering::Release);
+        envelope
+    }
+}
+
 impl Default for EventSink {
     fn default() -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_SUBSCRIBER_BUFFER);
@@ -725,21 +753,14 @@ impl EventSink {
     }
 
     pub fn emit_returning_envelope(&self, event: Event) -> EventEnvelope {
-        let mut events = self.events.lock().expect("event sink poisoned");
-        let next = self
-            .seq_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        let mut envelope = EventEnvelope::new(next, event);
-        envelope.context_id.clone_from(&self.context_id);
-        if let Some(tx) = &self.forwarder {
-            let _ = tx.send(envelope.clone());
+        self.batch().emit(event)
+    }
+
+    pub(crate) fn batch(&self) -> EventBatch<'_> {
+        EventBatch {
+            sink: self,
+            events: self.events.lock().expect("event sink poisoned"),
         }
-        events.push(envelope.clone());
-        let _ = self.event_tx.send(envelope.clone());
-        self.published_seq
-            .store(next, std::sync::atomic::Ordering::Release);
-        envelope
     }
 
     pub fn emit(&self, event: Event) {
@@ -1115,6 +1136,61 @@ mod tests {
             }
             let restored: EventEnvelope = serde_json::from_value(expected.clone()).unwrap();
             assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+        }
+        assert!(forwarded.try_recv().is_err());
+        assert!(subscribed.try_recv().is_err());
+    }
+
+    #[test]
+    fn batches_exclude_shared_log_readers_and_other_emitters() {
+        let (tx, mut forwarded) = mpsc::unbounded_channel();
+        let sink = EventSink::new().with_forwarder(tx);
+        let left = sink.clone().with_context(ContextId::now());
+        let right = sink.clone().with_context(ContextId::now());
+        let mut subscribed = sink.subscribe();
+        {
+            let _batch = left.batch();
+            assert!(matches!(
+                sink.events.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+        }
+        std::thread::scope(|scope| {
+            for source in [&sink, &left, &right] {
+                scope.spawn(move || {
+                    for _ in 0..8 {
+                        let run_id = FlowRunId::now();
+                        let mut batch = source.batch();
+                        batch.emit(Event::RunCancelRequested {
+                            run_id: run_id.clone(),
+                        });
+                        std::thread::yield_now();
+                        batch.emit(Event::RunCancelRequested { run_id });
+                    }
+                });
+            }
+        });
+        let events = sink.snapshot_envelopes();
+        assert_eq!(events.len(), 48);
+        assert_eq!(sink.published_seq(), 48);
+        for pair in events.chunks_exact(2) {
+            assert_eq!(pair[0].context_id, pair[1].context_id);
+            assert_eq!(
+                serde_json::to_value(&pair[0].event).unwrap(),
+                serde_json::to_value(&pair[1].event).unwrap()
+            );
+        }
+        for (index, envelope) in events.iter().enumerate() {
+            assert_eq!(envelope.seq, index as u64 + 1);
+            let expected = serde_json::to_value(envelope).unwrap();
+            assert_eq!(
+                serde_json::to_value(forwarded.try_recv().unwrap()).unwrap(),
+                expected
+            );
+            assert_eq!(
+                serde_json::to_value(subscribed.try_recv().unwrap()).unwrap(),
+                expected
+            );
         }
         assert!(forwarded.try_recv().is_err());
         assert!(subscribed.try_recv().is_err());
