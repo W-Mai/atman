@@ -551,6 +551,7 @@ const MAX_TRACKED_CONTEXT_PREFIXES: usize = 32;
 struct ContextPrefixTraceKey {
     call_purpose: ContextCallPurpose,
     call_identity: ContextCallIdentity,
+    managed_context: bool,
 }
 
 #[derive(Clone)]
@@ -573,11 +574,13 @@ impl ContextPrefixTracker {
         call_identity: ContextCallIdentity,
         provider: &str,
         model: &str,
+        managed_context: bool,
         snapshot: ContextPrefixSnapshot,
     ) -> ContextCacheObservation {
         let key = ContextPrefixTraceKey {
             call_purpose,
             call_identity,
+            managed_context,
         };
         let observation = self.entries.get(&key).map_or_else(
             || snapshot.initial_observation(),
@@ -1657,6 +1660,7 @@ mod tests {
                     identity,
                     "provider",
                     "model",
+                    true,
                     ContextPrefixSnapshot::provider_neutral(plan.request()).unwrap(),
                 );
                 assert_eq!(
@@ -1709,6 +1713,7 @@ mod tests {
                 oldest = Some(ContextPrefixTraceKey {
                     call_purpose: ContextCallPurpose::General,
                     call_identity: identity.clone(),
+                    managed_context: true,
                 });
             }
             tracker.observe(
@@ -1716,6 +1721,7 @@ mod tests {
                 identity,
                 "provider",
                 "model",
+                true,
                 snapshot.clone(),
             );
         }

@@ -220,6 +220,9 @@ pub enum Event {
         provider: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_plan_id: Option<crate::context_plan::ContextPlanId>,
+        /// Whether this request read the bound message context, rather than explicit input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        managed_context: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_epoch: Option<crate::context_plan::ContextEpoch>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

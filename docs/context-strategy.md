@@ -57,9 +57,9 @@ Provider usage remains authoritative when present; missing input or output count
 the complete plan estimate and the event identifies provider, estimated, or mixed
 usage. The same event classifies general, extraction, classification, and branch
 generation calls and identifies detached, root-session, and spawned-child contexts.
-The Session retains the latest usage in bounded provider/model/purpose/identity buckets.
-Only a general root-session call updates the active model-window reading; helper and
-child calls remain visible in their own buckets without replacing it.
+The Session accumulates all call usage in provider/model/purpose/scope buckets. A bound context retains its latest managed-request usage separately; bare prompts and explicit `messages:` calls do not replace it. Only a general managed call belonging to the default root context updates the active model-window reading. Helper and child costs remain visible without replacing that reading. Each new `llm_call` records `managed_context`, so live accounting, raw-log replay, and daemon projection apply the same eligibility rule. Released raw events without this field retain their existing interpretation.
+
+Managed and explicit requests use separate bounded prefix-observation tracks within each owner and purpose. An explicit request can reuse its own observation without overwriting the managed history's prefix. Only managed requests incorporate the owner's checkpoint epoch.
 
 Each call also fingerprints the cacheable prompt sequence after OpenAI Chat,
 Anthropic Messages, Codex Responses, or provider-neutral projection. The observation

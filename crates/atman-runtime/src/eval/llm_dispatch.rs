@@ -138,6 +138,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .await;
     }
     let uses_managed_context = !matches!(context_mode, ContextMode::None) && !has_messages_override;
+    let managed_context = ctx.context().filter(|_| uses_managed_context);
     let uses_spawned_context = uses_managed_context
         && ctx.session_runtime().is_none()
         && matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
@@ -280,6 +281,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         model: model.clone(),
                         provider: provider.name().to_string(),
                         context_plan_id: None,
+                        managed_context: Some(false),
                         context_epoch: None,
                         context_tokens: None,
                         usage_source: None,
@@ -334,7 +336,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 reasoning: reasoning.clone(),
                 stall_timeout_secs,
             };
-            let context_epoch = ctx.context().and_then(|context| context.epoch());
+            let context_epoch = managed_context.and_then(|context| context.epoch());
             let context_plan = crate::context_plan::ModelContextPlan::for_provider_call(
                 req,
                 args.call_purpose,
@@ -362,6 +364,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     &api_model,
                     context_call_purpose,
                     context_call_identity.clone(),
+                    managed_context.is_some(),
                     context_prefix,
                 )
             } else {
@@ -510,6 +513,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     model: model.clone(),
                     provider: provider.name().to_string(),
                     context_plan_id: Some(context_plan_id.clone()),
+                    managed_context: Some(managed_context.is_some()),
                     context_epoch: Some(context_epoch),
                     context_tokens: Some(context_tokens),
                     usage_source: Some(usage_source),
@@ -543,12 +547,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     node_id: ctx.current_node_id.clone(),
                 });
             }
-            if let Some(session) = ctx.session_runtime()
-                && !matches!(context_mode, ContextMode::None)
-                && let Some(context) = ctx.context()
-            {
+            if let Some(session) = ctx.session_runtime() {
                 session.record_context_plan_call(
-                    context,
+                    managed_context.map(std::convert::AsRef::as_ref),
                     provider.name(),
                     &model,
                     context_plan_id,
@@ -558,9 +559,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     ttft_ms,
                     tps,
                 );
-            } else if let Some(context) = ctx.context()
-                && !matches!(context_mode, ContextMode::None)
-            {
+            } else if let Some(context) = managed_context {
                 context.record_call(
                     provider.name(),
                     &model,

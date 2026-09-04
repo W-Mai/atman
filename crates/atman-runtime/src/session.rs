@@ -1502,7 +1502,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn record_context_plan_call(
         &self,
-        context: &ContextState,
+        context: Option<&ContextState>,
         provider: &str,
         model: &str,
         plan_id: crate::context_plan::ContextPlanId,
@@ -1512,16 +1512,18 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        context.record_call(
-            provider,
-            model,
-            call_purpose,
-            call_identity.clone(),
-            crate::context_plan::ContextUsageRecord {
-                plan_id,
-                usage: usage.clone(),
-            },
-        );
+        if let Some(context) = context {
+            context.record_call(
+                provider,
+                model,
+                call_purpose,
+                call_identity.clone(),
+                crate::context_plan::ContextUsageRecord {
+                    plan_id,
+                    usage: usage.clone(),
+                },
+            );
+        }
 
         let total_input = usage.prompt_input();
         self.watch.context.send_modify(|snap| {
@@ -1552,7 +1554,8 @@ impl Session {
             bucket.cache_write = bucket.cache_write.saturating_add(usage.cache_write);
         });
 
-        let updates_model_window = std::ptr::eq(context, self.context.as_ref())
+        let updates_model_window = context
+            .is_some_and(|context| std::ptr::eq(context, self.context.as_ref()))
             && matches!(
                 (call_identity.scope, call_purpose),
                 (

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Context usage targets** — `Session::record_context_plan_call` accepts an optional managed context. An absent target records aggregate usage without updating message-window statistics.
 - **Compaction targets** — budget-aware compaction, manual scheduling, and session compaction commits require the target `ContextState`. Manual request consumption is internal to that owner.
 - **Attachment rejection ownership** — the session-wide `Session::record_attachment_degrade` method is removed. Managed LLM calls apply image rejection patches through their bound message context.
 - **Attachment patch addresses** — `Event::AttachmentDegraded` carries a shared `AttachmentPatch` with an exclusive stable-ID or legacy-position target. Existing JSONL position addresses remain readable; mixed and incomplete addresses are rejected. Message projections expose optional context, checkpoint, and image identities.
@@ -43,6 +44,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Explicit-request accounting** — bare prompts and explicit message lists contribute to call totals without replacing the managed window's usage or model. LLM events retain this distinction during replay and daemon projection; managed and explicit requests retain separate bounded cache-prefix observations.
 - **LLM call journals** — successful, failed, and retried calls publish usage through their context's canonical journal even without execution diagnostics. Independent diagnostic traces receive a copy; a shared journal receives one scoped event.
 - **Compaction scheduling ownership** — automatic scheduling, manual requests, and overflow retries retain the selected message context through locking, summarization, and checkpoint publication. Default-window statistics and streaming panels are not replaced by another context's compaction.
 - **Message-view scope isolation** — unscoped session history no longer consumes messages, checkpoints, or attachment patches from typed contexts. Live and restored default windows preserve their own history while selected context replay retains inherited messages and branch-local changes.

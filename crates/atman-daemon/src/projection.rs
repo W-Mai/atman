@@ -783,6 +783,7 @@ impl SessionProjector {
             Event::LlmCall {
                 model,
                 provider,
+                managed_context,
                 context_call_purpose,
                 context_call_identity,
                 run_id,
@@ -837,7 +838,10 @@ impl SessionProjector {
                         run.provider = Some(provider.clone());
                         changes.push(ProjectionChange::RunUpsert { run: run.clone() });
                     }
-                    if scope == atman_runtime::context_plan::ContextCallScope::Root {
+                    if scope == atman_runtime::context_plan::ContextCallScope::Root
+                        && managed_context.unwrap_or(true)
+                        && envelope.context_id.is_none()
+                    {
                         self.projection.context.model = model.clone();
                         self.projection.context.provider = provider.clone();
                     }
@@ -2257,6 +2261,7 @@ mod tests {
                     model: "reasoning-model".into(),
                     provider: "openai-compatible".into(),
                     context_plan_id: None,
+                    managed_context: None,
                     context_epoch: None,
                     context_tokens: None,
                     usage_source: None,
@@ -2729,6 +2734,7 @@ mod tests {
                 model: "reasoning-model".into(),
                 provider: "openai-compatible".into(),
                 context_plan_id: None,
+                managed_context: None,
                 context_epoch: None,
                 context_tokens: None,
                 usage_source: None,
@@ -2801,6 +2807,7 @@ mod tests {
             model: model.into(),
             provider: provider.into(),
             context_plan_id: None,
+            managed_context: None,
             context_epoch: None,
             context_tokens: None,
             usage_source: None,
@@ -2884,6 +2891,56 @@ mod tests {
         assert_eq!(child.provider.as_deref(), Some("child-provider"));
         assert_eq!(projector.projection().context.model, "root-model");
         assert_eq!(projector.projection().context.provider, "root-provider");
+
+        for (index, scoped) in [false, true].into_iter().enumerate() {
+            let seq = 7 + 2 * index as u64;
+            let mut event = llm_call(
+                "separate-input-model",
+                "separate-input-provider",
+                ContextCallPurpose::General,
+                ContextCallScope::Root,
+                root_run_id.clone(),
+            );
+            let Event::LlmCall {
+                managed_context,
+                usage,
+                ..
+            } = &mut event
+            else {
+                unreachable!();
+            };
+            *managed_context = Some(scoped);
+            usage.input = 25;
+            let mut record = envelope(seq, started_at, event);
+            record.context_id = scoped.then(atman_runtime::event::ContextId::now);
+            if scoped {
+                let mut created = envelope(
+                    seq - 1,
+                    started_at,
+                    Event::ContextCreated {
+                        base: None,
+                        inheritance: atman_runtime::event::ContextInheritance::Full,
+                    },
+                );
+                created.context_id = record.context_id.clone();
+                projector.apply_envelope(&created);
+            }
+            projector.apply_envelope(&record);
+            assert_eq!(projector.projection().context.model, "root-model");
+            assert_eq!(projector.projection().context.provider, "root-provider");
+            assert_eq!(projector.projection().usage.llm_calls, index as u64 + 5);
+            assert_eq!(
+                projector.projection().usage.input_tokens,
+                (index as u64 + 1) * 25
+            );
+            let run = projector
+                .projection()
+                .runs
+                .iter()
+                .find(|run| run.id.0 == root_run_id.0)
+                .unwrap();
+            assert_eq!(run.model.as_deref(), Some("separate-input-model"));
+        }
     }
 
     #[test]

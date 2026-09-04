@@ -249,13 +249,21 @@ impl ContextState {
         model: &str,
         call_purpose: crate::context_plan::ContextCallPurpose,
         call_identity: crate::context_plan::ContextCallIdentity,
+        managed_context: bool,
         snapshot: crate::context_plan::ContextPrefixSnapshot,
     ) -> crate::context_plan::ContextCacheObservation {
         self.compaction
             .last_context_prefix
             .lock()
             .expect("context prefix lock poisoned")
-            .observe(call_purpose, call_identity, provider, model, snapshot)
+            .observe(
+                call_purpose,
+                call_identity,
+                provider,
+                model,
+                managed_context,
+                snapshot,
+            )
     }
 }
 
@@ -432,6 +440,7 @@ mod tests {
                     "model",
                     purpose,
                     identity.clone(),
+                    true,
                     prefix.clone(),
                 );
                 let source_raw = source.messages_full();
@@ -478,6 +487,7 @@ mod tests {
                             "model",
                             purpose,
                             identity.clone(),
+                            true,
                             prefix.clone()
                         )
                         .reset_reason,
@@ -488,7 +498,7 @@ mod tests {
                 assert_eq!(source.last_usage(&usage_key), Some(usage));
                 assert_eq!(
                     source
-                        .observe_prefix("provider", "model", purpose, identity, prefix)
+                        .observe_prefix("provider", "model", purpose, identity, true, prefix)
                         .reset_reason,
                     None
                 );
@@ -888,6 +898,7 @@ mod tests {
                     "model",
                     purpose,
                     identity.clone(),
+                    true,
                     prefix.clone()
                 )
                 .reset_reason,
@@ -902,6 +913,7 @@ mod tests {
                     "model",
                     purpose,
                     identity.clone(),
+                    true,
                     prefix.clone()
                 )
                 .reset_reason,
@@ -910,7 +922,7 @@ mod tests {
         assert_eq!(
             root.context()
                 .unwrap()
-                .observe_prefix("provider", "model", purpose, identity, prefix)
+                .observe_prefix("provider", "model", purpose, identity, true, prefix)
                 .reset_reason,
             Some(ContextCacheResetReason::ColdStart)
         );
@@ -1110,6 +1122,9 @@ mod tests {
                     }).collect();
                     assert_eq!(calls.len(), 1, "{diagnostics}/{watched}/{inline}");
                     assert_eq!(calls[0].context_id, Some(context_id));
+                    let replay = crate::event_log::reader::context_snapshot_from_envelopes(&events);
+                    assert!(replay.model.is_empty());
+                    assert!(replay.provider.is_empty());
                     let traced_calls: Vec<_> = trace.snapshot().into_iter().filter(|event| {
                         matches!(event, Event::LlmCall { .. })
                     }).collect();

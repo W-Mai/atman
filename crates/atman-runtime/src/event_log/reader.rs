@@ -112,15 +112,16 @@ pub fn find_last_seq(path: &Path) -> Result<Option<u64>, SessionOpenError> {
 pub(crate) fn context_snapshot_from_records(records: &[ReplayRecord]) -> ContextSnapshot {
     let mut snapshot = ContextSnapshot::default();
     for record in records {
-        apply_context_record(&mut snapshot, &record.envelope.event);
+        apply_context_record(&mut snapshot, &record.envelope);
     }
     snapshot
 }
 
-fn apply_context_record(snapshot: &mut ContextSnapshot, event: &Event) {
+fn apply_context_record(snapshot: &mut ContextSnapshot, envelope: &EventEnvelope) {
     let Event::LlmCall {
         model,
         provider,
+        managed_context,
         context_call_purpose,
         context_call_identity,
         usage,
@@ -128,7 +129,7 @@ fn apply_context_record(snapshot: &mut ContextSnapshot, event: &Event) {
         tokens_per_second,
         run_id,
         ..
-    } = event
+    } = &envelope.event
     else {
         return;
     };
@@ -181,7 +182,11 @@ fn apply_context_record(snapshot: &mut ContextSnapshot, event: &Event) {
     bucket.cache_read = bucket.cache_read.saturating_add(usage.cached_input);
     bucket.cache_write = bucket.cache_write.saturating_add(usage.cache_write);
 
-    if purpose == ContextCallPurpose::General && scope == ContextCallScope::Root {
+    if purpose == ContextCallPurpose::General
+        && scope == ContextCallScope::Root
+        && managed_context.unwrap_or(true)
+        && envelope.context_id.is_none()
+    {
         snapshot.provider.clone_from(provider);
         snapshot.model.clone_from(model);
         snapshot.last_ttft_ms = ttft_ms.unwrap_or(0);
@@ -198,7 +203,7 @@ pub fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
 pub fn context_snapshot_from_envelopes(events: &[EventEnvelope]) -> ContextSnapshot {
     let mut snapshot = ContextSnapshot::default();
     for envelope in events {
-        apply_context_record(&mut snapshot, &envelope.event);
+        apply_context_record(&mut snapshot, envelope);
     }
     snapshot
 }
