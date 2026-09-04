@@ -100,7 +100,7 @@ fn validate_retrieved_record_key(key: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn append_context_records(
+pub(crate) fn append_context_records(
     ctx: &ToolCtx,
     turn_id: crate::event::TurnId,
     specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
@@ -115,12 +115,11 @@ fn append_context_records(
     };
     let mut messages = messages.lock().unwrap();
     let records = crate::context_plan::compile_context_records(&messages, specs);
-    messages.extend(
-        records
-            .iter()
-            .cloned()
-            .map(|record| crate::message::Message::context_record(turn_id.clone(), record)),
-    );
+    for record in &records {
+        let message = crate::message::Message::context_record(turn_id.clone(), record.clone());
+        super::session::emit_message_event(ctx, &message);
+        messages.push(message);
+    }
     Ok(records)
 }
 

@@ -130,6 +130,8 @@ Spawned flows keep a separate message segment. With `inherit_context: true`, the
 
 Successful managed `llm.call(context: "session")` calls append their assistant message to the active root or child segment through the same runtime contract. Flow code uses `session.push` for tool results, interjections, and other explicit messages rather than re-appending the returned assistant message.
 
+Child workspace, parent handoff, and retrieved context records use the same versioned append operation. Each changed record is persisted with its child owner before entering memory; identical content does not create another event. Course corrections preserve these records alongside partial assistant responses and captured steering. Bare `prompt:` calls remain hidden and do not append their final response automatically.
+
 Child segments use the same token-aware, transaction-aligned compaction and checkpoint mechanism as root history. No message-count trim rewrites the child prefix outside compaction; each child retains its own context epoch and cache-prefix observations.
 
 Tool results use the same configured line, byte, and per-line budget in dispatch,

@@ -30,6 +30,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Child context persistence** — spawned workspace, handoff, and retrieved records share a versioned append path that persists each change with its child owner. Repeated content remains a no-op, and replay retains the records used by corrected requests.
 - **Canonical course corrections** — session and handle-based interjections share the root inbox and canonical context; spawned flows retain separate inboxes. Nudges remain pending until another agent call. Course corrections preserve partial assistant output and rebuild requests without duplicating the user prompt or imposing a three-correction limit. Terminal runs reject late input and cancel only their own pending messages.
 - **Flow control ownership** — root handles cancel their actual invocation token. Synchronous spawned flows own separate output, message, compaction, and cancellation state; normal root and child completion publishes one terminal entry state. Cancellation is classified consistently in flow events, task status, and entry status.
 - **Interjection ordering** — hard stops take priority over redirects and corrections; equal-priority controls retain arrival order. Stream interruption consumes only the selected control, and concurrent session consumers cannot claim the same control twice.

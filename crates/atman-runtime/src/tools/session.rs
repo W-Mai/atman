@@ -118,7 +118,7 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
     Ok(())
 }
 
-fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
+pub(super) fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
     use crate::event::{Event, TurnId};
     let Some(sink) = &ctx.events else {
         return;

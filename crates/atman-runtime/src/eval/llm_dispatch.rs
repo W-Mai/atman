@@ -80,7 +80,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             &mut system,
             vec![crate::context_plan::CONTEXT_RECORD_INSTRUCTIONS.to_string()],
         );
-        sync_runtime_context_records(ctx, &turn_id).await;
+        if let Err(error) = sync_runtime_context_records(ctx, &turn_id).await {
+            return Value::Err(error);
+        }
     }
     if let Some(budget) = args.context_budget {
         if let Some(p) = args.prompt.as_mut() {
@@ -925,18 +927,18 @@ fn request_working_directory(ctx: &ToolCtx) -> Option<std::path::PathBuf> {
         .or_else(|| ctx.resolve_cwd(None).ok())
 }
 
-async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::TurnId) {
+async fn sync_runtime_context_records(
+    ctx: &ToolCtx,
+    turn_id: &crate::event::TurnId,
+) -> Result<(), RuntimeError> {
     if let Some(session) = ctx.session_runtime.as_ref() {
         session
             .append_context_records(turn_id.clone(), session_context_record_specs(session).await);
-        return;
+        return Ok(());
     }
     if !matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned) {
-        return;
+        return Ok(());
     }
-    let Some(messages) = ctx.session_messages_handle.as_ref() else {
-        return;
-    };
     let workspace = tool_context_working_directory_context(ctx);
     let spec = crate::context_plan::ContextRecordSpec::new(
         "session.workspace",
@@ -947,13 +949,12 @@ async fn sync_runtime_context_records(ctx: &ToolCtx, turn_id: &crate::event::Tur
             crate::context_plan::ContextRecordBody::text,
         ),
     );
-    let mut messages = messages.lock().unwrap();
-    let records = crate::context_plan::compile_context_records(&messages, [spec]);
-    messages.extend(
-        records
-            .into_iter()
-            .map(|record| crate::message::Message::context_record(turn_id.clone(), record)),
-    );
+    let _compact_guard = match ctx.compact_lock_handle.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    crate::tools::context::append_context_records(ctx, turn_id.clone(), [spec])?;
+    Ok(())
 }
 
 fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<&std::path::Path>) {
@@ -1099,9 +1100,15 @@ mod tests {
         };
         let turn_id = crate::event::TurnId::now();
 
-        sync_runtime_context_records(&context(first.path()), &turn_id).await;
-        sync_runtime_context_records(&context(first.path()), &turn_id).await;
-        sync_runtime_context_records(&context(second.path()), &turn_id).await;
+        sync_runtime_context_records(&context(first.path()), &turn_id)
+            .await
+            .unwrap();
+        sync_runtime_context_records(&context(first.path()), &turn_id)
+            .await
+            .unwrap();
+        sync_runtime_context_records(&context(second.path()), &turn_id)
+            .await
+            .unwrap();
 
         let messages = messages.lock().unwrap();
         let records: Vec<_> = messages

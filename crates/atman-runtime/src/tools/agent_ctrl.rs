@@ -1803,24 +1803,12 @@ fn seed_parent_handoff_context(
         .turn_id
         .clone()
         .unwrap_or_else(crate::event::TurnId::now);
-    let record = {
-        let messages = ctx.session_messages_handle.as_ref().ok_or_else(|| {
-            RuntimeError::ToolFailed("flow.spawn: child message context is unavailable".into())
-        })?;
-        let messages = messages.lock().unwrap();
-        crate::context_plan::compile_context_records(&messages, [spec])
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                RuntimeError::ToolFailed(
-                    "flow.spawn: child handoff record was not materialized".into(),
-                )
-            })?
-    };
-    crate::tools::session::append_message_to_context(
-        ctx,
-        crate::message::Message::context_record(turn_id, record),
-    )
+    if super::context::append_context_records(ctx, turn_id, [spec])?.is_empty() {
+        return Err(RuntimeError::ToolFailed(
+            "flow.spawn: child handoff record was not materialized".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn mark_terminal_and_emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
