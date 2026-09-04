@@ -613,6 +613,7 @@ async fn get_snapshot_replays_idle_sessions_and_marks_interrupted_runs_lost() {
     let event = atman_runtime::event::EventEnvelope {
         seq: 1,
         ts: chrono::Utc::now(),
+        context_id: None,
         event: atman_runtime::event::Event::FlowStart {
             turn_id: None,
             run_id,

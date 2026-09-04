@@ -468,7 +468,18 @@ fn serialize_event(envelope: &EventEnvelope, redactor: Option<&Redactor>) -> Str
             );
         }
     };
+    let metadata = ["seq", "ts", "context_id"].map(|key| {
+        let field = value.as_object_mut().and_then(|map| map.remove(key));
+        (key, field)
+    });
     r.redact_json(&mut value);
+    if let serde_json::Value::Object(map) = &mut value {
+        for (key, field) in metadata {
+            if let Some(field) = field {
+                map.insert(key.into(), field);
+            }
+        }
+    }
     serde_json::to_string(&value).unwrap_or_else(|e| {
         format!(
             "{{\"type\":\"encode_error\",\"error\":{:?}}}",

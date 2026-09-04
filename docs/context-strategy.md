@@ -6,6 +6,8 @@ hides important behavior.
 
 ## The request model
 
+Event envelopes can carry a typed `ContextId` independent of turn and execution identifiers. A scoped `EventSink` labels its emitted events without changing sibling sinks; all sinks still share the same ordered log, subscriptions, and writer. JSONL and envelope replay preserve this metadata. Missing or null context identities represent legacy unscoped records; invalid identities fail envelope deserialization. Scope metadata alone does not select a message window or enable concurrent root execution.
+
 Root handles use the invocation's cancellation token, including an explicitly supplied token independent of the session turn. Synchronous and asynchronous spawned flows own separate entries, message handles, and compaction locks; synchronous child cancellation propagates from the caller without cancelling the caller in reverse. Normal completion updates the entry and publishes its terminal output state once. Flow events, entry status, and task status share the execution result's cancellation classification.
 
 Every `llm.call` is assembled from four independent inputs:

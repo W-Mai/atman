@@ -1946,7 +1946,12 @@ mod tests {
     use atman_runtime::message::Message;
 
     fn envelope(seq: u64, ts: chrono::DateTime<chrono::Utc>, event: Event) -> EventEnvelope {
-        EventEnvelope { seq, ts, event }
+        EventEnvelope {
+            seq,
+            ts,
+            context_id: None,
+            event,
+        }
     }
 
     #[test]

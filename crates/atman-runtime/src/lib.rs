@@ -100,7 +100,8 @@ pub use env::Env;
 pub use error::RuntimeError;
 pub use eval::{EvalCtx, eval_expr};
 pub use event::{
-    Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
+    ContextId, Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable,
+    TurnId,
 };
 pub use executor::{Executor, ProviderLifecycleAlreadyAttached, RootInvocation};
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Event context identity** — `EventEnvelope` includes an optional typed `ContextId`. `EventSink::with_context` labels emitted envelopes while sharing sequence assignment and delivery with sibling sinks. Unscoped JSONL records retain their existing representation.
 - **Run inbox API** — flow entries expose checked `interject` and read-only `pending_injections` methods instead of a mutable queue and notifier. Entry registration requires a live execution identity and returns a result. Course correction is an internal streaming outcome, not a `RuntimeError` variant.
 - **Flow entry registration** — `FlowRegistry::create_entry` accepts `FlowEntryOptions` for display labels, workspace bindings, and execution cancellation; separate workspace-specific registration methods are removed.
 - **Session controls** — `Session::take_pending_control` atomically consumes a stop or redirect and returns its control error, replacing separate peek and acknowledgement methods.

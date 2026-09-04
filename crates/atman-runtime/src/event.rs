@@ -38,19 +38,42 @@ impl std::fmt::Display for TurnId {
     }
 }
 
-/// Wraps an Event with assigned sequence number and timestamp.
-/// Serializes to the same JSONL format as the flat Event for backward compat.
+/// Identity of a message context, independent of its turns and execution runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ContextId(pub Uuid);
+
+impl ContextId {
+    pub fn now() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for ContextId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// An event with sequence, timestamp, and optional message-context identity.
+/// Unscoped events retain the legacy flat JSONL representation.
 #[derive(Debug, Clone)]
 pub struct EventEnvelope {
     pub seq: u64,
     pub ts: chrono::DateTime<chrono::Utc>,
+    pub context_id: Option<ContextId>,
     pub event: Event,
 }
 
 impl EventEnvelope {
     pub fn new(seq: u64, event: Event) -> Self {
         let ts = chrono::Utc::now();
-        Self { seq, ts, event }
+        Self {
+            seq,
+            ts,
+            context_id: None,
+            event,
+        }
     }
 
     pub(crate) fn from_json_value(value: serde_json::Value) -> serde_json::Result<Self> {
@@ -61,8 +84,18 @@ impl EventEnvelope {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(chrono::Utc::now);
+        let context_id = value
+            .get("context_id")
+            .map(|id| serde_json::from_value::<Option<ContextId>>(id.clone()))
+            .transpose()?
+            .flatten();
         let event = serde_json::from_value(value)?;
-        Ok(Self { seq, ts, event })
+        Ok(Self {
+            seq,
+            ts,
+            context_id,
+            event,
+        })
     }
 }
 
@@ -72,6 +105,12 @@ impl serde::Serialize for EventEnvelope {
         if let serde_json::Value::Object(ref mut map) = value {
             map.insert("seq".into(), serde_json::Value::Number(self.seq.into()));
             map.insert("ts".into(), serde_json::Value::String(self.ts.to_rfc3339()));
+            if let Some(id) = &self.context_id {
+                map.insert(
+                    "context_id".into(),
+                    serde_json::Value::String(id.to_string()),
+                );
+            }
         }
         value.serialize(serializer)
     }
@@ -569,6 +608,7 @@ const EVENT_SUBSCRIBER_BUFFER: usize = 2_048;
 
 #[derive(Clone)]
 pub struct EventSink {
+    context_id: Option<ContextId>,
     events: Arc<Mutex<Vec<EventEnvelope>>>,
     event_tx: broadcast::Sender<EventEnvelope>,
     forwarder: Option<mpsc::UnboundedSender<EventEnvelope>>,
@@ -582,6 +622,7 @@ impl Default for EventSink {
     fn default() -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_SUBSCRIBER_BUFFER);
         Self {
+            context_id: None,
             events: Arc::new(Mutex::new(Vec::new())),
             event_tx,
             forwarder: None,
@@ -605,6 +646,13 @@ impl EventSink {
 
     pub fn with_redactor(mut self, redactor: Arc<crate::redact::Redactor>) -> Self {
         self.redactor = Some(redactor);
+        self
+    }
+
+    /// Scopes emitted envelopes without changing sibling sinks or subscriptions.
+    /// Clones share the complete event log and its sequence, not a filtered view.
+    pub fn with_context(mut self, context_id: ContextId) -> Self {
+        self.context_id = Some(context_id);
         self
     }
 
@@ -650,7 +698,8 @@ impl EventSink {
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let envelope = EventEnvelope::new(next, event);
+        let mut envelope = EventEnvelope::new(next, event);
+        envelope.context_id.clone_from(&self.context_id);
         if let Some(tx) = &self.forwarder {
             let _ = tx.send(envelope.clone());
         }
@@ -964,6 +1013,79 @@ mod tests {
         let back: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.seq, 42);
         assert!(matches!(back.event, Event::UserMsg { .. }));
+    }
+
+    #[test]
+    fn context_scope_is_typed_and_absent_from_legacy_json() {
+        let envelope = EventEnvelope::new(
+            42,
+            Event::RunCancelRequested {
+                run_id: FlowRunId::now(),
+            },
+        );
+        let mut value = serde_json::to_value(&envelope).unwrap();
+        assert!(value.get("context_id").is_none());
+        for scope in [None, Some(serde_json::Value::Null)] {
+            if let Some(scope) = scope {
+                value["context_id"] = scope;
+            }
+            let restored: EventEnvelope = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(restored.context_id, None);
+            assert_eq!(restored.ts, envelope.ts);
+        }
+        for invalid in [
+            serde_json::json!("invalid"),
+            serde_json::json!(7),
+            serde_json::json!({}),
+        ] {
+            value["context_id"] = invalid;
+            assert!(serde_json::from_value::<EventEnvelope>(value.clone()).is_err());
+        }
+    }
+
+    #[test]
+    fn scoped_sinks_share_ordered_delivery_without_changing_sibling_identity() {
+        let (tx, mut forwarded) = mpsc::unbounded_channel();
+        let sink = EventSink::new().with_forwarder(tx);
+        let left_id = ContextId::now();
+        let right_id = ContextId::now();
+        let left = sink.clone().with_context(left_id.clone());
+        let right = left.clone().with_context(right_id.clone());
+        let mut subscribed = right.subscribe();
+        std::thread::scope(|scope| {
+            for source in [&sink, &left, &right] {
+                scope.spawn(move || {
+                    for _ in 0..8 {
+                        source.emit(Event::RunCancelRequested {
+                            run_id: FlowRunId::now(),
+                        });
+                    }
+                });
+            }
+        });
+        let events = sink.snapshot_envelopes();
+        assert_eq!(sink.published_seq(), 24);
+        assert_eq!(left.published_seq(), 24);
+        for id in [None, Some(left_id), Some(right_id)] {
+            assert_eq!(
+                events.iter().filter(|event| event.context_id == id).count(),
+                8
+            );
+        }
+        for (index, envelope) in events.iter().enumerate() {
+            assert_eq!(envelope.seq, index as u64 + 1);
+            let expected = serde_json::to_value(envelope).unwrap();
+            for delivered in [
+                forwarded.try_recv().unwrap(),
+                subscribed.try_recv().unwrap(),
+            ] {
+                assert_eq!(serde_json::to_value(delivered).unwrap(), expected);
+            }
+            let restored: EventEnvelope = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+        }
+        assert!(forwarded.try_recv().is_err());
+        assert!(subscribed.try_recv().is_err());
     }
 
     #[test]

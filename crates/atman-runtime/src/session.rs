@@ -2972,13 +2972,23 @@ mod tests {
     #[tokio::test]
     async fn restored_session_returns_projection_history_from_the_same_scan() {
         let root = TempDir::new().unwrap();
-        let created = Session::open(root.path()).unwrap();
+        let context_id = crate::event::ContextId::now();
+        let redactor = std::sync::Arc::new(crate::redact::Redactor::from_pairs(
+            &[("test", &format!("history|{context_id}"))],
+            crate::redact::RedactMode::Full,
+        ));
+        let created = Session::open_with_context(root.path(), Some(redactor), None).unwrap();
         let sid = created.id().to_string();
-        let turn_id = crate::event::TurnId::now();
-        created.sink().emit(crate::event::Event::UserMsg {
-            turn_id: turn_id.clone(),
-            flow_run_id: None,
-            message: crate::message::Message::user_text(turn_id, "history"),
+        let unscoped = created.sink().clone();
+        let scoped = unscoped.clone().with_context(context_id.clone());
+        let sources = [&unscoped, &scoped, &unscoped];
+        let emitted = sources.map(|sink| {
+            let turn_id = crate::event::TurnId::now();
+            sink.emit_returning_envelope(crate::event::Event::UserMsg {
+                turn_id: turn_id.clone(),
+                flow_run_id: None,
+                message: crate::message::Message::user_text(turn_id, "history"),
+            })
         });
         created.flush_writer().await;
         created.shutdown().await;
@@ -2994,12 +3004,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(crate::event_log::reader::parse_attempts(), 1);
-        assert_eq!(restored.events.len(), 1);
-        assert!(matches!(
-            &restored.events[0].event,
-            crate::event::Event::UserMsg { message, .. } if message.text_concat() == "history"
-        ));
+        assert_eq!(crate::event_log::reader::parse_attempts(), 3);
+        assert_eq!(restored.events.len(), 3);
+        for (restored, original) in restored.events.iter().zip(&emitted) {
+            assert_eq!(restored.seq, original.seq);
+            assert_eq!(restored.ts, original.ts);
+            assert_eq!(restored.context_id, original.context_id);
+            assert!(matches!(
+                &restored.event,
+                crate::event::Event::UserMsg { message, .. }
+                    if message.text_concat() == "<REDACTED:test>"
+            ));
+        }
         restored.session.shutdown().await;
     }
 
