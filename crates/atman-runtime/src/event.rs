@@ -168,6 +168,10 @@ pub enum Event {
         base: Option<ContextBase>,
         inheritance: ContextInheritance,
     },
+    /// Selects the envelope's context as the default for an accepted turn.
+    ContextHeadSelected {
+        turn_id: TurnId,
+    },
     FlowStart {
         run_id: FlowRunId,
         #[serde(default, skip_serializing_if = "Option::is_none")]

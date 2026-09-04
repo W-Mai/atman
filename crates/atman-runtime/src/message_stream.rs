@@ -130,7 +130,7 @@ impl MessageStream {
         let history = events.lock().expect("events poisoned");
         let through_seq = history.iter().map(|event| event.seq).max().unwrap_or(0);
         let replay = crate::projection::context::replay_context(
-            &history,
+            history.iter(),
             &ContextBase::Context {
                 context_id: context_id.clone(),
                 through_seq,

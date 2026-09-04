@@ -158,4 +158,53 @@ mod tests {
         assert_eq!(crate::event_log::reader::parse_attempts(), 3);
         assert_eq!(bundle.last_seq, Some(1));
     }
+
+    #[test]
+    fn malformed_context_records_fail_before_transcript_publication() {
+        use crate::event::{ContextId, EventEnvelope, TurnId};
+
+        let turn = TurnId::now();
+        let legacy = EventEnvelope::new(
+            1,
+            Event::UserMsg {
+                turn_id: turn.clone(),
+                flow_run_id: None,
+                message: Message::user_text(turn, "retained"),
+            },
+        );
+        let head = serde_json::to_value(EventEnvelope::new(
+            2,
+            Event::ContextHeadSelected {
+                turn_id: TurnId::now(),
+            },
+        ))
+        .unwrap();
+        let mut missing_turn = head.clone();
+        missing_turn.as_object_mut().unwrap().remove("turn_id");
+        let mut invalid_identity = head;
+        invalid_identity["context_id"] = serde_json::json!("not-a-context-id");
+        for malformed in [
+            missing_turn,
+            invalid_identity,
+            serde_json::json!({
+                "seq": 2, "type": "context_created", "context_id": ContextId::now(),
+                "base": null,
+            }),
+        ] {
+            let input = format!(
+                "{}\n\n{malformed}\n",
+                serde_json::to_string(&legacy).unwrap()
+            );
+            let mut observed = Vec::new();
+            let error = SessionReplay::from_reader(
+                input.as_bytes(),
+                Some(&mut |entry| observed.push(entry)),
+            )
+            .err()
+            .expect("invalid typed records must not disappear");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("line 3"));
+            assert!(observed.is_empty());
+        }
+    }
 }

@@ -30,6 +30,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Context head journals** — accepted-turn head records select one ancestry for default-context replay. Late branch output cannot change that selection; metadata can use the same bounded membership, and malformed typed records are rejected before transcript publication.
 - **Journal-backed context forks** — `ContextState::fork` captures an owner's active window, raw history, checkpoint epoch, and bounded usage and prefix observations. Creation records only the source boundary and inheritance policy; later parent output and child rewrites remain isolated, including after restoring a session.
 - **Live context views** — `MessageStream::from_context` initializes a validated branch window and raw history, then applies only that context's new events. Unrelated branches preserve the cached views without rebuilding their contents.
 - **Selective context replay** — `projection::context::replay_context` reconstructs one ancestry at fixed event boundaries, isolates sibling checkpoints and compaction, and retains raw history separately. Invalid lineage is rejected instead of falling back to unrelated history.

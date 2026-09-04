@@ -451,8 +451,12 @@ async fn write_event(
 }
 
 fn serialize_event(envelope: &EventEnvelope, redactor: Option<&Redactor>) -> String {
-    let Some(r) = redactor.filter(|_| !matches!(envelope.event, Event::ContextCreated { .. }))
-    else {
+    let Some(r) = redactor.filter(|_| {
+        !matches!(
+            envelope.event,
+            Event::ContextCreated { .. } | Event::ContextHeadSelected { .. }
+        )
+    }) else {
         return serde_json::to_string(envelope).unwrap_or_else(|e| {
             format!(
                 "{{\"type\":\"encode_error\",\"error\":{:?}}}",
@@ -520,6 +524,7 @@ pub(crate) fn extract_ts(envelope: &EventEnvelope) -> String {
 pub(crate) fn event_kind(event: &Event) -> &'static str {
     match event {
         Event::ContextCreated { .. } => "context_created",
+        Event::ContextHeadSelected { .. } => "context_head_selected",
         Event::FlowStart { .. } => "flow_start",
         Event::FlowEnd { .. } => "flow_end",
         Event::RunCancelRequested { .. } => "run_cancel_requested",
@@ -589,9 +594,9 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         Event::TaskLifecycle { run_id, .. } => {
             (None, run_id.as_ref().map(|run_id| run_id.0.to_string()))
         }
-        Event::TurnStart { turn_id, .. } | Event::TurnEnd { turn_id, .. } => {
-            (Some(turn_id.0.to_string()), None)
-        }
+        Event::TurnStart { turn_id, .. }
+        | Event::TurnEnd { turn_id, .. }
+        | Event::ContextHeadSelected { turn_id } => (Some(turn_id.0.to_string()), None),
         Event::UserInject {
             turn_id, injection, ..
         } => (

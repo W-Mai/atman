@@ -34,11 +34,13 @@ pub(crate) struct ReplayRecord {
 pub(crate) fn scan_replay_records<R: BufRead>(mut reader: R) -> std::io::Result<Vec<ReplayRecord>> {
     let mut records = Vec::new();
     let mut line = String::new();
+    let mut line_number = 0;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
             break;
         }
+        line_number += 1;
         let text = line.trim();
         if text.is_empty() {
             continue;
@@ -53,8 +55,20 @@ pub(crate) fn scan_replay_records<R: BufRead>(mut reader: R) -> std::io::Result<
             .and_then(serde_json::Value::as_str)
             .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
             .map(|ts| ts.with_timezone(&chrono::Utc));
-        let Ok(envelope) = EventEnvelope::from_json_value(value) else {
-            continue;
+        let typed_context = value.get("context_id").is_some_and(|id| !id.is_null())
+            || matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some("context_created" | "context_head_selected")
+            );
+        let envelope = match EventEnvelope::from_json_value(value) {
+            Ok(envelope) => envelope,
+            Err(error) if typed_context => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid context event at line {line_number}: {error}"),
+                ));
+            }
+            Err(_) => continue,
         };
         records.push(ReplayRecord {
             envelope,

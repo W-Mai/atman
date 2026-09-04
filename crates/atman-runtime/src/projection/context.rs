@@ -14,6 +14,8 @@ use super::message_window::{
 /// One materialized context. Raw history ignores checkpoints and range replacement.
 #[derive(Debug, PartialEq)]
 pub struct ContextReplay {
+    pub context_id: Option<ContextId>,
+    cutoffs: HashMap<Option<ContextId>, u64>,
     pub(crate) compacted: Vec<(u64, Message)>,
     window_start: usize,
     pub raw: Vec<(u64, Message)>,
@@ -22,6 +24,13 @@ pub struct ContextReplay {
 }
 
 impl ContextReplay {
+    /// Whether an event falls inside this view's fixed ancestry boundaries.
+    pub fn includes(&self, envelope: &EventEnvelope) -> bool {
+        self.cutoffs
+            .get(&envelope.context_id)
+            .is_some_and(|end| envelope.seq <= *end)
+    }
+
     pub fn window(&self) -> &[(u64, Message)] {
         &self.compacted[self.window_start..]
     }
@@ -38,7 +47,7 @@ struct ContextLineage {
 }
 
 impl ContextLineage {
-    fn from_envelopes(events: &[EventEnvelope]) -> io::Result<Self> {
+    fn from_envelopes<'a>(events: impl Iterator<Item = &'a EventEnvelope>) -> io::Result<Self> {
         let mut lineage = Self {
             contexts: HashMap::new(),
             last_seq: 0,
@@ -46,7 +55,15 @@ impl ContextLineage {
         let mut scoped = false;
         for envelope in events {
             scoped |= envelope.context_id.is_some()
-                || matches!(envelope.event, Event::ContextCreated { .. });
+                || matches!(
+                    envelope.event,
+                    Event::ContextCreated { .. } | Event::ContextHeadSelected { .. }
+                );
+            if matches!(envelope.event, Event::ContextHeadSelected { .. })
+                && envelope.context_id.is_none()
+            {
+                return Err(invalid("context head selection has no identity"));
+            }
             if scoped && envelope.seq <= lineage.last_seq {
                 return Err(invalid(format!(
                     "context event sequence is not increasing: {}",
@@ -130,11 +147,41 @@ fn retain_active_window(
     }
 }
 
+/// Selects the last accepted head, independent of later output from other contexts.
+pub fn replay_default_context<'a, I>(events: I) -> io::Result<ContextReplay>
+where
+    I: IntoIterator<Item = &'a EventEnvelope>,
+    I::IntoIter: Clone,
+{
+    let events = events.into_iter();
+    let mut head = None;
+    let mut through_seq = 0;
+    for envelope in events.clone() {
+        through_seq = through_seq.max(envelope.seq);
+        if matches!(envelope.event, Event::ContextHeadSelected { .. }) {
+            head = envelope.context_id.clone();
+        }
+    }
+    let target = match head {
+        Some(context_id) => ContextBase::Context {
+            context_id,
+            through_seq,
+        },
+        None => ContextBase::LegacyRoot { through_seq },
+    };
+    replay_context(events, &target)
+}
+
 /// Replays one selected ancestry without materializing every historical branch.
 /// Invalid or missing lineage is an error, never a fallback to unscoped history.
-pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Result<ContextReplay> {
-    let cutoffs = ContextLineage::from_envelopes(events)?.cutoffs(target)?;
-    let ownership = FlowOwnership::from_events(events.iter().map(|envelope| &envelope.event));
+pub fn replay_context<'a, I>(events: I, target: &ContextBase) -> io::Result<ContextReplay>
+where
+    I: IntoIterator<Item = &'a EventEnvelope>,
+    I::IntoIter: Clone,
+{
+    let events = events.into_iter();
+    let cutoffs = ContextLineage::from_envelopes(events.clone())?.cutoffs(target)?;
+    let ownership = FlowOwnership::from_events(events.clone().map(|envelope| &envelope.event));
     let no_exclusions = HashSet::new();
     let mut window = Vec::new();
     let mut positions = HashMap::new();
@@ -194,6 +241,8 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
         }
     }
     Ok(ContextReplay {
+        context_id: target.context_id().cloned(),
+        cutoffs,
         compacted: window,
         window_start,
         raw,
@@ -262,6 +311,10 @@ mod tests {
         );
         let left_suffix = push(&left, "left", None);
         let (right_id, right) = create(&sink, Some(target(&left_id, left_suffix)));
+        let accepted_turn = TurnId::now();
+        right.emit(Event::ContextHeadSelected {
+            turn_id: accepted_turn.clone(),
+        });
         push(&left, "late parent", None);
         let (empty_id, empty) = create(&sink, None);
         push(&empty, "isolated", None);
@@ -270,6 +323,7 @@ mod tests {
         let events = sink.snapshot_envelopes();
         let right_target = target(&right_id, sink.published_seq());
         let expected = replay_context(&events, &right_target).unwrap();
+        assert_eq!(replay_default_context(&events).unwrap(), expected);
         assert_eq!(texts(expected.window()), ["shared", "left", "right"]);
         assert_eq!(expected.raw, expected.window());
         assert_eq!(
@@ -290,7 +344,7 @@ mod tests {
         );
 
         let dir = tempfile::tempdir().unwrap();
-        let pattern = format!("{left_id}|{right_id}|{empty_id}");
+        let pattern = format!("{left_id}|{right_id}|{empty_id}|{accepted_turn}");
         let redactor = std::sync::Arc::new(crate::redact::Redactor::from_pairs(
             &[("context", &pattern)],
             crate::redact::RedactMode::Full,
@@ -311,6 +365,7 @@ mod tests {
             replay_context(&restored.events, &right_target).unwrap(),
             expected
         );
+        assert_eq!(replay_default_context(&restored.events).unwrap(), expected);
         assert_eq!(
             serde_json::to_value(&restored.events).unwrap(),
             serde_json::to_value(&events).unwrap()
@@ -560,7 +615,10 @@ mod tests {
                         .collect::<Vec<_>>();
                     let grand =
                         replay_context(&events, &target(&grand_id, sink.published_seq())).unwrap();
-                    assert_eq!(grand, at_fork);
+                    assert_ne!(grand.context_id, at_fork.context_id);
+                    assert_eq!(grand.window(), at_fork.window());
+                    assert_eq!(grand.raw, at_fork.raw);
+                    assert_eq!(grand.checkpoint_epoch, at_fork.checkpoint_epoch);
                     let child_replay =
                         replay_context(&events, &target(&child_id, sink.published_seq())).unwrap();
                     assert_eq!(
@@ -819,6 +877,10 @@ mod tests {
                 replay_context(&events, &target(&id, 1)).unwrap_err().kind(),
                 io::ErrorKind::InvalidData
             );
+            assert_eq!(
+                replay_default_context(&events).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
         let mut before_creation = first.clone();
         before_creation.event = Event::RunCancelRequested {
@@ -834,6 +896,87 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<ContextBase>(value).is_err());
         }
+    }
+
+    #[test]
+    fn accepted_heads_select_messages_and_facts_at_the_same_boundaries() {
+        let sink = EventSink::new();
+        let legacy = push(&sink, "legacy", None);
+        let (first_id, first) = create(
+            &sink,
+            Some(ContextBase::LegacyRoot {
+                through_seq: legacy,
+            }),
+        );
+        assert_eq!(
+            texts(
+                replay_default_context(&sink.snapshot_envelopes())
+                    .unwrap()
+                    .window()
+            ),
+            ["legacy"]
+        );
+        first.emit(Event::ContextHeadSelected {
+            turn_id: TurnId::now(),
+        });
+        let first_input = push(&first, "first input", None);
+        let (second_id, second) = create(&sink, Some(target(&first_id, first_input)));
+        second.emit(Event::ContextHeadSelected {
+            turn_id: TurnId::now(),
+        });
+        let second_input = push(&second, "second input", None);
+        let late_first = first.emit_returning_seq(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: None,
+            messages: vec![Message::user_text(TurnId::now(), "late first checkpoint")],
+            window_tokens: 10,
+        });
+        let (_, unrelated) = create(&sink, None);
+        let unrelated_input = push(&unrelated, "unrelated", None);
+        let events = sink.snapshot_envelopes();
+        let selected = replay_default_context(events.iter()).unwrap();
+        assert_eq!(selected.context_id, Some(second_id));
+        assert_eq!(
+            texts(selected.window()),
+            ["legacy", "first input", "second input"]
+        );
+        assert_eq!(selected.raw, selected.window());
+        for event in &events {
+            if [legacy, first_input, second_input].contains(&event.seq) {
+                assert!(selected.includes(event));
+            }
+            if [late_first, unrelated_input].contains(&event.seq) {
+                assert!(!selected.includes(event));
+            }
+        }
+        assert_eq!(
+            texts(
+                replay_context(&events, &target(&first_id, sink.published_seq()))
+                    .unwrap()
+                    .window()
+            ),
+            ["late first checkpoint"]
+        );
+
+        for scope in [None, Some(ContextId::now())] {
+            let mut broken = events.clone();
+            let mut selection = EventEnvelope::new(
+                sink.published_seq() + 1,
+                Event::ContextHeadSelected {
+                    turn_id: TurnId::now(),
+                },
+            );
+            selection.context_id = scope;
+            broken.push(selection);
+            assert_eq!(
+                replay_default_context(&broken).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let empty = replay_default_context(&[]).unwrap();
+        assert!(empty.context_id.is_none());
+        assert!(empty.window().is_empty());
+        assert!(empty.raw.is_empty());
     }
 
     #[test]
