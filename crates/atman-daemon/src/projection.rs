@@ -188,14 +188,18 @@ impl SessionProjector {
     pub(crate) fn register_run(
         &mut self,
         run_id: FlowRunId,
+        turn_id: atman_runtime::event::TurnId,
         flow_name: String,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<ProjectionDelta> {
         if self.projection.runs.iter().any(|run| run.id == run_id) {
             return None;
         }
+        self.run_turns
+            .insert(atman_runtime::event::FlowRunId(run_id.0), turn_id.clone());
         let run = RunProjection {
             id: run_id,
+            turn_id: Some(TurnId(turn_id.0)),
             flow_name,
             model: None,
             provider: None,
@@ -235,20 +239,28 @@ impl SessionProjector {
             }
             Event::FlowStart {
                 run_id,
+                turn_id,
                 flow_name,
                 parent_run_id,
                 parent_node_id,
                 ..
             } => {
-                let turn_id = parent_run_id
-                    .as_ref()
-                    .and_then(|parent| self.run_turns.get(parent))
-                    .cloned()
-                    .or_else(|| self.current_turn.clone())
-                    .unwrap_or_else(orphan_turn_id);
-                self.run_turns.insert(run_id.clone(), turn_id);
+                let turn_id = turn_id
+                    .clone()
+                    .or_else(|| self.run_turns.get(run_id).cloned())
+                    .or_else(|| {
+                        parent_run_id
+                            .as_ref()
+                            .and_then(|parent| self.run_turns.get(parent))
+                            .cloned()
+                    })
+                    .or_else(|| self.current_turn.clone());
+                if let Some(turn_id) = &turn_id {
+                    self.run_turns.insert(run_id.clone(), turn_id.clone());
+                }
                 let run = RunProjection {
                     id: FlowRunId(run_id.0),
+                    turn_id: turn_id.map(|id| TurnId(id.0)),
                     flow_name: flow_name.clone(),
                     model: None,
                     provider: None,
@@ -291,6 +303,7 @@ impl SessionProjector {
                 } else {
                     let run = RunProjection {
                         id: FlowRunId(run_id.0),
+                        turn_id: self.run_turns.get(run_id).map(|id| TurnId(id.0)),
                         flow_name: String::new(),
                         model: None,
                         provider: None,
@@ -1972,6 +1985,138 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_run_turn_anchors_survive_replay_and_snapshot_resume() {
+        let sid = SessionId(uuid::Uuid::now_v7());
+        let first_turn = RuntimeTurnId::now();
+        let second_turn = RuntimeTurnId::now();
+        let first_run = RuntimeRunId::now();
+        let second_run = RuntimeRunId::now();
+        let child_run = RuntimeRunId::now();
+        let at = chrono::Utc::now();
+        let events: Vec<_> = [
+            Event::TurnStart {
+                turn_id: first_turn.clone(),
+            },
+            Event::TurnStart {
+                turn_id: second_turn.clone(),
+            },
+            Event::FlowStart {
+                run_id: first_run.clone(),
+                turn_id: Some(first_turn.clone()),
+                flow_name: "first".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+            Event::FlowStart {
+                run_id: second_run.clone(),
+                turn_id: Some(second_turn.clone()),
+                flow_name: "second".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+            Event::FlowStart {
+                run_id: child_run.clone(),
+                turn_id: None,
+                flow_name: "legacy-child".into(),
+                parent_run_id: Some(first_run.clone()),
+                parent_node_id: None,
+                spawned: true,
+            },
+            Event::FlowEnd {
+                run_id: first_run.clone(),
+                flow_name: "first".into(),
+                status: FlowStatus::Ok,
+            },
+            Event::TurnEnd {
+                turn_id: first_turn.clone(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, event)| envelope(i as u64 + 1, at, event))
+        .collect();
+        let mut live = SessionProjector::new(sid.clone(), None);
+        for event in &events[..4] {
+            live.apply_envelope(event);
+        }
+        let mut resumed: SessionProjector =
+            serde_json::from_value(serde_json::to_value(&live).unwrap()).unwrap();
+        for event in &events[4..] {
+            live.apply_envelope(event);
+            resumed.apply_envelope(event);
+        }
+        let replay = SessionProjector::from_events(sid.clone(), None, &events);
+        assert_eq!(live.projection(), replay.projection());
+        assert_eq!(live.projection(), resumed.projection());
+        for (run_id, turn_id) in [
+            (&first_run, &first_turn),
+            (&second_run, &second_turn),
+            (&child_run, &first_turn),
+        ] {
+            let run = live
+                .projection()
+                .runs
+                .iter()
+                .find(|run| run.id.0 == run_id.0)
+                .unwrap();
+            assert_eq!(run.turn_id, Some(TurnId(turn_id.0)));
+            assert_eq!(live.run_turns.get(run_id), Some(turn_id));
+        }
+        assert_eq!(live.projection().workflows.len(), 2);
+        for (turn_id, expected_roots) in [
+            (
+                &first_turn,
+                vec![first_run.to_string(), child_run.to_string()],
+            ),
+            (&second_turn, vec![second_run.to_string()]),
+        ] {
+            let workflow = live
+                .projection()
+                .workflows
+                .iter()
+                .find(|workflow| workflow.turn_id.0 == turn_id.0)
+                .unwrap();
+            assert_eq!(
+                workflow
+                    .roots
+                    .iter()
+                    .map(|node| node.id.clone())
+                    .collect::<Vec<_>>(),
+                expected_roots
+            );
+        }
+
+        let mut registered = SessionProjector::new(sid, None);
+        registered.register_run(
+            FlowRunId(first_run.0),
+            first_turn.clone(),
+            "first".into(),
+            at,
+        );
+        assert_eq!(
+            registered.projection().runs[0].turn_id,
+            Some(TurnId(first_turn.0))
+        );
+        registered.apply_envelope(&events[1]);
+        let mut legacy_start = events[2].clone();
+        if let Event::FlowStart { turn_id, .. } = &mut legacy_start.event {
+            *turn_id = None;
+        }
+        registered.apply_envelope(&legacy_start);
+        assert_eq!(registered.run_turns.get(&first_run), Some(&first_turn));
+        let mut legacy_run = serde_json::to_value(&registered.projection().runs[0]).unwrap();
+        legacy_run.as_object_mut().unwrap().remove("turn_id");
+        assert!(
+            serde_json::from_value::<RunProjection>(legacy_run)
+                .unwrap()
+                .turn_id
+                .is_none()
+        );
+    }
+
+    #[test]
     fn replay_builds_typed_transcript_workflow_and_usage_without_image_bytes() {
         let session_id = SessionId(uuid::Uuid::now_v7());
         let turn_id = RuntimeTurnId::now();
@@ -2001,6 +2146,7 @@ mod tests {
                 2,
                 started_at,
                 Event::FlowStart {
+                    turn_id: None,
                     run_id: run_id.clone(),
                     flow_name: "agent".into(),
                     parent_run_id: None,
@@ -2353,6 +2499,7 @@ mod tests {
             1,
             started_at,
             Event::FlowStart {
+                turn_id: None,
                 run_id: root_run_id.clone(),
                 flow_name: "agent".into(),
                 parent_run_id: None,
@@ -2364,6 +2511,7 @@ mod tests {
             2,
             started_at,
             Event::FlowStart {
+                turn_id: None,
                 run_id: child_run_id.clone(),
                 flow_name: "subagent".into(),
                 parent_run_id: Some(root_run_id.clone()),

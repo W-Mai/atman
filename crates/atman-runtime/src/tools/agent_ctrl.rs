@@ -1763,6 +1763,7 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
     if let Some(sink) = &ctx.events {
         sink.emit(Event::FlowStart {
             run_id: run_id.clone(),
+            turn_id: ctx.turn_id.clone(),
             flow_name: flow_name.into(),
             parent_run_id: parent_run_id.clone(),
             parent_node_id: parent_node_id.clone(),

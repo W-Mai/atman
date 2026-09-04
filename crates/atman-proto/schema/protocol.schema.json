@@ -3760,6 +3760,17 @@
         },
         "state": {
           "$ref": "#/$defs/RunLifecycle"
+        },
+        "turn_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TurnId",
+              "description": "Owning turn, when known. Older event logs may not contain this association."
+            }
+          ]
         }
       }
     },

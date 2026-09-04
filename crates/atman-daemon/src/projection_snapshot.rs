@@ -564,6 +564,7 @@ mod tests {
             EventEnvelope::new(
                 2,
                 Event::FlowStart {
+                    turn_id: None,
                     run_id: run_id.clone(),
                     flow_name: "agent".into(),
                     parent_run_id: None,

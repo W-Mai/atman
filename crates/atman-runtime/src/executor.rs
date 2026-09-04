@@ -288,6 +288,7 @@ impl Executor {
         let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
         self.events.emit(Event::FlowStart {
             run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
             flow_name: flow.name.name.clone(),
             parent_run_id: None,
             parent_node_id: None,

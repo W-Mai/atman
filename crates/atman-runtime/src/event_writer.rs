@@ -564,8 +564,13 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
 
 pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
     match event {
-        Event::FlowStart { run_id, .. }
-        | Event::FlowEnd { run_id, .. }
+        Event::FlowStart {
+            run_id, turn_id, ..
+        } => (
+            turn_id.as_ref().map(ToString::to_string),
+            Some(run_id.0.to_string()),
+        ),
+        Event::FlowEnd { run_id, .. }
         | Event::RunCancelRequested { run_id }
         | Event::WorkspaceLifecycle { run_id, .. } => (None, Some(run_id.0.to_string())),
         Event::TaskLifecycle { run_id, .. } => {
@@ -732,6 +737,7 @@ mod tests {
         EventEnvelope::new(
             seq,
             Event::FlowStart {
+                turn_id: None,
                 run_id: FlowRunId::now(),
                 flow_name: format!("flow_{seq}"),
                 parent_run_id: None,
@@ -926,6 +932,7 @@ mod tests {
             tx.send(EventEnvelope::new(
                 i as u64 + 1,
                 Event::FlowStart {
+                    turn_id: None,
                     run_id: FlowRunId::now(),
                     flow_name: format!("flow_{i}"),
                     parent_run_id: None,
@@ -977,6 +984,7 @@ mod tests {
             tx.send(EventEnvelope::new(
                 (i + 1) as u64,
                 Event::FlowStart {
+                    turn_id: None,
                     run_id: FlowRunId::now(),
                     flow_name: format!("flow_{i}"),
                     parent_run_id: None,

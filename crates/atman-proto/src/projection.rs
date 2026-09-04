@@ -100,6 +100,9 @@ pub enum SessionLifecycle {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct RunProjection {
     pub id: FlowRunId,
+    /// Owning turn, when known. Older event logs may not contain this association.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
     #[serde(default)]
     pub flow_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

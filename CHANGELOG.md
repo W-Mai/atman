@@ -10,6 +10,7 @@ All notable changes to atman are documented in this file.
 
 - **Explicit turn lifecycle** — `Session::end_turn`, `mark_streamed`, `take_streamed_flag`, and `flow_cancel_token` require a `TurnId`; cancellation lookup returns `None` for an inactive turn. Active turn state is private, and `current_turn` returns a value only when one turn is active.
 - **Daemon run anchors** — `LiveRun` includes its turn identity, and `Session::enqueue_injection_for_run` accepts a paired turn/run target.
+- **Run turn identity** — `Event::FlowStart` and `RunProjection` include an optional `turn_id`; older serialized events and snapshots remain readable.
 
 ### ✨ Features
 
@@ -26,6 +27,7 @@ All notable changes to atman are documented in this file.
 
 - **Turn state isolation** — cancellation and streaming state belong to individual turns; late completion and output cannot reset another turn, and interjection enqueue is serialized with turn completion.
 - **Targeted interjections** — daemon interjections use the target run's registered turn and reject inactive targets; run cleanup closes only that turn, including after execution-thread failure.
+- **Workflow ownership** — flow events carry their owning turn through root and child execution, preventing interleaved startup events from attaching workflows to another turn during live projection or replay.
 - **Spawned message stream roles** — assistant messages appended to isolated child context emit assistant frames instead of tool-result frames, keeping root and child document-flow projection equivalent.
 - **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.
 - **Filesystem diff correlation** — persisted previews retain their originating tool-use identity across concurrent dispatch and resume so edits remain nested in the matching tool row, and new-file previews encode content as insertion hunks.

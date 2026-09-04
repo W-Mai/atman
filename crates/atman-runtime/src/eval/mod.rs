@@ -1532,6 +1532,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             if let Some(sink) = ctx.events {
                 sink.emit(crate::event::Event::FlowStart {
                     run_id: sub_run_id.clone(),
+                    turn_id: ctx.turn_id.clone(),
                     flow_name: name.name.clone(),
                     parent_run_id: Some(parent_run_id.clone()),
                     parent_node_id: ctx.current_node_id.clone(),

@@ -853,6 +853,7 @@ export interface RunProjection {
   provider?: string | null
   started_at: string
   state: RunLifecycle
+  turn_id?: null | string
   [k: string]: unknown
 }
 export interface TodoProjection {

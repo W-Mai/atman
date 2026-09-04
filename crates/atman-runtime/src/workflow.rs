@@ -1171,6 +1171,7 @@ mod tests {
 
     fn flow_start(run_id: FlowRunId, name: &str) -> Event {
         Event::FlowStart {
+            turn_id: None,
             run_id,
             flow_name: name.into(),
             parent_run_id: None,
@@ -1181,6 +1182,7 @@ mod tests {
 
     fn subflow_start(child: FlowRunId, parent: FlowRunId, parent_node: &str, name: &str) -> Event {
         Event::FlowStart {
+            turn_id: None,
             run_id: child,
             flow_name: name.into(),
             parent_run_id: Some(parent),
@@ -2215,6 +2217,7 @@ fn rebuild_workflow_tree_restores_root_and_subflow() {
     let child = FlowRunId::now();
     let events = vec![
         Event::FlowStart {
+            turn_id: None,
             run_id: root.clone(),
             flow_name: "agent".into(),
             parent_run_id: None,
@@ -2229,6 +2232,7 @@ fn rebuild_workflow_tree_restores_root_and_subflow() {
             parent_node_id: None,
         },
         Event::FlowStart {
+            turn_id: None,
             run_id: child.clone(),
             flow_name: "subagent".into(),
             parent_run_id: Some(root.clone()),

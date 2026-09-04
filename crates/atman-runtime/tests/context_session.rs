@@ -211,6 +211,20 @@ async fn context_session_feeds_session_history_into_llm_call() {
             Some(session.clone()),
         )
         .await;
+    let started_turns: Vec<_> = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::FlowStart { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        started_turns.len() > 1,
+        "root and inline flows must be recorded"
+    );
+    assert!(started_turns.iter().all(|id| id.as_ref() == Some(&turn_id)));
     let result = match result {
         Ok(v) => v,
         Err(e) => {
@@ -356,6 +370,7 @@ async fn reopened_session_context_only_restores_explicit_durable_messages() {
         let root = FlowRunId::now();
         let spawned = FlowRunId::now();
         session.sink().emit(Event::FlowStart {
+            turn_id: None,
             run_id: root.clone(),
             flow_name: "root".into(),
             parent_run_id: None,
@@ -364,6 +379,7 @@ async fn reopened_session_context_only_restores_explicit_durable_messages() {
         });
         session.sink().emit(Event::FlowStart {
             run_id: spawned.clone(),
+            turn_id: None,
             flow_name: "worker".into(),
             parent_run_id: Some(root.clone()),
             parent_node_id: None,

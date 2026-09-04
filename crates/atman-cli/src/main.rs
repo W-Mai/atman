@@ -7165,6 +7165,7 @@ mod tests {
         state: atman_proto::RunLifecycle,
     ) -> atman_proto::RunProjection {
         atman_proto::RunProjection {
+            turn_id: None,
             id,
             flow_name: "test".into(),
             model: None,

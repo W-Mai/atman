@@ -1519,6 +1519,7 @@ mod tests {
         let run_id = crate::event::FlowRunId::now();
         let events = vec![
             Event::FlowStart {
+                turn_id: None,
                 run_id: run_id.clone(),
                 flow_name: "root".into(),
                 parent_run_id: None,
@@ -2100,6 +2101,7 @@ mod tests {
 
         projection.apply_event_at(
             &Event::FlowStart {
+                turn_id: None,
                 run_id: run_id.clone(),
                 flow_name: "root".into(),
                 parent_run_id: None,

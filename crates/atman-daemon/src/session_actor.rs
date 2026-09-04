@@ -220,7 +220,12 @@ impl SessionActorHandle {
         projection.set_forms(forms_rx.borrow().clone());
         projection.set_compact_review(compact_review_rx.borrow().clone());
         for run in &initial_runs {
-            projection.register_run(run.run_id.clone(), run.flow_name.clone(), run.started_at);
+            projection.register_run(
+                run.run_id.clone(),
+                run.turn_id.clone(),
+                run.flow_name.clone(),
+                run.started_at,
+            );
         }
         let projection_cursor = EventCursor(projection.projection().revision.0);
         let event_cursor = restored_event_cursor
@@ -871,6 +876,7 @@ impl SessionActor {
                 } else {
                     let delta = self.projection.register_run(
                         run.run_id.clone(),
+                        run.turn_id.clone(),
                         run.flow_name.clone(),
                         run.started_at,
                     );

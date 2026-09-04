@@ -1226,6 +1226,7 @@ pub(crate) fn project_transcript_records(
                 parent_run_id,
                 parent_node_id,
                 spawned,
+                ..
             } => out.push(TranscriptEntry::FlowStart {
                 run_id: run_id.0.to_string(),
                 flow_name: flow_name.clone(),
@@ -1773,6 +1774,7 @@ mod tests {
 
     fn flow_start(run_id: FlowRunId, parent_run_id: Option<FlowRunId>, spawned: bool) -> Event {
         Event::FlowStart {
+            turn_id: None,
             run_id,
             flow_name: "test".into(),
             spawned,

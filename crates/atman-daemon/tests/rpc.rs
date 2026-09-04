@@ -614,6 +614,7 @@ async fn get_snapshot_replays_idle_sessions_and_marks_interrupted_runs_lost() {
         seq: 1,
         ts: chrono::Utc::now(),
         event: atman_runtime::event::Event::FlowStart {
+            turn_id: None,
             run_id,
             flow_name: "agent".into(),
             parent_run_id: None,

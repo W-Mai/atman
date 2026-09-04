@@ -287,6 +287,7 @@ async fn session_actor_projects_durable_events_and_watch_state() {
         .sink()
         .emit(atman_runtime::event::Event::TurnStart { turn_id });
     session.sink().emit(atman_runtime::event::Event::FlowStart {
+        turn_id: None,
         run_id: atman_runtime::event::FlowRunId(run_id.0),
         flow_name: "hello".into(),
         parent_run_id: None,

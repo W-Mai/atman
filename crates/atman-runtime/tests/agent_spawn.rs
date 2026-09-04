@@ -400,6 +400,7 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
     }));
     let events = EventSink::new();
     let broker = atman_runtime::permission::PermissionBroker::shared(Arc::clone(&flow_registry));
+    let turn_id = atman_runtime::event::TurnId::now();
     let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
@@ -408,6 +409,7 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
         .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
         .with_trust(atman_runtime::trust::TrustConfig::default())
         .with_events(events.clone());
+    ctx.turn_id = Some(turn_id.clone());
     ctx.flow_run_id = Some(root_run_id);
     ctx.flow_identity = Some(root_identity);
 
@@ -433,6 +435,15 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
         .unwrap();
 
     assert!(matches!(result, Value::Str(text) if text == "child finished"));
+    let started_turns: Vec<_> = events
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::FlowStart { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started_turns, vec![Some(turn_id)]);
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 2);
     assert_eq!(

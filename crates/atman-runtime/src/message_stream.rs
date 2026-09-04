@@ -393,6 +393,7 @@ mod tests {
             EventEnvelope::new(
                 3,
                 Event::FlowStart {
+                    turn_id: None,
                     run_id: crate::event::FlowRunId::now(),
                     flow_name: "root".into(),
                     parent_run_id: None,
@@ -872,6 +873,7 @@ mod tests {
             make_msg_event("user_msg", &user("root user"), 1),
             make_msg_event("assistant_msg", &assistant("root assistant"), 2),
             Event::FlowStart {
+                turn_id: None,
                 run_id: child_run_id.clone(),
                 flow_name: "child".into(),
                 parent_run_id: None,
@@ -922,6 +924,7 @@ mod tests {
         let spawned = crate::event::FlowRunId::now();
         let descendant = crate::event::FlowRunId::now();
         let flow_start = |run_id, parent_run_id, spawned| Event::FlowStart {
+            turn_id: None,
             run_id,
             flow_name: "test".into(),
             spawned,
@@ -1054,6 +1057,7 @@ mod tests {
             EventEnvelope::new(
                 2,
                 Event::FlowStart {
+                    turn_id: None,
                     run_id: spawned,
                     flow_name: "spawned".into(),
                     parent_run_id: None,

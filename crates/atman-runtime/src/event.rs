@@ -89,6 +89,8 @@ impl<'de> serde::Deserialize<'de> for EventEnvelope {
 pub enum Event {
     FlowStart {
         run_id: FlowRunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<TurnId>,
         #[serde(default)]
         flow_name: String,
         #[serde(default)]
@@ -657,17 +659,29 @@ mod tests {
     #[test]
     fn flow_start_serializes_parent_linkage() {
         let parent = FlowRunId::now();
+        let turn_id = TurnId::now();
         let ev = Event::FlowStart {
             run_id: FlowRunId::now(),
+            turn_id: Some(turn_id.clone()),
             flow_name: "child".into(),
             parent_run_id: Some(parent.clone()),
             parent_node_id: Some("stmt_3".into()),
             spawned: false,
         };
-        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        let mut v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "flow_start");
         assert_eq!(v["parent_run_id"], serde_json::json!(parent.0.to_string()));
         assert_eq!(v["parent_node_id"], "stmt_3");
+        assert_eq!(v["turn_id"], serde_json::json!(turn_id.0));
+        assert_eq!(
+            crate::event_writer::extract_anchors(&ev).0,
+            Some(turn_id.to_string())
+        );
+        v.as_object_mut().unwrap().remove("turn_id");
+        assert!(matches!(
+            serde_json::from_value::<Event>(v).unwrap(),
+            Event::FlowStart { turn_id: None, .. }
+        ));
     }
 
     #[test]
