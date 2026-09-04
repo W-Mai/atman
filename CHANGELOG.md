@@ -55,6 +55,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction shutdown lifecycle** — scheduled compactions are owned by their Session. Shutdown cancels and joins active compaction work before closing the event writer, abandons pending reviews, and persists the operation's terminal state without cancelling unrelated runs.
+
 - **Compaction progress reconciliation** — simultaneous compactions with the same message range update by operation identity, late attachments recover in-flight summary text from the session snapshot, and interrupted operations restore as abandoned transcript entries instead of remaining active forever.
 
 - **Shared compaction policy** — root and spawned flows use the same budget, summary, review, retained-output rewrite, and source-validation path. Child flows inherit their parent's review policy and retain the Session review service without writing through the parent context.

@@ -66,6 +66,22 @@ struct TurnState {
     streamed: bool,
 }
 
+struct SessionBackground {
+    accepting: bool,
+    tracker: tokio_util::task::TaskTracker,
+    cancellation: CancellationToken,
+}
+
+impl SessionBackground {
+    fn new() -> Self {
+        Self {
+            accepting: true,
+            tracker: tokio_util::task::TaskTracker::new(),
+            cancellation: CancellationToken::new(),
+        }
+    }
+}
+
 pub struct WatchHub {
     pub stream_tx: broadcast::Sender<StreamFrame>,
     pub context: watch::Sender<ContextSnapshot>,
@@ -101,6 +117,7 @@ pub struct Session {
     sink: EventSink,
     context: std::sync::Arc<ContextState>,
     turns: Mutex<HashMap<TurnId, TurnState>>,
+    background: Mutex<SessionBackground>,
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
     pub flow_registry: std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
@@ -974,6 +991,7 @@ impl Session {
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
+            background: Mutex::new(SessionBackground::new()),
             watch: WatchHub {
                 stream_tx,
                 context: context_watch,
@@ -1245,6 +1263,7 @@ impl Session {
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
+            background: Mutex::new(SessionBackground::new()),
             watch: WatchHub {
                 stream_tx,
                 context: context_watch,
@@ -1299,6 +1318,7 @@ impl Session {
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
+            background: Mutex::new(SessionBackground::new()),
             watch: WatchHub {
                 stream_tx,
                 context: context_watch,
@@ -2522,7 +2542,30 @@ impl Session {
             .map(|turn| turn.flow_cancel.clone())
     }
 
+    pub(crate) fn spawn_background<F, Fut>(&self, task: F) -> bool
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        F: Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let background = self.background.lock().unwrap();
+        if !background.accepting {
+            return false;
+        }
+        let cancellation = background.cancellation.child_token();
+        background.tracker.spawn(task(cancellation));
+        true
+    }
+
     pub async fn shutdown(&self) {
+        let tracker = {
+            let mut background = self.background.lock().unwrap();
+            background.accepting = false;
+            background.cancellation.cancel();
+            background.tracker.close();
+            background.tracker.clone()
+        };
+        tracker.wait().await;
         let writer = self.writer.lock().unwrap().take();
         if let Some(writer) = writer {
             writer.shutdown().await;

@@ -295,9 +295,12 @@ pub async fn maybe_auto_compact_with_budget(
         context,
         model,
         providers,
-        budget_context,
-        flow_run_id,
-        None,
+        CompactionSchedule {
+            budget: budget_context,
+            flow_run_id,
+            operation_id: None,
+        },
+        tokio_util::sync::CancellationToken::new(),
     )
     .await;
 }
@@ -308,25 +311,26 @@ pub fn spawn_auto_compact(
     providers: crate::provider::ProviderRegistry,
 ) {
     let context = session.context().clone();
-    tokio::task::spawn_blocking(move || {
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            session.push_system_note("compaction skipped: background runtime init failed".into());
-            return;
+    let task_session = session.clone();
+    session.spawn_background(move |cancellation| async move {
+        let compact_guard = tokio::select! {
+            _ = cancellation.cancelled() => return,
+            guard = context.compact_lock().clone().lock_owned() => guard,
         };
-        rt.block_on(async move {
-            maybe_auto_compact_with_budget(
-                &session,
-                &context,
-                &model,
-                &providers,
-                CompactionBudgetContext::default(),
-                None,
-            )
-            .await;
-        });
+        maybe_auto_compact_locked(
+            &task_session,
+            &context,
+            &model,
+            &providers,
+            CompactionSchedule {
+                budget: CompactionBudgetContext::default(),
+                flow_run_id: None,
+                operation_id: None,
+            },
+            cancellation,
+        )
+        .await;
+        drop(compact_guard);
     });
 }
 
@@ -356,7 +360,7 @@ pub async fn start_auto_compact_with_budget(
     flow_run_id: Option<crate::event::FlowRunId>,
 ) {
     let compact_guard = context.compact_lock().clone().lock_owned().await;
-    spawn_locked_compact(
+    let _ = spawn_locked_compact(
         session,
         context,
         model,
@@ -384,9 +388,9 @@ pub fn start_manual_compact(
     }
     let operation_id = crate::event::CompactionOperationId::now();
     context.request_manual_compact();
-    spawn_locked_compact(
+    let scheduled = spawn_locked_compact(
         session,
-        context,
+        context.clone(),
         model,
         providers,
         CompactionSchedule {
@@ -396,7 +400,12 @@ pub fn start_manual_compact(
         },
         compact_guard,
     );
-    Some(operation_id)
+    if scheduled {
+        Some(operation_id)
+    } else {
+        context.take_manual_compact_request();
+        None
+    }
 }
 
 struct CompactionSchedule {
@@ -412,30 +421,20 @@ fn spawn_locked_compact(
     providers: crate::provider::ProviderRegistry,
     schedule: CompactionSchedule,
     compact_guard: tokio::sync::OwnedMutexGuard<()>,
-) {
-    tokio::task::spawn_blocking(move || {
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            drop(compact_guard);
-            session.push_system_note("compaction skipped: background runtime init failed".into());
-            return;
-        };
-        rt.block_on(async move {
-            maybe_auto_compact_locked(
-                &session,
-                &context,
-                &model,
-                &providers,
-                schedule.budget,
-                schedule.flow_run_id,
-                schedule.operation_id,
-            )
-            .await;
-            drop(compact_guard);
-        });
-    });
+) -> bool {
+    let task_session = session.clone();
+    session.spawn_background(move |cancellation| async move {
+        maybe_auto_compact_locked(
+            &task_session,
+            &context,
+            &model,
+            &providers,
+            schedule,
+            cancellation,
+        )
+        .await;
+        drop(compact_guard);
+    })
 }
 
 async fn maybe_auto_compact_locked(
@@ -443,24 +442,32 @@ async fn maybe_auto_compact_locked(
     context: &crate::context_state::ContextState,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
-    budget_context: CompactionBudgetContext,
-    flow_run_id: Option<crate::event::FlowRunId>,
-    operation_id: Option<crate::event::CompactionOperationId>,
+    schedule: CompactionSchedule,
+    cancellation: tokio_util::sync::CancellationToken,
 ) {
+    let CompactionSchedule {
+        budget,
+        flow_run_id,
+        operation_id,
+    } = schedule;
     let selected = std::ptr::eq(context, session.context().as_ref());
     let options = CompactionOptions {
-        budget: budget_context,
+        budget,
         forced: context.take_manual_compact_request(),
         reviews: Some(session.compact_reviews()),
         stream_tx: selected.then(|| session.stream_tx()),
         flow_run_id,
         operation_id,
     };
-    if let Some(result) =
-        maybe_auto_compact_context_locked(context, model, providers, options, |result| {
-            session.record_compaction(context, result, None)
-        })
-        .await
+    if let Some(result) = maybe_auto_compact_context_until_cancelled(
+        context,
+        model,
+        providers,
+        options,
+        cancellation,
+        |result| session.record_compaction(context, result, None),
+    )
+    .await
     {
         if selected {
             session.refresh_window_snapshot();
@@ -995,6 +1002,25 @@ pub async fn maybe_auto_compact_context_locked(
     options: CompactionOptions,
     commit: impl FnOnce(&ContextCompactResult),
 ) -> Option<ContextCompactResult> {
+    maybe_auto_compact_context_until_cancelled(
+        context,
+        model,
+        providers,
+        options,
+        tokio_util::sync::CancellationToken::new(),
+        commit,
+    )
+    .await
+}
+
+async fn maybe_auto_compact_context_until_cancelled(
+    context: &crate::context_state::ContextState,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+    options: CompactionOptions,
+    cancellation: tokio_util::sync::CancellationToken,
+    commit: impl FnOnce(&ContextCompactResult),
+) -> Option<ContextCompactResult> {
     let snapshot = context.messages().to_vec();
     let info = crate::model_registry::model_info(model);
     let trigger = info.compaction_trigger_threshold();
@@ -1090,6 +1116,13 @@ pub async fn maybe_auto_compact_context_locked(
             });
         }
     };
+    if cancellation.is_cancelled() {
+        send_failed(
+            "compaction cancelled during session shutdown",
+            initial_count,
+        );
+        return None;
+    }
     let (replacement, summary, compacted_start, compacted_end, compacted_count, must_fit_target) =
         if let Some(range) = &range {
             let on_delta = options.stream_tx.clone().map(|tx| {
@@ -1114,14 +1147,20 @@ pub async fn maybe_auto_compact_context_locked(
             let (anchor, new_messages) = extract_anchor(&filtered)
                 .map(|(anchor, remaining)| (Some(anchor), remaining.to_vec()))
                 .unwrap_or_else(|| (None, filtered.clone()));
-            let summary = generate_llm_summary_with_delta(
-                anchor.as_deref(),
-                &new_messages,
-                model,
-                providers,
-                on_delta,
-            )
-            .await
+            let summary = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    send_failed("compaction cancelled during session shutdown", range.end - range.start);
+                    return None;
+                }
+                result = generate_llm_summary_with_delta(
+                    anchor.as_deref(),
+                    &new_messages,
+                    model,
+                    providers,
+                    on_delta,
+                ) => result,
+            }
             .unwrap_or_else(|error| {
                 warn(&format!(
                     "LLM summary failed: {error}. Degraded to placeholder."
@@ -1132,17 +1171,23 @@ pub async fn maybe_auto_compact_context_locked(
                     chrono::Utc::now().to_rfc3339(),
                 )
             });
-            let summary = match request_review_if_enabled(
-                options.reviews.as_ref(),
-                context,
-                options.forced,
-                &filtered,
-                range,
-                current,
-                summary,
-            )
-            .await
-            {
+            let review = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    send_failed("compaction cancelled during session shutdown", range.end - range.start);
+                    return None;
+                }
+                review = request_review_if_enabled(
+                    options.reviews.as_ref(),
+                    context,
+                    options.forced,
+                    &filtered,
+                    range,
+                    current,
+                    summary,
+                ) => review,
+            };
+            let summary = match review {
                 ReviewOutcome::Commit(summary) => summary,
                 ReviewOutcome::Rejected => {
                     let reason = "compaction rejected by user; keeping full transcript";
@@ -1151,9 +1196,21 @@ pub async fn maybe_auto_compact_context_locked(
                     return None;
                 }
             };
-            let replacement =
-                build_budgeted_replacement(&snapshot, range, &summary, target, model, providers)
-                    .await;
+            let replacement = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    send_failed("compaction cancelled during session shutdown", range.end - range.start);
+                    return None;
+                }
+                replacement = build_budgeted_replacement(
+                    &snapshot,
+                    range,
+                    &summary,
+                    target,
+                    model,
+                    providers,
+                ) => replacement,
+            };
             (
                 replacement,
                 summary,
@@ -1163,8 +1220,19 @@ pub async fn maybe_auto_compact_context_locked(
                 false,
             )
         } else {
-            let (replacement, rewritten_count) =
-                build_budgeted_turn_rewrite(snapshot.clone(), target, model, providers).await;
+            let (replacement, rewritten_count) = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    send_failed("compaction cancelled during session shutdown", 0);
+                    return None;
+                }
+                replacement = build_budgeted_turn_rewrite(
+                    snapshot.clone(),
+                    target,
+                    model,
+                    providers,
+                ) => replacement,
+            };
             if rewritten_count == 0 {
                 let reason =
                     "no compactible span — retained user content cannot fit the history budget";
@@ -1206,6 +1274,13 @@ pub async fn maybe_auto_compact_context_locked(
         summary,
         checkpoint_messages: replacement,
     };
+    if cancellation.is_cancelled() {
+        send_failed(
+            "compaction cancelled during session shutdown",
+            compacted_count,
+        );
+        return None;
+    }
     if !context.commit_compaction(&snapshot, &result, || commit(&result)) {
         let reason = "message window changed before compaction committed";
         send_failed(reason, compacted_count);

@@ -668,6 +668,68 @@ async fn review_reject_skips_commit() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_cancels_compaction_review_and_flushes_terminal_events() {
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
+    use atman_runtime::compaction::start_manual_compact;
+    use atman_runtime::event::Event;
+
+    let (_tmp, session, providers) = setup_review_env().await;
+    session.set_compact_review_mode(atman_runtime::CompactReviewMode::Always);
+    let mut reviews = session.compact_reviews().subscribe();
+    let run_cancel = tokio_util::sync::CancellationToken::new();
+    session.begin_turn_with_cancel(
+        Message::user_text(TurnId::now(), "independent active run"),
+        run_cancel.clone(),
+    );
+    let operation_id = start_manual_compact(
+        session.clone(),
+        session.context().clone(),
+        "mock-summary".into(),
+        providers,
+    )
+    .expect("manual compaction should be scheduled");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if !reviews.borrow_and_update().is_empty() {
+                break;
+            }
+            reviews.changed().await.expect("review watch remains open");
+        }
+    })
+    .await
+    .expect("compaction should reach review");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), session.shutdown())
+        .await
+        .expect("shutdown should cancel and join the compaction worker");
+
+    assert!(session.compact_reviews().list_pending().is_empty());
+    assert!(
+        !run_cancel.is_cancelled(),
+        "shutdown must not cancel active runs"
+    );
+    let events = session.sink().snapshot();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::CompactReviewResolved {
+            abandoned: true,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::CompactionFailed { operation_id: failed_id, reason, .. }
+            if failed_id == &operation_id
+                && reason == "compaction cancelled during session shutdown"
+    )));
+    let persisted = tokio::fs::read_to_string(session.dir().join("events.jsonl"))
+        .await
+        .unwrap();
+    assert!(persisted.contains(&operation_id.to_string()));
+    assert!(persisted.contains("\"type\":\"compaction_failed\""));
+}
+
 #[tokio::test]
 async fn review_manual_only_skips_review_on_auto_path() {
     let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
