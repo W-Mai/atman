@@ -108,6 +108,8 @@ Root and child compaction records hold the shared event-log lock across publicat
 
 Message appends acquire the context message lock before the event-log lock. Root messages, explicit `session.push`, child assistant output, context records, and captured steering use this lock order. The shared append path updates its message handle before sending the live frame. A context snapshot must respect this ordering; an event watermark read outside the commit locks is not an atomic snapshot of the mutable handle.
 
+Child compaction computes its candidate without holding the message or event-log lock. It then reacquires the message lock, compares the current history with the source snapshot, and invokes its synchronous commit callback to update the epoch and publish the checkpoint before replacing the handle. A stale candidate performs no commit and preserves concurrent additions. Normal compaction and overflow retries use the same commit boundary; the callback must not reenter the message handle.
+
 The flow chooses one message source:
 
 | Form | Messages sent |

@@ -152,16 +152,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     if uses_spawned_context
         && compact_guard.is_some()
         && let Some(messages) = ctx.context().map(|context| context.messages_handle())
-        && let Some(result) = crate::compaction::maybe_auto_compact_handle_locked(
+    {
+        let _ = crate::compaction::maybe_auto_compact_handle_locked(
             messages,
             &model,
             &providers_reg,
             compaction_budget,
             false,
+            |result| record_spawned_compaction(ctx, result),
         )
-        .await
-    {
-        record_spawned_compaction(ctx, &result);
+        .await;
     }
     let llm_context = match llm_context::build_llm_context(
         &args,
@@ -664,17 +664,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         }
                         if let Some(messages) =
                             ctx.context().map(|context| context.messages_handle())
-                            && let Some(result) =
-                                crate::compaction::maybe_auto_compact_handle_locked(
-                                    messages,
-                                    &model,
-                                    &providers_reg,
-                                    compaction_budget,
-                                    true,
-                                )
-                                .await
+                            && crate::compaction::maybe_auto_compact_handle_locked(
+                                messages,
+                                &model,
+                                &providers_reg,
+                                compaction_budget,
+                                true,
+                                |result| record_spawned_compaction(ctx, result),
+                            )
+                            .await
+                            .is_some()
                         {
-                            record_spawned_compaction(ctx, &result);
                             match llm_context::build_llm_context(
                                 &args,
                                 context_mode,

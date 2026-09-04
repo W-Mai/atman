@@ -93,10 +93,45 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
     use atman_runtime::compaction::{
         CompactionBudgetContext, is_compaction_summary, maybe_auto_compact_handle_locked,
     };
-    use atman_runtime::provider::ProviderRegistry;
+    use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, ProviderRegistry};
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::value::Value;
     use std::sync::{Arc, Mutex};
+
+    struct SummaryProvider {
+        inner: MockProvider,
+        messages: Arc<Mutex<Vec<Message>>>,
+        mutate: std::sync::atomic::AtomicBool,
+    }
+
+    impl Provider for SummaryProvider {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn call<'a>(
+            &'a self,
+            request: LlmRequest,
+        ) -> atman_runtime::tool::BoxFut<'a, Result<AssistantMessage, atman_runtime::RuntimeError>>
+        {
+            let mut messages = self
+                .messages
+                .try_lock()
+                .expect("summary IO must not hold the message lock");
+            if self.mutate.load(std::sync::atomic::Ordering::SeqCst) {
+                messages.push(Message::user_text(TurnId::now(), "intervening input"));
+            }
+            drop(messages);
+            self.inner.call(request)
+        }
+
+        fn call_streaming(
+            &self,
+            request: LlmRequest,
+        ) -> atman_runtime::Observable<AssistantMessage> {
+            self.inner.call_streaming(request)
+        }
+    }
 
     let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let base = "x".repeat(4_000);
@@ -122,19 +157,34 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
             })
             .collect::<Vec<_>>(),
     );
-    let messages = Arc::new(Mutex::new(history));
+    let messages = Arc::new(Mutex::new(history.clone()));
     let providers = ProviderRegistry::new();
-    providers.register(Arc::new(
-        MockProvider::new("mock-summary")
+    let provider = Arc::new(SummaryProvider {
+        inner: MockProvider::new("mock-summary")
             .with_fallback(Value::Str("isolated child summary".into())),
-    ));
+        messages: messages.clone(),
+        mutate: std::sync::atomic::AtomicBool::new(false),
+    });
+    providers.register(provider.clone());
 
+    let mut published = None;
     let result = maybe_auto_compact_handle_locked(
         &messages,
         "mock-summary",
         &providers,
         CompactionBudgetContext::default(),
         false,
+        |result| {
+            assert!(matches!(
+                messages.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            assert!(
+                published
+                    .replace(result.checkpoint_messages.clone())
+                    .is_none()
+            );
+        },
     )
     .await
     .expect("isolated history should compact");
@@ -142,6 +192,7 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
     assert!(result.after_tokens < result.before_tokens);
     assert_eq!(result.summary, "isolated child summary");
     assert_eq!(*messages.lock().unwrap(), result.checkpoint_messages);
+    assert_eq!(published, Some(result.checkpoint_messages.clone()));
     assert!(result.checkpoint_messages.iter().any(is_compaction_summary));
     assert!(result.checkpoint_messages.iter().any(|message| {
         message.parts.iter().any(|part| {
@@ -153,6 +204,45 @@ async fn isolated_handle_uses_the_same_automatic_compaction_policy() {
         })
     }));
     assert!(result.compacted_count > 0);
+
+    *messages.lock().unwrap() = history.clone();
+    provider
+        .mutate
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let stale = maybe_auto_compact_handle_locked(
+        &messages,
+        "mock-summary",
+        &providers,
+        CompactionBudgetContext::default(),
+        false,
+        |_| panic!("stale candidates must not publish or update the epoch"),
+    )
+    .await;
+    assert!(stale.is_none());
+    let current = messages.lock().unwrap().clone();
+    assert!(current.len() > history.len());
+    assert_eq!(&current[..history.len()], history.as_slice());
+    assert!(
+        current[history.len()..]
+            .iter()
+            .all(|message| message.text_concat() == "intervening input")
+    );
+
+    let short = vec![Message::user_text(TurnId::now(), "short")];
+    *messages.lock().unwrap() = short.clone();
+    assert!(
+        maybe_auto_compact_handle_locked(
+            &messages,
+            "mock-summary",
+            &providers,
+            CompactionBudgetContext::default(),
+            false,
+            |_| panic!("a no-op must not publish a checkpoint"),
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(*messages.lock().unwrap(), short);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -1047,13 +1047,16 @@ pub struct HandleAutoCompactResult {
 
 /// Apply the root compaction budget, range, summary, and replacement policy to
 /// an isolated message handle. This function does not acquire the async lock
-/// and does not emit session events.
+/// and delegates event publication to `commit`. The synchronous callback runs
+/// only after snapshot validation, under the message lock; it must not reenter
+/// the same handle. Summary requests run without the message lock.
 pub async fn maybe_auto_compact_handle_locked(
     handle: &std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
     forced: bool,
+    commit: impl FnOnce(&HandleAutoCompactResult),
 ) -> Option<HandleAutoCompactResult> {
     let snapshot = handle.lock().unwrap().clone();
     let info = crate::model_registry::model_info(model);
@@ -1122,8 +1125,7 @@ pub async fn maybe_auto_compact_handle_locked(
     if *messages != snapshot {
         return None;
     }
-    *messages = replacement.clone();
-    Some(HandleAutoCompactResult {
+    let result = HandleAutoCompactResult {
         before_tokens,
         after_tokens,
         compacted_start,
@@ -1131,7 +1133,10 @@ pub async fn maybe_auto_compact_handle_locked(
         compacted_count,
         summary,
         checkpoint_messages: replacement,
-    })
+    };
+    commit(&result);
+    *messages = result.checkpoint_messages.clone();
+    Some(result)
 }
 
 /// Compact a messages_handle in place (data-layer primitive, operates on any
