@@ -1487,6 +1487,12 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
+        if tokens_in > 0 {
+            self.context
+                .compaction
+                .model_window_tokens
+                .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
+        }
         self.record_llm_usage(
             None,
             model,
@@ -1503,6 +1509,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn record_context_plan_call(
         &self,
+        context: &ContextState,
         provider: &str,
         model: &str,
         plan_id: crate::context_plan::ContextPlanId,
@@ -1512,7 +1519,7 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        self.context.record_call(
+        context.record_call(
             provider,
             model,
             call_purpose,
@@ -1552,13 +1559,14 @@ impl Session {
             bucket.cache_write = bucket.cache_write.saturating_add(usage.cache_write);
         });
 
-        let updates_model_window = matches!(
-            (call_identity.scope, call_purpose),
-            (
-                crate::context_plan::ContextCallScope::Root,
-                crate::context_plan::ContextCallPurpose::General
-            )
-        );
+        let updates_model_window = std::ptr::eq(context, self.context.as_ref())
+            && matches!(
+                (call_identity.scope, call_purpose),
+                (
+                    crate::context_plan::ContextCallScope::Root,
+                    crate::context_plan::ContextCallPurpose::General
+                )
+            );
         self.record_llm_usage(
             Some(provider),
             model,
@@ -1597,12 +1605,6 @@ impl Session {
         tokens_per_sec: Option<f64>,
         updates_model_window: bool,
     ) {
-        if updates_model_window && tokens_in > 0 {
-            self.context
-                .compaction
-                .model_window_tokens
-                .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
-        }
         self.watch.context.send_modify(|snap| {
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);

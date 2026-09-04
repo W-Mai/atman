@@ -47,6 +47,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
 
     let root_plan = ContextPlanId::now();
     session.record_context_plan_call(
+        session.context(),
         "root-provider",
         "root-model",
         root_plan.clone(),
@@ -62,6 +63,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         None,
     );
     session.record_context_plan_call(
+        session.context(),
         "child-provider",
         "child-model",
         ContextPlanId::now(),
@@ -104,4 +106,50 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
             .window_input_tokens(),
         1_000
     );
+
+    let head = session.subscribe_context().borrow().clone();
+    for purpose in [
+        ContextCallPurpose::General,
+        ContextCallPurpose::Classification,
+    ] {
+        let other = atman_runtime::context_state::ContextState::new(Vec::new());
+        let plan = ContextPlanId::now();
+        let key = ContextUsageKey {
+            provider: "other-provider".into(),
+            model: "other-model".into(),
+            call_purpose: purpose,
+            call_identity: root_key.call_identity.clone(),
+        };
+        session.record_context_plan_call(
+            &other,
+            &key.provider,
+            &key.model,
+            plan.clone(),
+            purpose,
+            key.call_identity.clone(),
+            &TokenUsage {
+                input: 200,
+                output: 50,
+                ..Default::default()
+            },
+            Some(99),
+            Some(12.0),
+        );
+        assert_eq!(other.last_usage(&key).unwrap().plan_id, plan);
+        assert!(session.last_context_usage(&key).is_none());
+        assert_eq!(
+            session.last_context_usage(&root_key).unwrap().plan_id,
+            root_plan
+        );
+    }
+    let updated = session.subscribe_context().borrow().clone();
+    assert_eq!(session.last_input_tokens(), 120);
+    assert_eq!(updated.model, head.model);
+    assert_eq!(updated.provider, head.provider);
+    assert_eq!(updated.window_tokens, head.window_tokens);
+    assert_eq!(updated.last_ttft_ms, head.last_ttft_ms);
+    assert_eq!(updated.last_tokens_per_sec, head.last_tokens_per_sec);
+    assert_eq!(updated.tokens_in, head.tokens_in + 400);
+    assert_eq!(updated.tokens_out, head.tokens_out + 100);
+    assert_eq!(updated.primary_usage().unwrap().calls, 1);
 }

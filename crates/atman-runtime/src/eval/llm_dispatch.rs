@@ -542,8 +542,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
             if let Some(session) = ctx.session_runtime()
                 && !matches!(context_mode, ContextMode::None)
+                && let Some(context) = ctx.context()
             {
                 session.record_context_plan_call(
+                    context,
                     provider.name(),
                     &model,
                     context_plan_id,

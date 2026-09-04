@@ -133,6 +133,12 @@ impl ContextState {
         call_identity: crate::context_plan::ContextCallIdentity,
         record: crate::context_plan::ContextUsageRecord,
     ) {
+        let input_tokens = record.window_input_tokens();
+        if call_purpose == crate::context_plan::ContextCallPurpose::General && input_tokens > 0 {
+            self.compaction
+                .model_window_tokens
+                .store(input_tokens, std::sync::atomic::Ordering::Relaxed);
+        }
         let key = crate::context_plan::ContextUsageKey {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -755,6 +761,19 @@ mod tests {
                         ]
                     );
                     assert_eq!(session.messages_handle().lock().unwrap().len(), 1);
+                    assert!(
+                        selected.compaction.model_window_tokens.load(
+                            std::sync::atomic::Ordering::Relaxed,
+                        ) > 0,
+                    );
+                    assert_eq!(session.last_input_tokens(), 0);
+                    assert_eq!(
+                        selected.compaction.last_context_usage.lock().unwrap().entries.len(),
+                        1,
+                    );
+                    assert!(
+                        session.context().compaction.last_context_usage.lock().unwrap().entries.is_empty(),
+                    );
                     let Value::Struct(fields) = result else {
                         panic!("expected recent-turn result");
                     };
