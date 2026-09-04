@@ -24,12 +24,12 @@ async fn recent_turns_returns_empty_before_any_message() {
 "#;
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match out {
         Value::Int(n) => assert!(n <= 1, "want zero or the just-emitted user msg, got {n}"),
@@ -63,12 +63,12 @@ async fn recent_turns_picks_up_appended_messages() {
     let file = parse_file(src).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match out {
         Value::Int(n) => assert!(n >= 2, "want at least the 2 appended msgs, got {n}"),
@@ -109,12 +109,12 @@ async fn recent_turns_caps_output_at_n() {
     let file = parse_file(src).unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match out {
         Value::Int(n) => assert!(

@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **Explicit turn lifecycle** — `Session::end_turn`, `mark_streamed`, `take_streamed_flag`, and `flow_cancel_token` require a `TurnId`; cancellation lookup returns `None` for an inactive turn. Active turn state is private, and `current_turn` returns a value only when one turn is active.
+
 ### ✨ Features
 
 - **Remote terminal resizing** — daemon clients can resize live terminal resources through session-scoped resource identities, with idempotent commands and projected dimensions for every attached client.
@@ -19,6 +23,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Turn state isolation** — cancellation and streaming state belong to individual turns; late completion and output cannot reset another turn, and interjection enqueue is serialized with turn completion.
 - **Spawned message stream roles** — assistant messages appended to isolated child context emit assistant frames instead of tool-result frames, keeping root and child document-flow projection equivalent.
 - **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.
 - **Filesystem diff correlation** — persisted previews retain their originating tool-use identity across concurrent dispatch and resume so edits remain nested in the matching tool row, and new-file previews encode content as insertion hunks.

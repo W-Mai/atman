@@ -283,10 +283,16 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     let turn_id = TurnId::now();
     session.begin_turn(Message::user_text(turn_id.clone(), "run"));
     let out = ex
-        .run_in_turn(&file, "start", vec![], Some(turn_id), Some(session.clone()))
+        .run_in_turn(
+            &file,
+            "start",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        )
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     assert!(matches!(out, Value::Str(s) if s == "reply 1"));
     assert!(

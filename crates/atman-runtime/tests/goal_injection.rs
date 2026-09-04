@@ -113,12 +113,12 @@ async fn goal_lands_in_llm_context_records() {
 "#;
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     let _ = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     let system = provider.last_system().unwrap_or_default();
     let messages = provider.last_messages();
@@ -160,12 +160,12 @@ async fn goal_record_keeps_the_user_system_stable() {
 "#;
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     let _ = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     let seen = provider.last_system().unwrap();
     let messages = provider.last_messages();
@@ -198,11 +198,11 @@ async fn no_goal_leaves_system_untouched() {
 "#;
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     let system = provider.last_system().unwrap_or_default();
     assert!(
@@ -230,11 +230,11 @@ async fn goal_survives_multiple_turns_in_same_session() {
 
     for _ in 0..3 {
         let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-        session.begin_turn(user_msg);
+        let turn_id = session.begin_turn(user_msg);
         ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
             .await
             .unwrap();
-        session.end_turn();
+        session.end_turn(&turn_id);
         let messages = provider.last_messages();
         assert!(
             goal_records(&messages)
@@ -272,11 +272,11 @@ async fn dsl_goal_set_persists_to_disk() {
 "#;
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     assert_eq!(goal.get().unwrap(), "via dsl");
 }

@@ -385,8 +385,10 @@ impl<'a> StreamingLlmStream<'a> {
         text: &str,
         cumulative_tokens: u64,
     ) {
-        if let Some(session) = self.session {
-            session.mark_streamed();
+        if let Some(session) = self.session
+            && let Some(turn_id) = &self.base.turn_id
+        {
+            session.mark_streamed(turn_id);
         }
         self.base.mark_first_token();
         emit_stream_event(
@@ -1132,11 +1134,11 @@ mod tests {
         let provider = ScriptProvider::new(vec![vec![Step::WaitCancel]]);
         let temp = tempfile::TempDir::new().unwrap();
         let session = Session::open(temp.path()).unwrap();
-        session.begin_turn(user_text_message("hi"));
+        let turn_id = session.begin_turn(user_text_message("hi"));
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1))
             .with_stream_tx(stream_tx)
-            .with_session(&session, session.flow_cancel_token());
+            .with_session(&session, session.flow_cancel_token(&turn_id).unwrap());
         let fut = async {
             tokio::task::yield_now().await;
             session.cancel_flow();

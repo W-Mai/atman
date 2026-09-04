@@ -74,7 +74,7 @@ flow t(user: string) -> string {
 
     let (result, ()) = tokio::join!(flow, injector);
     let result = result.unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match result {
         Value::Message(_) | Value::Err(_) => {}

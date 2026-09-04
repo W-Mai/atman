@@ -207,7 +207,7 @@ async fn context_session_feeds_session_history_into_llm_call() {
                 "user_prompt".into(),
                 Value::Str("what's in the file?".into()),
             )],
-            Some(turn_id),
+            Some(turn_id.clone()),
             Some(session.clone()),
         )
         .await;
@@ -225,7 +225,7 @@ async fn context_session_feeds_session_history_into_llm_call() {
             panic!("agent flow failed: {e}");
         }
     };
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match result {
         Value::Str(s) => assert!(s.contains("done: read the file"), "got: {s}"),
@@ -523,12 +523,12 @@ async fn context_none_default_does_not_read_session_history() {
             &file,
             "one_shot",
             vec![("user_prompt".into(), Value::Str("just this prompt".into()))],
-            Some(turn_id),
+            Some(turn_id.clone()),
             Some(session.clone()),
         )
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match result {
         Value::Str(s) => assert!(s.contains("ok"), "got: {s}"),

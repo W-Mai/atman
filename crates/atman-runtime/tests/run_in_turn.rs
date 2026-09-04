@@ -106,7 +106,7 @@ async fn run_in_turn_appends_assistant_message_to_session() {
         )
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     assert!(matches!(&out, Value::Message(message) if message.text_concat() == "hello world"));
 
@@ -186,7 +186,7 @@ async fn assistant_msg_event_carries_flow_run_id() {
         )
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     let events = session.sink().snapshot();
     let has_correlated_assistant = events.iter().any(|e| {
@@ -232,10 +232,16 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
     let output = executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
+        .run_in_turn(
+            &file,
+            "ask",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        )
         .await
         .unwrap();
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     assert!(matches!(&output, Value::Message(message) if message.text_concat() == "ok"));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);

@@ -845,7 +845,7 @@ async fn run_flow_inner(
             &flow_name,
             args,
             atman_runtime::RootInvocation {
-                turn_id: Some(turn_id),
+                turn_id: Some(turn_id.clone()),
                 session: Some(session.clone()),
                 first_run_id: Some(run_id),
                 flow_cancel: Some(flow_cancel),
@@ -859,7 +859,7 @@ async fn run_flow_inner(
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;
-    session.end_turn();
+    session.end_turn(&turn_id);
     if result.is_ok() && session.record_successful_flow().is_some() {
         let _ =
             atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;

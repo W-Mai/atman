@@ -201,8 +201,11 @@ impl Executor {
         invocation: &RootInvocation,
         run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
-        let turn_id = invocation.turn_id.clone();
         let session = invocation.session.clone();
+        let turn_id = invocation
+            .turn_id
+            .clone()
+            .or_else(|| session.as_ref().and_then(|session| session.current_turn()));
         if let Some(session) = session.as_ref() {
             session.set_tool_output_budget(self.tool_ctx.tool_output_budget);
         }
@@ -215,7 +218,13 @@ impl Executor {
         let flow_cancel = invocation
             .flow_cancel
             .clone()
-            .or_else(|| session.as_ref().map(|s| s.flow_cancel_token()))
+            .or_else(|| {
+                session.as_ref().and_then(|session| {
+                    turn_id
+                        .as_ref()
+                        .and_then(|turn_id| session.flow_cancel_token(turn_id))
+                })
+            })
             .unwrap_or_default();
         let flow_registry = session
             .as_ref()

@@ -58,20 +58,9 @@ type WatchKeepalive = (
 );
 
 #[derive(Debug)]
-pub struct TurnState {
-    pub current_turn: Mutex<Option<TurnId>>,
-    pub flow_cancel: Mutex<CancellationToken>,
-    pub streamed: std::sync::atomic::AtomicBool,
-}
-
-impl TurnState {
-    fn new() -> Self {
-        Self {
-            current_turn: Mutex::new(None),
-            flow_cancel: Mutex::new(CancellationToken::new()),
-            streamed: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
+struct TurnState {
+    flow_cancel: CancellationToken,
+    streamed: bool,
 }
 
 pub struct WatchHub {
@@ -197,7 +186,7 @@ pub struct Session {
     sink: EventSink,
     message_stream: crate::message_stream::MessageStream,
     messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
-    pub turn: TurnState,
+    turns: Mutex<HashMap<TurnId, TurnState>>,
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
     pub flow_registry: std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
@@ -1036,7 +1025,7 @@ impl Session {
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
-            turn: TurnState::new(),
+            turns: Mutex::new(HashMap::new()),
             watch: WatchHub {
                 stream_tx,
                 context: context_watch,
@@ -1277,7 +1266,7 @@ impl Session {
             messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
-            turn: TurnState::new(),
+            turns: Mutex::new(HashMap::new()),
             watch: WatchHub {
                 stream_tx,
                 context: context_watch,
@@ -1341,7 +1330,7 @@ impl Session {
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
-            turn: TurnState::new(),
+            turns: Mutex::new(HashMap::new()),
             watch: WatchHub {
                 stream_tx,
                 context: context_watch,
@@ -2085,10 +2074,9 @@ impl Session {
         let Some(entry) = target else {
             return 0;
         };
-        let turn_id = self.turn.current_turn.lock().unwrap().clone();
         for (part_index, basename) in &entry.images {
             self.sink.emit(Event::AttachmentDegraded {
-                turn_id: turn_id.clone(),
+                turn_id: Some(entry.message_turn_id.clone()),
                 flow_run_id: None,
                 message_seq: entry.message_seq,
                 part_index: *part_index,
@@ -2160,7 +2148,7 @@ impl Session {
             "context {current_tokens} > threshold {threshold} (budget {budget}, model {model}); skipping compaction: {reason}"
         );
         self.sink.emit(Event::WatchWarn {
-            turn_id: self.turn.current_turn.lock().unwrap().clone(),
+            turn_id: self.current_turn(),
             flow_run_id: None,
             target: "context.compaction".into(),
             trigger: "auto_compact".into(),
@@ -2439,28 +2427,27 @@ impl Session {
         .execute(self)
     }
 
-    pub fn mark_streamed(&self) {
-        self.turn
-            .streamed
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+    pub fn mark_streamed(&self, turn_id: &TurnId) {
+        if let Some(turn) = self.turns.lock().unwrap().get_mut(turn_id) {
+            turn.streamed = true;
+        }
     }
 
-    pub fn take_streamed_flag(&self) -> bool {
-        self.turn
-            .streamed
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    pub fn take_streamed_flag(&self, turn_id: &TurnId) -> bool {
+        self.turns
+            .lock()
+            .unwrap()
+            .get_mut(turn_id)
+            .is_some_and(|turn| std::mem::take(&mut turn.streamed))
     }
 
-    pub fn end_turn(&self) {
-        self.turn
-            .streamed
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        let turn_id = self.turn.current_turn.lock().unwrap().take();
-        if let Some(turn_id) = turn_id {
+    pub fn end_turn(&self, turn_id: &TurnId) {
+        let mut turns = self.turns.lock().unwrap();
+        if turns.remove(turn_id).is_some() {
             let mut q = self.injection_queue.lock().unwrap();
             let mut cancelled = Vec::new();
             for inj in q.iter_mut() {
-                if inj.state == InjectionState::Pending && inj.turn_id == turn_id {
+                if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
                     inj.state = InjectionState::Cancelled;
                     cancelled.push(inj.clone());
                 }
@@ -2480,8 +2467,14 @@ impl Session {
         }
     }
 
+    /// Returns the sole active turn for embedded clients, never an arbitrary concurrent turn.
     pub fn current_turn(&self) -> Option<TurnId> {
-        self.turn.current_turn.lock().unwrap().clone()
+        let turns = self.turns.lock().unwrap();
+        if turns.len() == 1 {
+            turns.keys().next().cloned()
+        } else {
+            None
+        }
     }
 
     pub fn enqueue_injection(&self, text: impl Into<String>) -> Result<InjectionId, EnqueueError> {
@@ -2505,13 +2498,12 @@ impl Session {
         redirect_target: Option<String>,
         flow_run_id: Option<crate::event::FlowRunId>,
     ) -> Result<(InjectionId, crate::event::EventEnvelope), EnqueueError> {
-        let turn_id = self
-            .turn
-            .current_turn
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or(EnqueueError::NoActiveTurn)?;
+        let turns = self.turns.lock().unwrap();
+        let turn_id = match turns.len() {
+            0 => return Err(EnqueueError::NoActiveTurn),
+            1 => turns.keys().next().expect("one active turn").clone(),
+            _ => return Err(EnqueueError::AmbiguousTurn),
+        };
         let inj = Injection::with_level_for_run(
             turn_id.clone(),
             text,
@@ -2595,12 +2587,25 @@ impl Session {
             .collect()
     }
 
+    /// Cancels the sole active turn for embedded clients. Daemon clients target a run token.
     pub fn cancel_flow(&self) {
-        self.turn.flow_cancel.lock().unwrap().cancel();
+        let turns = self.turns.lock().unwrap();
+        if turns.len() == 1 {
+            turns
+                .values()
+                .next()
+                .expect("one active turn")
+                .flow_cancel
+                .cancel();
+        }
     }
 
-    pub fn flow_cancel_token(&self) -> CancellationToken {
-        self.turn.flow_cancel.lock().unwrap().clone()
+    pub fn flow_cancel_token(&self, turn_id: &TurnId) -> Option<CancellationToken> {
+        self.turns
+            .lock()
+            .unwrap()
+            .get(turn_id)
+            .map(|turn| turn.flow_cancel.clone())
     }
 
     pub async fn shutdown(&self) {
@@ -2622,6 +2627,8 @@ impl Session {
 pub enum EnqueueError {
     #[error("enqueue_injection called with no active turn")]
     NoActiveTurn,
+    #[error("enqueue_injection requires an explicit turn when multiple turns are active")]
+    AmbiguousTurn,
 }
 
 pub struct AppendMessageCommand {
@@ -2741,8 +2748,18 @@ pub struct BeginTurnCommand {
 impl BeginTurnCommand {
     pub fn execute(&self, session: &Session) -> TurnId {
         let turn_id = self.user_msg.turn_id.clone();
-        *session.turn.current_turn.lock().unwrap() = Some(turn_id.clone());
-        *session.turn.flow_cancel.lock().unwrap() = self.flow_cancel.clone().unwrap_or_default();
+        let mut turns = session.turns.lock().unwrap();
+        assert!(
+            !turns.contains_key(&turn_id),
+            "turn {turn_id} is already active"
+        );
+        turns.insert(
+            turn_id.clone(),
+            TurnState {
+                flow_cancel: self.flow_cancel.clone().unwrap_or_default(),
+                streamed: false,
+            },
+        );
         session.sink.emit(Event::TurnStart {
             turn_id: turn_id.clone(),
         });

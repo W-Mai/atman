@@ -392,7 +392,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
         Some(turn_id.clone()),
         Some(session.clone()),
     ));
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match result.unwrap() {
         Value::Str(s) => assert!(s.contains("recovered"), "got {s}"),

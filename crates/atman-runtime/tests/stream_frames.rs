@@ -29,11 +29,11 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
     let file = parse_file(src).unwrap();
     let user_msg =
         atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .expect("flow ok");
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     let mut got_chunk = false;
     let mut got_done = false;
@@ -71,11 +71,11 @@ async fn tool_use_frames_wrap_dispatch() {
     let file = parse_file(src).unwrap();
     let user_msg =
         atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .expect("flow ok");
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     let mut started = 0;
     let mut done = 0;
@@ -107,12 +107,12 @@ async fn zero_subscribers_makes_stream_send_a_noop() {
     let file = parse_file(src).unwrap();
     let user_msg =
         atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
-    session.begin_turn(user_msg);
+    let turn_id = session.begin_turn(user_msg);
     let out = ex
         .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .expect("flow ok");
-    session.end_turn();
+    session.end_turn(&turn_id);
 
     match out {
         Value::Int(n) => assert_eq!(n, 3),

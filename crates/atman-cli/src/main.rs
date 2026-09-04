@@ -827,12 +827,12 @@ async fn cmd_run(
             &parsed,
             &flow_name,
             args,
-            Some(turn_id),
+            Some(turn_id.clone()),
             Some(session.clone()),
             invocation_env,
         )
         .await;
-    session.end_turn();
+    session.end_turn(&turn_id);
     if outcome.is_ok() && session.record_successful_flow().is_some() {
         let _ =
             atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
@@ -3284,15 +3284,21 @@ async fn run_turn_with_interjection(
     let flow_fut = async {
         match kind {
             TurnKind::Slash => {
-                run_slash_command_in_turn(&text, executor, session.clone(), turn_id, invocation_env)
-                    .await
+                run_slash_command_in_turn(
+                    &text,
+                    executor,
+                    session.clone(),
+                    turn_id.clone(),
+                    invocation_env,
+                )
+                .await
             }
             TurnKind::Bare(route) => {
                 match route_input_in_turn(
                     &route,
                     executor,
                     session.clone(),
-                    turn_id,
+                    turn_id.clone(),
                     invocation_env,
                 )
                 .await
@@ -3318,7 +3324,7 @@ async fn run_turn_with_interjection(
             }
         }
     };
-    let streamed = session.take_streamed_flag();
+    let streamed = session.take_streamed_flag(&turn_id);
     let succeeded = result.is_ok();
     match result {
         Ok(v) => {
@@ -3334,7 +3340,7 @@ async fn run_turn_with_interjection(
     lifecycles
         .fire(executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;
-    session.end_turn();
+    session.end_turn(&turn_id);
     if succeeded && session.record_successful_flow().is_some() {
         let _ =
             atman_runtime::session_naming::maybe_generate_session_name(executor, &session).await;
