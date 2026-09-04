@@ -6,6 +6,8 @@ hides important behavior.
 
 ## The request model
 
+Root handles use the invocation's cancellation token, including an explicitly supplied token independent of the session turn. Synchronous and asynchronous spawned flows own separate entries, message handles, and compaction locks; synchronous child cancellation propagates from the caller without cancelling the caller in reverse. Normal completion updates the entry and publishes its terminal output state once. Flow events, entry status, and task status share the execution result's cancellation classification.
+
 Every `llm.call` is assembled from four independent inputs:
 
 ```text

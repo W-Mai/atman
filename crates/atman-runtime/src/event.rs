@@ -490,6 +490,17 @@ pub enum FlowStatus {
 }
 
 impl FlowStatus {
+    pub(crate) fn for_result(result: &crate::tool::ToolResult) -> Self {
+        match result {
+            Err(crate::error::RuntimeError::Cancelled(_))
+            | Ok(crate::value::Value::Err(crate::error::RuntimeError::Cancelled(_))) => {
+                Self::Cancelled
+            }
+            Err(error) => Self::errored(error.to_string()),
+            Ok(_) => Self::Ok,
+        }
+    }
+
     pub fn errored(msg: impl Into<String>) -> Self {
         Self::Errored {
             message: msg.into(),

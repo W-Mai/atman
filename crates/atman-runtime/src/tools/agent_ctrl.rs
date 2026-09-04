@@ -50,6 +50,13 @@ pub enum FlowEvent {
     Exited { status: FlowRunStatus },
 }
 
+#[derive(Default)]
+pub struct FlowEntryOptions {
+    pub display_label: Option<String>,
+    pub workspace: Option<WorkspaceBinding>,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
 pub struct FlowEntry {
     pub handle: String,
     pub goal: String,
@@ -71,6 +78,31 @@ pub struct FlowEntry {
     pub workspace: Option<WorkspaceBinding>,
     pub workspace_state: Arc<Mutex<Option<WorkspaceState>>>,
     pub cleanup_error: Arc<Mutex<Option<String>>>,
+}
+
+impl FlowEntry {
+    pub(crate) fn finish(&self, result: &ToolResult) -> FlowRunStatus {
+        let mut status = self.status.lock().unwrap();
+        if !status.is_running() {
+            return status.clone();
+        }
+        let ended_at = chrono::Utc::now();
+        *status = match FlowStatus::for_result(result) {
+            FlowStatus::Cancelled => FlowRunStatus::Killed { ended_at },
+            FlowStatus::Errored { message } => FlowRunStatus::Err { ended_at, message },
+            FlowStatus::Ok => FlowRunStatus::Ok {
+                ended_at,
+                final_text: match result {
+                    Ok(Value::Str(text)) => text.clone(),
+                    _ => String::new(),
+                },
+            },
+        };
+        let _ = self.stream_tx.send(FlowEvent::Exited {
+            status: status.clone(),
+        });
+        status.clone()
+    }
 }
 
 impl crate::watch::Watchable for FlowEntry {
@@ -505,38 +537,14 @@ impl FlowRegistry {
         goal: String,
         model: String,
         child_run_id: FlowRunId,
+        options: FlowEntryOptions,
     ) -> Arc<FlowEntry> {
-        self.create_entry_with_workspace(handle, goal, model, child_run_id, None)
-    }
-
-    pub fn create_entry_with_workspace(
-        &self,
-        handle: String,
-        goal: String,
-        model: String,
-        child_run_id: FlowRunId,
-        workspace: Option<WorkspaceBinding>,
-    ) -> Arc<FlowEntry> {
-        let display_label = goal.clone();
-        self.create_entry_with_workspace_label(
-            handle,
-            goal,
+        let FlowEntryOptions {
             display_label,
-            model,
-            child_run_id,
             workspace,
-        )
-    }
-
-    fn create_entry_with_workspace_label(
-        &self,
-        handle: String,
-        goal: String,
-        display_label: String,
-        model: String,
-        child_run_id: FlowRunId,
-        workspace: Option<WorkspaceBinding>,
-    ) -> Arc<FlowEntry> {
+            cancel,
+        } = options;
+        let display_label = display_label.unwrap_or_else(|| goal.clone());
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
         let entry = Arc::new(FlowEntry {
             handle: handle.clone(),
@@ -546,7 +554,7 @@ impl FlowRegistry {
                 started_at: chrono::Utc::now(),
             })),
             output: Arc::new(Mutex::new(String::new())),
-            cancel: tokio_util::sync::CancellationToken::new(),
+            cancel,
             stream_tx,
             messages: Arc::new(Mutex::new(Vec::new())),
             iteration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -831,6 +839,57 @@ struct PreparedFlowAgent {
     flows: std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
 }
 
+impl PreparedFlowAgent {
+    fn register_entry(
+        &self,
+        arguments: &[(String, Value)],
+        ctx: &ToolCtx,
+        run_id: FlowRunId,
+        mut options: FlowEntryOptions,
+    ) -> Arc<FlowEntry> {
+        let goal = arguments
+            .iter()
+            .find_map(|(_, value)| match value {
+                Value::Str(value) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        options.display_label = ctx
+            .call_intent
+            .as_ref()
+            .map(|intent| intent.as_str().into());
+        let model = arguments
+            .iter()
+            .find_map(|(name, value)| match (name.as_str(), value) {
+                ("model", Value::Str(model)) => Some(model.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                self.flow
+                    .params
+                    .iter()
+                    .find(|parameter| parameter.name.name == "model")
+                    .and_then(|parameter| match parameter.default.as_ref() {
+                        Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(
+                            model,
+                        ))) => Some(model.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_default();
+        ctx.flow_registry
+            .as_ref()
+            .expect("validated flow registry")
+            .create_entry(
+                format!("agent_{}", uuid::Uuid::now_v7().simple()),
+                goal,
+                model,
+                run_id,
+                options,
+            )
+    }
+}
+
 async fn prepare_flow_agent(
     flow_ref: &str,
     expected_version: Option<&str>,
@@ -910,7 +969,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let run_id = FlowRunId::now();
     let policy = workspace_policy(&args)?;
     let session_id = workspace_session(ctx, policy)?;
-    let workspace_guard = WorkspaceFinalizeGuard::new(
+    let mut workspace_guard = WorkspaceFinalizeGuard::new(
         ctx,
         allocate_workspace(ctx, policy, session_id.as_deref(), &run_id)?,
         session_id,
@@ -932,6 +991,20 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         .run_id
         .clone();
     let _block_guard = flow_registry.block_on_descendant(&parent_run_id, &run_id)?;
+    let entry = prepared.register_entry(
+        &flow_args,
+        ctx,
+        run_id.clone(),
+        FlowEntryOptions {
+            workspace: workspace_guard.binding().cloned(),
+            cancel: ctx.cancel.child_token(),
+            ..Default::default()
+        },
+    );
+    workspace_guard = workspace_guard.with_projections(
+        Arc::clone(&entry.workspace_state),
+        Arc::clone(&entry.cleanup_error),
+    );
     let mut child_ctx = match workspace_guard.binding().cloned() {
         Some(binding) => ctx.clone().with_workspace(binding),
         None => ctx.clone(),
@@ -939,37 +1012,22 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     child_ctx.flow_run_id = Some(run_id.clone());
     child_ctx.flow_identity = Some(child_identity);
     child_ctx.call_intent = None;
-    let child_messages = Arc::new(Mutex::new(Vec::new()));
     if inherit_context && let Some(parent) = &ctx.session_messages_handle {
-        *child_messages.lock().unwrap() = inherited_context_snapshot(parent);
+        *entry.messages.lock().unwrap() = inherited_context_snapshot(parent);
     }
-    run_prepared_flow_agent(
+    let result = run_prepared_flow_agent(
         prepared,
         flow_args,
         &child_ctx,
-        run_id,
-        child_messages,
-        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::clone(&entry),
         inherit_context,
     )
-    .await
+    .await;
+    entry.finish(&result);
+    result
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
-    // Use the first string-typed argument as a display label for the FlowEntry.
-    let goal = match args.named("arguments") {
-        Some(Value::Struct(fields)) => fields.iter().find_map(|(_, value)| match value {
-            Value::Str(value) => Some(value.clone()),
-            _ => None,
-        }),
-        _ => None,
-    }
-    .unwrap_or_default();
-    let display_label = ctx
-        .call_intent
-        .as_ref()
-        .map(|intent| intent.as_str().to_string())
-        .unwrap_or_else(|| goal.clone());
     let inherit_context = should_inherit_context(&args);
     let flow_registry = ctx.flow_registry.clone().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
@@ -979,28 +1037,6 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let version = extract_flow_version(&args)?;
     let prepared = prepare_flow_agent(&flow_ref, version.as_deref()).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
-    let model = flow_args
-        .iter()
-        .find_map(|(name, value)| match (name.as_str(), value) {
-            ("model", Value::Str(model)) => Some(model.clone()),
-            _ => None,
-        })
-        .or_else(|| {
-            prepared
-                .flow
-                .params
-                .iter()
-                .find(|parameter| parameter.name.name == "model")
-                .and_then(|parameter| match parameter.default.as_ref() {
-                    Some(atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(model))) => {
-                        Some(model.clone())
-                    }
-                    _ => None,
-                })
-        })
-        .unwrap_or_default();
-
-    let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
     let child_run_id = FlowRunId::now();
     let policy = workspace_policy(&args)?;
     let session_id = workspace_session(ctx, policy)?;
@@ -1019,14 +1055,16 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     )?;
     let lifecycle_guard = flow_registry.lifecycle_guard(&child_run_id);
     let workspace = workspace_guard.binding().cloned();
-    let entry = flow_registry.create_entry_with_workspace_label(
-        handle.clone(),
-        goal,
-        display_label,
-        model,
+    let entry = prepared.register_entry(
+        &flow_args,
+        ctx,
         child_run_id.clone(),
-        workspace.clone(),
+        FlowEntryOptions {
+            workspace: workspace.clone(),
+            ..Default::default()
+        },
     );
+    let handle = entry.handle.clone();
     workspace_guard = workspace_guard.with_projections(
         Arc::clone(&entry.workspace_state),
         Arc::clone(&entry.cleanup_error),
@@ -1072,18 +1110,10 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             });
         }
 
-        // Replace ctx.cancel with entry.cancel so flow.kill can actually cancel
-        // the sub-agent's flow execution. Pass entry into ctx so the DSL runtime
-        // can write output/messages/iteration synchronously during LLM calls.
-        // Bind the sub-agent's own compact_lock so it can compact its segment
-        // independently.
         let mut ctx_for_flow = ctx_clone;
-        ctx_for_flow.cancel = entry_clone.cancel.clone();
         ctx_for_flow.call_intent = None;
-        ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
         ctx_for_flow.flow_run_id = Some(child_run_id.clone());
         ctx_for_flow.flow_identity = Some(child_identity);
-        ctx_for_flow.compact_lock_handle = Some(Arc::clone(&entry_clone.compact_lock));
         if let Some(binding) = entry_clone.workspace.clone() {
             ctx_for_flow = ctx_for_flow.with_workspace(binding);
         }
@@ -1092,32 +1122,11 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             prepared,
             flow_args,
             &ctx_for_flow,
-            child_run_id.clone(),
-            Arc::clone(&entry_clone.messages),
-            Arc::clone(&entry_clone.compact_lock),
+            Arc::clone(&entry_clone),
             inherit_context,
         )
         .await;
-        let killed = entry_clone.cancel.is_cancelled();
-        let status = match &result {
-            _ if killed => FlowRunStatus::Killed {
-                ended_at: chrono::Utc::now(),
-            },
-            Ok(Value::Str(s)) => FlowRunStatus::Ok {
-                ended_at: chrono::Utc::now(),
-                final_text: s.clone(),
-            },
-            Ok(_) => FlowRunStatus::Ok {
-                ended_at: chrono::Utc::now(),
-                final_text: String::new(),
-            },
-            Err(e) => FlowRunStatus::Err {
-                ended_at: chrono::Utc::now(),
-                message: e.to_string(),
-            },
-        };
-
-        *entry_clone.status.lock().unwrap() = status.clone();
+        let status = entry_clone.finish(&result);
 
         // Send SubAgentDone so the TUI updates the SubAgentActivity item.
         if let Some(tx) = &parent_stream_tx {
@@ -1132,15 +1141,12 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             });
         }
 
-        let _ = entry_clone.stream_tx.send(FlowEvent::Exited { status });
         if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
-            let ts = if killed {
-                crate::task_registry::TaskStatus::Killed
-            } else {
-                match result {
-                    Ok(_) => crate::task_registry::TaskStatus::Ok,
-                    Err(_) => crate::task_registry::TaskStatus::Err,
-                }
+            let ts = match status {
+                FlowRunStatus::Killed { .. } => crate::task_registry::TaskStatus::Killed,
+                FlowRunStatus::Ok { .. } => crate::task_registry::TaskStatus::Ok,
+                FlowRunStatus::Err { .. } => crate::task_registry::TaskStatus::Err,
+                FlowRunStatus::Running { .. } => unreachable!("entry is finished"),
             };
             tr.finish(tid, ts);
         }
@@ -1297,7 +1303,7 @@ impl Tool for AgentKill {
         Tier::Four
     }
     fn description(&self) -> Option<&str> {
-        Some("Cancel a running async sub-agent by handle.")
+        Some("Cancel a running flow by handle, including the root flow.")
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1415,9 +1421,7 @@ async fn run_prepared_flow_agent(
     prepared: PreparedFlowAgent,
     flow_args: Vec<(String, Value)>,
     ctx: &ToolCtx,
-    run_id: FlowRunId,
-    child_messages: Arc<Mutex<Vec<Message>>>,
-    child_compact_lock: Arc<tokio::sync::Mutex<()>>,
+    entry: Arc<FlowEntry>,
     inherited_parent_context: bool,
 ) -> ToolResult {
     let Some(registry) = ctx.registry.as_ref() else {
@@ -1431,11 +1435,14 @@ async fn run_prepared_flow_agent(
         ));
     };
     let PreparedFlowAgent { path, flow, flows } = prepared;
+    let run_id = entry.child_run_id.clone();
     let initial_prompt = invocation_user_message(&flow, &flow_args)?;
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
-    child_ctx.session_messages_handle = Some(child_messages);
-    child_ctx.compact_lock_handle = Some(child_compact_lock);
+    child_ctx.cancel = entry.cancel.clone();
+    child_ctx.session_messages_handle = Some(Arc::clone(&entry.messages));
+    child_ctx.compact_lock_handle = Some(Arc::clone(&entry.compact_lock));
+    child_ctx.agent_entry = Some(entry);
     child_ctx.context_epoch_handle = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
     child_ctx.context_prefix_tracker = Some(Arc::new(std::sync::Mutex::new(
         crate::context_plan::ContextPrefixTracker::default(),
@@ -1450,7 +1457,7 @@ async fn run_prepared_flow_agent(
     if let Some(prompt) = initial_prompt {
         seed_child_message_context(&child_ctx, prompt)?;
     }
-    let out = crate::exec::exec_flow_with_siblings(
+    let execution = crate::exec::exec_flow_with_siblings(
         &flow,
         flow_args,
         registry.as_ref(),
@@ -1464,14 +1471,13 @@ async fn run_prepared_flow_agent(
         child_ctx.cancel.clone(),
         None,
         path.parent().map(|p| p.to_path_buf()),
-    )
-    .await;
-    let status = match &out {
-        Ok(_) => FlowStatus::Ok,
-        Err(e) => FlowStatus::Errored {
-            message: e.to_string(),
-        },
+    );
+    let out = tokio::select! {
+        biased;
+        _ = child_ctx.cancel.cancelled() => Err(RuntimeError::Cancelled("flow cancelled by user".into())),
+        result = execution => result,
     };
+    let status = FlowStatus::for_result(&out);
     mark_terminal_and_emit_child_flow_end(ctx, &run_id, &status);
     out
 }
@@ -1909,16 +1915,46 @@ mod tests {
     #[test]
     fn flow_entry_keeps_execution_goal_separate_from_display_label() {
         let registry = FlowRegistry::new();
-        let entry = registry.create_entry_with_workspace_label(
+        let entry = registry.create_entry(
             "agent-test".into(),
             "Audit the full provider chain".into(),
-            "Review provider routing".into(),
             "smart".into(),
             crate::event::FlowRunId::now(),
-            None,
+            super::FlowEntryOptions {
+                display_label: Some("Review provider routing".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(entry.goal, "Audit the full provider chain");
         assert_eq!(entry.display_label, "Review provider routing");
+    }
+
+    #[test]
+    fn flow_entry_completion_publishes_one_terminal_state() {
+        let entry = FlowRegistry::new().create_entry(
+            "agent-test".into(),
+            String::new(),
+            String::new(),
+            crate::event::FlowRunId::now(),
+            Default::default(),
+        );
+        let mut events = entry.stream_tx.subscribe();
+        assert!(matches!(
+            entry.finish(&Ok(Value::Str("complete".into()))),
+            FlowRunStatus::Ok { final_text, .. } if final_text == "complete"
+        ));
+        entry.cancel.cancel();
+        assert!(matches!(
+            entry.finish(&Err(crate::RuntimeError::Cancelled("late".into()))),
+            FlowRunStatus::Ok { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            super::FlowEvent::Exited {
+                status: FlowRunStatus::Ok { .. }
+            }
+        ));
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
@@ -2020,6 +2056,23 @@ mod tests {
             ctx: &'a ToolCtx,
         ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
             Box::pin(async move {
+                let entry = ctx.agent_entry.as_ref().expect("child owns an entry");
+                assert_eq!(ctx.flow_run_id.as_ref(), Some(&entry.child_run_id));
+                assert!(Arc::ptr_eq(
+                    &entry.messages,
+                    ctx.session_messages_handle.as_ref().unwrap(),
+                ));
+                assert!(Arc::ptr_eq(
+                    &entry.compact_lock,
+                    ctx.compact_lock_handle.as_ref().unwrap(),
+                ));
+                assert!(matches!(
+                    crate::watch::HasPendingInjections
+                        .call(ToolArgs::default(), ctx)
+                        .await
+                        .unwrap(),
+                    Value::Bool(false)
+                ));
                 let text = ctx
                     .session_messages_handle
                     .as_ref()
@@ -2303,6 +2356,10 @@ flow plain(user_prompt: string) -> string {
             "parent prompt".into(),
             String::new(),
             root_run_id.clone(),
+            Default::default(),
+        );
+        root_entry.pending_injections.lock().unwrap().push(
+            crate::injection::Injection::new_pending(crate::event::TurnId::now(), "parent only"),
         );
         let parent_messages = Arc::new(std::sync::Mutex::new(vec![
             crate::message::Message::user_text(crate::event::TurnId::now(), "parent prompt"),
@@ -2345,6 +2402,25 @@ flow plain(user_prompt: string) -> string {
             .unwrap();
 
         assert!(matches!(result, Value::Str(text) if text == "child prompt"));
+        assert_eq!(root_entry.pending_injections.lock().unwrap().len(), 1);
+        let sync_child = flows
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .find(|entry| entry.child_run_id != root_entry.child_run_id)
+            .cloned()
+            .unwrap();
+        assert!(matches!(
+            *sync_child.status.lock().unwrap(),
+            FlowRunStatus::Ok { .. }
+        ));
+        sync_child.cancel.cancel();
+        assert!(
+            !ctx.cancel.is_cancelled(),
+            "child cancellation must not cancel its parent"
+        );
+        assert!(root_entry.status.lock().unwrap().is_running());
         assert_eq!(parent_messages.lock().unwrap().len(), 1);
         assert!(
             root_entry.messages.lock().unwrap().is_empty(),

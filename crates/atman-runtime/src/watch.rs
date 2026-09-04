@@ -714,6 +714,7 @@ mod tests {
             "goal".into(),
             String::new(),
             crate::event::FlowRunId::now(),
+            Default::default(),
         );
         let child_ctx = ToolCtx::new().with_agent_entry(Arc::clone(&entry));
         assert!(matches!(

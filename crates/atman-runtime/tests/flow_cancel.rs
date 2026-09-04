@@ -124,7 +124,7 @@ flow watched() -> string {
 struct CancelAfterFirstProvider {
     name: String,
     calls: Arc<Mutex<usize>>,
-    session: Arc<Session>,
+    cancel: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Provider for CancelAfterFirstProvider {
@@ -133,7 +133,7 @@ impl Provider for CancelAfterFirstProvider {
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
-        let session = self.session.clone();
+        let cancel = self.cancel.clone();
         let calls = self.calls.clone();
         Box::pin(async move {
             let idx = {
@@ -142,7 +142,7 @@ impl Provider for CancelAfterFirstProvider {
                 *c
             };
             if idx == 1 {
-                session.cancel_flow();
+                cancel();
             }
             let turn_id = req
                 .messages
@@ -168,7 +168,7 @@ impl Provider for CancelAfterFirstProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let session = self.session.clone();
+        let cancel = self.cancel.clone();
         let calls = self.calls.clone();
         let turn_id = req
             .messages
@@ -182,7 +182,7 @@ impl Provider for CancelAfterFirstProvider {
                 *c
             };
             if idx == 1 {
-                session.cancel_flow();
+                cancel();
             }
             Ok(AssistantMessage::text_only(Message {
                 role: MessageRole::Assistant,
@@ -211,33 +211,61 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
 "#;
     let file = parse_file(src).unwrap();
 
-    let session = Arc::new(Session::open_ephemeral());
-    let turn_id = TurnId::now();
-    session.begin_turn(user_msg(turn_id.clone(), "go"));
+    for through_entry in [false, true] {
+        let session = Arc::new(Session::open_ephemeral());
+        let turn_id = TurnId::now();
+        session.begin_turn(user_msg(turn_id.clone(), "go"));
 
-    let calls = Arc::new(Mutex::new(0usize));
-    let executor = Executor::new();
-    executor
-        .providers
-        .register(Arc::new(CancelAfterFirstProvider {
-            name: "prov".into(),
-            calls: calls.clone(),
-            session: session.clone(),
-        }));
+        let calls = Arc::new(Mutex::new(0usize));
+        let cancel_session = session.clone();
+        let executor = Executor::new();
+        executor
+            .providers
+            .register(Arc::new(CancelAfterFirstProvider {
+                name: "prov".into(),
+                calls: calls.clone(),
+                cancel: Arc::new(move || {
+                    if through_entry {
+                        cancel_session
+                            .flow_registry
+                            .lookup("root")
+                            .unwrap()
+                            .cancel
+                            .cancel();
+                    } else {
+                        cancel_session.cancel_flow();
+                    }
+                }),
+            }));
 
-    let out = executor
-        .run_in_turn(
-            &file,
-            "chained",
-            vec![],
-            Some(turn_id),
-            Some(session.clone()),
-        )
-        .await;
-    assert!(out.is_err(), "flow should abort after cancel_flow");
-    assert_eq!(
-        *calls.lock().unwrap(),
-        1,
-        "second llm call must be skipped by cancel-poll at eval_node entry"
-    );
+        let out = executor
+            .run_with_invocation(
+                &file,
+                "chained",
+                vec![],
+                RootInvocation {
+                    turn_id: Some(turn_id),
+                    session: Some(session.clone()),
+                    flow_cancel: through_entry.then(CancellationToken::new),
+                    ..RootInvocation::default()
+                },
+            )
+            .await;
+        assert!(out.is_err(), "flow should abort after cancel_flow");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "second llm call must be skipped by cancel-poll at eval_node entry"
+        );
+        assert!(matches!(
+            *session
+                .flow_registry
+                .lookup("root")
+                .unwrap()
+                .status
+                .lock()
+                .unwrap(),
+            atman_runtime::tools::agent_ctrl::FlowRunStatus::Killed { .. }
+        ));
+    }
 }

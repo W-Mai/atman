@@ -330,19 +330,25 @@ impl Executor {
         tool_ctx.flow_identity = Some(identity);
         tool_ctx.flow_run_id = Some(run_id.clone());
         tool_ctx.session_id = Some(session_id);
+        let mut root_entry = None;
         if let Some(sess) = session.as_ref() {
             tool_ctx.stream_tx = Some(sess.stream_tx());
             tool_ctx.session_messages_handle = Some(sess.messages_handle());
             // Register root so flow.output/interject("root") work. Root's llm
             // context stays on session MessageStream; entry is for output +
             // interjection addressing.
-            let root_entry = sess.flow_registry.create_entry(
+            let entry = sess.flow_registry.create_entry(
                 "root".to_string(),
                 sess.goal().unwrap_or_else(|| flow.name.name.clone()),
                 String::new(),
                 run_id.clone(),
+                crate::tools::agent_ctrl::FlowEntryOptions {
+                    cancel: flow_cancel.clone(),
+                    ..Default::default()
+                },
             );
-            tool_ctx.agent_entry = Some(std::sync::Arc::clone(&root_entry));
+            tool_ctx.agent_entry = Some(std::sync::Arc::clone(&entry));
+            root_entry = Some(entry);
             sess.set_current_root("root".to_string());
         }
         let exec_fut = exec_flow_with_siblings(
@@ -381,26 +387,10 @@ impl Executor {
         } else {
             result
         };
-        let status = match &result {
-            Ok(v) => {
-                if let Value::Err(e) = v
-                    && matches!(e, RuntimeError::Cancelled(_))
-                {
-                    FlowStatus::Cancelled
-                } else {
-                    FlowStatus::Ok
-                }
-            }
-            Err(e) => {
-                if matches!(e, RuntimeError::Cancelled(_)) {
-                    FlowStatus::Cancelled
-                } else {
-                    FlowStatus::Errored {
-                        message: e.to_string(),
-                    }
-                }
-            }
-        };
+        if let Some(entry) = root_entry {
+            entry.finish(&result);
+        }
+        let status = FlowStatus::for_result(&result);
         let cancelled = matches!(status, FlowStatus::Cancelled);
         let suicide = task_id.as_ref().and_then(|id| {
             self.tool_ctx

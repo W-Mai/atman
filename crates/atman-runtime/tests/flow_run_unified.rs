@@ -72,6 +72,10 @@ async fn root_flow_run_registered_in_flow_registry() {
     assert!(root.is_ok(), "root should be in flow_registry");
     let root = root.unwrap();
     assert_eq!(root.handle, "root");
+    assert!(matches!(
+        *root.status.lock().unwrap(),
+        atman_runtime::tools::agent_ctrl::FlowRunStatus::Ok { .. }
+    ));
 
     // current_root pointer should point at "root".
     assert_eq!(session.current_root(), Some("root".to_string()));
@@ -162,6 +166,7 @@ fn ancestry_and_handle_removal_matrix_preserves_run_identities() {
         "child".into(),
         "m".into(),
         child.clone(),
+        Default::default(),
     );
     registry.remove("child-handle");
     assert!(registry.lookup("child-handle").is_err());
@@ -346,7 +351,13 @@ async fn no_session_no_root_registration() {
 #[tokio::test]
 async fn flow_interject_delivers_to_target_entry_channel() {
     let registry = Arc::new(FlowRegistry::new());
-    let entry = registry.create_entry("sub_1".into(), "g".into(), "m".into(), FlowRunId::now());
+    let entry = registry.create_entry(
+        "sub_1".into(),
+        "g".into(),
+        "m".into(),
+        FlowRunId::now(),
+        Default::default(),
+    );
     let ctx = ToolCtx::new().with_flow_registry(registry);
     let args = ToolArgs {
         positional: vec![Value::Str("sub_1".into()), Value::Str("wake up".into())],
@@ -404,6 +415,8 @@ flow test_flow(goal: string) -> string {
     let _home = HomeGuard::set(tmp.path());
 
     let registry = Arc::new(FlowRegistry::new());
+    let events = atman_runtime::event::EventSink::new();
+    let tasks = atman_runtime::task_registry::TaskRegistry::new();
     let providers = atman_runtime::provider::ProviderRegistry::new();
     providers.register(Arc::new(
         MockProvider::new("mock")
@@ -424,6 +437,7 @@ flow test_flow(goal: string) -> string {
         .unwrap();
     let broker = atman_runtime::permission::PermissionBroker::shared(registry.clone());
     let mut ctx = ToolCtx::new()
+        .with_events(events.clone())
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
         .with_flow_registry(registry.clone())
@@ -431,6 +445,7 @@ flow test_flow(goal: string) -> string {
         .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
         .with_trust(atman_runtime::trust::TrustConfig::default())
         .with_stream_tx(stream_tx);
+    ctx.task_registry = Some(tasks.clone());
     ctx.flow_run_id = Some(root_run_id);
     ctx.flow_identity = Some(root_identity);
 
@@ -475,12 +490,19 @@ flow test_flow(goal: string) -> string {
 
     let entry = registry.lookup(&handle).unwrap();
     let status = entry.status.lock().unwrap().clone();
-    let is_err = matches!(status, FlowRunStatus::Err { .. });
     assert!(
-        is_err,
-        "sub-agent should be err after interjection, got: {:?}",
+        matches!(status, FlowRunStatus::Killed { .. }),
+        "sub-agent should be killed after hard stop, got: {:?}",
         status
     );
+    assert!(events.snapshot().iter().any(|event| matches!(event,
+        atman_runtime::event::Event::FlowEnd { run_id, status: atman_runtime::event::FlowStatus::Cancelled, .. }
+        if run_id == &entry.child_run_id
+    )));
+    assert!(matches!(
+        tasks.lookup_by_handle(&handle).unwrap().status,
+        atman_runtime::task_registry::TaskStatus::Killed
+    ));
 }
 
 #[tokio::test]
