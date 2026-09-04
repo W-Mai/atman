@@ -123,8 +123,11 @@ async fn call_costs_and_managed_window_observations_survive_replay_independently
     use std::sync::Arc;
 
     let _registry = common::ModelRegistryGuard::acquire(common::config(
-        ["primary", "helper", "failure"]
-            .map(|name| common::model_for_provider(name, "mock", 100_000, None)),
+        ["primary", "helper", "failure"].map(|name| {
+            let (key, mut entry) = common::model_for_provider(name, "mock", 100_000, None);
+            entry.reasoning_efforts = vec![atman_runtime::provider::ReasoningEffort::Low];
+            (key, entry)
+        }),
     ))
     .await;
     let directory = tempfile::tempdir().unwrap();
@@ -180,6 +183,7 @@ async fn call_costs_and_managed_window_observations_survive_replay_independently
         ("helper", "bare", Purpose::Classification),
         ("failure", "override", Purpose::General),
         ("failure", "bare", Purpose::General),
+        ("primary", "reasoning-error", Purpose::General),
         ("primary", "session", Purpose::General),
     ]
     .into_iter()
@@ -194,6 +198,10 @@ async fn call_costs_and_managed_window_observations_survive_replay_independently
             ),
         ];
         match mode {
+            "reasoning-error" => {
+                named.push(("prompt".into(), Value::Str("separate input".into())));
+                named.push(("effort".into(), Value::Str("high".into())));
+            }
             "bare" => named.push(("prompt".into(), Value::Str("separate input".into()))),
             "override" => named.push((
                 "messages".into(),
@@ -217,7 +225,14 @@ async fn call_costs_and_managed_window_observations_survive_replay_independently
             &LlmCallTool
         };
         let result = tool.call(args, &ctx).await;
-        assert_eq!(result.is_err(), model == "failure", "{mode}: {result:?}");
+        assert_eq!(
+            result.is_err(),
+            model == "failure" || mode == "reasoning-error",
+            "{mode}: {result:?}"
+        );
+        if mode == "reasoning-error" {
+            assert!(result.unwrap_err().to_string().contains("reasoning config"));
+        }
 
         let events = session.sink().snapshot_envelopes();
         let calls: Vec<_> = events
@@ -243,6 +258,10 @@ async fn call_costs_and_managed_window_observations_survive_replay_independently
             unreachable!()
         };
         assert_eq!(*managed_context, Some(mode == "session"));
+        if mode == "reasoning-error" {
+            assert!(context_plan_id.is_none());
+            assert_eq!(usage, &atman_runtime::TokenUsage::default());
+        }
         if model == "helper" && mode == "bare" && purpose == Purpose::General {
             let cache = context_cache.as_ref().unwrap();
             if let Some(previous) = explicit_prefix_bytes.replace(cache.wire_prefix_bytes) {

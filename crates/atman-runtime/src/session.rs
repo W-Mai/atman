@@ -1505,14 +1505,17 @@ impl Session {
         context: Option<&ContextState>,
         provider: &str,
         model: &str,
-        plan_id: crate::context_plan::ContextPlanId,
+        plan_id: Option<crate::context_plan::ContextPlanId>,
         call_purpose: crate::context_plan::ContextCallPurpose,
         call_identity: crate::context_plan::ContextCallIdentity,
         usage: &crate::provider::TokenUsage,
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        if let Some(context) = context {
+        let context = context.filter(|_| plan_id.is_some());
+        if let Some(context) = context
+            && let Some(plan_id) = plan_id
+        {
             context.record_call(
                 provider,
                 model,

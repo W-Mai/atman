@@ -547,30 +547,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     node_id: ctx.current_node_id.clone(),
                 });
             }
-            if let Some(session) = ctx.session_runtime() {
-                session.record_context_plan_call(
-                    managed_context.map(std::convert::AsRef::as_ref),
-                    provider.name(),
-                    &model,
-                    context_plan_id,
-                    context_call_purpose,
-                    context_call_identity,
-                    &usage,
-                    ttft_ms,
-                    tps,
-                );
-            } else if let Some(context) = managed_context {
-                context.record_call(
-                    provider.name(),
-                    &model,
-                    context_call_purpose,
-                    context_call_identity,
-                    crate::context_plan::ContextUsageRecord {
-                        plan_id: context_plan_id,
-                        usage: usage.clone(),
-                    },
-                );
-            }
             let outcome = match (outcome, response_error) {
                 (Ok(_), Some(error)) => Err(error),
                 (outcome, _) => outcome,
@@ -878,7 +854,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         return fb;
     }
     drop(compact_guard);
-    if let Some(session) = ctx.session_runtime()
+    if uses_managed_context
+        && let Some(session) = ctx.session_runtime()
         && !saw_context_overflow
     {
         crate::compaction::start_auto_compact_with_budget(
@@ -900,9 +877,51 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
 }
 
 fn emit_llm_call(ctx: &ToolCtx, event: crate::event::Event) {
+    let crate::event::Event::LlmCall {
+        model,
+        provider,
+        context_plan_id,
+        managed_context,
+        context_call_purpose: Some(purpose),
+        context_call_identity: Some(identity),
+        usage,
+        ttft_ms,
+        tokens_per_second,
+        ..
+    } = &event
+    else {
+        unreachable!("dispatch must provide call identity and purpose");
+    };
     let owner = ctx.context_sink();
     if let Some(sink) = owner {
         sink.emit(event.clone());
+    }
+    let context = ctx.context().filter(|_| *managed_context == Some(true));
+    if let Some(session) = ctx.session_runtime() {
+        session.record_context_plan_call(
+            context.map(std::convert::AsRef::as_ref),
+            provider,
+            model,
+            context_plan_id.clone(),
+            *purpose,
+            identity.clone(),
+            usage,
+            *ttft_ms,
+            *tokens_per_second,
+        );
+    } else if let Some(context) = context
+        && let Some(plan_id) = context_plan_id
+    {
+        context.record_call(
+            provider,
+            model,
+            *purpose,
+            identity.clone(),
+            crate::context_plan::ContextUsageRecord {
+                plan_id: plan_id.clone(),
+                usage: usage.clone(),
+            },
+        );
     }
     if let Some(diagnostics) = ctx.events.as_ref()
         && owner.is_none_or(|sink| {

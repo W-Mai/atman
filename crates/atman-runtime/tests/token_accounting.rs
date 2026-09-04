@@ -50,7 +50,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         Some(session.context()),
         "root-provider",
         "root-model",
-        root_plan.clone(),
+        Some(root_plan.clone()),
         ContextCallPurpose::General,
         root_identity,
         &TokenUsage {
@@ -66,7 +66,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         Some(session.context()),
         "child-provider",
         "child-model",
-        ContextPlanId::now(),
+        Some(ContextPlanId::now()),
         ContextCallPurpose::Classification,
         child_identity,
         &TokenUsage {
@@ -124,7 +124,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
             Some(&other),
             &key.provider,
             &key.model,
-            plan.clone(),
+            Some(plan.clone()),
             purpose,
             key.call_identity.clone(),
             &TokenUsage {

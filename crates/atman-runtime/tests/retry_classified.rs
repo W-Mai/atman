@@ -789,3 +789,92 @@ fn retry_classified_unknown_kind_fails_parse_time() {
         other => panic!("expected ToolFailed err with kind name, got {other:?}"),
     }
 }
+
+#[test]
+fn isolated_request_failures_do_not_schedule_context_compaction() {
+    use atman_runtime::event::{ContextInheritance, Event, FlowRunId, TurnId};
+    use atman_runtime::tool::{HistorySegment, Tool, ToolArgs, ToolCtx, ToolRegistry};
+
+    let _registry = common::SyncModelRegistryGuard::mock("m");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        for spawned in [false, true] {
+            for explicit_messages in [false, true] {
+                let session = Arc::new(Session::open_ephemeral());
+                build_long_history(&session, 12);
+                let providers = Arc::new(atman_runtime::provider::ProviderRegistry::new());
+                let provider = Arc::new(ScriptedProvider::new(
+                    "m",
+                    vec![Err(RuntimeError::ToolFailed(
+                        "provider rejected isolated input".into(),
+                    ))],
+                ));
+                providers.register(provider.clone());
+                let turn_id = TurnId::now();
+                let mut ctx = ToolCtx::new()
+                    .with_session_runtime(session.clone())
+                    .with_registry(Arc::new(ToolRegistry::new()))
+                    .with_providers(providers)
+                    .with_anchors(Some(turn_id.clone()), Some(FlowRunId::now()), None);
+                if spawned {
+                    ctx = ctx
+                        .with_context(Arc::new(
+                            session.context().fork(ContextInheritance::Full).unwrap(),
+                        ))
+                        .with_history_segment(HistorySegment::Spawned);
+                }
+                let owner = ctx.context().unwrap().clone();
+                let original = owner.messages().to_vec();
+                let input = if explicit_messages {
+                    (
+                        "messages".into(),
+                        Value::List(vec![Value::Message(Message::user_text(
+                            turn_id,
+                            "isolated input",
+                        ))]),
+                    )
+                } else {
+                    ("prompt".into(), Value::Str("isolated input".into()))
+                };
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    atman_runtime::tools::llm_call::LlmCallTool.call(
+                        ToolArgs {
+                            positional: Vec::new(),
+                            named: vec![("model".into(), Value::Str("m".into())), input],
+                        },
+                        &ctx,
+                    ),
+                )
+                .await
+                .unwrap();
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("provider rejected isolated input")
+                );
+                let _settled = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    owner.compact_lock().lock(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(provider.call_count(), 1);
+                let ordinary: Vec<_> = owner
+                    .messages()
+                    .iter()
+                    .filter(|message| {
+                        message.origin != atman_runtime::message::MessageOrigin::Internal
+                    })
+                    .cloned()
+                    .collect();
+                assert_eq!(ordinary, original);
+                assert!(!session.sink().snapshot().iter().any(|event| matches!(
+                    event,
+                    Event::Checkpoint { .. } | Event::ContextCompact { .. }
+                )));
+            }
+        }
+    });
+}

@@ -61,6 +61,8 @@ The Session accumulates all call usage in provider/model/purpose/scope buckets. 
 
 Managed and explicit requests use separate bounded prefix-observation tracks within each owner and purpose. An explicit request can reuse its own observation without overwriting the managed history's prefix. Only managed requests incorporate the owner's checkpoint epoch.
 
+Call accounting consumes the same facts as the canonical call journal, including reasoning configuration failures before a plan is created. These failures count as rejected calls with zero usage and cannot replace a valid window reading. A failed isolated prompt or explicit message list does not schedule automatic compaction of the bound history using its own model budget.
+
 Each call also fingerprints the cacheable prompt sequence after OpenAI Chat,
 Anthropic Messages, Codex Responses, or provider-neutral projection. The observation
 records prompt bytes and estimated tokens, plus a conservative common-prefix lower
