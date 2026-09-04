@@ -70,6 +70,41 @@ impl ContextState {
         &self.compaction.lock
     }
 
+    pub(crate) fn degrade_attachment(
+        &self,
+        part_id: crate::message::MessagePartId,
+        reason: &str,
+        sink: &crate::event::EventSink,
+        turn_id: Option<crate::event::TurnId>,
+        flow_run_id: Option<crate::event::FlowRunId>,
+    ) -> Option<crate::message::AttachmentPatch> {
+        let mut messages = self.messages.lock().expect("context messages poisoned");
+        let source = messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .find_map(|part| match part {
+                crate::message::MessagePart::Image {
+                    id: Some(id),
+                    source,
+                } if *id == part_id => Some(source),
+                _ => None,
+            })?;
+        let patch = crate::message::AttachmentPatch {
+            target: crate::message::AttachmentTarget::Part { part_id },
+            file_basename: crate::attachment_store::display_name(source),
+            reason: reason.into(),
+        };
+        sink.emit(crate::event::Event::AttachmentDegraded {
+            turn_id,
+            flow_run_id,
+            patch: patch.clone(),
+        });
+        for message in messages.iter_mut() {
+            patch.apply(0, message);
+        }
+        Some(patch)
+    }
+
     pub(crate) fn record_call(
         &self,
         provider: &str,
@@ -298,7 +333,7 @@ mod tests {
 
     #[test]
     fn message_writers_acquire_the_context_before_publishing() {
-        for writer_kind in ["root", "tool", "record", "injection"] {
+        for writer_kind in ["root", "tool", "record", "injection", "attachment"] {
             let session = Arc::new(crate::session::Session::open_ephemeral());
             let context = if writer_kind == "root" {
                 session.context().clone()
@@ -311,6 +346,21 @@ mod tests {
                 .with_context(context.clone())
                 .with_events(sink.clone())
                 .with_anchors(Some(turn.clone()), None, None);
+            let image_id = crate::message::MessagePartId(uuid::Uuid::now_v7());
+            if writer_kind == "attachment" {
+                let mut message = Message::user_text(turn.clone(), "inspect");
+                message.parts.push(crate::message::MessagePart::Image {
+                    id: Some(image_id),
+                    source: crate::message::ImageSource {
+                        media_type: "image/png".into(),
+                        data: crate::message::ImageData::Base64 {
+                            data: "AA==".into(),
+                        },
+                        detail: Default::default(),
+                    },
+                });
+                crate::tools::session::append_message_to_context(&ctx, message).unwrap();
+            }
             let queue = crate::injection::InjectionQueue::new(Some(sink.clone()));
             queue.enqueue(crate::injection::Injection::new_pending(
                 turn.clone(),
@@ -348,6 +398,19 @@ mod tests {
                             .commit(Some(context.messages_handle()), || {})
                             .unwrap();
                     }
+                    "attachment" => {
+                        assert!(
+                            context
+                                .degrade_attachment(
+                                    image_id,
+                                    "invalid_image",
+                                    &sink,
+                                    Some(turn),
+                                    None
+                                )
+                                .is_some()
+                        );
+                    }
                     _ => unreachable!(),
                 });
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -371,16 +434,17 @@ mod tests {
                     "{writer_kind} published before acquiring its context"
                 );
             });
-            let published: Vec<_> = sink
-                .snapshot_envelopes()
-                .iter()
-                .filter_map(|envelope| {
-                    envelope
-                        .event
-                        .context_message()
-                        .map(|(message, _)| message.clone())
-                })
-                .collect();
+            let published: Vec<_> = crate::projection::context::replay_context(
+                &sink.snapshot_envelopes(),
+                &crate::event::ContextBase::LegacyRoot {
+                    through_seq: sink.published_seq(),
+                },
+            )
+            .unwrap()
+            .raw
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect();
             assert_eq!(context.messages().to_vec(), published, "{writer_kind}");
             assert_eq!(published.len(), 1);
         }

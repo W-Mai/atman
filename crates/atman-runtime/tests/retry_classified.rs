@@ -131,6 +131,244 @@ fn build_long_history(session: &Session, turn_count: usize) {
     }
 }
 
+#[test]
+fn attachment_failures_are_bound_to_the_request_and_context_owner() {
+    use atman_runtime::context_state::ContextState;
+    use atman_runtime::event::{ContextBase, ContextId, Event, FlowRunId, TurnId};
+    use atman_runtime::message::{ImageData, ImageSource, MessagePart, MessagePartId};
+    use atman_runtime::tool::{HistorySegment, Tool, ToolArgs, ToolCtx, ToolRegistry};
+
+    let _registry = common::SyncModelRegistryGuard::mock("m");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    for owner_kind in ["root", "spawned", "inline"] {
+        for (mode, image_count, location, outcome, changed) in [
+            ("session", 2, "first", "error", true),
+            ("session", 1, "remote", "error", true),
+            ("session", 2, "remote", "error", false),
+            ("session_recent(1)", 2, "first", "error", false),
+            ("bare", 1, "first", "error", false),
+            ("override", 1, "first", "error", false),
+            ("session", 1, "foreign", "error", false),
+            ("session", 1, "first", "retry", true),
+            ("session", 1, "remote", "retry", true),
+            ("session", 1, "first", "repeat", true),
+            ("session", 1, "provider", "error", false),
+        ] {
+            let session = Arc::new(Session::open_ephemeral());
+            let turn = TurnId::now();
+            let root_run = FlowRunId::now();
+            let child_run = FlowRunId::now();
+            let inline_run = FlowRunId::now();
+            for (run, parent, spawned) in [
+                (&root_run, None, false),
+                (&child_run, Some(root_run.clone()), true),
+                (&inline_run, Some(child_run.clone()), false),
+            ] {
+                session.sink().emit(Event::FlowStart {
+                    run_id: run.clone(),
+                    turn_id: Some(turn.clone()),
+                    flow_name: "test".into(),
+                    parent_run_id: parent,
+                    parent_node_id: None,
+                    spawned,
+                });
+            }
+            let original: Vec<_> = (0..image_count)
+                .map(|index| {
+                    let mut message = Message::user_text(turn.clone(), format!("image {index}"));
+                    message.parts.push(MessagePart::Image {
+                        id: Some(MessagePartId(uuid::Uuid::now_v7())),
+                        source: ImageSource {
+                            media_type: "image/png".into(),
+                            data: ImageData::Path {
+                                path: format!("/tmp/image-{index}.png").into(),
+                            },
+                            detail: Default::default(),
+                        },
+                    });
+                    session.append_message(message.clone(), None);
+                    message
+                })
+                .collect();
+            let first_id = original[0].part_id(0, None, 1).unwrap();
+            let error = if location == "provider" {
+                RuntimeError::ToolFailed("provider request failed".into())
+            } else {
+                RuntimeError::AttachmentError {
+                    reason: "invalid_image".into(),
+                    part_id: match location {
+                        "first" => Some(first_id),
+                        "foreign" => Some(MessagePartId(uuid::Uuid::now_v7())),
+                        "remote" => None,
+                        _ => unreachable!(),
+                    },
+                }
+            };
+            let provider = Arc::new(ScriptedProvider::new(
+                "m",
+                vec![
+                    Err(error.clone()),
+                    if outcome == "retry" {
+                        Ok("done".into())
+                    } else {
+                        Err(error)
+                    },
+                ],
+            ));
+            let providers = Arc::new(atman_runtime::provider::ProviderRegistry::default());
+            providers.register(provider.clone());
+            let run = match owner_kind {
+                "root" => &root_run,
+                "spawned" => &child_run,
+                "inline" => &inline_run,
+                _ => unreachable!(),
+            };
+            let (tx, mut frames) = tokio::sync::broadcast::channel(128);
+            let mut ctx = ToolCtx::new()
+                .with_session_runtime(session.clone())
+                .with_registry(Arc::new(ToolRegistry::default()))
+                .with_providers(providers)
+                .with_events(session.sink().clone())
+                .with_stream_tx(tx)
+                .with_anchors(Some(turn.clone()), Some(run.clone()), None);
+            let context_id = (owner_kind != "root").then(ContextId::now);
+            if let Some(id) = &context_id {
+                let sink = session.sink().clone().with_context(id.clone());
+                sink.emit(Event::ContextCreated { base: None });
+                ctx = ctx
+                    .with_context(Arc::new(ContextState::new(Vec::new())))
+                    .with_history_segment(HistorySegment::Spawned)
+                    .with_events(sink);
+                runtime
+                    .block_on(atman_runtime::tools::session::SessionPush.call(
+                        ToolArgs {
+                            positional: vec![Value::List(
+                                original.iter().cloned().map(Value::Message).collect(),
+                            )],
+                            named: vec![],
+                        },
+                        &ctx,
+                    ))
+                    .unwrap();
+            }
+            let mut args = ToolArgs {
+                positional: vec![],
+                named: vec![
+                    ("model".into(), Value::Str("m".into())),
+                    ("retry".into(), Value::Int(i64::from(outcome != "error"))),
+                ],
+            };
+            args.named.push(match mode {
+                "bare" => ("prompt".into(), Value::Str("unrelated helper".into())),
+                "override" => (
+                    "messages".into(),
+                    Value::List(vec![Value::Message(original[0].clone())]),
+                ),
+                _ => ("context".into(), Value::Str(mode.into())),
+            });
+            let result = runtime.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    atman_runtime::tools::llm_call::LlmCallTool.call(args, &ctx),
+                )
+                .await
+                .expect("LLM request did not release its context lock")
+            });
+            assert_eq!(
+                result.is_ok(),
+                outcome == "retry",
+                "{owner_kind}/{mode}/{location}/{outcome}: {result:?}"
+            );
+            assert_eq!(
+                provider.call_count(),
+                if outcome == "error" { 1 } else { 2 }
+            );
+            let owner_messages = ctx
+                .context()
+                .unwrap()
+                .messages_handle()
+                .lock()
+                .unwrap()
+                .clone();
+            let remaining = owner_messages
+                .iter()
+                .flat_map(|m| &m.parts)
+                .filter(|p| matches!(p, MessagePart::Image { .. }))
+                .count();
+            assert_eq!(
+                remaining,
+                image_count - usize::from(changed),
+                "{owner_kind}/{mode}/{location}/{outcome}"
+            );
+            if changed {
+                assert!(owner_messages.iter().any(|m| {
+                    m.text_concat()
+                        .contains("attachment unavailable: image-0.png")
+                }));
+            }
+            if owner_kind != "root" {
+                assert_eq!(*session.messages_handle().lock().unwrap(), original);
+                assert_eq!(session.messages().as_ref(), original.as_slice());
+            }
+            let events = session.sink().snapshot_envelopes();
+            let patches: Vec<_> = events
+                .iter()
+                .filter(|e| matches!(e.event, Event::AttachmentDegraded { .. }))
+                .collect();
+            assert_eq!(patches.len(), usize::from(changed));
+            if let Some(envelope) = patches.first() {
+                assert_eq!(envelope.context_id, context_id);
+                assert!(
+                    matches!(&envelope.event, Event::AttachmentDegraded { flow_run_id: Some(actual), patch, .. }
+                    if actual == run && patch.target == (atman_runtime::message::AttachmentTarget::Part { part_id: first_id }))
+                );
+            }
+            let base = match context_id {
+                Some(context_id) => ContextBase::Context {
+                    context_id,
+                    through_seq: session.sink().published_seq(),
+                },
+                None => ContextBase::LegacyRoot {
+                    through_seq: session.sink().published_seq(),
+                },
+            };
+            let selected =
+                atman_runtime::projection::context::replay_context(&events, &base).unwrap();
+            assert_eq!(
+                selected
+                    .window()
+                    .iter()
+                    .map(|(_, m)| m.clone())
+                    .collect::<Vec<_>>(),
+                owner_messages
+            );
+            if outcome != "error" {
+                let requests = provider.requests.lock().unwrap();
+                assert!(
+                    !requests[1]
+                        .iter()
+                        .flat_map(|m| &m.parts)
+                        .any(|p| matches!(p, MessagePart::Image { .. }))
+                );
+                assert!(requests[1].iter().any(|m| {
+                    m.text_concat()
+                        .contains("attachment unavailable: image-0.png")
+                }));
+            }
+            let mut attachment_notes = 0;
+            while let Ok(frame) = frames.try_recv() {
+                if let atman_runtime::stream::StreamFrame::Notification(note) = frame
+                    && note.message.starts_with("attachment rejected")
+                {
+                    assert_eq!(note.run_id.as_deref(), Some(run.to_string().as_str()));
+                    attachment_notes += 1;
+                }
+            }
+            assert_eq!(attachment_notes, usize::from(changed));
+        }
+    }
+}
+
 fn run_with(provider: Arc<ScriptedProvider>, src: &str) -> (Result<Value, RuntimeError>, usize) {
     let file = parse_file(src).unwrap();
     let ex = Executor::new();

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Attachment rejection ownership** — the session-wide `Session::record_attachment_degrade` method is removed. Managed LLM calls apply image rejection patches through their bound message context.
 - **Attachment patch addresses** — `Event::AttachmentDegraded` carries a shared `AttachmentPatch` with an exclusive stable-ID or legacy-position target. Existing JSONL position addresses remain readable; mixed and incomplete addresses are rejected. Message projections expose optional context, checkpoint, and image identities.
 - **Attachment error identities** — `RuntimeError::AttachmentError` includes an optional `part_id`, and `attachment_store::image_base64` accepts the current image part identity. Local encoding failures retain that identity; unlocated remote and import errors leave it unset.
 - **Image part identities** — `MessagePart::Image` includes an optional `MessagePartId`. Context insertion assigns missing identities; persisted legacy images remain readable.
@@ -40,6 +41,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **LLM failure cleanup** — terminal request failures release their compaction lock before scheduling automatic compaction, preventing the failure path from waiting on its own lock.
+- **Scoped image rejection** — attachment errors replace only the identified image in the calling flow's context. Ambiguous multi-image failures, excluded history images, and standalone requests leave stored attachments intact. Configured retries receive the same patch without changing other request-local content.
 - **Projection identity redaction** — UUID-only values are not classified as card numbers. Projection snapshots retain valid identities while card numbers and explicitly configured credential patterns remain redacted.
 - **Attachment error classification** — generic parameter errors and request-size failures without image evidence no longer trigger attachment degradation. Authentication, rate-limit, and server failures retain their original error paths across providers and call modes.
 - **Cross-transport session access** — authenticated HTTP and owner-only Unix-socket clients share the daemon operator identity. Session ownership checks and session-scoped event tickets remain enforced.

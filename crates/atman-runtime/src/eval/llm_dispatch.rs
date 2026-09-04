@@ -366,6 +366,17 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 context_prefix.initial_observation()
             };
             let estimated_input = context_plan.estimated_input_tokens();
+            let request_images: Vec<_> = context_plan
+                .request()
+                .messages
+                .iter()
+                .flat_map(|message| {
+                    message.parts.iter().filter_map(move |part| match part {
+                        crate::message::MessagePart::Image { id, .. } => Some((*id, message.role)),
+                        _ => None,
+                    })
+                })
+                .collect();
             let start = std::time::Instant::now();
             let outcome = call_and_maybe_stream(
                 provider.as_ref(),
@@ -614,6 +625,53 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     return crate::provider::assistant_message_to_value(&am);
                 }
                 Err(e) => {
+                    if uses_managed_context
+                        && let (Some(context), Some(sink)) = (ctx.context(), ctx.events.as_ref())
+                        && let RuntimeError::AttachmentError { reason, part_id } = &e
+                    {
+                        let target = match part_id {
+                            Some(id) => request_images
+                                .iter()
+                                .any(|(candidate, _)| *candidate == Some(*id))
+                                .then_some(*id),
+                            None => request_images.first().and_then(|(id, _)| *id).filter(|id| {
+                                request_images
+                                    .iter()
+                                    .all(|(candidate, _)| *candidate == Some(*id))
+                                    && request_images
+                                        .iter()
+                                        .any(|(_, role)| *role == crate::message::MessageRole::User)
+                            }),
+                        };
+                        if let Some(part_id) = target
+                            && let Some(patch) = context.degrade_attachment(
+                                part_id,
+                                reason,
+                                sink,
+                                ctx.turn_id.clone(),
+                                ctx.flow_run_id.clone(),
+                            )
+                        {
+                            for message in &mut final_messages {
+                                patch.apply(0, message);
+                            }
+                            if let Some(tx) = &stream_tx {
+                                let mut notification = crate::stream::NotificationFrame::from(
+                                    crate::notify::Notification::new(
+                                        crate::notify::NotifyLevel::Warn,
+                                        format!(
+                                            "attachment rejected ({reason}); {} replaced with a history marker. Re-attach the image to retry.",
+                                            patch.file_basename
+                                        ),
+                                    ),
+                                );
+                                notification.run_id =
+                                    ctx.flow_run_id.as_ref().map(ToString::to_string);
+                                let _ =
+                                    tx.send(crate::stream::StreamFrame::Notification(notification));
+                            }
+                        }
+                    }
                     if matches!(
                         e,
                         RuntimeError::Cancelled(_)
@@ -817,6 +875,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         );
         return fb;
     }
+    drop(compact_guard);
     if let Some(session) = ctx.session_runtime()
         && !saw_context_overflow
     {

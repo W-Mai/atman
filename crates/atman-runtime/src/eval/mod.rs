@@ -1082,7 +1082,7 @@ pub(super) async fn call_and_maybe_stream(
         .with_turn_id(stream_ctx.turn_id)
         .with_flow_run_id(stream_ctx.flow_run_id.cloned());
 
-    let result = if stream_ctx.stream_tx.is_some() || stream_ctx.agent_entry.is_some() {
+    if stream_ctx.stream_tx.is_some() || stream_ctx.agent_entry.is_some() {
         let mut stream = base.with_stream_tx(stream_ctx.stream_tx);
         if let Some(rules) = watch_rules {
             stream = stream.with_watch_rules(rules);
@@ -1096,22 +1096,7 @@ pub(super) async fn call_and_maybe_stream(
         stream.run().await
     } else {
         base.run().await.map_err(Into::into)
-    };
-    if let (
-        Some(sess),
-        Err(crate::streaming::StreamFailure::Error(RuntimeError::AttachmentError {
-            reason, ..
-        })),
-    ) = (stream_ctx.session, &result)
-    {
-        let count = sess.record_attachment_degrade(reason);
-        if count > 0 {
-            let _ = sess.stream_tx().send(crate::stream::StreamFrame::Note(format!(
-                "attachment rejected ({reason}); {count} image part(s) replaced with a history marker. re-attach the image to retry."
-            )));
-        }
     }
-    result
 }
 
 fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String {

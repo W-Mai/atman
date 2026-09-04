@@ -114,7 +114,6 @@ pub struct Session {
     successful_flow_count: std::sync::atomic::AtomicU64,
     pub interactions: InteractionServices,
     injection_queue: std::sync::Arc<crate::injection::InjectionQueue>,
-    last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     pending_images: Mutex<Vec<crate::message::ImageSource>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     output_store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
@@ -594,14 +593,6 @@ impl ApprovalRegistry {
         let _ = self.watch_tx.send(snapshot);
     }
 }
-type ImagePart = (usize, String);
-
-#[derive(Debug, Clone)]
-struct LastImageUserMsg {
-    message_seq: u64,
-    message_turn_id: crate::event::TurnId,
-    images: Vec<ImagePart>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompactReviewMode {
@@ -959,7 +950,6 @@ impl Session {
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             interactions,
             injection_queue,
-            last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1211,7 +1201,6 @@ impl Session {
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             interactions,
             injection_queue,
-            last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1266,7 +1255,6 @@ impl Session {
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             interactions,
             injection_queue,
-            last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1969,43 +1957,6 @@ impl Session {
         });
     }
 
-    pub fn record_attachment_degrade(&self, reason: &str) -> usize {
-        let target = self.last_image_user_msg.lock().unwrap().take();
-        let Some(entry) = target else {
-            return 0;
-        };
-        for (part_index, basename) in &entry.images {
-            self.sink.emit(Event::AttachmentDegraded {
-                turn_id: Some(entry.message_turn_id.clone()),
-                flow_run_id: None,
-                patch: crate::message::AttachmentPatch {
-                    target: crate::message::AttachmentTarget::Legacy {
-                        message_seq: entry.message_seq,
-                        part_index: *part_index,
-                    },
-                    file_basename: basename.clone(),
-                    reason: reason.into(),
-                },
-            });
-        }
-        if let Ok(mut messages) = self.context.messages.lock()
-            && let Some(message) = messages.iter_mut().find(|message| {
-                message.role == MessageRole::User && message.turn_id == entry.message_turn_id
-            })
-        {
-            for (part_index, basename) in &entry.images {
-                if let Some(part) = message.parts.get_mut(*part_index)
-                    && matches!(part, crate::message::MessagePart::Image { .. })
-                {
-                    *part = crate::message::MessagePart::Text {
-                        text: format!("[attachment unavailable: {basename} — {reason}]"),
-                    };
-                }
-            }
-        }
-        entry.images.len()
-    }
-
     pub fn messages(&self) -> crate::message_stream::MessageWindow {
         self.context.messages()
     }
@@ -2644,37 +2595,6 @@ impl AppendMessageCommand {
                 },
             };
         let seq = session.sink.emit_returning_seq(event);
-        if matches!(msg.role, MessageRole::User) {
-            let images: Vec<(usize, String)> = msg
-                .parts
-                .iter()
-                .enumerate()
-                .filter_map(|(i, p)| match p {
-                    crate::message::MessagePart::Image { source, .. } => {
-                        let basename = match &source.data {
-                            crate::message::ImageData::Path { path } => path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            crate::message::ImageData::Base64 { .. } => "base64".into(),
-                            crate::message::ImageData::Artifact { .. } => {
-                                crate::attachment_store::display_name(source)
-                            }
-                        };
-                        Some((i, basename))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if !images.is_empty() {
-                *session.last_image_user_msg.lock().unwrap() = Some(LastImageUserMsg {
-                    message_seq: seq,
-                    message_turn_id: msg.turn_id.clone(),
-                    images,
-                });
-            }
-        }
         messages.push(msg.clone());
         seq
     }
@@ -3911,41 +3831,6 @@ mod tests {
         assert!(matches!(
             msg.parts[0],
             crate::message::MessagePart::Image { .. }
-        ));
-    }
-
-    #[test]
-    fn attachment_degrade_updates_only_the_target_user_message() {
-        fn image_message(path: &str) -> Message {
-            Message {
-                role: MessageRole::User,
-                parts: vec![crate::message::MessagePart::Image {
-                    id: None,
-                    source: crate::message::ImageSource {
-                        media_type: "image/png".into(),
-                        data: crate::message::ImageData::Path { path: path.into() },
-                        detail: crate::provider::ImageDetail::Auto,
-                    },
-                }],
-                turn_id: TurnId::now(),
-                origin: crate::message::MessageOrigin::User,
-            }
-        }
-
-        let session = Session::open_ephemeral();
-        session.append_message(image_message("/tmp/first.png"), None);
-        session.append_message(image_message("/tmp/second.png"), None);
-
-        assert_eq!(session.record_attachment_degrade("invalid_image"), 1);
-        let messages = session.messages_handle();
-        let messages = messages.lock().unwrap();
-        assert!(matches!(
-            messages[0].parts[0],
-            crate::message::MessagePart::Image { .. }
-        ));
-        assert!(matches!(
-            &messages[1].parts[0],
-            crate::message::MessagePart::Text { text } if text.contains("second.png")
         ));
     }
 

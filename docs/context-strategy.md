@@ -286,6 +286,12 @@ Provider attachment errors require an HTTP 400/413 response with explicit image 
 
 Local image encoding errors carry the failing `MessagePartId` when the caller supplied one. Import failures and remote errors without a concrete image location leave `part_id` unset. The identity is diagnostic metadata, not part of the provider request or the displayed error text.
 
+Only a managed-context LLM request can degrade its stored images. A reported part ID must occur in the actual request. An unlocated rejection can select an image only when all request images share one known part ID and include a user image; ambiguous multi-image failures do not alter history. Bare prompts, explicit `messages:` overrides, and images omitted by `session_recent` cannot target unrelated stored attachments. Local model-capability rejection also leaves images intact.
+
+Root and spawned flows commit the same image-only patch while holding their context's message lock. The patch is also applied to the pending request snapshot, so configured retries use the marker while preserving request-local rewrites. No additional retry is introduced. Repeated errors do not republish an already-applied patch, and attachment notifications retain the calling run identity.
+
+When a managed request exhausts its retries, its compaction guard is released before automatic compaction is scheduled. Failure cleanup must not reacquire a lock still held by that request.
+
 Persisted attachment patches address either a stable image part ID or a legacy message sequence and part index, never both. Only matching image parts are replaced; text and existing replacement markers remain unchanged. Selected context replay applies patches within its ancestry boundary. Legacy spawned and inline runs share their context owner's patch scope, separate from the root history.
 
 Daemon transcript projections retain context and image identities and the source index of checkpoint messages. Attachment updates produce a transcript replacement delta, so attached clients and snapshot recovery receive the same updated content. Older private projection snapshots without this identity state are rebuilt from the event log. A checkpoint event sequence is not a legacy message address.
