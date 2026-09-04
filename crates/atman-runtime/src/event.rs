@@ -667,6 +667,10 @@ pub(crate) struct EventBatch<'a> {
 }
 
 impl EventBatch<'_> {
+    pub(crate) fn records(&self) -> &[EventEnvelope] {
+        &self.events
+    }
+
     pub(crate) fn emit(&mut self, event: Event) -> EventEnvelope {
         let next = self
             .sink
@@ -723,6 +727,10 @@ impl EventSink {
     pub fn with_context(mut self, context_id: ContextId) -> Self {
         self.context_id = Some(context_id);
         self
+    }
+
+    pub fn context_id(&self) -> Option<&ContextId> {
+        self.context_id.as_ref()
     }
 
     // Best-effort peek for anchor labels. NOT reserved: two peekers see the same value.

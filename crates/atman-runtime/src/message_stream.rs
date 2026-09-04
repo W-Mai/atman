@@ -142,6 +142,41 @@ impl MessageStream {
         Ok(stream)
     }
 
+    pub(crate) fn fork(
+        &self,
+        sink: &crate::event::EventSink,
+        inheritance: crate::event::ContextInheritance,
+    ) -> (Self, crate::event::EventSink) {
+        assert!(Arc::ptr_eq(&self.events, &sink.events_handle()));
+        let context_id = ContextId::now();
+        let sink = sink.clone().with_context(context_id.clone());
+        let mut batch = sink.batch();
+        let mut acc = self.acc.lock().expect("acc poisoned");
+        self.ensure_fresh_locked(batch.records(), &mut acc);
+        let mut compacted = acc.compacted[acc.window_cache.start..].to_vec();
+        if inheritance == crate::event::ContextInheritance::CompleteToolPairs {
+            crate::message::retain_complete_tool_pairs_in(&mut compacted, |(_, message)| message);
+        }
+        let base = match &self.context_id {
+            Some(id) => ContextBase::Context {
+                context_id: id.clone(),
+                through_seq: sink.published_seq(),
+            },
+            None => ContextBase::LegacyRoot {
+                through_seq: sink.published_seq(),
+            },
+        };
+        batch.emit(crate::event::Event::ContextCreated {
+            base: Some(base),
+            inheritance,
+        });
+        let mut stream = Self::with_initial(self.events.clone(), compacted, acc.full_raw.clone());
+        stream.context_id = Some(context_id);
+        stream.acc.get_mut().expect("acc poisoned").replayed = batch.records().len();
+        drop(batch);
+        (stream, sink)
+    }
+
     pub fn full_messages(&self) -> Arc<Vec<Message>> {
         let events = self.events.lock().expect("events poisoned");
         let mut acc = self.acc.lock().expect("acc poisoned");

@@ -29,6 +29,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Journal-backed context forks** — `ContextState::fork` captures an owner's active window, raw history, checkpoint epoch, and bounded usage and prefix observations. Creation records only the source boundary and inheritance policy; later parent output and child rewrites remain isolated, including after restoring a session.
 - **Live context views** — `MessageStream::from_context` initializes a validated branch window and raw history, then applies only that context's new events. Unrelated branches preserve the cached views without rebuilding their contents.
 - **Selective context replay** — `projection::context::replay_context` reconstructs one ancestry at fixed event boundaries, isolates sibling checkpoints and compaction, and retains raw history separately. Invalid lineage is rejected instead of falling back to unrelated history.
 - **Remote terminal resizing** — daemon clients can resize live terminal resources through session-scoped resource identities, with idempotent commands and projected dimensions for every attached client.

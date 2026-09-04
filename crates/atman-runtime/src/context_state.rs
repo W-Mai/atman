@@ -43,6 +43,56 @@ impl ContextState {
         }
     }
 
+    /// Captures a journal-backed source without replaying historical events.
+    /// The new owner retains its own messages, compaction lock, and observations.
+    pub fn fork(&self, inheritance: crate::event::ContextInheritance) -> std::io::Result<Self> {
+        let (Some(stream), Some(sink)) = (&self.stream, self.sink()) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "context fork requires a journal-backed message view",
+            ));
+        };
+        let _messages = self.messages.lock().expect("context messages poisoned");
+        let (stream, sink) = stream.fork(sink, inheritance);
+        let messages = stream.window().to_vec();
+        let compaction = CompactionState {
+            manual_pending: std::sync::atomic::AtomicBool::new(false),
+            model_window_tokens: std::sync::atomic::AtomicU64::new(
+                self.compaction
+                    .model_window_tokens
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            review_mode: Mutex::new(
+                *self
+                    .compaction
+                    .review_mode
+                    .lock()
+                    .expect("review mode poisoned"),
+            ),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            last_context_usage: Mutex::new(
+                self.compaction
+                    .last_context_usage
+                    .lock()
+                    .expect("context usage lock poisoned")
+                    .clone(),
+            ),
+            last_context_prefix: Mutex::new(
+                self.compaction
+                    .last_context_prefix
+                    .lock()
+                    .expect("context prefix lock poisoned")
+                    .clone(),
+            ),
+            context_epoch: Mutex::new(self.epoch()),
+        };
+        Ok(Self::from_stream(stream, messages, compaction, sink))
+    }
+
+    pub fn context_id(&self) -> Option<&crate::event::ContextId> {
+        self.sink().and_then(crate::event::EventSink::context_id)
+    }
+
     pub(crate) fn sink(&self) -> Option<&crate::event::EventSink> {
         self.sink.as_ref()
     }
@@ -259,7 +309,7 @@ pub(crate) fn checkpoint_epoch_digest(messages: &[Message]) -> String {
 
 const MAX_LAST_CONTEXT_USAGES: usize = 256;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct LastContextUsageStore {
     entries: HashMap<crate::context_plan::ContextUsageKey, crate::context_plan::ContextUsageRecord>,
     order: VecDeque<crate::context_plan::ContextUsageKey>,
@@ -292,6 +342,253 @@ impl LastContextUsageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn journal_forks_match_replay_before_and_after_session_restore() {
+        use crate::event::{ContextBase, ContextInheritance, TurnId};
+        use crate::message::{ImageData, ImageSource, MessagePart};
+        for restored in [false, true] {
+            for inheritance in [
+                ContextInheritance::Full,
+                ContextInheritance::CompleteToolPairs,
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut session = crate::Session::open(dir.path()).unwrap();
+                let mut user = Message::user_text(TurnId::now(), "x".repeat(20_000));
+                user.parts.push(MessagePart::Image {
+                    id: None,
+                    source: ImageSource {
+                        media_type: "image/png".into(),
+                        data: ImageData::Base64 {
+                            data: "AA==".into(),
+                        },
+                        detail: Default::default(),
+                    },
+                });
+                session.append_message(user, None);
+                let mut assistant = Message::assistant_text(TurnId::now(), "pending tool");
+                assistant.parts.push(MessagePart::ToolUse {
+                    id: "pending".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path": "file.txt"}),
+                    intent: None,
+                });
+                session.append_message(assistant, None);
+                let original = session.messages();
+                let mut replacement = original.to_vec();
+                replacement[0].parts[0] = MessagePart::Text {
+                    text: "retained user".into(),
+                };
+                session
+                    .commit_rewritten_window(session.context(), replacement, 10_000, &original, 1)
+                    .unwrap();
+                if restored {
+                    let id = session.id().to_string();
+                    session.flush_writer().await.unwrap();
+                    session.shutdown().await;
+                    session = crate::Session::open_existing(dir.path(), &id).unwrap();
+                    assert!(session.sink().snapshot_envelopes().is_empty());
+                }
+                let source = session.context().clone();
+                let identity = crate::context_plan::ContextCallIdentity::detached();
+                let purpose = crate::context_plan::ContextCallPurpose::General;
+                let usage_key = crate::context_plan::ContextUsageKey {
+                    provider: "provider".into(),
+                    model: "model".into(),
+                    call_purpose: purpose,
+                    call_identity: identity.clone(),
+                };
+                let usage = crate::context_plan::ContextUsageRecord {
+                    plan_id: crate::context_plan::ContextPlanId::now(),
+                    usage: crate::provider::TokenUsage {
+                        input: 1234,
+                        ..Default::default()
+                    },
+                };
+                source.record_call(
+                    "provider",
+                    "model",
+                    purpose,
+                    identity.clone(),
+                    usage.clone(),
+                );
+                let prefix = crate::context_plan::ContextPrefixSnapshot::provider_neutral(
+                    &crate::provider::LlmRequest {
+                        model: "model".into(),
+                        messages: source.messages().to_vec(),
+                        system: Some("stable".into()),
+                        input: crate::Value::Unit,
+                        schema: None,
+                        cache_prompt: true,
+                        prompt_cache_key: None,
+                        tools: Vec::new(),
+                        reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+                        stall_timeout_secs: 120,
+                    },
+                )
+                .unwrap();
+                source.observe_prefix(
+                    "provider",
+                    "model",
+                    purpose,
+                    identity.clone(),
+                    prefix.clone(),
+                );
+                let source_raw = source.messages_full();
+                let mut expected = source.messages().to_vec();
+                if inheritance == ContextInheritance::CompleteToolPairs {
+                    crate::message::retain_complete_tool_pairs(&mut expected);
+                }
+                let cutoff = session.sink().published_seq();
+                let count = session.sink().snapshot_envelopes().len();
+                source.request_manual_compact();
+                let active_request = source.compact_lock().lock().await;
+                let child = Arc::new(source.fork(inheritance).unwrap());
+                drop(active_request);
+                assert_eq!(session.sink().snapshot_envelopes().len(), count + 1);
+                let created = session.sink().snapshot_envelopes().pop().unwrap();
+                assert_eq!(created.context_id.as_ref(), child.context_id());
+                assert!(
+                    matches!(created.event, crate::event::Event::ContextCreated {
+                    base: Some(ContextBase::LegacyRoot { through_seq }), inheritance: selected,
+                } if through_seq == cutoff && selected == inheritance)
+                );
+                assert_eq!(child.messages().to_vec(), expected);
+                assert_eq!(*child.messages_full(), *source_raw);
+                assert_eq!(child.epoch(), source.epoch());
+                assert!(!Arc::ptr_eq(
+                    child.messages_handle(),
+                    source.messages_handle()
+                ));
+                assert!(!Arc::ptr_eq(child.compact_lock(), source.compact_lock()));
+                assert!(!child.take_manual_compact_request());
+                assert!(source.take_manual_compact_request());
+                assert_eq!(child.last_usage(&usage_key), Some(usage.clone()));
+                assert_eq!(
+                    child
+                        .compaction
+                        .model_window_tokens
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    1234
+                );
+                assert_eq!(
+                    child
+                        .observe_prefix(
+                            "provider",
+                            "model",
+                            purpose,
+                            identity.clone(),
+                            prefix.clone()
+                        )
+                        .reset_reason,
+                    None
+                );
+                *child.compaction.last_context_prefix.lock().unwrap() = Default::default();
+                *child.compaction.last_context_usage.lock().unwrap() = Default::default();
+                assert_eq!(source.last_usage(&usage_key), Some(usage));
+                assert_eq!(
+                    source
+                        .observe_prefix("provider", "model", purpose, identity, prefix)
+                        .reset_reason,
+                    None
+                );
+
+                session
+                    .append_message(Message::user_text(TurnId::now(), "late parent input"), None);
+                assert_eq!(child.messages().to_vec(), expected);
+                let child_ctx = crate::ToolCtx::new().with_context(child.clone());
+                crate::tools::session::append_message_to_context(
+                    &child_ctx,
+                    Message::user_text(TurnId::now(), "child input"),
+                )
+                .unwrap();
+                let image_id = expected
+                    .iter()
+                    .flat_map(|message| &message.parts)
+                    .find_map(|part| {
+                        if let MessagePart::Image { id, .. } = part {
+                            *id
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                child
+                    .degrade_attachment(image_id, "invalid_image", None, None)
+                    .unwrap();
+                assert!(
+                    source
+                        .messages_full()
+                        .iter()
+                        .flat_map(|message| &message.parts)
+                        .any(|part| matches!(part, MessagePart::Image { .. }))
+                );
+                let grandchild = Arc::new(child.fork(ContextInheritance::Full).unwrap());
+                assert_eq!(grandchild.messages().to_vec(), child.messages().to_vec());
+                crate::tools::session::append_message_to_context(
+                    &child_ctx,
+                    Message::assistant_text(TurnId::now(), "late child output"),
+                )
+                .unwrap();
+                assert_ne!(grandchild.messages().to_vec(), child.messages().to_vec());
+                let current = child.messages();
+                session
+                    .commit_rewritten_window(
+                        &child,
+                        vec![Message::user_text(TurnId::now(), "short")],
+                        100,
+                        &current,
+                        1,
+                    )
+                    .unwrap();
+                session.flush_writer().await.unwrap();
+                let bundle = crate::event_log::replay::SessionReplay::from_path(
+                    &session.dir().join("events.jsonl"),
+                    None,
+                )
+                .unwrap();
+                for context in [&child, &grandchild] {
+                    let replay = crate::projection::context::replay_context(
+                        &bundle.events,
+                        &ContextBase::Context {
+                            context_id: context.context_id().unwrap().clone(),
+                            through_seq: session.sink().published_seq(),
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        replay
+                            .window()
+                            .iter()
+                            .map(|(_, message)| message.clone())
+                            .collect::<Vec<_>>(),
+                        context.messages().to_vec()
+                    );
+                    assert_eq!(
+                        replay
+                            .raw
+                            .iter()
+                            .map(|(_, message)| message.clone())
+                            .collect::<Vec<_>>(),
+                        *context.messages_full()
+                    );
+                    assert_eq!(replay.checkpoint_epoch, context.epoch());
+                }
+                assert_eq!(
+                    bundle
+                        .all_messages
+                        .iter()
+                        .map(|(_, message)| message.clone())
+                        .collect::<Vec<_>>(),
+                    *source.messages_full()
+                );
+                session.shutdown().await;
+            }
+        }
+        let context = ContextState::new(Vec::new(), Some(crate::event::EventSink::new()));
+        assert!(context.fork(ContextInheritance::Full).is_err());
+        assert!(context.sink().unwrap().snapshot_envelopes().is_empty());
+    }
 
     #[test]
     fn image_ids_match_live_handles_checkpoints_and_replay() {
@@ -397,9 +694,10 @@ mod tests {
             "root-record",
             "injection",
             "attachment",
+            "fork",
         ] {
             let session = Arc::new(crate::session::Session::open_ephemeral());
-            let context = if matches!(writer_kind, "root" | "root-record") {
+            let context = if matches!(writer_kind, "root" | "root-record" | "fork") {
                 session.context().clone()
             } else {
                 Arc::new(ContextState::new(Vec::new(), Some(session.sink().clone())))
@@ -439,6 +737,11 @@ mod tests {
             let batch = sink.batch();
             std::thread::scope(|scope| {
                 let writer = scope.spawn(|| match writer_kind {
+                    "fork" => {
+                        context
+                            .fork(crate::event::ContextInheritance::Full)
+                            .unwrap();
+                    }
                     "root" => {
                         session.append_message(Message::user_text(turn, "root"), None);
                     }
@@ -507,7 +810,7 @@ mod tests {
             .map(|(_, message)| message)
             .collect();
             assert_eq!(context.messages().to_vec(), published, "{writer_kind}");
-            assert_eq!(published.len(), 1);
+            assert_eq!(published.len(), usize::from(writer_kind != "fork"));
         }
     }
 

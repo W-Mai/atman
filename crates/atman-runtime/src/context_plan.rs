@@ -553,13 +553,14 @@ struct ContextPrefixTraceKey {
     call_identity: ContextCallIdentity,
 }
 
+#[derive(Clone)]
 struct TrackedContextPrefix {
     provider: String,
     model: String,
     snapshot: ContextPrefixSnapshot,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ContextPrefixTracker {
     entries: std::collections::HashMap<ContextPrefixTraceKey, TrackedContextPrefix>,
     order: std::collections::VecDeque<ContextPrefixTraceKey>,
