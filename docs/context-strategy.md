@@ -280,6 +280,10 @@ This is retrieval before the main loop plus full active-session context inside t
 - Keep large structured artifacts in files or stores and retrieve only the relevant
   portion instead of repeatedly injecting them.
 
+## Attachment errors
+
+Provider attachment errors require an HTTP 400/413 response with explicit image or attachment evidence. Generic unsupported parameters, request-size errors without that evidence, authentication failures, rate limits, and server errors do not trigger attachment degradation.
+
 ## Implementation references
 
 - `crates/atman-runtime/src/context_state.rs` — message views, compaction locks, checkpoint epochs, usage, and prefix observations

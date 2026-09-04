@@ -112,7 +112,7 @@ impl CodexProvider {
     }
 
     #[cfg(test)]
-    fn with_endpoints(
+    pub(super) fn with_endpoints(
         mut self,
         responses_url: impl Into<String>,
         models_url: impl Into<String>,
