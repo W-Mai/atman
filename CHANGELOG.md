@@ -55,6 +55,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Projection snapshot serialization** — workflow permission requests use ordered entry-list encoding instead of treating structured request identities as JSON object keys. Snapshot loading rejects duplicate identities and restores the same projection as a complete event replay.
+
 - **Compaction shutdown lifecycle** — scheduled compactions are owned by their Session. Shutdown cancels and joins active compaction work before closing the event writer, abandons pending reviews, and persists the operation's terminal state without cancelling unrelated runs.
 
 - **Compaction progress reconciliation** — simultaneous compactions with the same message range update by operation identity, late attachments recover in-flight summary text from the session snapshot, and interrupted operations restore as abandoned transcript entries instead of remaining active forever.

@@ -47,12 +47,51 @@ fn update_perf_counters(update: impl FnOnce(&mut PerfCounters)) {
 pub struct WorkflowGraph {
     pub turn_id: TurnId,
     pub root: Vec<WorkflowNode>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "permission_request_entries"
+    )]
     pub permission_requests: BTreeMap<WorkflowPermissionIdentity, WorkflowPermissionRequest>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub permission_groups: BTreeMap<PermissionGroupId, PermissionGroupAudit>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub resolved_permission_groups: BTreeSet<PermissionGroupId>,
+}
+
+mod permission_request_entries {
+    use super::{WorkflowPermissionIdentity, WorkflowPermissionRequest};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S>(
+        requests: &BTreeMap<WorkflowPermissionIdentity, WorkflowPermissionRequest>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        requests.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<WorkflowPermissionIdentity, WorkflowPermissionRequest>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<(WorkflowPermissionIdentity, WorkflowPermissionRequest)>::deserialize(
+            deserializer,
+        )?;
+        let entry_count = entries.len();
+        let requests = entries.into_iter().collect::<BTreeMap<_, _>>();
+        if requests.len() != entry_count {
+            return Err(serde::de::Error::custom(
+                "duplicate workflow permission request identity",
+            ));
+        }
+        Ok(requests)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -2170,6 +2209,34 @@ mod tests {
             restored.resolved_permission_groups,
             from_events.resolved_permission_groups
         );
+    }
+
+    #[test]
+    fn permission_request_map_serializes_as_unique_ordered_entries() {
+        let run_id = FlowRunId::now();
+        let request_id = request_id();
+        let payload = permission_payload(
+            request_id.clone(),
+            run_id.clone(),
+            run_id,
+            "tool",
+            chrono::Utc::now(),
+        );
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        graph.apply_permission_request_with_identity(
+            WorkflowPermissionIdentity::Canonical { request_id },
+            &payload,
+            WorkflowPermissionState::Pending,
+        );
+
+        let mut encoded = serde_json::to_value(&graph).unwrap();
+        assert!(encoded["permission_requests"].is_array());
+        let restored: WorkflowGraph = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored.permission_requests, graph.permission_requests);
+
+        let entries = encoded["permission_requests"].as_array_mut().unwrap();
+        entries.push(entries[0].clone());
+        assert!(serde_json::from_value::<WorkflowGraph>(encoded).is_err());
     }
 
     #[test]

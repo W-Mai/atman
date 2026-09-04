@@ -165,6 +165,8 @@ History queries include captured interjection messages in both SQLite and in-mem
 
 Daemon projections include captured steering in their message positions before applying compaction ranges. A consumed message and its interaction state are published in one delta; pending, cancelled, and legacy queue-only records add no message position. The message retains its interjection origin rather than becoming a new user turn. Client renderers must preserve these hidden positions when applying updates. Snapshot recovery and live updates use the same event message contract. Private projection caches require the current cache version and an explicit event cursor; invalid caches are rebuilt from the original log, without migration or inferring a cursor from a revision.
 
+Private projector snapshots encode workflow permission-request maps as ordered identity/value entries because their structured identities are not JSON object keys. Snapshot reads reject duplicate identities and rebuild the runtime index from the restored graph.
+
 The durable event stream is the source of session history. The runtime derives the
 message stream from user, assistant, and tool events, plus checkpoints. The active
 window is the message list currently used by `context: "session"`.

@@ -321,6 +321,11 @@ mod tests {
     use super::*;
     use atman_runtime::event::{Event, FlowRunId, FlowStatus, TurnId};
     use atman_runtime::message::Message;
+    use atman_runtime::permission::PermissionRequestId;
+    use atman_runtime::permission_audit::{
+        PermissionAuditTarget, PermissionPolicyReference, PermissionProvenanceSummary,
+        PermissionRequestAudit,
+    };
 
     fn append_event(path: &Path, seq: u64, event: Event) -> u64 {
         append_envelope(path, &EventEnvelope::new(seq, event))
@@ -336,6 +341,92 @@ mod tests {
         file.write_all(b"\n").unwrap();
         file.sync_all().unwrap();
         file.metadata().unwrap().len()
+    }
+
+    fn permission_request(run_id: FlowRunId) -> PermissionRequestAudit {
+        PermissionRequestAudit {
+            request_id: Some(PermissionRequestId::now()),
+            revision: 1,
+            session_id: "session".into(),
+            requesting_run_id: run_id.clone(),
+            parent_run_id: None,
+            root_run_id: run_id,
+            tool_use_id: "tool-use".into(),
+            tool: "fs.read".into(),
+            call_intent: None,
+            tier: atman_runtime::tool::Tier::Two,
+            execution_boundary: Default::default(),
+            provenance: PermissionProvenanceSummary::default(),
+            target: PermissionAuditTarget::User,
+            group_ids: Vec::new(),
+            policy: PermissionPolicyReference {
+                snapshot_id: "snapshot".into(),
+                rule_id: "rule".into(),
+            },
+            escalation_path: Vec::new(),
+            decision_id: None,
+            actor: None,
+            scope: None,
+            reason: None,
+            at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn permission_workflow_snapshot_round_trip_matches_full_replay() {
+        let session_dir = tempfile::tempdir().unwrap();
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let events_path = session_dir.path().join("events.jsonl");
+        let turn_id = TurnId::now();
+        let run_id = FlowRunId::now();
+        let events = vec![
+            EventEnvelope::new(
+                1,
+                Event::TurnStart {
+                    turn_id: turn_id.clone(),
+                },
+            ),
+            EventEnvelope::new(
+                2,
+                Event::FlowStart {
+                    turn_id: Some(turn_id),
+                    run_id: run_id.clone(),
+                    flow_name: "agent".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            ),
+            EventEnvelope::new(
+                3,
+                Event::PermissionRequestCreated {
+                    payload: permission_request(run_id),
+                },
+            ),
+        ];
+        let mut offset = 0;
+        for event in &events {
+            offset = append_envelope(&events_path, event);
+        }
+        let projector = SessionProjector::from_events(session_id.clone(), None, &events);
+
+        save(
+            &session_id,
+            session_dir.path(),
+            EventWriterWatermark { seq: 3, offset },
+            EventCursor(projector.projection().revision.0),
+            &projector,
+            None,
+        )
+        .unwrap();
+
+        let restored = load(&session_id, session_dir.path()).unwrap().unwrap();
+        let rebuilt = SessionProjector::from_events(session_id, None, &events);
+        assert_eq!(restored.projector.projection(), rebuilt.projection());
+        assert_eq!(
+            restored.projector.last_runtime_seq(),
+            rebuilt.last_runtime_seq()
+        );
     }
 
     #[test]
