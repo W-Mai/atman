@@ -364,7 +364,6 @@ impl Executor {
             Some(&self.events),
             turn_id,
             Some(run_id.clone()),
-            session.clone(),
             flow_cancel.clone(),
             self.safety.as_ref(),
             self.source_dir.clone(),

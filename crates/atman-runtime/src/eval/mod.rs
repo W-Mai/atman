@@ -30,7 +30,6 @@ pub struct EvalCtx<'a> {
     pub events: Option<&'a crate::event::EventSink>,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
-    pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
     pub safety: Option<&'a crate::safety::SafetyConfig>,
     pub current_node_id: Option<String>,
     /// Directory of the .at source file. When set, relative `@` paths
@@ -772,15 +771,6 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
-        ctx_with_anchors
-            .with_session_messages(session.messages_full())
-            .with_session_runtime(session.clone())
-            .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
-            .with_flow_registry(std::sync::Arc::clone(&session.flow_registry))
-    } else {
-        ctx_with_anchors
-    };
     let ctx_with_anchors = ctx_with_anchors.for_tool_invocation(tool.tier());
     let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
     let ctx_with_anchors = if let Some(s) = ctx.safety.cloned() {
@@ -798,7 +788,7 @@ async fn dispatch_tool_call<'a>(
     if let Some(tx) = ctx.tool_ctx.stream_tx.clone() {
         ctx_with_anchors = ctx_with_anchors.with_stream_tx(tx);
     }
-    let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
+    let ctx_with_anchors = if let Some(session) = ctx.tool_ctx.session_runtime() {
         let mut c = ctx_with_anchors
             .with_read_files(session.read_files())
             .with_approval(session.approval())
@@ -836,7 +826,7 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    let stream_tx = ctx.session_runtime.as_ref().map(|s| s.stream_tx());
+    let stream_tx = ctx.tool_ctx.session_runtime().map(|s| s.stream_tx());
     let tool_call_id = uuid::Uuid::now_v7().to_string();
     let args_preview = preview_tool_args(&positional, &named);
     if let (Some(sink), Some(run_id), Some(parent_node)) =
@@ -897,12 +887,12 @@ async fn dispatch_tool_call<'a>(
             id: tool_call_id.clone(),
         });
     }
-    if let Some(session) = ctx.session_runtime.as_ref()
+    if let Some(session) = ctx.tool_ctx.session_runtime()
         && (name == "memory.todo.set" || name == "memory.todo.done")
     {
         session.refresh_todos_from_store_async().await;
     }
-    if let Some(session) = ctx.session_runtime.as_ref()
+    if let Some(session) = ctx.tool_ctx.session_runtime()
         && (name == "plan.write" || name == "plan.tick")
     {
         session.refresh_plans_from_store_async().await;
@@ -1394,7 +1384,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::form::FormAnswer::Confirmed { value: true }
                 ));
             }
-            let Some(session) = ctx.session_runtime.as_ref() else {
+            let Some(session) = ctx.tool_ctx.session_runtime() else {
                 return Value::Bool(true);
             };
             let forms = session.forms();
@@ -1506,7 +1496,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     spawned: false,
                 });
             }
-            if let Some(session) = ctx.session_runtime.as_ref() {
+            if let Some(session) = ctx.tool_ctx.session_runtime() {
                 let _ = session
                     .stream_tx()
                     .send(crate::stream::StreamFrame::FlowStart {
@@ -1882,7 +1872,7 @@ async fn eval_message_node<'a>(
     let mut parts: Vec<MessagePart> =
         Vec::with_capacity(attachment_paths.len() + usize::from(text.is_some()));
     for path in attachment_paths {
-        let source = if let Some(session) = ctx.session_runtime.as_ref() {
+        let source = if let Some(session) = ctx.tool_ctx.session_runtime() {
             match session.import_image_path(&path) {
                 Ok(source) => source,
                 Err(error) => return Value::Err(error),
@@ -2216,7 +2206,6 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2312,7 +2301,6 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2360,7 +2348,7 @@ mod tests {
         let file = parse_file(&source).unwrap();
         let tools = ToolRegistry::new();
         tools.register(Arc::new(AgentSpawn));
-        let mut tool_ctx = ToolCtx::new();
+        let mut tool_ctx = ToolCtx::new().with_session_runtime(Arc::clone(&session));
         tool_ctx.flow_identity = Some(identity);
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
@@ -2373,7 +2361,6 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: Some(run_id),
-            session_runtime: Some(Arc::clone(&session)),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2427,7 +2414,6 @@ mod tests {
                 .flow_identity
                 .as_ref()
                 .map(|identity| identity.run_id.clone()),
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2468,7 +2454,6 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2525,7 +2510,6 @@ mod tests {
                 .flow_identity
                 .as_ref()
                 .map(|identity| identity.run_id.clone()),
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2566,7 +2550,6 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2594,7 +2577,6 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2656,7 +2638,6 @@ flow parent(x: Int) -> Int {
             None,
             None,
             None,
-            None,
             tokio_util::sync::CancellationToken::new(),
             None,
             None,
@@ -2700,7 +2681,6 @@ flow parent() -> Int {
             None,
             None,
             tool_ctx.flow_run_id.clone(),
-            None,
             tokio_util::sync::CancellationToken::new(),
             None,
             None,
@@ -2740,7 +2720,6 @@ flow parent() -> Int {
             None,
             None,
             None,
-            None,
             tokio_util::sync::CancellationToken::new(),
             None,
             None,
@@ -2777,7 +2756,6 @@ flow parent() -> Int {
                 .flow_identity
                 .as_ref()
                 .map(|identity| identity.run_id.clone()),
-            session_runtime: None,
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2812,7 +2790,6 @@ flow parent() -> Int {
             events: Some(&events),
             turn_id: None,
             flow_run_id: Some(crate::event::FlowRunId::now()),
-            session_runtime: None,
             safety: None,
             current_node_id: Some("stmt_1".into()),
             source_dir: None,

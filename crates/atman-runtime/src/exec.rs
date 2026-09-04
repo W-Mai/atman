@@ -89,8 +89,8 @@ pub fn exec_stmts_prefixed<'a>(
             let control = if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
                 entry.take_pending_control()
             } else {
-                ctx.session_runtime
-                    .as_ref()
+                ctx.tool_ctx
+                    .session_runtime()
                     .zip(ctx.turn_id.as_ref())
                     .and_then(|(session, turn)| session.take_pending_control(turn))
             };
@@ -467,13 +467,6 @@ async fn eval_bind_with_watches(
     if let Some(sink) = ctx.events {
         tool_ctx = tool_ctx.with_events(sink.clone());
     }
-    if let Some(session) = ctx.session_runtime.as_ref() {
-        tool_ctx = tool_ctx
-            .with_session_messages(session.messages_full())
-            .with_session_runtime(session.clone())
-            .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
-            .with_flow_registry(std::sync::Arc::clone(&session.flow_registry));
-    }
     if let Some(safety) = ctx.safety.cloned() {
         tool_ctx = tool_ctx.with_safety(safety);
     }
@@ -617,7 +610,6 @@ pub async fn exec_flow(
         None,
         None,
         None,
-        None,
         tokio_util::sync::CancellationToken::new(),
         None,
         source_dir,
@@ -636,7 +628,6 @@ pub async fn exec_flow_with_siblings(
     events: Option<&crate::event::EventSink>,
     turn_id: Option<crate::event::TurnId>,
     flow_run_id: Option<crate::event::FlowRunId>,
-    session: Option<std::sync::Arc<crate::session::Session>>,
     flow_cancel: tokio_util::sync::CancellationToken,
     safety: Option<&crate::safety::SafetyConfig>,
     source_dir: Option<PathBuf>,
@@ -652,7 +643,6 @@ pub async fn exec_flow_with_siblings(
         events,
         turn_id,
         flow_run_id,
-        session_runtime: session,
         safety,
         current_node_id: None,
         source_dir,

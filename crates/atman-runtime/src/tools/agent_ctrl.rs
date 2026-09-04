@@ -1583,7 +1583,6 @@ async fn run_prepared_flow_agent(
         child_ctx.events.as_ref(),
         child_ctx.turn_id.clone(),
         Some(run_id.clone()),
-        None,
         child_ctx.cancel.clone(),
         None,
         path.parent().map(|p| p.to_path_buf()),

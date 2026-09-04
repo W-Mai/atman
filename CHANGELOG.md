@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Execution context binding** — ordinary calls, watched calls, and inline flows retain the message context selected by their execution owner. Recent-turn queries read that context directly instead of inheriting a stale parent snapshot, while preserving raw history across checkpoints.
 - **Compaction source validation** — root and child compaction validate the complete source window under the message lock before committing. Intervening input, attachment changes, and other rewrites are preserved; stale candidates cannot publish checkpoints or change context usage and cache epochs. Rejected automatic commits clear the running compaction display.
 - **Context message ownership** — LLM responses, correction output, and internal records use the calling context's message store and durable log. Independent execution diagnostics do not redirect session history or attachment patches. Root responses retain Mermaid output and stay under the context lock until appended.
 - **Context inheritance replay** — context creation records whether an inherited window retains all messages or only complete tool transactions. Replay applies the same selection as live tool-pair filtering, preserves message identities, and leaves raw history unchanged.

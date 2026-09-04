@@ -593,6 +593,199 @@ mod tests {
     }
 
     #[test]
+    fn execution_paths_preserve_the_bound_context() {
+        use crate::event::{FlowRunId, TurnId};
+        use crate::provider::{AssistantMessage, LlmRequest, Provider};
+        use crate::tool::{BoxFut, ContextOwner, ToolCtx};
+        use crate::value::Value;
+
+        struct ProbeProvider {
+            inner: crate::providers::mock::MockProvider,
+            requests: Arc<Mutex<Vec<LlmRequest>>>,
+        }
+
+        impl Provider for ProbeProvider {
+            fn name(&self) -> &str {
+                self.inner.name()
+            }
+
+            fn call<'a>(
+                &'a self,
+                request: LlmRequest,
+            ) -> BoxFut<'a, Result<AssistantMessage, crate::RuntimeError>> {
+                self.requests.lock().unwrap().push(request.clone());
+                self.inner.call(request)
+            }
+
+            fn call_streaming(&self, request: LlmRequest) -> crate::Observable<AssistantMessage> {
+                self.requests.lock().unwrap().push(request.clone());
+                self.inner.call_streaming(request)
+            }
+        }
+
+        let _registry = crate::model_registry::MODEL_CONFIG_LOCK.lock().unwrap();
+        crate::model_registry::register_model_entries(vec![(
+            "context-owner-probe".into(),
+            crate::model_registry::ModelEntry {
+                model: "context-owner-probe".into(),
+                context_budget: Some(100_000),
+                ..Default::default()
+            },
+        )]);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+        for detached in [false, true] {
+            for watched in [false, true] {
+                for inline in [false, true] {
+                    let session = Arc::new(crate::Session::open_ephemeral());
+                    let turn = TurnId::now();
+                    session.begin_turn(Message::user_text(turn.clone(), "unselected head"));
+                    let selected = Arc::new(ContextState::new(vec![Message::user_text(
+                        turn.clone(),
+                        "selected history",
+                    )]));
+                    let run_id = FlowRunId::now();
+                    let identity = session
+                        .flow_registry
+                        .register_root(
+                            session.id().to_string(),
+                            run_id.clone(),
+                            crate::flow_authority::EffectiveAuthority::root(
+                                &Default::default(),
+                                false,
+                                None,
+                            ),
+                        )
+                        .unwrap();
+                    let mut tool_ctx = ToolCtx::new()
+                        .with_session_runtime(session.clone())
+                        .with_permission_broker(session.permission_broker())
+                        .with_trust(session.trust_config());
+                    if detached {
+                        tool_ctx = tool_ctx.with_context(selected.clone());
+                        tool_ctx.history_segment = crate::tool::HistorySegment::Spawned;
+                    } else {
+                        // The selected invocation context need not be the session's default.
+                        let Some(ContextOwner::Session { context, .. }) =
+                            &mut tool_ctx.context_owner
+                        else {
+                            unreachable!();
+                        };
+                        *context = selected.clone();
+                    }
+                    tool_ctx.flow_identity = Some(identity);
+                    tool_ctx.flow_run_id = Some(run_id.clone());
+                    let tools = crate::tool::ToolRegistry::new();
+                    crate::tools::register_tier_zero(&tools);
+                    tools.register(Arc::new(crate::tools::memory::MemoryRecentTurns));
+                    let providers = crate::provider::ProviderRegistry::new();
+                    let requests = Arc::new(Mutex::new(Vec::new()));
+                    providers.register(Arc::new(ProbeProvider {
+                        inner: crate::providers::mock::MockProvider::new("context-owner-probe")
+                            .with_fallback(Value::Str("bound reply".into())),
+                        requests: requests.clone(),
+                    }));
+                    let watch = if watched {
+                        "watch reply { on token(match: \"forbidden-marker\") { abort(\"unexpected token\") } }"
+                    } else {
+                        ""
+                    };
+                    let body = format!(
+                        "session.push(message.user(\"new input\"))\n reply = llm.call(model: \"context-owner-probe\", context: \"session\")\n {watch}\n session.push(message.user(\"later input\"))\n return memory.recent_turns(n: 10)"
+                    );
+                    let source = if inline {
+                        format!(
+                            "flow main() {{ return subflow(helper) }}\n flow helper() {{ {body} }}"
+                        )
+                    } else {
+                        format!("flow main() {{ {body} }}")
+                    };
+                    let file = atman_dsl::parse::parse_file(&source).unwrap();
+                    let flows = file
+                        .flows
+                        .iter()
+                        .map(|flow| (flow.name.name.clone(), flow.clone()))
+                        .collect();
+                    let result = crate::exec::exec_flow_with_siblings(
+                        &file.flows[0],
+                        Vec::new(),
+                        &tools,
+                        &tool_ctx,
+                        &providers,
+                        &flows,
+                        None,
+                        Some(turn.clone()),
+                        Some(run_id),
+                        tokio_util::sync::CancellationToken::new(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        !result.is_err(),
+                        "{detached}/{watched}/{inline}: {result:?}"
+                    );
+                    let requests = requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    let requested: Vec<_> = requests[0]
+                        .messages
+                        .iter()
+                        .map(Message::text_concat)
+                        .collect();
+                    assert!(requested.iter().any(|text| text == "selected history"));
+                    assert!(requested.iter().any(|text| text == "new input"));
+                    assert!(!requested.iter().any(|text| text == "unselected head"));
+                    let messages = selected.messages();
+                    let texts: Vec<_> = messages
+                        .iter()
+                        .filter(|message| message.origin != crate::message::MessageOrigin::Internal)
+                        .map(Message::text_concat)
+                        .collect();
+                    assert_eq!(
+                        texts,
+                        [
+                            "selected history",
+                            "new input",
+                            "bound reply",
+                            "later input"
+                        ]
+                    );
+                    assert_eq!(session.messages_handle().lock().unwrap().len(), 1);
+                    let Value::Struct(fields) = result else {
+                        panic!("expected recent-turn result");
+                    };
+                    let items = fields.iter().find(|(key, _)| key == "items").unwrap();
+                    let Value::List(items) = &items.1 else {
+                        panic!("expected messages");
+                    };
+                    let recent: Vec<_> = items
+                        .iter()
+                        .map(|item| {
+                            let Value::Message(message) = item else {
+                                panic!("expected message");
+                            };
+                            message.text_concat()
+                        })
+                        .collect();
+                    assert_eq!(
+                        recent,
+                        messages
+                            .iter()
+                            .map(Message::text_concat)
+                            .collect::<Vec<_>>()
+                    );
+                    session.end_turn(&turn);
+                }
+            }
+        }
+            });
+    }
+
+    #[test]
     fn last_context_usage_store_evicts_the_oldest_identity() {
         let mut store = LastContextUsageStore::default();
         for index in 0..=MAX_LAST_CONTEXT_USAGES {

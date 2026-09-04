@@ -10,6 +10,8 @@ Event envelopes can carry a typed `ContextId` independent of turn and execution 
 
 Root handles use the invocation's cancellation token, including an explicitly supplied token independent of the session turn. Synchronous and asynchronous spawned flows own separate entries, message handles, and compaction locks; synchronous child cancellation propagates from the caller without cancelling the caller in reverse. Normal completion updates the entry and publishes its terminal output state once. Flow events, entry status, and task status share the execution result's cancellation classification.
 
+Execution binds its message context once through `ToolCtx`; evaluators and individual nodes do not select the session default again. Inline flows retain the caller's context, while spawned flows select their own. `memory.recent_turns` reads the bound context's current raw history directly, including messages added after binding and history retained across checkpoints. Invocation-time trust checks remain independent of this fixed message binding.
+
 Every `llm.call` is assembled from four independent inputs:
 
 ```text

@@ -126,15 +126,31 @@ async fn recent_turns_caps_output_at_n() {
 }
 
 #[tokio::test]
-async fn recent_turns_excerpt_is_bounded_without_replacing_lossless_items() {
+async fn recent_turns_reads_lossless_owner_history_after_checkpoint() {
     let ex = Executor::new();
     ex.tools
         .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
-    let messages = Arc::new(vec![
-        Message::user_text(atman_runtime::event::TurnId::now(), "x".repeat(10_000)),
-        Message::assistant_text(atman_runtime::event::TurnId::now(), "latest-marker"),
-    ]);
-    let ctx = atman_runtime::ToolCtx::new().with_session_messages(messages);
+    let session = Arc::new(Session::open_ephemeral());
+    session.append_message(
+        Message::assistant_text(atman_runtime::event::TurnId::now(), "x".repeat(10_000)),
+        None,
+    );
+    let ctx = atman_runtime::ToolCtx::new().with_session_runtime(session.clone());
+    session.append_message(
+        Message::user_text(atman_runtime::event::TurnId::now(), "latest-marker"),
+        None,
+    );
+    let original = session.messages();
+    let mut replacement = original.to_vec();
+    replacement[0] = Message::assistant_text(original[0].turn_id.clone(), "short");
+    session
+        .commit_rewritten_window(
+            replacement,
+            atman_runtime::compaction::estimate_tokens_for_messages(&original),
+            &original,
+            1,
+        )
+        .unwrap();
     let args = atman_runtime::ToolArgs {
         positional: Vec::new(),
         named: vec![
@@ -167,5 +183,12 @@ async fn recent_turns_excerpt_is_bounded_without_replacing_lossless_items() {
         .unwrap();
     assert!(excerpt.chars().count() <= 128);
     assert!(excerpt.contains("latest-marker"));
-    assert!(matches!(items, Value::List(items) if items.len() == 2));
+    let Value::List(items) = items else {
+        panic!("expected lossless items");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(
+        matches!(&items[0], Value::Message(message) if message.text_concat() == "x".repeat(10_000))
+    );
+    assert_eq!(session.messages()[0].text_concat(), "short");
 }

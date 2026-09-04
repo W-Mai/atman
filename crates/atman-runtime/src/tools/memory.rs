@@ -280,9 +280,9 @@ impl Tool for MemoryRecentTurns {
                 }
                 return Ok(recent_turns_value(0, 0, Vec::new(), excerpt_chars));
             }
-            // Sub-agent path: session_messages has the child's local message list.
-            if let Some(msgs) = ctx.session_messages.as_ref() {
-                let (total, recent) = crate::history_store::recent_turn_messages(msgs, n);
+            if let Some(context) = ctx.context() {
+                let msgs = context.messages_full();
+                let (total, recent) = crate::history_store::recent_turn_messages(&msgs, n);
                 if let Some(cb) = &ctx.on_memory_recent {
                     cb(recent.len() as u16);
                 }
@@ -293,7 +293,6 @@ impl Tool for MemoryRecentTurns {
                     excerpt_chars,
                 ));
             }
-            // Main-agent path: delegate to HistoryStore.
             let Some(store) = ctx.history_store.clone() else {
                 return Err(RuntimeError::ToolFailed(
                     "memory.recent_turns: no history store on context".into(),

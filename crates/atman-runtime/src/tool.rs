@@ -106,7 +106,6 @@ pub struct ToolCtx {
     pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
-    pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
     pub(crate) context_owner: Option<ContextOwner>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
@@ -150,7 +149,10 @@ pub struct ToolCtx {
 
 #[derive(Clone)]
 pub(crate) enum ContextOwner {
-    Session(std::sync::Arc<crate::session::Session>),
+    Session {
+        session: std::sync::Arc<crate::session::Session>,
+        context: std::sync::Arc<crate::context_state::ContextState>,
+    },
     Detached(std::sync::Arc<crate::context_state::ContextState>),
 }
 
@@ -292,21 +294,13 @@ impl ToolCtx {
 
     pub(crate) fn context_sink(&self) -> Option<&crate::event::EventSink> {
         match self.context_owner.as_ref()? {
-            ContextOwner::Session(session) => Some(session.sink()),
+            ContextOwner::Session { session, .. } => Some(session.sink()),
             ContextOwner::Detached(_) => self.events.as_ref(),
         }
     }
 
     pub fn with_stdout_broadcast(mut self, tx: tokio::sync::broadcast::Sender<String>) -> Self {
         self.stdout_broadcast = Some(tx);
-        self
-    }
-
-    pub fn with_session_messages(
-        mut self,
-        msgs: std::sync::Arc<Vec<crate::message::Message>>,
-    ) -> Self {
-        self.session_messages = Some(msgs);
         self
     }
 
@@ -322,7 +316,12 @@ impl ToolCtx {
         mut self,
         session: std::sync::Arc<crate::session::Session>,
     ) -> Self {
-        self.context_owner = Some(ContextOwner::Session(session));
+        self.watch_hub = Some(std::sync::Arc::clone(&session.watch_hub));
+        self.flow_registry = Some(std::sync::Arc::clone(&session.flow_registry));
+        self.context_owner = Some(ContextOwner::Session {
+            context: std::sync::Arc::clone(session.context()),
+            session,
+        });
         self
     }
 
@@ -332,15 +331,14 @@ impl ToolCtx {
 
     pub fn session_runtime(&self) -> Option<&std::sync::Arc<crate::session::Session>> {
         match self.context_owner.as_ref()? {
-            ContextOwner::Session(session) => Some(session),
+            ContextOwner::Session { session, .. } => Some(session),
             ContextOwner::Detached(_) => None,
         }
     }
 
     pub fn context(&self) -> Option<&std::sync::Arc<crate::context_state::ContextState>> {
         Some(match self.context_owner.as_ref()? {
-            ContextOwner::Session(session) => session.context(),
-            ContextOwner::Detached(context) => context,
+            ContextOwner::Session { context, .. } | ContextOwner::Detached(context) => context,
         })
     }
 
