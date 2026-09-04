@@ -979,6 +979,7 @@ pub struct ContextCallIdentity {
     pub scope: ContextCallScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Context owner's run, independent of an inline call's execution run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_run_id: Option<crate::event::FlowRunId>,
 }
@@ -1000,7 +1001,11 @@ impl ContextCallIdentity {
         };
         let flow_run_id = match scope {
             ContextCallScope::Root => None,
-            ContextCallScope::Child | ContextCallScope::Detached => ctx.flow_run_id.clone(),
+            ContextCallScope::Child | ContextCallScope::Detached => ctx
+                .agent_entry
+                .as_ref()
+                .map(|entry| entry.child_run_id.clone())
+                .or_else(|| ctx.flow_run_id.clone()),
         };
         Self {
             scope,
@@ -1592,6 +1597,73 @@ mod tests {
         });
         assert_eq!(child.scope, ContextCallScope::Child);
         assert!(child.flow_run_id.is_some());
+    }
+
+    #[test]
+    fn inline_calls_share_the_owner_cache_route_and_observation() {
+        let registry = crate::tools::agent_ctrl::FlowRegistry::new();
+        let owner_run = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                "session".into(),
+                owner_run.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        let entry = registry
+            .create_entry(
+                "owner".into(),
+                "task".into(),
+                "model".into(),
+                owner_run.clone(),
+                Default::default(),
+            )
+            .unwrap();
+        for segment in [
+            crate::tool::HistorySegment::Root,
+            crate::tool::HistorySegment::Spawned,
+        ] {
+            let mut ctx = crate::tool::ToolCtx::new()
+                .with_context(entry.context.clone())
+                .with_agent_entry(entry.clone());
+            ctx.history_segment = segment;
+            ctx.flow_run_id = Some(owner_run.clone());
+            let expected = ContextCallIdentity::from_tool_context(&ctx);
+            assert_eq!(expected.flow_run_id.as_ref(), Some(&owner_run));
+            let mut previous_key = None;
+            let mut tracker = ContextPrefixTracker::default();
+            for index in 0..3 {
+                ctx.flow_run_id = Some(crate::event::FlowRunId::now());
+                let identity = ContextCallIdentity::from_tool_context(&ctx);
+                assert_eq!(identity, expected);
+                let plan = ModelContextPlan::for_provider_call(
+                    request(),
+                    ContextCallPurpose::General,
+                    identity.clone(),
+                    "provider",
+                    crate::provider::ProviderCapabilities {
+                        prompt_cache_key: true,
+                        ..Default::default()
+                    },
+                    None,
+                );
+                let key = plan.request().prompt_cache_key.clone().unwrap();
+                if let Some(previous) = previous_key.replace(key.clone()) {
+                    assert_eq!(previous, key);
+                }
+                let observation = tracker.observe(
+                    ContextCallPurpose::General,
+                    identity,
+                    "provider",
+                    "model",
+                    ContextPrefixSnapshot::provider_neutral(plan.request()).unwrap(),
+                );
+                assert_eq!(
+                    observation.reset_reason,
+                    (index == 0).then_some(ContextCacheResetReason::ColdStart)
+                );
+            }
+        }
     }
 
     #[test]

@@ -26,6 +26,13 @@ impl Provider for CorrectingProvider {
         "correcting"
     }
 
+    fn capabilities(&self) -> atman_runtime::provider::ProviderCapabilities {
+        atman_runtime::provider::ProviderCapabilities {
+            prompt_cache_key: true,
+            ..Default::default()
+        }
+    }
+
     fn call<'a>(&'a self, _: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         panic!("run controls must also be monitored without a UI stream subscriber")
     }
@@ -282,7 +289,16 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
             None,
         )]))
         .await;
-    for (is_async, watched) in [(false, false), (false, true), (true, false), (true, true)] {
+    for (is_async, watched, inline) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+        (false, true, true),
+        (true, false, true),
+        (true, true, true),
+    ] {
         for selection in ["context: \"session\"", "prompt: \"explicit\""] {
             if watched && selection.starts_with("prompt:") {
                 continue;
@@ -294,10 +310,18 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
             };
             let dir = tempfile::tempdir().unwrap();
             let source_path = dir.path().join("child.at");
+            let call = format!(
+                "reply = llm.call(model: \"model\", {selection}, cache: true)\n {watch}\n return text_concat(reply)"
+            );
+            let body = if inline {
+                format!("return subflow(helper)\n }}\n flow helper() -> string {{ {call}")
+            } else {
+                call
+            };
             std::fs::write(
                 &source_path,
                 format!(
-                    "flow child() -> string {{\n capture_owner()\n session.push(message.user(\"child task\"))\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n reply = llm.call(model: \"model\", {selection})\n {watch}\n return text_concat(reply)\n }}"
+                    "flow child() -> string {{\n capture_owner()\n session.push(message.user(\"child task\"))\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n context.record(key: \"agent.rule.test\", content: \"child rule\")\n {body}\n }}"
                 ),
             )
             .unwrap();
@@ -409,7 +433,9 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
 
             let requests = calls.lock().unwrap().clone();
             assert_eq!(requests.len(), 5);
+            assert!(requests[0].prompt_cache_key.is_some());
             for (index, request) in requests.iter().enumerate() {
+                assert_eq!(request.prompt_cache_key, requests[0].prompt_cache_key);
                 let texts: Vec<_> = request.messages.iter().map(Message::text_concat).collect();
                 assert!(!texts.iter().any(|text| text == "parent task"));
                 assert_eq!(
@@ -443,6 +469,22 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
                 }
             }
             let events = session.sink().snapshot();
+            let llm_calls: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::LlmCall {
+                        run_id,
+                        context_call_identity: Some(identity),
+                        ..
+                    } => Some((run_id, identity)),
+                    _ => None,
+                })
+                .collect();
+            assert!(!llm_calls.is_empty());
+            for (run_id, identity) in llm_calls {
+                assert_eq!(identity, &usage_key.call_identity);
+                assert_eq!(run_id.as_ref() != Some(&entry.child_run_id), inline);
+            }
             let captured: Vec<_> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -458,6 +500,19 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
             assert!(captured.iter().all(|injection| injection.turn_id == turn
                 && injection.flow_run_id.as_ref() == Some(&entry.child_run_id)));
             let child_messages_from = |events: &[Event]| -> Vec<Message> {
+                let owners: std::collections::HashSet<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::FlowStart {
+                            run_id,
+                            parent_run_id: Some(parent),
+                            spawned: false,
+                            ..
+                        } if parent == &entry.child_run_id => Some(run_id.clone()),
+                        _ => None,
+                    })
+                    .chain(std::iter::once(entry.child_run_id.clone()))
+                    .collect();
                 events
                     .iter()
                     .filter_map(|event| match event {
@@ -480,7 +535,7 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
                             message,
                             flow_run_id,
                             ..
-                        } if flow_run_id.as_ref() == Some(&entry.child_run_id) => {
+                        } if flow_run_id.as_ref().is_some_and(|id| owners.contains(id)) => {
                             Some(message.clone())
                         }
                         Event::UserInject {
