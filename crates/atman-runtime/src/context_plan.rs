@@ -939,6 +939,10 @@ pub enum ContextCallPurpose {
 }
 
 impl ContextCallPurpose {
+    pub(crate) fn accepts_steering_messages(self) -> bool {
+        matches!(self, Self::General)
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::General => "general",

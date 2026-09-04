@@ -58,7 +58,41 @@ flow test() -> string {
             Value::Str(r#"["one"]"#.into()),
         );
 
-    let (_, events) = run_with_events(src, provider);
+    let _registry =
+        common::SyncModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "m", "mock", 8_192, None,
+        )]));
+    let session = Arc::new(atman_runtime::session::Session::open_ephemeral());
+    let turn_id = atman_runtime::event::TurnId::now();
+    session.begin_turn(atman_runtime::message::Message::user_text(
+        turn_id.clone(),
+        "task",
+    ));
+    session.enqueue_injection("pending user input").unwrap();
+    session
+        .enqueue_injection_with_level(
+            "pending correction",
+            atman_runtime::injection::InjectionLevel::L2CourseCorrect,
+            None,
+        )
+        .unwrap();
+    let pending = session.list_pending_injections();
+    let executor = Executor::with_events(session.sink().clone());
+    executor.providers.register(Arc::new(provider));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime
+        .block_on(executor.run_in_turn(
+            &parse_file(src).unwrap(),
+            "test",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        ))
+        .unwrap();
+    assert!(matches!(result, Value::Str(text) if text == "done"));
+    assert_eq!(session.list_pending_injections(), pending);
+    session.end_turn(&turn_id);
+    let events = executor.events.snapshot();
     let purposes: Vec<_> = events
         .into_iter()
         .filter_map(|event| match event {

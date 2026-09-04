@@ -25,6 +25,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Interjection consumption** — auxiliary LLM calls leave pending nudges and course corrections for the agent, including during streaming; helper output and stream-level stop controls remain connected.
 - **Event publication races** — daemon snapshots and live signals synchronize against published events, not reserved sequence numbers; compaction references the actual emitted summary event.
 - **Turn state isolation** — cancellation and streaming state belong to individual turns; late completion and output cannot reset another turn, and interjection enqueue is serialized with turn completion.
 - **Targeted interjections** — daemon interjections use the target run's registered turn and reject inactive targets; run cleanup closes only that turn, including after execution-thread failure.

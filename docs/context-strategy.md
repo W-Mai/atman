@@ -103,6 +103,8 @@ The managed `commands/agent.at` uses `context: "session"`. It does **not** feed 
 
 At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_chars: 12000)` provides a bounded excerpt to the cheap rule/confession selector. The same bounded view is used later by the loop-disposition classifier. Its lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context.
 
+Pending nudges and course corrections are reserved for general agent calls. Classification, extraction, branch generation, compaction, and interjection classification do not consume these messages, including through the streaming monitor. Streaming helper calls still accept redirect and hard-stop controls and retain their normal output routing. The managed flow decides whether to continue after checking pending input.
+
 ## Session history and active window
 
 The durable event stream is the source of session history. The runtime derives the

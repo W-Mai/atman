@@ -1084,6 +1084,7 @@ fn value_struct_string(value: &Value, name: &str) -> Option<String> {
 
 #[derive(Default)]
 pub(super) struct StreamCallCtx<'a> {
+    call_purpose: crate::context_plan::ContextCallPurpose,
     session: Option<&'a crate::session::Session>,
     flow_cancel: tokio_util::sync::CancellationToken,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
@@ -1099,7 +1100,7 @@ pub(super) async fn call_and_maybe_stream(
     stream_ctx: StreamCallCtx<'_>,
     watch_rules: Option<crate::streaming::WatchRules>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let mut base = LlmStream::new(provider, req)
+    let mut base = LlmStream::new(provider, req, stream_ctx.call_purpose)
         .with_event_sink(stream_ctx.event_sink)
         .with_turn_id(stream_ctx.turn_id)
         .with_flow_run_id(stream_ctx.flow_run_id.cloned());

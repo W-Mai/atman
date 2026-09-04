@@ -180,7 +180,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         session.mark_injection_consumed(&l3_or_l2.id);
         return Value::Err(RuntimeError::Redirect(target.clone()));
     }
-    if let Some(session) = ctx.session_runtime.as_ref() {
+    if args.call_purpose.accepts_steering_messages()
+        && let Some(session) = ctx.session_runtime.as_ref()
+    {
         let injections = session.drain_injections(&turn_id);
         let renderable: Vec<crate::injection::Injection> = injections
             .into_iter()
@@ -394,6 +396,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 provider.as_ref(),
                 context_plan.into_request(),
                 StreamCallCtx {
+                    call_purpose: context_call_purpose,
                     session: ctx.session_runtime.as_deref(),
                     flow_cancel: ctx.flow_cancel.clone(),
                     stream_tx: stream_tx.clone(),
