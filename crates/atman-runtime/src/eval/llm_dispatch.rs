@@ -420,15 +420,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     }
                     let consumed = claim.commit(Some(&entry.context.messages), || {
                         if let Some(message) = partial.as_ref() {
-                            if let Some(session) = ctx.session_runtime() {
-                                session.append_message(message.clone(), ctx.flow_run_id.clone());
-                            } else {
-                                crate::tools::session::append_message_to_context(
-                                    ctx,
-                                    message.clone(),
-                                )
+                            crate::tools::session::append_message_to_context(ctx, message.clone())
                                 .expect("validated run context");
-                            }
                         }
                     });
                     let Some(injection) = consumed else {
@@ -594,23 +587,18 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             "LLM call recovered after retry".into(),
                         );
                     }
-                    if let Some(session) = ctx.session_runtime()
-                        && !matches!(context_mode, ContextMode::None)
+                    if !matches!(context_mode, ContextMode::None)
+                        && (ctx.session_runtime().is_some() || uses_spawned_context)
                     {
-                        if !has_messages_override {
-                            drop(compact_guard.take());
+                        if compact_guard.is_none() {
+                            compact_guard = Some(
+                                ctx.context()
+                                    .expect("managed context")
+                                    .compact_lock()
+                                    .lock()
+                                    .await,
+                            );
                         }
-                        let _append_compact_guard = session.acquire_compact_lock().await;
-                        session.append_message(am.message.clone(), ctx.flow_run_id.clone());
-                        drop(_append_compact_guard);
-                        crate::compaction::start_auto_compact_with_budget(
-                            session.clone(),
-                            model.clone(),
-                            providers_reg.clone(),
-                            compaction_budget,
-                        )
-                        .await;
-                    } else if uses_spawned_context {
                         if let Err(error) = crate::tools::session::append_message_to_context(
                             ctx,
                             am.message.clone(),
@@ -618,6 +606,15 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             return Value::Err(error);
                         }
                         drop(compact_guard.take());
+                        if let Some(session) = ctx.session_runtime() {
+                            crate::compaction::start_auto_compact_with_budget(
+                                session.clone(),
+                                model.clone(),
+                                providers_reg.clone(),
+                                compaction_budget,
+                            )
+                            .await;
+                        }
                     }
                     if !matches!(context_mode, ContextMode::None) {
                         return Value::Message(am.message.clone());
@@ -626,7 +623,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 }
                 Err(e) => {
                     if uses_managed_context
-                        && let (Some(context), Some(sink)) = (ctx.context(), ctx.events.as_ref())
+                        && let (Some(context), Some(sink)) = (ctx.context(), ctx.context_sink())
                         && let RuntimeError::AttachmentError { reason, part_id } = &e
                     {
                         let target = match part_id {
@@ -903,7 +900,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAu
     let Some(flow_run_id) = ctx.message_flow_run_id() else {
         return;
     };
-    let Some(sink) = ctx.events.as_ref() else {
+    let Some(sink) = ctx.context_sink() else {
         return;
     };
     let session_id = ctx
@@ -980,29 +977,27 @@ async fn sync_runtime_context_records(
     ctx: &ToolCtx,
     turn_id: &crate::event::TurnId,
 ) -> Result<(), RuntimeError> {
-    if let Some(session) = ctx.session_runtime() {
-        session
-            .append_context_records(turn_id.clone(), session_context_record_specs(session).await);
+    let specs = if let Some(session) = ctx.session_runtime() {
+        session_context_record_specs(session).await
+    } else if matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned) {
+        let workspace = tool_context_working_directory_context(ctx);
+        vec![crate::context_plan::ContextRecordSpec::new(
+            "session.workspace",
+            crate::context_plan::ContextRecordAuthority::Runtime,
+            crate::context_plan::ContextRecordRetention::Latest,
+            workspace.map_or_else(
+                crate::context_plan::ContextRecordBody::tombstone,
+                crate::context_plan::ContextRecordBody::text,
+            ),
+        )]
+    } else {
         return Ok(());
-    }
-    if !matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned) {
-        return Ok(());
-    }
-    let workspace = tool_context_working_directory_context(ctx);
-    let spec = crate::context_plan::ContextRecordSpec::new(
-        "session.workspace",
-        crate::context_plan::ContextRecordAuthority::Runtime,
-        crate::context_plan::ContextRecordRetention::Latest,
-        workspace.map_or_else(
-            crate::context_plan::ContextRecordBody::tombstone,
-            crate::context_plan::ContextRecordBody::text,
-        ),
-    );
+    };
     let _compact_guard = match ctx.context().map(|context| context.compact_lock()) {
         Some(lock) => Some(lock.lock().await),
         None => None,
     };
-    crate::tools::context::append_context_records(ctx, turn_id.clone(), [spec])?;
+    crate::tools::context::append_context_records(ctx, turn_id.clone(), specs)?;
     Ok(())
 }
 

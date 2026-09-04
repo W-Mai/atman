@@ -105,9 +105,6 @@ pub(crate) fn append_context_records(
     turn_id: crate::event::TurnId,
     specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
 ) -> Result<Vec<crate::context_plan::ContextRecord>, RuntimeError> {
-    if let Some(session) = ctx.session_runtime() {
-        return Ok(session.append_context_records(turn_id, specs));
-    }
     let Some(messages) = ctx.context().map(|context| context.messages_handle()) else {
         return Err(RuntimeError::ToolFailed(
             "context.record: no session message context available".into(),

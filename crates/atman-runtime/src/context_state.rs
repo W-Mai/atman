@@ -336,9 +336,16 @@ mod tests {
 
     #[test]
     fn message_writers_acquire_the_context_before_publishing() {
-        for writer_kind in ["root", "tool", "record", "injection", "attachment"] {
+        for writer_kind in [
+            "root",
+            "tool",
+            "record",
+            "root-record",
+            "injection",
+            "attachment",
+        ] {
             let session = Arc::new(crate::session::Session::open_ephemeral());
-            let context = if writer_kind == "root" {
+            let context = if matches!(writer_kind, "root" | "root-record") {
                 session.context().clone()
             } else {
                 Arc::new(ContextState::new(Vec::new()))
@@ -349,6 +356,11 @@ mod tests {
                 .with_context(context.clone())
                 .with_events(sink.clone())
                 .with_anchors(Some(turn.clone()), None, None);
+            let ctx = if writer_kind == "root-record" {
+                ctx.with_session_runtime(session.clone())
+            } else {
+                ctx
+            };
             let image_id = crate::message::MessagePartId(uuid::Uuid::now_v7());
             if writer_kind == "attachment" {
                 let mut message = Message::user_text(turn.clone(), "inspect");
@@ -383,7 +395,7 @@ mod tests {
                         )
                         .unwrap();
                     }
-                    "record" => {
+                    "record" | "root-record" => {
                         crate::tools::context::append_context_records(
                             &ctx,
                             turn,

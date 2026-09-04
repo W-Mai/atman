@@ -2637,7 +2637,7 @@ impl BeginTurnCommand {
     }
 }
 
-fn extract_mermaid_blocks(msg: &crate::message::Message) -> Vec<String> {
+pub(crate) fn extract_mermaid_blocks(msg: &crate::message::Message) -> Vec<String> {
     let text = msg.text_concat();
     let mut blocks = Vec::new();
     let mut lines = text.lines().peekable();

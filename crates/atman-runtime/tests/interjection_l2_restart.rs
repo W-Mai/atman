@@ -238,7 +238,12 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
                     .count(),
                 4
             );
-            session.flush_writer().await.unwrap();
+            let published = session.sink().published_seq();
+            let durable = session.flush_writer().await.unwrap();
+            assert!(
+                durable.seq >= published,
+                "event writer did not persist the complete history: {durable:?}, published={published}"
+            );
             let restored = Session::open_existing(dir.path(), &session.id().to_string()).unwrap();
             assert_eq!(restored.messages().to_vec(), expected);
             session.shutdown().await;
@@ -578,7 +583,12 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
                 Event::FlowEnd { run_id, status: FlowStatus::Ok, .. } if run_id == &entry.child_run_id)));
             session.flow_registry.mark_terminal(&parent_run);
             session.end_turn(&turn);
-            session.flush_writer().await.unwrap();
+            let published = session.sink().published_seq();
+            let durable = session.flush_writer().await.unwrap();
+            assert!(
+                durable.seq >= published,
+                "event writer did not persist the complete history: {durable:?}, published={published}"
+            );
             let restored = Session::restore_existing_with_context_and_trust(
                 dir.path(),
                 &session.id().to_string(),

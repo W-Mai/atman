@@ -89,6 +89,18 @@ pub(crate) fn append_message_to_context(
         ));
     };
     msg.ensure_part_ids();
+    let stream_tx = ctx
+        .stream_tx
+        .clone()
+        .or_else(|| ctx.session_runtime().map(|session| session.stream_tx()));
+    let diagrams = if ctx.session_runtime().is_some()
+        && msg.role == MessageRole::Assistant
+        && msg.origin != crate::message::MessageOrigin::Internal
+    {
+        crate::session::extract_mermaid_blocks(&msg)
+    } else {
+        Vec::new()
+    };
     let flow_run_id = match msg.role {
         MessageRole::Assistant | MessageRole::Tool => {
             ctx.flow_run_id.as_ref().map(|run_id| run_id.0.to_string())
@@ -98,7 +110,7 @@ pub(crate) fn append_message_to_context(
     };
     let frame = if msg.origin != crate::message::MessageOrigin::Internal
         && msg.role != MessageRole::System
-        && let Some(tx) = &ctx.stream_tx
+        && let Some(tx) = &stream_tx
     {
         let frame = match msg.role {
             MessageRole::Assistant => crate::stream::StreamFrame::AssistantMsg {
@@ -122,15 +134,25 @@ pub(crate) fn append_message_to_context(
     if let Some((tx, frame)) = frame {
         let _ = tx.send(frame);
     }
+    for source in diagrams {
+        if let Some(sink) = ctx.context_sink() {
+            sink.emit(crate::event::Event::MermaidDiagram {
+                source: source.clone(),
+            });
+        }
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::MermaidDiagram { source });
+        }
+    }
     Ok(())
 }
 
 pub(super) fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
-    use crate::event::{Event, TurnId};
-    let Some(sink) = &ctx.events else {
+    use crate::event::Event;
+    let Some(sink) = ctx.context_sink() else {
         return;
     };
-    let turn_id = ctx.turn_id.clone().unwrap_or_else(TurnId::now);
+    let turn_id = ctx.turn_id.clone().unwrap_or_else(|| msg.turn_id.clone());
     let flow_run_id = ctx.message_flow_run_id();
     let event = match msg.role {
         MessageRole::User => Event::UserMsg {
@@ -140,7 +162,7 @@ pub(super) fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
         },
         MessageRole::Assistant => Event::AssistantMsg {
             turn_id,
-            flow_run_id,
+            flow_run_id: ctx.flow_run_id.clone(),
             message: msg.clone(),
         },
         MessageRole::Tool => Event::ToolResultMsg {
@@ -192,6 +214,132 @@ mod tests {
         assert_eq!(tool.name(), "session.push");
         assert_eq!(tool.tier(), Tier::Zero);
         assert!(tool.description().is_some());
+    }
+
+    #[test]
+    fn owner_writes_preserve_identity_records_and_root_diagrams() {
+        use crate::event::{ContextBase, ContextId, ContextInheritance, Event, FlowRunId, TurnId};
+        use std::sync::Arc;
+        for owner_kind in ["root", "root-traced", "spawned"] {
+            let spawned = owner_kind == "spawned";
+            let trace = crate::event::EventSink::new();
+            let session = Arc::new(crate::Session::open_ephemeral());
+            let run = FlowRunId::now();
+            let turn = TurnId::now();
+            let id = ContextId::now();
+            let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+            let ctx = if spawned {
+                let sink = session.sink().clone().with_context(id.clone());
+                sink.emit(Event::ContextCreated {
+                    base: None,
+                    inheritance: ContextInheritance::Full,
+                });
+                ToolCtx::new()
+                    .with_context(Arc::new(
+                        crate::context_state::ContextState::new(Vec::new()),
+                    ))
+                    .with_history_segment(crate::tool::HistorySegment::Spawned)
+                    .with_events(sink)
+            } else {
+                ToolCtx::new().with_session_runtime(session.clone())
+            }
+            .with_stream_tx(tx)
+            .with_anchors(Some(turn.clone()), Some(run.clone()), None);
+            let ctx = if owner_kind == "root-traced" {
+                ctx.with_events(trace.clone())
+            } else {
+                ctx
+            };
+            let sink = ctx.context_sink().unwrap();
+            sink.emit(Event::FlowStart {
+                run_id: run.clone(),
+                turn_id: Some(turn.clone()),
+                flow_name: "test".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned,
+            });
+            let message =
+                Message::assistant_text(TurnId::now(), "```mermaid\ngraph TD\n  A-->B\n```");
+            append_message_to_context(&ctx, message.clone()).unwrap();
+            let spec = crate::context_plan::ContextRecordSpec::new(
+                "agent.rule.test",
+                crate::context_plan::ContextRecordAuthority::Retrieved,
+                crate::context_plan::ContextRecordRetention::Latest,
+                crate::context_plan::ContextRecordBody::text("rule"),
+            );
+            assert_eq!(
+                crate::tools::context::append_context_records(&ctx, turn.clone(), [spec.clone()])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                crate::tools::context::append_context_records(&ctx, turn.clone(), [spec])
+                    .unwrap()
+                    .is_empty()
+            );
+            let live = ctx.context().unwrap().messages().to_vec();
+            assert_eq!(live[0], message);
+            assert_eq!(live.len(), 2);
+            let events = sink.snapshot_envelopes();
+            assert!(events.iter().any(|event| matches!(&event.event,
+                Event::AssistantMsg { turn_id, flow_run_id: Some(owner), message: stored }
+                    if turn_id == &turn && owner == &run && stored == &message)));
+            let base = if spawned {
+                ContextBase::Context {
+                    context_id: id,
+                    through_seq: sink.published_seq(),
+                }
+            } else {
+                ContextBase::LegacyRoot {
+                    through_seq: sink.published_seq(),
+                }
+            };
+            assert_eq!(
+                crate::projection::context::replay_context(&events, &base)
+                    .unwrap()
+                    .window()
+                    .iter()
+                    .map(|(_, m)| m.clone())
+                    .collect::<Vec<_>>(),
+                live
+            );
+            assert!(
+                matches!(rx.try_recv().unwrap(), crate::stream::StreamFrame::AssistantMsg { flow_run_id: Some(owner), .. } if owner == run.to_string())
+            );
+            if !spawned {
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    crate::stream::StreamFrame::MermaidDiagram { .. }
+                ));
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event.event, Event::MermaidDiagram { .. }))
+                );
+            } else {
+                assert!(session.messages().is_empty());
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event.event, Event::MermaidDiagram { .. }))
+                );
+            }
+            assert!(rx.try_recv().is_err());
+            assert!(trace.snapshot().is_empty());
+        }
+        let session = Arc::new(crate::Session::open_ephemeral());
+        let ctx = ToolCtx::new().with_session_runtime(session.clone());
+        let message = Message::assistant_text(TurnId::now(), "direct");
+        let mut frames = session.stream_subscribe();
+        append_message_to_context(&ctx, message.clone()).unwrap();
+        assert!(matches!(
+            frames.try_recv().unwrap(),
+            crate::stream::StreamFrame::AssistantMsg { .. }
+        ));
+        assert!(session.sink().snapshot().iter().any(|event| matches!(event,
+            Event::AssistantMsg { turn_id, message: stored, .. } if turn_id == &message.turn_id && stored == &message)));
     }
 
     #[tokio::test]

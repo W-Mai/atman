@@ -140,7 +140,8 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
 
     let _registry = common::SyncModelRegistryGuard::mock("m");
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    for owner_kind in ["root", "spawned", "inline"] {
+    for owner_kind in ["root", "root-traced", "spawned", "inline"] {
+        let spawned_context = matches!(owner_kind, "spawned" | "inline");
         for (mode, image_count, location, outcome, changed) in [
             ("session", 2, "first", "error", true),
             ("session", 1, "remote", "error", true),
@@ -155,6 +156,7 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
             ("session", 1, "provider", "error", false),
         ] {
             let session = Arc::new(Session::open_ephemeral());
+            let trace = atman_runtime::event::EventSink::new();
             let turn = TurnId::now();
             let root_run = FlowRunId::now();
             let child_run = FlowRunId::now();
@@ -218,7 +220,7 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
             let providers = Arc::new(atman_runtime::provider::ProviderRegistry::default());
             providers.register(provider.clone());
             let run = match owner_kind {
-                "root" => &root_run,
+                "root" | "root-traced" => &root_run,
                 "spawned" => &child_run,
                 "inline" => &inline_run,
                 _ => unreachable!(),
@@ -231,7 +233,10 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                 .with_events(session.sink().clone())
                 .with_stream_tx(tx)
                 .with_anchors(Some(turn.clone()), Some(run.clone()), None);
-            let context_id = (owner_kind != "root").then(ContextId::now);
+            if owner_kind == "root-traced" {
+                ctx = ctx.with_events(trace.clone());
+            }
+            let context_id = spawned_context.then(ContextId::now);
             if let Some(id) = &context_id {
                 let sink = session.sink().clone().with_context(id.clone());
                 sink.emit(Event::ContextCreated {
@@ -309,11 +314,23 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                         .contains("attachment unavailable: image-0.png")
                 }));
             }
-            if owner_kind != "root" {
+            if spawned_context {
                 assert_eq!(*session.messages_handle().lock().unwrap(), original);
                 assert_eq!(session.messages().as_ref(), original.as_slice());
             }
             let events = session.sink().snapshot_envelopes();
+            assert!(trace.snapshot().iter().all(|event| {
+                event.context_message().is_none()
+                    && !matches!(event, Event::AttachmentDegraded { .. })
+            }));
+            if owner_kind == "root-traced" {
+                assert!(
+                    trace
+                        .snapshot()
+                        .iter()
+                        .any(|event| matches!(event, Event::LlmCall { .. }))
+                );
+            }
             let patches: Vec<_> = events
                 .iter()
                 .filter(|e| matches!(e.event, Event::AttachmentDegraded { .. }))
