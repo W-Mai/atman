@@ -2,13 +2,14 @@
 //! `MessageWindow` anchored at the last compaction summary (zero-copy);
 //! `full_messages()` returns a shared `Arc<Vec<Message>>` of every message.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::compaction::is_compaction_summary;
 use crate::event::EventEnvelope;
 use crate::message::Message;
+use crate::projection::message_window::FlowOwnership;
 
 #[derive(Clone)]
 pub struct MessageWindow {
@@ -44,48 +45,6 @@ struct Acc {
     ownership: FlowOwnership,
     full_cache: Arc<Vec<Message>>,
     window_cache: MessageWindow,
-}
-
-#[derive(Default)]
-struct FlowOwnership {
-    children: HashMap<crate::event::FlowRunId, HashSet<crate::event::FlowRunId>>,
-    spawned: HashSet<crate::event::FlowRunId>,
-}
-
-impl FlowOwnership {
-    fn observe(&mut self, event: &crate::event::Event) {
-        let crate::event::Event::FlowStart {
-            run_id,
-            parent_run_id,
-            spawned,
-            ..
-        } = event
-        else {
-            return;
-        };
-        if let Some(parent) = parent_run_id {
-            self.children
-                .entry(parent.clone())
-                .or_default()
-                .insert(run_id.clone());
-        }
-        if !*spawned
-            && !parent_run_id
-                .as_ref()
-                .is_some_and(|parent| self.spawned.contains(parent))
-        {
-            return;
-        }
-        let mut queue = VecDeque::from([run_id.clone()]);
-        while let Some(parent) = queue.pop_front() {
-            if !self.spawned.insert(parent.clone()) {
-                continue;
-            }
-            if let Some(children) = self.children.get(&parent) {
-                queue.extend(children.iter().cloned());
-            }
-        }
-    }
 }
 
 pub struct MessageStream {

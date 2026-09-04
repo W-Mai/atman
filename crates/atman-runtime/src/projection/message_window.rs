@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-use crate::event;
+use crate::event::{self, Event, FlowRunId};
 #[cfg(test)]
 use crate::event_log::reader::parse_json_lines;
 use crate::event_log::reader::read_event_envelopes;
@@ -9,6 +9,58 @@ use crate::message::{Message, MessagePart};
 use crate::nodegraph;
 use crate::provider;
 use crate::session::SessionOpenError;
+
+#[derive(Debug, Default)]
+pub(crate) struct FlowOwnership {
+    pub known: HashSet<FlowRunId>,
+    pub spawned: HashSet<FlowRunId>,
+    children: HashMap<FlowRunId, HashSet<FlowRunId>>,
+}
+
+impl FlowOwnership {
+    pub(crate) fn from_events<'a>(events: impl IntoIterator<Item = &'a Event>) -> Self {
+        let mut ownership = Self::default();
+        for event in events {
+            ownership.observe(event);
+        }
+        ownership
+    }
+
+    pub(crate) fn observe(&mut self, event: &Event) {
+        let Event::FlowStart {
+            run_id,
+            parent_run_id,
+            spawned,
+            ..
+        } = event
+        else {
+            return;
+        };
+        self.known.insert(run_id.clone());
+        if let Some(parent) = parent_run_id {
+            self.children
+                .entry(parent.clone())
+                .or_default()
+                .insert(run_id.clone());
+        }
+        if !*spawned
+            && !parent_run_id
+                .as_ref()
+                .is_some_and(|parent| self.spawned.contains(parent))
+        {
+            return;
+        }
+        let mut queue = VecDeque::from([run_id.clone()]);
+        while let Some(parent) = queue.pop_front() {
+            if !self.spawned.insert(parent.clone()) {
+                continue;
+            }
+            if let Some(children) = self.children.get(&parent) {
+                queue.extend(children.iter().cloned());
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum TranscriptEntry {
@@ -139,7 +191,8 @@ pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, Sess
 
 pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
-    let spawned_flow_ids = spawned_flow_ids(&envelopes);
+    let spawned_flow_ids =
+        FlowOwnership::from_events(envelopes.iter().map(|env| &env.event)).spawned;
     let mut messages = Vec::new();
     let mut positions = HashMap::new();
     for env in &envelopes {
@@ -1007,7 +1060,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
 
 pub(crate) fn project_transcript_records(
     records: &[crate::event_log::reader::ReplayRecord],
-    ownership: &crate::event_log::replay::FlowOwnership,
+    ownership: &FlowOwnership,
 ) -> Vec<TranscriptEntry> {
     let mut patches: HashMap<u64, Vec<AttachmentPatch>> = HashMap::new();
     let mut tool_started_at = HashMap::new();
@@ -1524,7 +1577,8 @@ impl MessageProjection for [crate::event::EventEnvelope] {
     }
 
     fn to_messages_with_seq(&self) -> Vec<(u64, Message)> {
-        let spawned_flow_ids = spawned_flow_ids(self);
+        let spawned_flow_ids =
+            FlowOwnership::from_events(self.iter().map(|env| &env.event)).spawned;
         let mut acc: Vec<(u64, Message)> = Vec::new();
         let mut positions = HashMap::new();
         for env in self {
@@ -1532,44 +1586,6 @@ impl MessageProjection for [crate::event::EventEnvelope] {
         }
         acc
     }
-}
-
-pub(crate) fn spawned_flow_ids(
-    envelopes: &[crate::event::EventEnvelope],
-) -> std::collections::HashSet<crate::event::FlowRunId> {
-    let mut children =
-        std::collections::HashMap::<crate::event::FlowRunId, Vec<crate::event::FlowRunId>>::new();
-    let mut spawned = std::collections::HashSet::new();
-    for env in envelopes {
-        if let crate::event::Event::FlowStart {
-            run_id,
-            parent_run_id,
-            spawned: is_spawned,
-            ..
-        } = &env.event
-        {
-            if let Some(parent_run_id) = parent_run_id {
-                children
-                    .entry(parent_run_id.clone())
-                    .or_default()
-                    .push(run_id.clone());
-            }
-            if *is_spawned {
-                spawned.insert(run_id.clone());
-            }
-        }
-    }
-    let mut queue = std::collections::VecDeque::from_iter(spawned.iter().cloned());
-    while let Some(parent) = queue.pop_front() {
-        if let Some(descendants) = children.get(&parent) {
-            for descendant in descendants {
-                if spawned.insert(descendant.clone()) {
-                    queue.push_back(descendant.clone());
-                }
-            }
-        }
-    }
-    spawned
 }
 
 pub(crate) fn message_positions(acc: &[(u64, Message)]) -> HashMap<u64, usize> {
@@ -1751,6 +1767,114 @@ mod tests {
             spawned,
             parent_run_id,
             parent_node_id: None,
+        }
+    }
+
+    #[test]
+    fn flow_ownership_keeps_live_and_replay_views_equivalent_for_parent_orderings() {
+        use super::{FlowOwnership, MessageProjection};
+        use std::sync::{Arc, Mutex};
+
+        let root = FlowRunId::now();
+        let inline = FlowRunId::now();
+        let child = FlowRunId::now();
+        let nested = FlowRunId::now();
+        let unknown = FlowRunId::now();
+        let starts = [
+            flow_start(root.clone(), None, false),
+            flow_start(inline.clone(), Some(root.clone()), false),
+            flow_start(child.clone(), Some(root.clone()), true),
+            flow_start(nested.clone(), Some(child.clone()), false),
+        ];
+        for reverse in [false, true] {
+            for rotation in 0..starts.len() {
+                let mut ordered = starts.to_vec();
+                ordered.rotate_left(rotation);
+                if reverse {
+                    ordered.reverse();
+                }
+                let mut ownership = FlowOwnership::default();
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let live = crate::message_stream::MessageStream::new(events.clone());
+                for event in ordered.iter().chain(&ordered) {
+                    ownership.observe(event);
+                    let mut events = events.lock().unwrap();
+                    let seq = events.len() as u64 + 1;
+                    events.push(EventEnvelope::new(seq, event.clone()));
+                    drop(events);
+                    assert!(live.window().is_empty());
+                }
+                assert_eq!(
+                    ownership.known,
+                    super::HashSet::from([
+                        root.clone(),
+                        inline.clone(),
+                        child.clone(),
+                        nested.clone()
+                    ])
+                );
+                assert_eq!(
+                    ownership.spawned,
+                    super::HashSet::from([child.clone(), nested.clone()])
+                );
+                for (owner, text) in [
+                    (Some(root.clone()), "root"),
+                    (Some(inline.clone()), "inline"),
+                    (Some(child.clone()), "child"),
+                    (Some(nested.clone()), "nested"),
+                    (Some(unknown.clone()), "legacy unknown"),
+                    (None, "unowned"),
+                ] {
+                    let mut events = events.lock().unwrap();
+                    let seq = events.len() as u64 + 1;
+                    events.push(EventEnvelope::new(
+                        seq,
+                        Event::AssistantMsg {
+                            turn_id: TurnId::now(),
+                            flow_run_id: owner,
+                            message: message(MessageRole::Assistant, text),
+                        },
+                    ));
+                    let replay = events.as_slice().to_messages();
+                    drop(events);
+                    assert_eq!(live.window().to_vec(), replay);
+                    assert_eq!(*live.full_messages(), replay);
+                }
+                let expected = live.window().to_vec();
+                assert_eq!(
+                    expected
+                        .iter()
+                        .map(Message::text_concat)
+                        .collect::<Vec<_>>(),
+                    ["root", "inline", "legacy unknown", "unowned"]
+                );
+                let jsonl = events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|event| serde_json::to_string(event).unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let replay =
+                    crate::event_log::replay::SessionReplay::from_reader(jsonl.as_bytes(), None)
+                        .unwrap();
+                assert_eq!(
+                    replay
+                        .compacted_messages
+                        .iter()
+                        .map(|(_, message)| message.clone())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(
+                    replay
+                        .all_messages
+                        .iter()
+                        .map(|(_, message)| message.clone())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
         }
     }
 

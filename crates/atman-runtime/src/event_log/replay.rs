@@ -1,14 +1,14 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
 
-use crate::event::{Event, FlowRunId};
+use crate::event::Event;
 use crate::event_log::reader::{
     ReplayRecord, context_snapshot_from_records, read_replay_records, scan_replay_records,
 };
 use crate::message::Message;
 use crate::projection::message_window::{
-    TranscriptEntry, apply_attachment_degradation, apply_envelope_to_messages,
+    FlowOwnership, TranscriptEntry, apply_attachment_degradation, apply_envelope_to_messages,
     message_belongs_to_root, project_transcript_records,
 };
 use crate::session::{ContextSnapshot, SessionOpenError};
@@ -34,53 +34,6 @@ pub struct ReplayBundle {
     pub events: Vec<crate::event::EventEnvelope>,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct FlowOwnership {
-    pub known: HashSet<FlowRunId>,
-    pub spawned: HashSet<FlowRunId>,
-}
-
-impl FlowOwnership {
-    fn from_records(records: &[ReplayRecord]) -> Self {
-        let mut known = HashSet::new();
-        let mut spawned = HashSet::new();
-        let mut children = HashMap::<FlowRunId, Vec<FlowRunId>>::new();
-        for record in records {
-            let Event::FlowStart {
-                run_id,
-                parent_run_id,
-                spawned: is_spawned,
-                ..
-            } = &record.envelope.event
-            else {
-                continue;
-            };
-            known.insert(run_id.clone());
-            if let Some(parent) = parent_run_id {
-                children
-                    .entry(parent.clone())
-                    .or_default()
-                    .push(run_id.clone());
-            }
-            if *is_spawned {
-                spawned.insert(run_id.clone());
-            }
-        }
-        let mut queue = spawned.iter().cloned().collect::<VecDeque<_>>();
-        while let Some(parent) = queue.pop_front() {
-            let Some(descendants) = children.get(&parent) else {
-                continue;
-            };
-            for descendant in descendants {
-                if spawned.insert(descendant.clone()) {
-                    queue.push_back(descendant.clone());
-                }
-            }
-        }
-        Self { known, spawned }
-    }
-}
-
 pub struct SessionReplay;
 
 impl SessionReplay {
@@ -104,7 +57,8 @@ impl SessionReplay {
         records: Vec<ReplayRecord>,
         observer: Option<&mut dyn TranscriptReplayObserver>,
     ) -> ReplayBundle {
-        let ownership = FlowOwnership::from_records(&records);
+        let ownership =
+            FlowOwnership::from_events(records.iter().map(|record| &record.envelope.event));
         let mut compacted_messages = Vec::new();
         let mut compacted_positions = HashMap::new();
         let mut all_messages = Vec::new();
@@ -169,7 +123,7 @@ pub fn transcript_from_envelopes(
             envelope,
         })
         .collect::<Vec<_>>();
-    let ownership = FlowOwnership::from_records(&records);
+    let ownership = FlowOwnership::from_events(records.iter().map(|record| &record.envelope.event));
     project_transcript_records(&records, &ownership)
 }
 
