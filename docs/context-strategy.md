@@ -109,6 +109,8 @@ Session steering consumption records the rendered message and consumed state in 
 
 ## Session history and active window
 
+History queries include captured interjection messages in both SQLite and in-memory or JSONL reads. Message filtering occurs before SQL counting and pagination; queue-only updates do not occupy message positions. Live indexing and index rebuild use the same message text and run anchors, so consumed steering remains searchable without exposing pending or cancelled input as completed history.
+
 The durable event stream is the source of session history. The runtime derives the
 message stream from user, assistant, and tool events, plus checkpoints. The active
 window is the message list currently used by `context: "session"`.

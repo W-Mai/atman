@@ -719,11 +719,10 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
 }
 
 pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
+    if let Some((message, _)) = event.context_message() {
+        return Some(message.text_concat());
+    }
     match event {
-        Event::UserMsg { message, .. }
-        | Event::AssistantMsg { message, .. }
-        | Event::ToolResultMsg { message, .. }
-        | Event::SystemMsg { message, .. } => Some(message.text_concat()),
         Event::WatchWarn { message, .. } => Some(message.clone()),
         Event::CompactionSummary { summary, .. } => Some(summary.clone()),
         Event::AttachmentDegraded {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::error::RuntimeError;
 use crate::event::EventEnvelope;
-use crate::index::AnchorIndex;
+use crate::index::{AnchorIndex, EventFilter};
 use crate::message::Message;
 use crate::projection::message_window::replay_all_messages_with_seq;
 use crate::session::SessionOpenError;
@@ -118,28 +118,6 @@ impl HistoryStoreImpl {
     }
 }
 
-fn role_to_kind(role: &str) -> Option<&'static str> {
-    match role {
-        "user" => Some("user_msg"),
-        "assistant" => Some("assistant_msg"),
-        "tool" => Some("tool_result_msg"),
-        "system" => Some("system_msg"),
-        _ => None,
-    }
-}
-
-const MESSAGE_KINDS: &[&str] = &["user_msg", "assistant_msg", "tool_result_msg", "system_msg"];
-
-fn roles_to_kinds(roles: Option<&[&str]>) -> Vec<&'static str> {
-    match roles {
-        Some(rs) if !rs.is_empty() => rs
-            .iter()
-            .filter_map(|r| role_to_kind(r))
-            .collect::<Vec<_>>(),
-        _ => MESSAGE_KINDS.to_vec(),
-    }
-}
-
 fn filter_messages_by_role(msgs: Vec<Message>, roles: Option<&[&str]>) -> Vec<Message> {
     match roles {
         Some(rs) if !rs.is_empty() => msgs
@@ -152,13 +130,9 @@ fn filter_messages_by_role(msgs: Vec<Message>, roles: Option<&[&str]>) -> Vec<Me
 
 fn extract_message_from_payload(payload: &str) -> Option<Message> {
     let env: EventEnvelope = serde_json::from_str(payload).ok()?;
-    match env.event {
-        crate::event::Event::UserMsg { message, .. }
-        | crate::event::Event::AssistantMsg { message, .. }
-        | crate::event::Event::ToolResultMsg { message, .. }
-        | crate::event::Event::SystemMsg { message, .. } => Some(message),
-        _ => None,
-    }
+    env.event
+        .context_message()
+        .map(|(message, _)| message.clone())
 }
 
 fn rows_to_messages(rows: Vec<crate::index::ProjectEventRow>) -> Vec<Message> {
@@ -169,13 +143,14 @@ fn rows_to_messages(rows: Vec<crate::index::ProjectEventRow>) -> Vec<Message> {
 
 impl HistoryStore for HistoryStoreImpl {
     fn count(&self, session_id: &str, role_filter: Option<&[&str]>) -> Result<u64, RuntimeError> {
-        let kinds = roles_to_kinds(role_filter);
-
         if let Some(idx) = &self.project_index
             && self.sqlite_available()
         {
             return idx
-                .count_events(session_id, Some(&kinds))
+                .count_events(
+                    session_id,
+                    EventFilter::Messages(role_filter.unwrap_or_default()),
+                )
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.count: {e}")));
         }
 
@@ -201,17 +176,17 @@ impl HistoryStore for HistoryStoreImpl {
         let role_strs: Option<Vec<&str>> = role_filter
             .as_ref()
             .map(|rs| rs.iter().map(|s| s.as_str()).collect());
-        let kinds = roles_to_kinds(role_strs.as_deref());
+        let filter = EventFilter::Messages(role_strs.as_deref().unwrap_or_default());
         let offset0 = offset.saturating_sub(1);
 
         if let Some(idx) = &self.project_index
             && self.sqlite_available()
         {
             let total = idx
-                .count_events(&session_id, Some(&kinds))
+                .count_events(&session_id, filter)
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.read count: {e}")))?;
             let rows = idx
-                .read_events_paginated(&session_id, offset0, limit, Some(&kinds))
+                .read_events_paginated(&session_id, offset0, limit, filter)
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.read: {e}")))?;
             let items = rows_to_messages(rows);
             return Ok(HistoryPage {
@@ -491,6 +466,141 @@ mod tests {
         assert_eq!(store.count("s1", None).unwrap(), 3);
         assert_eq!(store.count("s1", Some(&["user"])).unwrap(), 2);
         assert_eq!(store.count("s1", Some(&["assistant"])).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn captured_steering_agrees_across_index_rebuild_and_fallbacks() {
+        use crate::event::{Event, FlowRunId, TurnId};
+        use crate::injection::{Injection, InjectionLevel, InjectionState};
+
+        let dir = TempDir::new().unwrap();
+        let session = Arc::new(crate::session::Session::open(dir.path()).unwrap());
+        let sid = session.id().to_string();
+        let turn_id = session.begin_turn(Message::user_text(TurnId::now(), "task"));
+        let run_id = FlowRunId::now();
+        for _ in 0..2 {
+            session
+                .enqueue_injection_for_run(
+                    "steeringneedle",
+                    InjectionLevel::L1Nudge,
+                    None,
+                    Some((&turn_id, run_id.clone())),
+                )
+                .unwrap();
+        }
+        session.drain_injections(&turn_id).await;
+        session.append_message(Message::assistant_text(turn_id.clone(), "answer"), None);
+        for state in [
+            InjectionState::Pending,
+            InjectionState::Cancelled,
+            InjectionState::Injected,
+        ] {
+            let mut injection = Injection::new_pending(turn_id.clone(), "unconsumedneedle");
+            injection.state = state;
+            let context_message =
+                (state != InjectionState::Injected).then(|| injection.context_message());
+            session.sink().emit(Event::UserInject {
+                turn_id: turn_id.clone(),
+                injection,
+                context_message,
+            });
+        }
+        session.end_turn(&turn_id);
+        session.shutdown().await;
+        let expected = session.messages_full().to_vec();
+        assert_eq!(expected.len(), 4);
+
+        let live = Arc::new(AnchorIndex::open_project(&dir.path().join("live-index")).unwrap());
+        for envelope in session.sink().snapshot_envelopes() {
+            let (turn, run) = crate::event_writer::extract_anchors(&envelope.event);
+            live.insert_project_event_raw(ProjectEventInsert {
+                session_id: &sid,
+                seq: envelope.seq as i64,
+                ts: &envelope.ts.to_rfc3339(),
+                kind: crate::event_writer::event_kind(&envelope.event),
+                turn_id: turn.as_deref(),
+                flow_run_id: run.as_deref(),
+                text_content: &crate::event_writer::extract_text_content(&envelope.event)
+                    .unwrap_or_default(),
+                payload_json: &serde_json::to_string(&envelope).unwrap(),
+            })
+            .unwrap();
+        }
+        let sessions_root = dir.path().join("sessions");
+        let session_dir = sessions_root.join(&sid);
+        let mut meta = crate::session_meta::SessionMeta::load(&session_dir).unwrap();
+        meta.project_fingerprint = Some("test-project".into());
+        meta.save(&session_dir).unwrap();
+        let rebuilt =
+            Arc::new(AnchorIndex::open_project(&dir.path().join("rebuilt-index")).unwrap());
+        rebuilt
+            .rebuild_events_from_sessions(&sessions_root, "test-project")
+            .unwrap();
+
+        for index in [&live, &rebuilt] {
+            let hits = index
+                .fts_search_project_events("steeringneedle", Some(&sid), 10)
+                .unwrap();
+            assert_eq!(hits.len(), 2);
+            assert!(hits.iter().all(|hit| hit.kind == "user_inject"
+                && hit.flow_run_id.as_deref() == Some(run_id.to_string().as_str())));
+            assert!(
+                index
+                    .fts_search_project_events("unconsumedneedle", Some(&sid), 10)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        for (index, active) in [
+            (Some(live), Some(session.clone())),
+            (Some(rebuilt), Some(session.clone())),
+            (None, Some(session.clone())),
+            (None, None),
+        ] {
+            let store = HistoryStoreImpl::new(
+                index,
+                active,
+                Some(sid.clone()),
+                Some(sessions_root.clone()),
+            );
+            assert_eq!(store.recent(1).unwrap().2, expected);
+            for roles in [
+                None,
+                Some(vec![]),
+                Some(vec!["user"]),
+                Some(vec!["assistant"]),
+                Some(vec!["system", "tool"]),
+                Some(vec!["unknown-role"]),
+                Some(vec!["user') OR 1=1 --"]),
+            ] {
+                let filtered = filter_messages_by_role(expected.clone(), roles.as_deref());
+                assert_eq!(
+                    store.count(&sid, roles.as_deref()).unwrap(),
+                    filtered.len() as u64
+                );
+                for offset in 1..=filtered.len() + 1 {
+                    let page = store
+                        .read(HistoryQuery {
+                            session_id: sid.clone(),
+                            offset,
+                            limit: 1,
+                            role_filter: roles
+                                .as_ref()
+                                .map(|roles| roles.iter().map(|role| role.to_string()).collect()),
+                        })
+                        .unwrap();
+                    assert_eq!(page.total, filtered.len() as u64);
+                    assert_eq!(
+                        page.items,
+                        filtered
+                            .get(offset - 1)
+                            .cloned()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

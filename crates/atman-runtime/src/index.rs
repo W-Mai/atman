@@ -9,6 +9,77 @@ pub struct AnchorIndex {
     conn: Mutex<Connection>,
 }
 
+/// Selects raw events or message-bearing events before counting and pagination.
+#[derive(Clone, Copy)]
+pub enum EventFilter<'a> {
+    /// Every event, including events without messages.
+    All,
+    /// An empty list matches no events.
+    Kinds(&'a [&'a str]),
+    /// Empty roles select every message role.
+    Messages(&'a [&'a str]),
+}
+
+impl EventFilter<'_> {
+    fn predicate(self, params: &mut Vec<rusqlite::types::Value>) -> String {
+        match self {
+            Self::All => "1".into(),
+            Self::Kinds(kinds) => sql_membership("kind", kinds.iter().copied(), params),
+            Self::Messages(roles) => {
+                let kinds = [
+                    ("user", "user_msg"),
+                    ("assistant", "assistant_msg"),
+                    ("tool", "tool_result_msg"),
+                    ("system", "system_msg"),
+                ];
+                let ordinary = sql_membership(
+                    "kind",
+                    kinds.iter().filter_map(|(role, kind)| {
+                        (roles.is_empty() || roles.contains(role)).then_some(*kind)
+                    }),
+                    params,
+                );
+                let role = if roles.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " AND {}",
+                        sql_membership(
+                            "json_extract(payload, '$.context_message.role')",
+                            roles.iter().copied(),
+                            params,
+                        )
+                    )
+                };
+                format!(
+                    "({ordinary} OR CASE WHEN kind = 'user_inject' THEN \
+                     json_extract(payload, '$.injection.state') = 'injected' \
+                     AND json_type(payload, '$.context_message') = 'object'{role} ELSE 0 END)"
+                )
+            }
+        }
+    }
+}
+
+fn sql_membership<'a>(
+    column: &str,
+    values: impl Iterator<Item = &'a str>,
+    params: &mut Vec<rusqlite::types::Value>,
+) -> String {
+    let placeholders = values
+        .map(|value| {
+            params.push(value.to_string().into());
+            "?"
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    if placeholders.is_empty() {
+        "0".into()
+    } else {
+        format!("{column} IN ({placeholders})")
+    }
+}
+
 impl AnchorIndex {
     pub fn open_project(project_dir: &Path) -> Result<Self> {
         Self::open_with_schema(&project_dir.join("index.db"), PROJECT_SCHEMA)
@@ -122,29 +193,13 @@ impl AnchorIndex {
         collect(rows)
     }
 
-    pub fn count_events(&self, session_id: &str, kinds: Option<&[&str]>) -> Result<u64> {
+    pub fn count_events(&self, session_id: &str, filter: EventFilter<'_>) -> Result<u64> {
         let conn = self.conn();
-        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match kinds {
-            Some(ks) if !ks.is_empty() => {
-                let placeholders = ks.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!(
-                    "SELECT COUNT(*) FROM events WHERE session_id = ? AND kind IN ({placeholders})"
-                );
-                let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-                    vec![Box::new(session_id.to_string())];
-                for k in ks {
-                    params.push(Box::new(k.to_string()));
-                }
-                (sql, params)
-            }
-            _ => (
-                "SELECT COUNT(*) FROM events WHERE session_id = ?".into(),
-                vec![Box::new(session_id.to_string())],
-            ),
-        };
+        let mut params = vec![session_id.to_string().into()];
+        let predicate = filter.predicate(&mut params);
+        let sql = format!("SELECT COUNT(*) FROM events WHERE session_id = ? AND {predicate}");
         let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        let count: i64 = stmt.query_row(rusqlite::params_from_iter(params), |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -209,40 +264,19 @@ impl AnchorIndex {
         session_id: &str,
         offset: usize,
         limit: usize,
-        kinds: Option<&[&str]>,
+        filter: EventFilter<'_>,
     ) -> Result<Vec<ProjectEventRow>> {
         let conn = self.conn();
-        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match kinds {
-            Some(ks) if !ks.is_empty() => {
-                let placeholders = ks.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!(
-                    "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
-                     FROM events WHERE session_id = ? AND kind IN ({placeholders}) \
-                     ORDER BY seq LIMIT ? OFFSET ?"
-                );
-                let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-                    vec![Box::new(session_id.to_string())];
-                for k in ks {
-                    params.push(Box::new(k.to_string()));
-                }
-                params.push(Box::new(limit as i64));
-                params.push(Box::new(offset as i64));
-                (sql, params)
-            }
-            _ => (
-                "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
-                 FROM events WHERE session_id = ? ORDER BY seq LIMIT ? OFFSET ?"
-                    .into(),
-                vec![
-                    Box::new(session_id.to_string()),
-                    Box::new(limit as i64),
-                    Box::new(offset as i64),
-                ],
-            ),
-        };
+        let mut params = vec![session_id.to_string().into()];
+        let predicate = filter.predicate(&mut params);
+        let sql = format!(
+            "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
+             FROM events WHERE session_id = ? AND {predicate} ORDER BY seq LIMIT ? OFFSET ?"
+        );
+        params.push((limit as i64).into());
+        params.push((offset as i64).into());
         let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), project_event_row_from)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), project_event_row_from)?;
         collect(rows)
     }
 
@@ -415,31 +449,17 @@ impl AnchorIndex {
                 let seq = envelope.seq as i64;
                 let ts = envelope.ts.to_rfc3339();
                 let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                let turn_id = value.get("turn_id").and_then(|v| v.as_str());
-                let flow_run_id = value
-                    .get("run_id")
-                    .or_else(|| value.get("flow_run_id"))
-                    .and_then(|v| v.as_str());
-                let text_content = value
-                    .get("message")
-                    .and_then(|m| m.get("parts"))
-                    .and_then(|p| p.as_array())
-                    .map(|parts| {
-                        parts
-                            .iter()
-                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join("")
-                    })
-                    .unwrap_or_default();
+                let (turn_id, flow_run_id) = crate::event_writer::extract_anchors(&envelope.event);
+                let text_content =
+                    crate::event_writer::extract_text_content(&envelope.event).unwrap_or_default();
                 let payload_json = serde_json::to_string(&value).unwrap_or_default();
                 self.insert_project_event_raw(ProjectEventInsert {
                     session_id: &sid,
                     seq,
                     ts: &ts,
                     kind,
-                    turn_id,
-                    flow_run_id,
+                    turn_id: turn_id.as_deref(),
+                    flow_run_id: flow_run_id.as_deref(),
                     text_content: &text_content,
                     payload_json: &payload_json,
                 })?;
@@ -919,7 +939,11 @@ mod tests {
     fn count_events_returns_zero_for_empty_session() {
         let dir = tempfile::tempdir().unwrap();
         let idx = AnchorIndex::open_project(dir.path()).unwrap();
-        assert_eq!(idx.count_events("no-such-session", None).unwrap(), 0);
+        assert_eq!(
+            idx.count_events("no-such-session", EventFilter::All)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -930,8 +954,8 @@ mod tests {
         seed_project_event(&idx, "s1", 2, "assistant_msg", None, None, "hi");
         seed_project_event(&idx, "s1", 3, "tool_result_msg", None, None, "ok");
         seed_project_event(&idx, "s2", 1, "user_msg", None, None, "other");
-        assert_eq!(idx.count_events("s1", None).unwrap(), 3);
-        assert_eq!(idx.count_events("s2", None).unwrap(), 1);
+        assert_eq!(idx.count_events("s1", EventFilter::All).unwrap(), 3);
+        assert_eq!(idx.count_events("s2", EventFilter::All).unwrap(), 1);
     }
 
     #[test]
@@ -942,13 +966,21 @@ mod tests {
         seed_project_event(&idx, "s1", 2, "assistant_msg", None, None, "b");
         seed_project_event(&idx, "s1", 3, "tool_result_msg", None, None, "c");
         seed_project_event(&idx, "s1", 4, "user_msg", None, None, "d");
-        assert_eq!(idx.count_events("s1", Some(&["user_msg"])).unwrap(), 2);
         assert_eq!(
-            idx.count_events("s1", Some(&["user_msg", "assistant_msg"]))
+            idx.count_events("s1", EventFilter::Kinds(&["user_msg"]))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            idx.count_events("s1", EventFilter::Kinds(&["user_msg", "assistant_msg"]))
                 .unwrap(),
             3
         );
-        assert_eq!(idx.count_events("s1", Some(&["system_msg"])).unwrap(), 0);
+        assert_eq!(
+            idx.count_events("s1", EventFilter::Kinds(&["system_msg"]))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -958,7 +990,9 @@ mod tests {
         seed_project_event(&idx, "s1", 3, "user_msg", None, None, "third");
         seed_project_event(&idx, "s1", 1, "user_msg", None, None, "first");
         seed_project_event(&idx, "s1", 2, "user_msg", None, None, "second");
-        let rows = idx.read_events_paginated("s1", 0, 10, None).unwrap();
+        let rows = idx
+            .read_events_paginated("s1", 0, 10, EventFilter::All)
+            .unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].seq, 1);
         assert_eq!(rows[1].seq, 2);
@@ -972,7 +1006,9 @@ mod tests {
         for i in 1..=5 {
             seed_project_event(&idx, "s1", i, "user_msg", None, None, &format!("msg {i}"));
         }
-        let rows = idx.read_events_paginated("s1", 1, 2, None).unwrap();
+        let rows = idx
+            .read_events_paginated("s1", 1, 2, EventFilter::All)
+            .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].seq, 2);
         assert_eq!(rows[1].seq, 3);
@@ -986,7 +1022,7 @@ mod tests {
         seed_project_event(&idx, "s1", 2, "assistant_msg", None, None, "a1");
         seed_project_event(&idx, "s1", 3, "user_msg", None, None, "u2");
         let rows = idx
-            .read_events_paginated("s1", 0, 10, Some(&["user_msg"]))
+            .read_events_paginated("s1", 0, 10, EventFilter::Kinds(&["user_msg"]))
             .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].seq, 1);
@@ -997,7 +1033,9 @@ mod tests {
     fn read_events_paginated_empty_session() {
         let dir = tempfile::tempdir().unwrap();
         let idx = AnchorIndex::open_project(dir.path()).unwrap();
-        let rows = idx.read_events_paginated("no-such", 0, 10, None).unwrap();
+        let rows = idx
+            .read_events_paginated("no-such", 0, 10, EventFilter::All)
+            .unwrap();
         assert!(rows.is_empty());
     }
 
