@@ -631,8 +631,6 @@ impl RunLauncher {
                 )
                 .await?;
         }
-        session.restore_pending_images(images);
-
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
@@ -674,6 +672,7 @@ impl RunLauncher {
                         invocation_env,
                         prepared_flow,
                         turn,
+                        images,
                         cancel,
                     )
                     .await
@@ -711,6 +710,7 @@ async fn run_flow_inner(
     invocation_env: atman_runtime::InvocationEnv,
     prepared_flow: Option<PreparedFlow>,
     turn: Option<RunTurn>,
+    images: Vec<atman_runtime::message::ImageSource>,
     flow_cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     if path_is_managed_agent_at(path, config_dir.as_deref()) {
@@ -819,8 +819,7 @@ async fn run_flow_inner(
         },
         |turn| (turn.text, turn.origin),
     );
-    let mut parts: Vec<atman_runtime::message::MessagePart> = session
-        .take_pending_images()
+    let mut parts: Vec<atman_runtime::message::MessagePart> = images
         .into_iter()
         .map(|source| atman_runtime::message::MessagePart::Image { source })
         .collect();
@@ -1278,6 +1277,65 @@ mod tests {
         let preserved = atman_runtime::model_registry::model_info("daemon-reload");
         assert_eq!(preserved.name, "daemon-reload");
         assert_eq!(preserved.context_budget, 4242);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_attachments_do_not_consume_session_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let flow_path = temp.path().join("echo.at");
+        std::fs::write(&flow_path, "flow echo() -> string { return \"ok\" }").unwrap();
+        let state = Arc::new(DaemonState::new(temp.path().to_path_buf()));
+        let session = Arc::new(atman_runtime::Session::open(temp.path()).unwrap());
+        let draft = session
+            .import_image_base64("iVBORw0KGgo=", Some("draft.png"))
+            .unwrap();
+        session.restore_pending_images(vec![draft]);
+        let launcher = RunLauncher::new(temp.path().to_path_buf(), Some(config), None).unwrap();
+        let spawned = launcher
+            .spawn_session_as_with_options(
+                state.clone(),
+                session.clone(),
+                temp.path().to_path_buf(),
+                temp.path().to_path_buf(),
+                flow_path.to_str().unwrap(),
+                Vec::new(),
+                "test-principal",
+                RunOptions {
+                    images: vec![atman_proto::InlineImage {
+                        data_base64: "iVBORw0KGgo=".into(),
+                        name: Some("request.png".into()),
+                    }],
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.has_live_runs(&spawned.session_id) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(session.pending_image_count(), 1);
+        let messages = session.messages();
+        let submitted = messages
+            .iter()
+            .find(|message| message.role == atman_runtime::message::MessageRole::User)
+            .unwrap();
+        assert_eq!(
+            submitted
+                .parts
+                .iter()
+                .filter(|part| matches!(part, atman_runtime::message::MessagePart::Image { .. }))
+                .count(),
+            1
+        );
+        state.shutdown(std::time::Duration::from_secs(1)).await;
     }
 
     #[test]
