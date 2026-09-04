@@ -407,178 +407,31 @@ async fn maybe_auto_compact_locked(
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
-    let forced = context.take_manual_compact_request();
-    let info = crate::model_registry::model_info(model);
-    let trigger = info.compaction_trigger_threshold();
-    let target = budget_context
-        .history_budget(&info)
-        .map(|budget| budget.min(info.compaction_target_after()))
-        .unwrap_or_else(|| info.compaction_target_after());
-    let msgs = context.messages();
-    let window_tokens = estimate_tokens_for_messages(&msgs);
-    let current = budget_context.estimated_input_tokens(window_tokens);
-    if !forced && current <= trigger {
-        return;
-    }
-    if !forced && !context.compaction_cooldown_elapsed() {
-        return;
-    }
-    let Some(range) = find_compact_range(&msgs, target) else {
-        let (replacement, rewritten_count) =
-            build_budgeted_turn_rewrite(msgs.to_vec(), target, model, providers).await;
-        let after_tokens = estimate_tokens_for_messages(&replacement);
-        if rewritten_count == 0 || after_tokens >= window_tokens || after_tokens > target {
-            session.emit_compact_warning(
-                context,
-                model,
-                current,
-                trigger,
-                info.context_budget,
-                "no compactible span — retained user content cannot fit the history budget",
-            );
-            return;
-        }
-        match session.commit_rewritten_window(
-            context,
-            replacement,
-            window_tokens,
-            &msgs,
-            rewritten_count,
-        ) {
-            Some(_) => {}
-            None => {
-                session.emit_compact_warning(
-                    context,
-                    model,
-                    current,
-                    trigger,
-                    info.context_budget,
-                    "message window changed before retained output rewrite committed",
-                );
-            }
-        }
-        return;
+    let selected = std::ptr::eq(context, session.context().as_ref());
+    let options = CompactionOptions {
+        budget: budget_context,
+        forced: context.take_manual_compact_request(),
+        reviews: Some(session.compact_reviews()),
+        stream_tx: selected.then(|| session.stream_tx()),
+        flow_run_id: None,
     };
-    let stream_tx = std::ptr::eq(context, session.context().as_ref()).then(|| session.stream_tx());
-    if let Some(tx) = &stream_tx {
-        let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
-            phase: crate::stream::CompactionPhase::Running,
-            range_start: range.start,
-            range_end: range.end.saturating_sub(1),
-            summary: String::new(),
-            before_tokens: current,
-            after_tokens: 0,
-            compacted_count: range.end - range.start,
-        });
-    }
-    let send_failed = |reason: &str| {
-        if let Some(tx) = &stream_tx {
-            let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
-                phase: crate::stream::CompactionPhase::Failed,
-                range_start: range.start,
-                range_end: range.end.saturating_sub(1),
-                summary: reason.to_string(),
-                before_tokens: current,
-                after_tokens: current,
-                compacted_count: range.end - range.start,
-            });
-        }
-    };
-    let mut filtered: Vec<Message> = msgs[range.start..range.end].to_vec();
-    filter_orphan_tool_messages(&mut filtered);
-    let (anchor, new_messages) = extract_anchor(&filtered)
-        .map(|(anchor, remaining)| (Some(anchor), remaining.to_vec()))
-        .unwrap_or_else(|| (None, filtered.clone()));
-    let range_start = range.start;
-    let range_end = range.end.saturating_sub(1);
-    let on_delta = stream_tx.clone().map(|tx| {
-        std::sync::Arc::new(move |text| {
-            let _ = tx.send(crate::stream::StreamFrame::CompactionDelta {
-                range_start,
-                range_end,
-                text,
-            });
-        }) as std::sync::Arc<dyn Fn(String) + Send + Sync>
-    });
-    let summary = match generate_llm_summary_with_delta(
-        anchor.as_deref(),
-        &new_messages,
-        model,
-        providers,
-        on_delta,
-    )
-    .await
+    if let Some(result) =
+        maybe_auto_compact_context_locked(context, model, providers, options, |result| {
+            session.record_compaction(context, result, None)
+        })
+        .await
     {
-        Ok(text) => text,
-        Err(err) => {
-            session.emit_compact_warning(
-                context,
-                model,
-                current,
-                trigger,
-                info.context_budget,
-                &format!("LLM summary failed: {err}. Degraded to placeholder."),
-            );
-            format!(
-                "[atman: compacted {} messages, LLM summary unavailable at {}]",
-                range.end - range.start,
-                chrono::Utc::now().to_rfc3339()
-            )
+        if selected {
+            session.refresh_window_snapshot();
         }
-    };
-    let final_summary = match request_review_if_enabled(
-        session, context, forced, &filtered, &range, current, summary,
-    )
-    .await
-    {
-        ReviewOutcome::Commit(s) => s,
-        ReviewOutcome::Rejected => {
-            send_failed("compaction rejected by user; keeping full transcript");
-            session.push_system_note("compaction rejected by user; keeping full transcript".into());
-            return;
-        }
-    };
-    let replacement =
-        build_budgeted_replacement(&msgs, &range, &final_summary, target, model, providers).await;
-    let after_tokens = estimate_tokens_for_messages(&replacement);
-    if after_tokens >= window_tokens {
-        send_failed(&format!(
-            "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
-            after_tokens, window_tokens
-        ));
-        session.push_system_note(format!(
-            "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
-            after_tokens, window_tokens
-        ));
-        return;
-    }
-    match session.commit_compacted_window(
-        context,
-        final_summary,
-        replacement,
-        range.clone(),
-        window_tokens,
-        &msgs,
-    ) {
-        Some(result) => {
+        if result.compacted_start < result.compacted_end {
             session.push_system_note(format!(
                 "auto-compacted {}..{} — {} → {} tokens",
                 result.compacted_start,
                 result.compacted_end,
                 result.before_tokens,
-                result.after_tokens
+                result.after_tokens,
             ));
-        }
-        None => {
-            send_failed("message window changed before compaction committed");
-            session.emit_compact_warning(
-                context,
-                model,
-                current,
-                trigger,
-                info.context_budget,
-                "message window changed before compaction committed",
-            );
         }
     }
 }
@@ -589,7 +442,7 @@ enum ReviewOutcome {
 }
 
 async fn request_review_if_enabled(
-    session: &crate::session::Session,
+    reviews: Option<&std::sync::Arc<crate::session::CompactReviewRegistry>>,
     context: &crate::context_state::ContextState,
     forced: bool,
     slice: &[Message],
@@ -606,10 +459,9 @@ async fn request_review_if_enabled(
     {
         return ReviewOutcome::Commit(summary);
     }
-    let reviews = session.compact_reviews();
-    if reviews.subscriber_count() == 0 {
+    let Some(reviews) = reviews.filter(|reviews| reviews.subscriber_count() > 0) else {
         return ReviewOutcome::Commit(summary);
-    }
+    };
     let pending = crate::session::PendingCompactReview {
         review_id: uuid::Uuid::now_v7().to_string(),
         context_id: context.context_id().cloned(),
@@ -1080,64 +932,154 @@ pub struct ContextCompactResult {
     pub checkpoint_messages: Vec<Message>,
 }
 
-/// Apply the root compaction budget, range, summary, and replacement policy to
-/// an isolated context. This function does not acquire the async lock
-/// and delegates event publication to `commit`. The synchronous callback runs
-/// only after snapshot validation, under the message lock; it must not reenter
-/// the same handle. Summary requests run without the message lock.
+/// Execution policy and interaction services for one context compaction.
+#[derive(Default)]
+pub struct CompactionOptions {
+    pub budget: CompactionBudgetContext,
+    pub forced: bool,
+    pub reviews: Option<std::sync::Arc<crate::session::CompactReviewRegistry>>,
+    pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    pub flow_run_id: Option<crate::event::FlowRunId>,
+}
+
+/// Applies the shared budget, summary, review, and replacement policy.
+/// The caller holds the context's async compaction lock. The commit callback
+/// runs after source validation under the message lock and must not reenter it.
 pub async fn maybe_auto_compact_context_locked(
     context: &crate::context_state::ContextState,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
-    budget_context: CompactionBudgetContext,
-    forced: bool,
+    options: CompactionOptions,
     commit: impl FnOnce(&ContextCompactResult),
 ) -> Option<ContextCompactResult> {
-    let snapshot = context.messages_handle().lock().unwrap().clone();
+    let snapshot = context.messages().to_vec();
     let info = crate::model_registry::model_info(model);
     let trigger = info.compaction_trigger_threshold();
-    let target = budget_context
+    let target = options
+        .budget
         .history_budget(&info)
         .map(|budget| budget.min(info.compaction_target_after()))
         .unwrap_or_else(|| info.compaction_target_after());
     let before_tokens = estimate_tokens_for_messages(&snapshot);
-    let current = budget_context.estimated_input_tokens(before_tokens);
-    if !forced && (current <= trigger || !context.compaction_cooldown_elapsed()) {
+    let current = options.budget.estimated_input_tokens(before_tokens);
+    if !options.forced && (current <= trigger || !context.compaction_cooldown_elapsed()) {
         return None;
     }
-
+    let warn = |reason: &str| {
+        if let Some(sink) = context.sink() {
+            sink.emit(crate::event::Event::WatchWarn {
+                turn_id: snapshot.last().map(|message| message.turn_id.clone()),
+                flow_run_id: options.flow_run_id.clone(),
+                target: "context.compaction".into(),
+                trigger: "auto_compact".into(),
+                message: format!(
+                    "context {current} tokens (threshold {trigger}, budget {}, model {model}); compaction: {reason}",
+                    info.context_budget,
+                ),
+            });
+        }
+        if let Some(tx) = &options.stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::Note(format!(
+                "[warn] compaction: {reason}"
+            )));
+        }
+    };
+    let range = find_compact_range(&snapshot, target);
+    let send_failed = |reason: &str| {
+        if let (Some(tx), Some(range)) = (&options.stream_tx, &range) {
+            let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
+                phase: crate::stream::CompactionPhase::Failed,
+                range_start: range.start,
+                range_end: range.end.saturating_sub(1),
+                summary: reason.to_string(),
+                before_tokens: current,
+                after_tokens: current,
+                compacted_count: range.end - range.start,
+            });
+        }
+    };
     let (replacement, summary, compacted_start, compacted_end, compacted_count, must_fit_target) =
-        if let Some(range) = find_compact_range(&snapshot, target) {
+        if let Some(range) = &range {
+            if let Some(tx) = &options.stream_tx {
+                let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
+                    phase: crate::stream::CompactionPhase::Running,
+                    range_start: range.start,
+                    range_end: range.end.saturating_sub(1),
+                    summary: String::new(),
+                    before_tokens: current,
+                    after_tokens: 0,
+                    compacted_count: range.end - range.start,
+                });
+            }
+            let on_delta = options.stream_tx.clone().map(|tx| {
+                let range_start = range.start;
+                let range_end = range.end.saturating_sub(1);
+                std::sync::Arc::new(move |text| {
+                    let _ = tx.send(crate::stream::StreamFrame::CompactionDelta {
+                        range_start,
+                        range_end,
+                        text,
+                    });
+                }) as std::sync::Arc<dyn Fn(String) + Send + Sync>
+            });
             let mut filtered = snapshot[range.start..range.end].to_vec();
             filter_orphan_tool_messages(&mut filtered);
             let (anchor, new_messages) = extract_anchor(&filtered)
                 .map(|(anchor, remaining)| (Some(anchor), remaining.to_vec()))
-                .unwrap_or_else(|| (None, filtered));
-            let summary = generate_llm_summary(anchor.as_deref(), &new_messages, model, providers)
-                .await
-                .unwrap_or_else(|_| {
-                    format!(
-                        "[atman: compacted {} messages; summary unavailable]",
-                        range.end - range.start
-                    )
-                });
+                .unwrap_or_else(|| (None, filtered.clone()));
+            let summary = generate_llm_summary_with_delta(
+                anchor.as_deref(),
+                &new_messages,
+                model,
+                providers,
+                on_delta,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                warn(&format!(
+                    "LLM summary failed: {error}. Degraded to placeholder."
+                ));
+                format!(
+                    "[atman: compacted {} messages, LLM summary unavailable at {}]",
+                    range.end - range.start,
+                    chrono::Utc::now().to_rfc3339(),
+                )
+            });
+            let summary = match request_review_if_enabled(
+                options.reviews.as_ref(),
+                context,
+                options.forced,
+                &filtered,
+                range,
+                current,
+                summary,
+            )
+            .await
+            {
+                ReviewOutcome::Commit(summary) => summary,
+                ReviewOutcome::Rejected => {
+                    let reason = "compaction rejected by user; keeping full transcript";
+                    send_failed(reason);
+                    warn(reason);
+                    return None;
+                }
+            };
             let replacement =
-                build_budgeted_replacement(&snapshot, &range, &summary, target, model, providers)
+                build_budgeted_replacement(&snapshot, range, &summary, target, model, providers)
                     .await;
-            let compacted_end = range.end;
-            let compacted_count = range.end - range.start;
             (
                 replacement,
                 summary,
                 range.start,
-                compacted_end,
-                compacted_count,
+                range.end,
+                range.end - range.start,
                 false,
             )
         } else {
             let (replacement, rewritten_count) =
                 build_budgeted_turn_rewrite(snapshot.clone(), target, model, providers).await;
             if rewritten_count == 0 {
+                warn("no compactible span — retained user content cannot fit the history budget");
                 return None;
             }
             (
@@ -1153,9 +1095,17 @@ pub async fn maybe_auto_compact_context_locked(
         };
     let after_tokens = estimate_tokens_for_messages(&replacement);
     if after_tokens >= before_tokens || (must_fit_target && after_tokens > target) {
+        let reason = if must_fit_target && after_tokens > target {
+            "retained user content cannot fit the history budget".to_string()
+        } else {
+            format!(
+                "replacement would not shrink transcript ({after_tokens} >= {before_tokens} tokens)"
+            )
+        };
+        send_failed(&reason);
+        warn(&reason);
         return None;
     }
-
     let result = ContextCompactResult {
         before_tokens,
         after_tokens,
@@ -1165,9 +1115,24 @@ pub async fn maybe_auto_compact_context_locked(
         summary,
         checkpoint_messages: replacement,
     };
-    context
-        .commit_compaction(&snapshot, &result, || commit(&result))
-        .then_some(result)
+    if !context.commit_compaction(&snapshot, &result, || commit(&result)) {
+        let reason = "message window changed before compaction committed";
+        send_failed(reason);
+        warn(reason);
+        return None;
+    }
+    if let Some(tx) = &options.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
+            phase: crate::stream::CompactionPhase::Finished,
+            range_start: result.compacted_start,
+            range_end: result.compacted_end.saturating_sub(1),
+            summary: result.summary.clone(),
+            before_tokens: result.before_tokens,
+            after_tokens: result.after_tokens,
+            compacted_count: result.compacted_count,
+        });
+    }
+    Some(result)
 }
 
 /// Compact a messages_handle in place (data-layer primitive, operates on any
@@ -1263,12 +1228,12 @@ mod tests {
         for forced in [false, true] {
             assert!(matches!(
                 request_review_if_enabled(
-                    &session, session.context(), forced, &slice, &range, 100, "root".into()
+                    Some(&reviews), session.context(), forced, &slice, &range, 100, "root".into()
                 ).await,
                 ReviewOutcome::Commit(summary) if summary == "root"
             ));
             let mut pending = Box::pin(request_review_if_enabled(
-                &session,
+                Some(&reviews),
                 &child,
                 forced,
                 &slice,

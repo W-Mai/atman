@@ -90,9 +90,7 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
 
 #[tokio::test]
 async fn context_compaction_rejects_changed_sources_before_publication() {
-    use atman_runtime::compaction::{
-        CompactionBudgetContext, is_compaction_summary, maybe_auto_compact_context_locked,
-    };
+    use atman_runtime::compaction::{is_compaction_summary, maybe_auto_compact_context_locked};
     use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, ProviderRegistry};
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::value::Value;
@@ -179,8 +177,7 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
         &context,
         "mock-summary",
         &providers,
-        CompactionBudgetContext::default(),
-        false,
+        atman_runtime::compaction::CompactionOptions::default(),
         |result| {
             assert!(matches!(
                 messages.try_lock(),
@@ -219,8 +216,7 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
             &context,
             "mock-summary",
             &providers,
-            CompactionBudgetContext::default(),
-            false,
+            atman_runtime::compaction::CompactionOptions::default(),
             |_| panic!("cooldown must prevent a repeated automatic commit"),
         )
         .await
@@ -234,8 +230,10 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
         &context,
         "mock-summary",
         &providers,
-        CompactionBudgetContext::default(),
-        true,
+        atman_runtime::compaction::CompactionOptions {
+            forced: true,
+            ..Default::default()
+        },
         |_| panic!("stale candidates must not publish or update the epoch"),
     )
     .await;
@@ -256,8 +254,7 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
             &context,
             "mock-summary",
             &providers,
-            CompactionBudgetContext::default(),
-            false,
+            atman_runtime::compaction::CompactionOptions::default(),
             |_| panic!("a no-op must not publish a checkpoint"),
         )
         .await
@@ -752,4 +749,160 @@ async fn cooldown_blocks_repeat_compaction_within_window() {
         )
         .unwrap();
     assert!(!sibling.compaction_cooldown_elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawned_dispatch_inherits_review_policy_and_compacts_only_its_context() {
+    use atman_runtime::event::{Event, FlowRunId};
+    use atman_runtime::flow_authority::EffectiveAuthority;
+    use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+    use atman_runtime::tools::agent_ctrl::{AgentSpawn, FlowRunStatus};
+    use atman_runtime::{CompactReviewDecision, CompactReviewMode, Value};
+    use std::sync::Arc;
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
+    for is_async in [false, true] {
+        for accept in [false, true] {
+            let (tmp, session, providers) = setup_review_env().await;
+            session.set_compact_review_mode(CompactReviewMode::Always);
+            let original = session.messages().to_vec();
+            let path = tmp.path().join("child.at");
+            std::fs::write(
+                &path,
+                r#"flow child() -> string {
+    llm.call(model: "mock-summary", context: "session")
+    return "done"
+}"#,
+            )
+            .unwrap();
+            let flows = session.flow_registry.clone();
+            let root_run = FlowRunId::now();
+            let identity = flows
+                .register_root(
+                    session.id().to_string(),
+                    root_run.clone(),
+                    EffectiveAuthority::root(&Default::default(), false, None),
+                )
+                .unwrap();
+            let broker = atman_runtime::permission::PermissionBroker::shared(Arc::clone(&flows));
+            let executor = atman_runtime::Executor::new();
+            let mut ctx = ToolCtx::new()
+                .with_session_runtime(session.clone())
+                .with_events(session.sink().clone())
+                .with_session_id(session.id().to_string())
+                .with_registry(Arc::new(executor.tools))
+                .with_providers(Arc::new(providers))
+                .with_permission_broker(broker)
+                .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
+                .with_trust(atman_runtime::trust::TrustConfig::default());
+            ctx.flow_identity = Some(identity);
+            ctx.flow_run_id = Some(root_run.clone());
+
+            let reviews = session.compact_reviews();
+            let mut subscriber = reviews.subscribe();
+            let response = tokio::spawn(async move {
+                let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if let Some(review) = subscriber.borrow().first().cloned() {
+                            break review;
+                        }
+                        subscriber.changed().await.unwrap();
+                    }
+                })
+                .await
+                .expect("spawned dispatch did not request review");
+                assert!(reviews.decide(
+                    &pending.review_id,
+                    if accept {
+                        CompactReviewDecision::AcceptEdited {
+                            summary: "reviewed child summary".into(),
+                        }
+                    } else {
+                        CompactReviewDecision::Reject
+                    }
+                ));
+            });
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                AgentSpawn.call(
+                    ToolArgs {
+                        positional: vec![],
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@child", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(is_async)),
+                            ("inherit_context".into(), Value::Bool(true)),
+                        ],
+                    },
+                    &ctx,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if is_async {
+                let Some(Value::Str(handle)) = result.field("handle") else {
+                    panic!("async handle")
+                };
+                let entry = flows.lookup(handle).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    loop {
+                        let status = entry.status.lock().unwrap().clone();
+                        if !status.is_running() {
+                            assert!(matches!(status, FlowRunStatus::Ok { .. }));
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                assert!(matches!(result, Value::Str(text) if text == "done"));
+            }
+            response.await.unwrap();
+            assert!(session.compact_reviews().list_pending().is_empty());
+            assert_eq!(session.messages().to_vec(), original);
+            let events = session.sink().snapshot();
+            let child = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::FlowStart {
+                        run_id,
+                        parent_run_id: Some(parent),
+                        spawned: true,
+                        ..
+                    } if parent == &root_run => Some(run_id),
+                    _ => None,
+                })
+                .expect("child run");
+            let summaries = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::CompactionSummary {
+                        flow_run_id,
+                        summary,
+                        ..
+                    } => Some((flow_run_id, summary)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if accept {
+                assert_eq!(summaries.len(), 1);
+                assert_eq!(summaries[0].0.as_ref(), Some(child));
+                assert_eq!(summaries[0].1, "reviewed child summary");
+                assert!(events.iter().any(|event| matches!(event,
+                    Event::Checkpoint { flow_run_id: Some(run), .. } if run == child)));
+            } else {
+                assert!(summaries.is_empty());
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, Event::Checkpoint { .. }))
+                );
+            }
+            session.shutdown().await;
+        }
+    }
 }

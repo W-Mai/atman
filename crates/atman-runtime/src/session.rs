@@ -2055,33 +2055,6 @@ impl Session {
             .send(crate::stream::StreamFrame::Note(text));
     }
 
-    pub fn emit_compact_warning(
-        &self,
-        context: &ContextState,
-        model: &str,
-        current_tokens: u64,
-        threshold: u64,
-        budget: u64,
-        reason: &str,
-    ) {
-        let message = format!(
-            "context {current_tokens} > threshold {threshold} (budget {budget}, model {model}); skipping compaction: {reason}"
-        );
-        if let Some(sink) = context.sink() {
-            sink.emit(Event::WatchWarn {
-                turn_id: context
-                    .messages()
-                    .last()
-                    .map(|message| message.turn_id.clone()),
-                flow_run_id: None,
-                target: "context.compaction".into(),
-                trigger: "auto_compact".into(),
-                message,
-            });
-        }
-        self.push_system_note(format!("[warn] compaction skipped: {reason}"));
-    }
-
     /// Convenience wrapper that computes the compact range and token count
     /// from the current message window. Used by tests and internal callers
     /// that don't already have a pre-computed range.
@@ -2181,6 +2154,53 @@ impl Session {
         )
     }
 
+    pub(crate) fn record_compaction(
+        &self,
+        context: &ContextState,
+        result: &crate::compaction::ContextCompactResult,
+        summary_message: Option<Message>,
+    ) {
+        let Some(sink) = context.sink() else {
+            return;
+        };
+        let mut batch = sink.batch();
+        let replacement_msg_seq = summary_message.map(|message| {
+            batch
+                .emit(Event::SystemMsg {
+                    turn_id: message.turn_id.clone(),
+                    flow_run_id: None,
+                    message,
+                })
+                .seq
+        });
+        batch.emit(Event::ContextCompact {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            before_tokens: result.before_tokens,
+            after_tokens: result.after_tokens,
+            compacted_range_start: result.compacted_start as u64,
+            compacted_range_end: result.compacted_end.saturating_sub(1) as u64,
+            summary_text: Some(result.summary.clone()),
+            replacement_msg_seq,
+        });
+        batch.emit(Event::CompactionSummary {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            range_start: result.compacted_start as u64,
+            range_end: result.compacted_end.saturating_sub(1) as u64,
+            compacted_count: result.compacted_count,
+            before_tokens: result.before_tokens,
+            after_tokens: result.after_tokens,
+            summary: result.summary.clone(),
+        });
+        batch.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            flow_run_id: None,
+            messages: result.checkpoint_messages.clone(),
+            window_tokens: result.after_tokens,
+        });
+    }
+
     fn commit_window(
         &self,
         context: &ContextState,
@@ -2197,45 +2217,7 @@ impl Session {
             return None;
         }
         if !context.commit_compaction(expected, &result, || {
-            let Some(sink) = context.sink() else {
-                return;
-            };
-            let mut batch = sink.batch();
-            let replacement_msg_seq = summary_message.map(|message| {
-                batch
-                    .emit(Event::SystemMsg {
-                        turn_id: message.turn_id.clone(),
-                        flow_run_id: None,
-                        message,
-                    })
-                    .seq
-            });
-            batch.emit(Event::ContextCompact {
-                session_id: self.id.to_string(),
-                flow_run_id: None,
-                before_tokens: result.before_tokens,
-                after_tokens: result.after_tokens,
-                compacted_range_start: result.compacted_start as u64,
-                compacted_range_end: result.compacted_end.saturating_sub(1) as u64,
-                summary_text: Some(result.summary.clone()),
-                replacement_msg_seq,
-            });
-            batch.emit(Event::CompactionSummary {
-                session_id: self.id.to_string(),
-                flow_run_id: None,
-                range_start: result.compacted_start as u64,
-                range_end: result.compacted_end.saturating_sub(1) as u64,
-                compacted_count: result.compacted_count,
-                before_tokens: result.before_tokens,
-                after_tokens: result.after_tokens,
-                summary: result.summary.clone(),
-            });
-            batch.emit(Event::Checkpoint {
-                session_id: self.id.to_string(),
-                flow_run_id: None,
-                messages: result.checkpoint_messages.clone(),
-                window_tokens: result.after_tokens,
-            });
+            self.record_compaction(context, &result, summary_message);
         }) {
             return None;
         }

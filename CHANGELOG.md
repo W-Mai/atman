@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Compaction execution options** — context compaction accepts `CompactionOptions` for its budget, forced mode, review service, and progress channel. Compaction diagnostics no longer require a Session warning method.
+
 - **Form resolver contract** — `form_ask` resolver payloads use `CompositeForm` for both single and multiple questions, and responses use `FormSubmission` with the same `status` tag as the RPC protocol. Attached Session form subscribers take precedence over generic prompt resolvers.
 
 - **Form wait ownership** — `FormRegistry::request` registers through an `Arc` and returns a future that abandons its request when dropped. Programmatic cancellation records abandonment; explicit user rejection remains a resolved submission.
@@ -50,6 +52,8 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Shared compaction policy** — root and spawned flows use the same budget, summary, review, retained-output rewrite, and source-validation path. Child flows inherit their parent's review policy and retain the Session review service without writing through the parent context.
 
 - **Consistent form answers** — single-question forms, composite forms, and `user_confirm` use the same validated submission contract. Root, inline, and spawned calls publish Session forms with their actual run and node identity; external resolvers remain available without a form subscriber. Invalid resolver answers produce an error instead of silently cancelling a valid response.
 

@@ -115,6 +115,7 @@ pub struct ToolCtx {
     pub permission_broker: Option<std::sync::Arc<crate::permission::PermissionBroker>>,
     pub(crate) invocation_authorization: Option<crate::permission::InvocationAuthorization>,
     pub forms: Option<std::sync::Arc<crate::session::FormRegistry>>,
+    pub compact_reviews: Option<std::sync::Arc<crate::session::CompactReviewRegistry>>,
     pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
     pub session_dir: Option<std::path::PathBuf>,
     pub output_store: Option<std::sync::Arc<crate::tools::tool_output::OutputStore>>,
@@ -314,6 +315,7 @@ impl ToolCtx {
         session: std::sync::Arc<crate::session::Session>,
     ) -> Self {
         self.forms = Some(session.forms());
+        self.compact_reviews = Some(session.compact_reviews());
         self.watch_hub = Some(std::sync::Arc::clone(&session.watch_hub));
         self.flow_registry = Some(std::sync::Arc::clone(&session.flow_registry));
         self.context_owner = Some(ContextOwner::Session {

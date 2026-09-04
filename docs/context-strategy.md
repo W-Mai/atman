@@ -335,3 +335,5 @@ Daemon transcript projections retain context and image identities and the source
 - `crates/atman-runtime/src/compaction.rs` — budgeting, range selection, summary, and checkpointing
 - `crates/atman-runtime/src/templates.rs` — managed agent composition
 - `crates/atman-runtime/src/message_stream.rs` — event stream to active messages
+
+Root and spawned flow compaction share budget calculation, summary generation, review decisions, retained-output rewriting, and source validation. Child creation captures the parent's review policy even when message inheritance is disabled. The review service is shared independently of the message-context owner; accepting or rejecting a child review cannot rewrite the parent window. Summary generation and review waits do not hold the synchronous message lock, and changed source windows reject the candidate before checkpoint publication.

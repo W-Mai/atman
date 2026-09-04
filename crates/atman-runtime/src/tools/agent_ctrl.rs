@@ -1008,7 +1008,14 @@ impl PreparedFlowAgent {
                     })
             })
             .unwrap_or_default();
-        ctx.flow_registry
+        let review_mode = if options.context.is_none() {
+            ctx.context()
+                .map(|context| *context.compaction.review_mode.lock().unwrap())
+        } else {
+            None
+        };
+        let entry = ctx
+            .flow_registry
             .as_ref()
             .expect("validated flow registry")
             .create_entry(
@@ -1017,7 +1024,11 @@ impl PreparedFlowAgent {
                 model,
                 run_id,
                 options,
-            )
+            )?;
+        if let Some(mode) = review_mode {
+            *entry.context.compaction.review_mode.lock().unwrap() = mode;
+        }
+        Ok(entry)
     }
 }
 

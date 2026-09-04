@@ -159,8 +159,12 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             context,
             &model,
             &providers_reg,
-            compaction_budget,
-            false,
+            crate::compaction::CompactionOptions {
+                budget: compaction_budget,
+                reviews: ctx.compact_reviews.clone(),
+                flow_run_id: ctx.flow_run_id.clone(),
+                ..Default::default()
+            },
             |result| record_spawned_compaction(ctx, result),
         )
         .await;
@@ -705,8 +709,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 context,
                                 &model,
                                 &providers_reg,
-                                compaction_budget,
-                                true,
+                                crate::compaction::CompactionOptions {
+                                    budget: compaction_budget,
+                                    forced: true,
+                                    reviews: ctx.compact_reviews.clone(),
+                                    flow_run_id: ctx.flow_run_id.clone(),
+                                    ..Default::default()
+                                },
                                 |result| record_spawned_compaction(ctx, result),
                             )
                             .await
