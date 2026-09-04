@@ -55,6 +55,15 @@ impl std::fmt::Display for ContextId {
     }
 }
 
+/// Selection applied to the inherited active window, without changing raw history.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextInheritance {
+    #[default]
+    Full,
+    CompleteToolPairs,
+}
+
 /// A fixed event-log boundary in an explicitly selected message context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -157,6 +166,7 @@ pub enum Event {
     /// The envelope identifies the new context; no base means empty history.
     ContextCreated {
         base: Option<ContextBase>,
+        inheritance: ContextInheritance,
     },
     FlowStart {
         run_id: FlowRunId,

@@ -234,7 +234,10 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
             let context_id = (owner_kind != "root").then(ContextId::now);
             if let Some(id) = &context_id {
                 let sink = session.sink().clone().with_context(id.clone());
-                sink.emit(Event::ContextCreated { base: None });
+                sink.emit(Event::ContextCreated {
+                    base: None,
+                    inheritance: atman_runtime::event::ContextInheritance::Full,
+                });
                 ctx = ctx
                     .with_context(Arc::new(ContextState::new(Vec::new())))
                     .with_history_segment(HistorySegment::Spawned)

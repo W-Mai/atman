@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Context inheritance replay** — context creation records whether an inherited window retains all messages or only complete tool transactions. Replay applies the same selection as live tool-pair filtering, preserves message identities, and leaves raw history unchanged.
 - **Steering projection consistency** — daemon transcripts include captured interjections when applying message-range compaction. Consumption state and message insertion share one update, preserving live, restored, and client-reconciled message positions without creating another user turn.
 - **Image validation boundaries** — remote attachment rejection requires a recognized image validation code or message. Model capability errors, message-shape failures, image-count limits, and generic payload limits preserve attachments and the original provider error. Classification ignores echoed request fields and unrelated error metadata.
 - **LLM failure cleanup** — terminal request failures release their compaction lock before scheduling automatic compaction, preventing the failure path from waiting on its own lock.

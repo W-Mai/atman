@@ -94,6 +94,8 @@ child requests.
 
 ## Message selection
 
+Context creation records an explicit inheritance policy. `Full` keeps the inherited active window; `CompleteToolPairs` removes unmatched tool uses and results using the same filter as live child-context snapshots. The policy applies only at the fork boundary: later messages are not continuously filtered, and later parent results cannot change the child's fixed prefix. Raw history, image identities, and checkpoint provenance remain intact. The creation event requires this policy; no fallback infers it from older event shapes.
+
 `ContextState` owns the message view, mutable message handle, compaction lock, checkpoint epoch, recent usage, and prefix observations. `ToolCtx` selects either a session-bound owner or an independent context; binding one replaces the other. Ordinary execution, watched calls, correction rebuilds, and inline calls retain that selection. Spawned flows share their complete state with their flow entry instead of separately constructing message, lock, and cache handles. Session views still use the event-backed window, and raw history remains separate from compaction. Root and child checkpoint epochs use the checkpoint contents rather than a process-local child counter.
 
 Context cache identity belongs to the owner, not each inline execution. Root calls use the session identity; child and detached calls with a flow entry use that entry's run identity. Starting another inline helper does not split usage records, reset prefix observations, or change the provider cache key. Calls without an entry retain their execution-run fallback. Execution events, authority checks, and tool exposure remain attributed to the actual calling run.

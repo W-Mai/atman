@@ -467,19 +467,26 @@ impl Message {
 }
 
 pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
+    retain_complete_tool_pairs_in(messages, |message| message);
+}
+
+pub(crate) fn retain_complete_tool_pairs_in<T>(
+    messages: &mut Vec<T>,
+    message: fn(&mut T) -> &mut Message,
+) {
     let use_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|message| {
-            message.parts.iter().filter_map(|part| match part {
+        .iter_mut()
+        .flat_map(|item| {
+            message(item).parts.iter().filter_map(|part| match part {
                 MessagePart::ToolUse { id, .. } => Some(id.clone()),
                 _ => None,
             })
         })
         .collect();
     let result_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|message| {
-            message.parts.iter().filter_map(|part| match part {
+        .iter_mut()
+        .flat_map(|item| {
+            message(item).parts.iter().filter_map(|part| match part {
                 MessagePart::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
                 _ => None,
             })
@@ -487,7 +494,8 @@ pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
         .collect();
     let mut seen_uses = std::collections::HashSet::new();
     let mut seen_results = std::collections::HashSet::new();
-    for message in messages.iter_mut() {
+    messages.retain_mut(|item| {
+        let message = message(item);
         message.parts.retain(|part| match part {
             MessagePart::ToolUse { id, .. } => {
                 result_ids.contains(id) && seen_uses.insert(id.clone())
@@ -497,8 +505,8 @@ pub fn retain_complete_tool_pairs(messages: &mut Vec<Message>) {
             }
             _ => true,
         });
-    }
-    messages.retain(|message| !message.parts.is_empty());
+        !message.parts.is_empty()
+    });
 }
 
 pub fn normalize_tool_pairs_for_model(messages: &[Message]) -> Vec<Message> {

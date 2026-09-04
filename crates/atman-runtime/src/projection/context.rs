@@ -53,7 +53,7 @@ impl ContextLineage {
                     envelope.seq
                 )));
             }
-            if let Event::ContextCreated { base } = &envelope.event {
+            if let Event::ContextCreated { base, .. } = &envelope.event {
                 let id = envelope
                     .context_id
                     .as_ref()
@@ -149,8 +149,12 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
         {
             continue;
         }
-        if matches!(envelope.event, Event::ContextCreated { .. }) {
+        if let Event::ContextCreated { inheritance, .. } = &envelope.event {
             retain_active_window(&mut window, &mut positions, &mut window_start);
+            if *inheritance == crate::event::ContextInheritance::CompleteToolPairs {
+                crate::message::retain_complete_tool_pairs_in(&mut window, |(_, message)| message);
+                positions = message_positions(&window);
+            }
         }
         // Selected typed contexts already establish ownership, including spawned runs.
         let excluded = if envelope.context_id.is_some() {
@@ -214,7 +218,10 @@ mod tests {
     fn create(sink: &EventSink, base: Option<ContextBase>) -> (ContextId, EventSink) {
         let id = ContextId::now();
         let scoped = sink.clone().with_context(id.clone());
-        scoped.emit(Event::ContextCreated { base });
+        scoped.emit(Event::ContextCreated {
+            base,
+            inheritance: crate::event::ContextInheritance::Full,
+        });
         (id, scoped)
     }
 
@@ -390,6 +397,204 @@ mod tests {
                     .window()
             ),
             ["parent checkpoint"]
+        );
+    }
+
+    #[test]
+    fn inherited_window_selection_matches_live_filtering_without_rewriting_raw_history() {
+        use crate::event::ContextInheritance;
+        use crate::message::{ImageData, ImageSource, MessagePart, MessageRole};
+
+        for scoped in [false, true] {
+            for checkpoint in [false, true] {
+                for inheritance in [
+                    ContextInheritance::Full,
+                    ContextInheritance::CompleteToolPairs,
+                ] {
+                    let sink = EventSink::new();
+                    let (parent_id, parent) = if scoped {
+                        let (id, owner) = create(&sink, None);
+                        (Some(id), owner)
+                    } else {
+                        (None, sink.clone())
+                    };
+                    let turn = TurnId::now();
+                    let tool_use = |id: &str| MessagePart::ToolUse {
+                        id: id.into(),
+                        name: "fs.read".into(),
+                        input: serde_json::json!({"path": "README.md"}),
+                        intent: None,
+                    };
+                    let tool_result = |id: &str| Message {
+                        role: MessageRole::Tool,
+                        parts: vec![MessagePart::ToolResult {
+                            tool_use_id: id.into(),
+                            content: "contents".into(),
+                            is_error: false,
+                        }],
+                        turn_id: turn.clone(),
+                        origin: Default::default(),
+                    };
+                    let emit = |owner: &EventSink, message: Message| {
+                        let event = match message.role {
+                            MessageRole::Tool => Event::ToolResultMsg {
+                                turn_id: turn.clone(),
+                                flow_run_id: None,
+                                message,
+                            },
+                            _ => Event::AssistantMsg {
+                                turn_id: turn.clone(),
+                                flow_run_id: None,
+                                message,
+                            },
+                        };
+                        owner.emit(event);
+                    };
+                    let mut mixed = Message::assistant_text(turn.clone(), "keep this text");
+                    mixed
+                        .parts
+                        .extend([tool_use("complete"), tool_use("parent-open")]);
+                    mixed.parts.push(MessagePart::Image {
+                        id: None,
+                        source: ImageSource {
+                            media_type: "image/png".into(),
+                            data: ImageData::Base64 {
+                                data: "AA==".into(),
+                            },
+                            detail: Default::default(),
+                        },
+                    });
+                    mixed.ensure_part_ids();
+                    let image_id = mixed.part_id(0, None, 3);
+                    let only_open = Message {
+                        parts: vec![tool_use("only-open")],
+                        ..mixed.clone()
+                    };
+                    let initial = vec![
+                        mixed,
+                        tool_result("complete"),
+                        tool_result("orphan"),
+                        only_open,
+                    ];
+                    for message in initial.iter().cloned() {
+                        emit(&parent, message);
+                    }
+                    if checkpoint {
+                        parent.emit(Event::Checkpoint {
+                            session_id: "session".into(),
+                            flow_run_id: None,
+                            messages: initial,
+                            window_tokens: 10,
+                        });
+                    }
+                    let base = match parent_id {
+                        Some(ref id) => target(id, sink.published_seq()),
+                        None => ContextBase::LegacyRoot {
+                            through_seq: sink.published_seq(),
+                        },
+                    };
+                    let parent_replay = replay_context(&sink.snapshot_envelopes(), &base).unwrap();
+                    let mut expected = parent_replay.window().to_vec();
+                    let mut live = expected.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>();
+                    if inheritance == ContextInheritance::CompleteToolPairs {
+                        crate::message::retain_complete_tool_pairs(&mut live);
+                        crate::message::retain_complete_tool_pairs_in(&mut expected, |(_, m)| m);
+                        assert_eq!(expected.len(), 2);
+                        assert!(expected[0].1.parts.iter().all(|part| !matches!(part, MessagePart::ToolUse { id, .. } if id == "parent-open")));
+                    }
+                    let child_id = ContextId::now();
+                    let child = sink.clone().with_context(child_id.clone());
+                    child.emit(Event::ContextCreated {
+                        base: Some(base),
+                        inheritance,
+                    });
+                    let stream = crate::message_stream::MessageStream::from_context(
+                        sink.events_handle(),
+                        child_id.clone(),
+                    )
+                    .unwrap();
+                    assert_eq!(stream.window().to_vec(), live);
+                    let before = replay_context(
+                        &sink.snapshot_envelopes(),
+                        &target(&child_id, sink.published_seq()),
+                    )
+                    .unwrap();
+                    assert_eq!(before.window(), expected);
+                    assert_eq!(before.raw, parent_replay.raw);
+                    assert_eq!(before.checkpoint_epoch, parent_replay.checkpoint_epoch);
+                    assert_eq!(
+                        before.window()[0]
+                            .1
+                            .parts
+                            .iter()
+                            .find_map(|part| match part {
+                                MessagePart::Image { id, .. } => *id,
+                                _ => None,
+                            }),
+                        image_id
+                    );
+
+                    emit(&parent, tool_result("parent-open"));
+                    let child_open = Message {
+                        role: MessageRole::Assistant,
+                        parts: vec![tool_use("child-open")],
+                        turn_id: turn.clone(),
+                        origin: Default::default(),
+                    };
+                    emit(&child, child_open.clone());
+                    live.push(child_open);
+                    assert_eq!(stream.window().to_vec(), live);
+                    let child_base = target(&child_id, sink.published_seq());
+                    let (grand_id, _) = create(&sink, Some(child_base.clone()));
+                    let at_fork = replay_context(&sink.snapshot_envelopes(), &child_base).unwrap();
+                    emit(&child, tool_result("child-open"));
+                    let events = sink
+                        .snapshot_envelopes()
+                        .into_iter()
+                        .map(|event| {
+                            serde_json::from_slice::<EventEnvelope>(
+                                &serde_json::to_vec(&event).unwrap(),
+                            )
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let grand =
+                        replay_context(&events, &target(&grand_id, sink.published_seq())).unwrap();
+                    assert_eq!(grand, at_fork);
+                    let child_replay =
+                        replay_context(&events, &target(&child_id, sink.published_seq())).unwrap();
+                    assert_eq!(
+                        child_replay
+                            .window()
+                            .iter()
+                            .map(|(_, m)| m.clone())
+                            .collect::<Vec<_>>(),
+                        stream.window().to_vec()
+                    );
+                    assert_eq!(
+                        child_replay
+                            .raw
+                            .iter()
+                            .map(|(_, m)| m.clone())
+                            .collect::<Vec<_>>(),
+                        *stream.full_messages()
+                    );
+                }
+            }
+        }
+        for policy in [serde_json::Value::Null, serde_json::json!("unknown")] {
+            assert!(
+                serde_json::from_value::<Event>(serde_json::json!({
+                    "type": "context_created", "base": null, "inheritance": policy,
+                }))
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<Event>(serde_json::json!({
+                "type": "context_created", "base": null,
+            }))
+            .is_err()
         );
     }
 
@@ -576,7 +781,13 @@ mod tests {
     fn invalid_lineage_never_falls_back_to_legacy_history() {
         let id = ContextId::now();
         let make = |seq, scope, base| {
-            let mut event = EventEnvelope::new(seq, Event::ContextCreated { base });
+            let mut event = EventEnvelope::new(
+                seq,
+                Event::ContextCreated {
+                    base,
+                    inheritance: crate::event::ContextInheritance::Full,
+                },
+            );
             event.context_id = scope;
             event
         };

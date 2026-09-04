@@ -2344,8 +2344,14 @@ mod tests {
                         sink.clone()
                     };
                     if typed {
-                        root.emit(Event::ContextCreated { base: None });
-                        child.emit(Event::ContextCreated { base: None });
+                        root.emit(Event::ContextCreated {
+                            base: None,
+                            inheritance: atman_runtime::event::ContextInheritance::Full,
+                        });
+                        child.emit(Event::ContextCreated {
+                            base: None,
+                            inheritance: atman_runtime::event::ContextInheritance::Full,
+                        });
                     }
                     let mut image = Message::user_text(RuntimeTurnId::now(), "caption");
                     image
@@ -3037,7 +3043,10 @@ mod tests {
                     sink.clone()
                 };
                 if scoped {
-                    owner.emit(Event::ContextCreated { base: None });
+                    owner.emit(Event::ContextCreated {
+                        base: None,
+                        inheritance: atman_runtime::event::ContextInheritance::Full,
+                    });
                 }
                 let user = Message::user_text(turn.clone(), "old user");
                 owner.emit(Event::UserMsg {

@@ -269,7 +269,10 @@ mod tests {
         let parent_id = ContextId::now();
         let child_id = ContextId::now();
         let parent = sink.clone().with_context(parent_id.clone());
-        parent.emit(Event::ContextCreated { base: None });
+        parent.emit(Event::ContextCreated {
+            base: None,
+            inheritance: crate::event::ContextInheritance::Full,
+        });
         let shared = user("shared");
         let shared_seq = parent.emit_returning_seq(Event::UserMsg {
             turn_id: shared.turn_id.clone(),
@@ -278,6 +281,7 @@ mod tests {
         });
         let child = sink.clone().with_context(child_id.clone());
         child.emit(Event::ContextCreated {
+            inheritance: crate::event::ContextInheritance::Full,
             base: Some(ContextBase::Context {
                 context_id: parent_id,
                 through_seq: shared_seq,
@@ -412,7 +416,10 @@ mod tests {
         let sink = EventSink::new();
         let context_id = ContextId::now();
         let scoped = sink.clone().with_context(context_id.clone());
-        scoped.emit(Event::ContextCreated { base: None });
+        scoped.emit(Event::ContextCreated {
+            base: None,
+            inheritance: crate::event::ContextInheritance::Full,
+        });
         assert!(MessageStream::from_context(sink.events_handle(), ContextId::now()).is_err());
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let gate = Arc::clone(&barrier);

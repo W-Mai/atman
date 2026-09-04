@@ -253,7 +253,10 @@ mod tests {
             let session = Arc::new(crate::session::Session::open_ephemeral());
             let context_id = ContextId::now();
             let sink = session.sink().clone().with_context(context_id.clone());
-            sink.emit(Event::ContextCreated { base: None });
+            sink.emit(Event::ContextCreated {
+                base: None,
+                inheritance: crate::event::ContextInheritance::Full,
+            });
             let context = Arc::new(ContextState::new(Vec::new()));
             let ctx = crate::tool::ToolCtx::new()
                 .with_context(context.clone())
