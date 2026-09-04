@@ -1180,8 +1180,6 @@ async fn cmd_session_gc() -> Result<()> {
 }
 
 async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
-    use atman_runtime::message::MessagePart;
-
     let root = data_dir()?;
     let dir = root.join("sessions").join(&sid);
     if !dir.is_dir() {
@@ -1193,55 +1191,27 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let text = tokio::fs::read_to_string(&events_path).await?;
-    let mut already_degraded: std::collections::HashSet<(u64, usize)> =
-        std::collections::HashSet::new();
-    let mut findings: Vec<(u64, usize, String, String)> = Vec::new();
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if v["type"].as_str() == Some("attachment_degraded") {
-            if let (Some(seq), Some(idx)) = (v["message_seq"].as_u64(), v["part_index"].as_u64()) {
-                already_degraded.insert((seq, idx as usize));
-            }
-            continue;
-        }
-        if v["type"].as_str() != Some("user_msg") {
-            continue;
-        }
-        let Some(seq) = v["seq"].as_u64() else {
-            continue;
-        };
-        let Some(m) = v.get("message") else { continue };
-        let Ok(msg) = serde_json::from_value::<atman_runtime::message::Message>(m.clone()) else {
-            continue;
-        };
-        for (idx, part) in msg.parts.iter().enumerate() {
-            let MessagePart::Image { source, .. } = part else {
-                continue;
-            };
-            if already_degraded.contains(&(seq, idx)) {
-                continue;
-            }
-            if let Err(error) = atman_runtime::attachment_store::image_bytes(source) {
-                findings.push((
-                    seq,
-                    idx,
-                    atman_runtime::attachment_store::display_name(source),
-                    format!("sanitize:{error}"),
-                ));
-            }
-        }
-    }
+    let events = atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
+    let findings = atman_runtime::attachment_store::sanitize_findings(&events)?;
 
     if findings.is_empty() {
         println!("sanitize: no attachment problems found");
         return Ok(());
     }
     println!("sanitize: found {} attachment issue(s)", findings.len());
-    for (seq, idx, basename, reason) in &findings {
-        println!("  msg_seq={seq} part_index={idx} {basename} → {reason}");
+    for finding in &findings {
+        println!(
+            "  {} part_id={} {} → {}",
+            finding.context,
+            match finding.patch.target {
+                atman_runtime::message::AttachmentTarget::Part { part_id } => part_id.0,
+                atman_runtime::message::AttachmentTarget::Legacy { .. } => {
+                    unreachable!("sanitize only emits stable part identities")
+                }
+            },
+            finding.patch.file_basename,
+            finding.patch.reason
+        );
     }
     if dry_run {
         println!("sanitize: dry-run, no events written");
@@ -1252,8 +1222,8 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
         atman_runtime::Session::open_existing_with_trust(&root, &sid, load_global_trust_config()?)
             .with_context(|| format!("open session {sid}"))?;
     let session = std::sync::Arc::new(session);
-    for (seq, idx, basename, reason) in &findings {
-        session.emit_attachment_degrade(*seq, *idx, basename.clone(), reason.clone());
+    for finding in &findings {
+        atman_runtime::attachment_store::emit_sanitize_finding(session.sink(), finding);
     }
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,

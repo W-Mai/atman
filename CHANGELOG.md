@@ -20,7 +20,7 @@ All notable changes to atman are documented in this file.
 - **Restored context views** — `ReplayBundle::view` contains the selected message view and checkpoint epoch. `MessageStream::with_initial` requires an explicit optional context identity. Context snapshot readers return errors for invalid lineage.
 - **Context usage targets** — `Session::record_context_plan_call` accepts an optional managed context and plan identity. An absent target or plan records aggregate usage without updating message-window statistics.
 - **Compaction targets** — budget-aware compaction, manual scheduling, and session compaction commits require the target `ContextState`. Manual request consumption is internal to that owner.
-- **Attachment rejection ownership** — the session-wide `Session::record_attachment_degrade` method is removed. Managed LLM calls apply image rejection patches through their bound message context.
+- **Attachment rejection ownership** — the session-wide `Session::record_attachment_degrade` and positional `Session::emit_attachment_degrade` methods are removed. Managed LLM calls and maintenance repairs apply image rejection patches through their bound message context.
 - **Attachment patch addresses** — `Event::AttachmentDegraded` carries a shared `AttachmentPatch` with an exclusive stable-ID or legacy-position target. Existing JSONL position addresses remain readable; mixed and incomplete addresses are rejected. Message projections expose optional context, checkpoint, and image identities.
 - **Attachment error identities** — `RuntimeError::AttachmentError` includes an optional `part_id`, and `attachment_store::image_base64` accepts the current image part identity. Local encoding failures retain that identity; unlocated remote and import errors leave it unset.
 - **Image part identities** — `MessagePart::Image` includes an optional `MessagePartId`. Context insertion assigns missing identities; persisted legacy images remain readable.
@@ -54,6 +54,8 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Attachment sanitizer replay** — session sanitization applies existing attachment patches before checking raw history and materialized windows, repairs checkpoint-only images by stable part identity, preserves root and child context ownership, and produces no duplicate repair events on repeated runs.
 
 - **Projection snapshot serialization** — workflow permission requests use ordered entry-list encoding instead of treating structured request identities as JSON object keys. Snapshot loading rejects duplicate identities and restores the same projection as a complete event replay.
 

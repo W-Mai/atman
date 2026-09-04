@@ -2020,27 +2020,6 @@ impl Session {
         records
     }
 
-    pub fn emit_attachment_degrade(
-        &self,
-        message_seq: u64,
-        part_index: usize,
-        file_basename: String,
-        reason: String,
-    ) {
-        self.sink.emit(Event::AttachmentDegraded {
-            turn_id: None,
-            flow_run_id: None,
-            patch: crate::message::AttachmentPatch {
-                target: crate::message::AttachmentTarget::Legacy {
-                    message_seq,
-                    part_index,
-                },
-                file_basename,
-                reason,
-            },
-        });
-    }
-
     pub fn messages(&self) -> crate::message_stream::MessageWindow {
         self.context.messages()
     }
