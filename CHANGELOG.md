@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Image validation boundaries** — remote attachment rejection requires a recognized image validation code or message. Model capability errors, message-shape failures, image-count limits, and generic payload limits preserve attachments and the original provider error. Classification ignores echoed request fields and unrelated error metadata.
 - **LLM failure cleanup** — terminal request failures release their compaction lock before scheduling automatic compaction, preventing the failure path from waiting on its own lock.
 - **Scoped image rejection** — attachment errors replace only the identified image in the calling flow's context. Ambiguous multi-image failures, excluded history images, and standalone requests leave stored attachments intact. Configured retries receive the same patch without changing other request-local content.
 - **Projection identity redaction** — UUID-only values are not classified as card numbers. Projection snapshots retain valid identities while card numbers and explicitly configured credential patterns remain redacted.

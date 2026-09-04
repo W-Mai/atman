@@ -282,7 +282,7 @@ This is retrieval before the main loop plus full active-session context inside t
 
 ## Attachment errors
 
-Provider attachment errors require an HTTP 400/413 response with explicit image or attachment evidence. Generic unsupported parameters, request-size errors without that evidence, authentication failures, rate limits, and server errors do not trigger attachment degradation.
+Provider attachment errors require an HTTP 400/413 response with a recognized image validation code or a message that identifies invalid image data, image decoding, unsupported image formats, or an oversized individual image. Merely mentioning images is insufficient. Model capability errors, message-shape failures, image-count limits, generic request-size errors, authentication failures, rate limits, and server errors retain the original provider error and do not trigger attachment degradation. JSON classification reads the error code/type and message, not echoed request fields or unrelated metadata; unrecognized errors leave attachments intact.
 
 Local image encoding errors carry the failing `MessagePartId` when the caller supplied one. Import failures and remote errors without a concrete image location leave `part_id` unset. The identity is diagnostic metadata, not part of the provider request or the displayed error text.
 

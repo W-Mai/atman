@@ -7,40 +7,97 @@ pub(crate) fn classify_attachment_error(status: u16, body: &str) -> Option<Strin
     if !matches!(status, 400 | 413) {
         return None;
     }
-    let lower = body.to_ascii_lowercase();
-    let attachment_markers = [
-        "image",
-        "attachment",
-        "images",
-        "attachments",
-        "invalid_image",
-        "image_parse_error",
-        "invalid_image_url",
-    ];
-    let has_marker = lower
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .any(|word| attachment_markers.contains(&word));
-    if !has_marker {
-        return None;
+    let json = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error = json
+        .as_ref()
+        .map(|value| value.get("error").unwrap_or(value));
+    if let Some(error) = error {
+        for field in ["code", "type"] {
+            if let Some(reason) = error
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .and_then(attachment_reason_code)
+            {
+                return Some(reason.into());
+            }
+        }
     }
-    Some(if status == 413 {
-        "payload_too_large".into()
-    } else {
-        pick_reason(&lower)
+    let message = match error {
+        Some(error) => error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| error.as_str())?,
+        None => body,
+    };
+    let lower = message.to_ascii_lowercase();
+    let words = lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+        .map(|word| if word == "images" { "image" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(reason) = attachment_reason_code(&words) {
+        return Some(reason.into());
+    }
+    if words == "invalid image" {
+        return Some("invalid_image".into());
+    }
+    let bounded = format!(" {words} ");
+    [
+        ("invalid_image_url", &[" invalid image url "][..]),
+        (
+            "unsupported_media_type",
+            &[
+                " unsupported media_type for image ",
+                " unsupported media type for image ",
+                " unsupported image media type ",
+                " unsupported image format ",
+            ][..],
+        ),
+        (
+            "payload_too_large",
+            &[
+                " image payload_too_large ",
+                " image payload too large ",
+                " image too large ",
+                " image is too large ",
+                " image data exceeds the limit ",
+            ][..],
+        ),
+        (
+            "image_parse_error",
+            &[
+                " unable to decode image ",
+                " could not decode image ",
+                " unable to decode base64 image ",
+                " image could not be decoded ",
+            ][..],
+        ),
+        (
+            "invalid_image",
+            &[
+                " invalid image data ",
+                " invalid image format ",
+                " invalid base64 image ",
+            ][..],
+        ),
+    ]
+    .into_iter()
+    .find_map(|(reason, phrases)| {
+        phrases
+            .iter()
+            .any(|phrase| bounded.contains(phrase))
+            .then(|| reason.into())
     })
 }
 
-fn pick_reason(lower: &str) -> String {
-    if lower.contains("invalid_image_url") {
-        "invalid_image_url".into()
-    } else if lower.contains("image_parse_error") {
-        "image_parse_error".into()
-    } else if lower.contains("unsupported") {
-        "unsupported_media_type".into()
-    } else if lower.contains("too large") || lower.contains("payload_too_large") {
-        "payload_too_large".into()
-    } else {
-        "invalid_image".into()
+fn attachment_reason_code(code: &str) -> Option<&'static str> {
+    match code {
+        "invalid_image_url" => Some("invalid_image_url"),
+        "image_parse_error" => Some("image_parse_error"),
+        "invalid_image" | "invalid_image_format" | "invalid_base64_image" => Some("invalid_image"),
+        "image_too_large" | "image_file_too_large" => Some("payload_too_large"),
+        _ => None,
     }
 }
 
@@ -59,6 +116,41 @@ mod tests {
         (403, "image access denied", None),
         (429, "image request too large", None),
         (500, "image payload too large", None),
+        (400, "image inputs are not supported by this model", None),
+        (400, "unsupported image inputs for this model", None),
+        (400, "unsupported model for image input", None),
+        (
+            400,
+            "messages must start with a user message when using images",
+            None,
+        ),
+        (400, "invalid image_detail parameter for image input", None),
+        (
+            400,
+            "invalid images count: at most 10 images per request",
+            None,
+        ),
+        (400, "image input requires the messages API", None),
+        (400, "maximum image count exceeded", None),
+        (400, "request too large with image inputs", None),
+        (413, "request too large with image inputs", None),
+        (413, "too many images or attachments in request", None),
+        (
+            400,
+            r#"{"error":{"message":"unsupported image inputs"},"request":{"code":"invalid_image"}}"#,
+            None,
+        ),
+        (
+            400,
+            r#"{"error":{"code":"unsupported_parameter","param":"invalid_image"}}"#,
+            None,
+        ),
+        (
+            400,
+            r#"{"error":{"message":"unsupported parameter","details":"invalid image data"}}"#,
+            None,
+        ),
+        (400, r#"{"request":{"message":"invalid image data"}}"#, None),
         (
             400,
             r#"{"error":{"code":"invalid_image_url","message":"..."}}"#,
@@ -68,6 +160,47 @@ mod tests {
             400,
             r#"{"error":{"code":"image_parse_error"}}"#,
             Some("image_parse_error"),
+        ),
+        (
+            400,
+            r#"{"error":{"type":"invalid_image"}}"#,
+            Some("invalid_image"),
+        ),
+        (
+            400,
+            r#"{"code":"invalid_base64_image"}"#,
+            Some("invalid_image"),
+        ),
+        (
+            400,
+            r#"{"error":{"code":"image_too_large"}}"#,
+            Some("payload_too_large"),
+        ),
+        (
+            413,
+            r#"{"error":{"code":"image_file_too_large"}}"#,
+            Some("payload_too_large"),
+        ),
+        (
+            400,
+            r#"{"error":{"message":"messages.0.content.1: Unable to decode image data"}}"#,
+            Some("image_parse_error"),
+        ),
+        (
+            400,
+            r#"{"message":"Unsupported image format: image/tiff"}"#,
+            Some("unsupported_media_type"),
+        ),
+        (
+            400,
+            r#"{"error":"Invalid image data: truncated PNG"}"#,
+            Some("invalid_image"),
+        ),
+        (400, "invalid_image", Some("invalid_image")),
+        (
+            400,
+            "Invalid image URL: unable to retrieve file",
+            Some("invalid_image_url"),
         ),
         (
             400,
@@ -148,7 +281,8 @@ mod tests {
                             assert_eq!(*part_id, None);
                         }
                         (None, crate::RuntimeError::ToolFailed(message)) => {
-                            assert!(message.contains(&status.to_string()))
+                            assert!(message.contains(&status.to_string()));
+                            assert!(message.contains(body));
                         }
                         _ => panic!(
                             "{} streaming={streaming} status={status}: {error:?}",
