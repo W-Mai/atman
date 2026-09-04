@@ -69,7 +69,7 @@ async fn sse_accepts_a_short_lived_session_ticket() {
                 cancel: CancellationToken::new(),
                 started_at: Utc::now(),
             },
-            "authenticated-daemon-client",
+            "local-daemon",
         )
         .await
         .unwrap();

@@ -410,7 +410,8 @@ impl RunLauncher {
         flow_path: &str,
         args: Vec<(String, atman_runtime::Value)>,
     ) -> Result<SpawnedRun> {
-        self.spawn_as(state, flow_path, args, "local-daemon").await
+        self.spawn_as(state, flow_path, args, crate::LOCAL_OPERATOR_PRINCIPAL)
+            .await
     }
 
     pub async fn spawn_as(

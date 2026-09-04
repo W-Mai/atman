@@ -42,7 +42,7 @@ async fn spawn_server(
                 cancel: tokio_util::sync::CancellationToken::new(),
                 started_at: chrono::Utc::now(),
             },
-            "authenticated-daemon-client",
+            "local-daemon",
         )
         .await
         .unwrap();

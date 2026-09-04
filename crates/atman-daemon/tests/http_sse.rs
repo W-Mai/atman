@@ -27,7 +27,7 @@ async fn build_state(tmp: &tempfile::TempDir, session_id: Option<Uuid>) -> Arc<H
                     cancel: tokio_util::sync::CancellationToken::new(),
                     started_at: chrono::Utc::now(),
                 },
-                "authenticated-daemon-client",
+                "local-daemon",
             )
             .await
             .unwrap();
@@ -260,14 +260,11 @@ async fn session_sse_streams_projection_updates_after_snapshot_cursor() {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 started_at: chrono::Utc::now(),
             },
-            "authenticated-daemon-client",
+            "local-daemon",
         )
         .await
         .unwrap();
-    let snapshot = daemon
-        .session_snapshot(&sid, "authenticated-daemon-client")
-        .await
-        .unwrap();
+    let snapshot = daemon.session_snapshot(&sid, "local-daemon").await.unwrap();
     let app = router(Arc::new(HttpState {
         daemon,
         auth_token: "secret".into(),

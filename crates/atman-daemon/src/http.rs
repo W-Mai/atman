@@ -312,7 +312,7 @@ async fn require_bearer(
         && let Some(token) = auth_str.strip_prefix("Bearer ")
     {
         if constant_time_eq(token.as_bytes(), state.auth_token.as_bytes()) {
-            let principal_id = "authenticated-daemon-client".to_string();
+            let principal_id = crate::LOCAL_OPERATOR_PRINCIPAL.to_string();
             let mut req = req;
             req.extensions_mut().insert(principal_id);
             return next.run(req).await;
@@ -329,7 +329,7 @@ async fn require_bearer(
         && let Ok(session_id) = uuid::Uuid::parse_str(&session_id).map(SessionId)
         && verify_event_ticket(&state, &session_id, &ticket, unix_timestamp())
     {
-        let principal_id = "authenticated-daemon-client".to_string();
+        let principal_id = crate::LOCAL_OPERATOR_PRINCIPAL.to_string();
         let mut req = req;
         req.extensions_mut().insert(principal_id);
         return next.run(req).await;

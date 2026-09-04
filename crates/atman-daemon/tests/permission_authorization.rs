@@ -88,6 +88,204 @@ fn pending_request(
 }
 
 #[tokio::test]
+async fn transport_pairs_share_approval_decisions_and_converge() {
+    use atman_client::{
+        Client, ClientError, ClientIdentity, HttpTransport, SessionClientError, UnixTransport,
+    };
+    use atman_daemon::{
+        http::{HttpState, router},
+        unix::UnixServer,
+    };
+    use atman_proto::{
+        ApprovalState, PermissionRpcAction, PermissionRpcScope, PermissionRpcSelector,
+    };
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let (session_id, session, _events) = register_session(&state, "local-daemon").await;
+    let socket = tmp.path().join("atman.sock");
+    let unix = UnixServer::bind(&socket).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let http = router(Arc::new(HttpState {
+        daemon: state.clone(),
+        auth_token: "test-token".into(),
+    }));
+    let shutdown = CancellationToken::new();
+    let unix_task = tokio::spawn(unix.serve(state.clone(), shutdown.clone()));
+    let http_task = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            axum::serve(listener, http)
+                .with_graceful_shutdown(shutdown.cancelled_owned())
+                .await
+                .unwrap();
+        }
+    });
+    let mut clients = Vec::new();
+    for name in ["unix-a", "unix-b"] {
+        clients.push(
+            Client::connect(UnixTransport::new(&socket), ClientIdentity::new(name, "1"))
+                .await
+                .unwrap(),
+        );
+    }
+    for name in ["http-a", "http-b"] {
+        clients.push(
+            Client::connect(
+                HttpTransport::new(&base, "test-token").unwrap(),
+                ClientIdentity::new(name, "1"),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+
+    for (left, right) in [(0, 1), (0, 2), (2, 3)] {
+        let pending = pending_request(&session, &format!("pair-{left}-{right}"));
+        let request_id = pending.request.request_id.clone();
+        let revision = pending.request.revision;
+        let a = clients[left]
+            .attach_session(session_id.clone())
+            .await
+            .unwrap();
+        let b = clients[right]
+            .attach_session(session_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(a.current().projection(), b.current().projection());
+        assert!(
+            a.current()
+                .projection()
+                .interactions
+                .approvals
+                .iter()
+                .any(|item| item.id == request_id.0 && item.state == ApprovalState::Pending)
+        );
+
+        let mut watchers = [a.subscribe(), b.subscribe()];
+        let mut workers = tokio::task::JoinSet::new();
+        for client in [a.clone(), b.clone()] {
+            workers.spawn(async move { client.synchronize().await });
+        }
+        let selector = PermissionRpcSelector::Requests {
+            request_ids: vec![request_id.0],
+            expected_request_revisions: [(request_id.0, revision)].into(),
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                a.resolve_permissions(
+                    selector.clone(),
+                    PermissionRpcAction::Approve,
+                    Some(PermissionRpcScope::CurrentCall),
+                    None
+                ),
+                b.resolve_permissions(selector, PermissionRpcAction::Deny, None, None)
+            )
+        })
+        .await
+        .expect("competing permission commands timed out");
+        assert_eq!(
+            usize::from(first.is_ok()) + usize::from(second.is_ok()),
+            1,
+            "pair {left}/{right}: {first:?}, {second:?}"
+        );
+        let expected_state = if first.is_ok() {
+            ApprovalState::Approved
+        } else {
+            ApprovalState::Denied
+        };
+        let error = first.err().or_else(|| second.err()).unwrap();
+        assert!(
+            matches!(error, SessionClientError::Client(ClientError::Rpc(ref rpc)) if rpc.message.contains("stale")),
+            "{error:?}"
+        );
+        assert_eq!(
+            session
+                .permission_broker()
+                .get(&request_id)
+                .unwrap()
+                .revision,
+            revision + 1
+        );
+        assert_eq!(
+            session
+                .sink()
+                .snapshot()
+                .iter()
+                .filter(|event| matches!(event,
+                    atman_runtime::event::Event::PermissionRequestApproved { payload }
+                    | atman_runtime::event::Event::PermissionRequestDenied { payload }
+                    if payload.request_id.as_ref() == Some(&request_id)
+                ))
+                .count(),
+            1
+        );
+
+        let expected = state
+            .session_snapshot(&session_id, "local-daemon")
+            .await
+            .unwrap();
+        for watcher in &mut watchers {
+            let current = tokio::time::timeout(
+                Duration::from_secs(10),
+                watcher.wait_for(|state| state.cursor() >= expected.cursor),
+            )
+            .await
+            .expect("approval did not synchronize")
+            .unwrap();
+            assert_eq!(current.projection(), &expected.projection);
+            assert!(
+                current
+                    .projection()
+                    .interactions
+                    .approvals
+                    .iter()
+                    .any(|item| item.id == request_id.0 && item.state == expected_state)
+            );
+        }
+        workers.abort_all();
+        while let Some(result) = workers.join_next().await {
+            assert!(result.unwrap_err().is_cancelled());
+        }
+        let reconnected = clients[right]
+            .attach_session(session_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(reconnected.current().projection(), &expected.projection);
+        assert_eq!(reconnected.current().cursor(), expected.cursor);
+    }
+
+    let invalid = Client::connect(
+        HttpTransport::new(&base, "wrong-token").unwrap(),
+        ClientIdentity::new("unix-a", "1"),
+    )
+    .await;
+    assert!(matches!(
+        invalid,
+        Err(ClientError::Transport(
+            atman_client::TransportError::HttpStatus { status: 401, .. }
+        ))
+    ));
+    let (foreign_id, _, _) = register_session(&state, "another-operator").await;
+    for client in [&clients[0], &clients[2]] {
+        assert!(client.attach_session(foreign_id.clone()).await.is_err());
+    }
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), unix_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), http_task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

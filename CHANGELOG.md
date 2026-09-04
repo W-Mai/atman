@@ -38,6 +38,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Cross-transport session access** — authenticated HTTP and owner-only Unix-socket clients share the daemon operator identity. Session ownership checks and session-scoped event tickets remain enforced.
 - **Attachment reference stability** — image identities survive message copies, part filtering, checkpoints, and replay. Legacy references are derived from event coordinates; storage identities are excluded from model input, cache prefixes, and checkpoint epochs.
 - **Checkpoint epoch recovery** — session and context-branch replay recover the epoch from the last applicable checkpoint, including empty checkpoints. Later message rewrites and unrelated child checkpoints do not change that persisted identity.
 - **Inline context cache identity** — inline calls retain their owner's usage and prefix-observation identity and provider cache route. Execution events and tool permissions keep the inline run identity.

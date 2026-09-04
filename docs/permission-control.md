@@ -107,7 +107,7 @@ A tool's provenance may include these risks:
 
 ## Daemon authentication and session ownership
 
-The daemon HTTP API uses one static bearer token. A valid token authenticates as the fixed principal `authenticated-daemon-client`; it is a single-operator control model, not a multi-user identity provider. Browser SSE clients can exchange the bearer for a 60-second session-scoped event ticket at `POST /event-ticket`; long-lived bearer query parameters are rejected. Unix-socket requests use the local principal `local-daemon`.
+The daemon HTTP API uses one static bearer token. A valid token and owner-only Unix-socket access authenticate the same operator as `local-daemon`, allowing both transports to access the same session. This is a single-operator control model, not a multi-user identity provider; client names do not grant authority. Browser SSE clients can exchange the bearer for a 60-second session-scoped event ticket at `POST /event-ticket`; long-lived bearer query parameters are rejected. Event tickets authorize only the specified session's event stream, not command RPCs.
 
 Authenticated clients can update a session's complete trust policy through `session.update_trust`. The command serializes the mutation through the session actor, persists the session policy and the default for new sessions, and returns its committed projection cursor.
 

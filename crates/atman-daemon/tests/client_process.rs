@@ -4,7 +4,9 @@ use std::process::{Child, Command, Stdio};
 
 use std::os::unix::fs::FileTypeExt;
 
-use atman_client::{Client, ClientError, ClientIdentity, HttpTransport, SessionClientError};
+use atman_client::{
+    Client, ClientError, ClientIdentity, HttpTransport, SessionClientError, UnixTransport,
+};
 use atman_proto::{FlowRunId, PromptId, RunLifecycle, StartRunResponse};
 use futures::StreamExt;
 
@@ -237,7 +239,18 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
 
     let prompted = start_when_idle(&session, &wait_flow).await;
     let prompt_id = wait_for_prompt(&session).await;
-    let resolved = session
+    let unix_client = Client::connect(
+        UnixTransport::new(&socket_path),
+        ClientIdentity::new("local-process-test", "1"),
+    )
+    .await
+    .unwrap();
+    let unix_session = unix_client
+        .attach_session(session_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(wait_for_prompt(&unix_session).await, prompt_id);
+    let resolved = unix_session
         .resolve_prompt(prompt_id, serde_json::json!(true))
         .await
         .unwrap();
@@ -259,6 +272,12 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
         RunLifecycle::Cancelled
     );
     wait_for_no_prompts(&session).await;
+    unix_session.refresh_until_current().await.unwrap();
+    session.refresh_until_current().await.unwrap();
+    assert_eq!(
+        unix_session.current().projection(),
+        session.current().projection()
+    );
 
     drop(events);
     let before_reconnect = session.current();

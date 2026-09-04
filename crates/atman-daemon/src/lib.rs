@@ -14,6 +14,9 @@ use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
 
+// Owner-only local access and the daemon bearer authenticate the same operator.
+pub(crate) const LOCAL_OPERATOR_PRINCIPAL: &str = "local-daemon";
+
 fn permission_action(action: PermissionRpcAction) -> atman_runtime::permission::PermissionAction {
     match action {
         PermissionRpcAction::Approve => atman_runtime::permission::PermissionAction::Approve,
@@ -180,7 +183,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
 ];
 
 pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
-    dispatch_as(state, req, "local-daemon").await
+    dispatch_as(state, req, LOCAL_OPERATOR_PRINCIPAL).await
 }
 
 pub async fn dispatch_as(
