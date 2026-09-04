@@ -37,6 +37,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Checkpoint epoch recovery** — session and context-branch replay recover the epoch from the last applicable checkpoint, including empty checkpoints. Later message rewrites and unrelated child checkpoints do not change that persisted identity.
 - **Inline context cache identity** — inline calls retain their owner's usage and prefix-observation identity and provider cache route. Execution events and tool permissions keep the inline run identity.
 - **Child checkpoint consistency** — normal and overflow-triggered child compaction publish the checkpoint and update the epoch within the message commit lock. Concurrently changed histories reject the candidate without publishing compaction records.
 - **Message publication ordering** — shared message appends acquire the context before publishing the event and update the message handle before sending the live frame, matching root, record, and steering writes.

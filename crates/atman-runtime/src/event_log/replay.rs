@@ -28,6 +28,8 @@ where
 
 pub struct ReplayBundle {
     pub last_seq: Option<u64>,
+    /// Digest of the last root checkpoint before subsequent message mutations.
+    pub checkpoint_epoch: Option<String>,
     pub compacted_messages: Vec<(u64, Message)>,
     pub all_messages: Vec<(u64, Message)>,
     pub context: ContextSnapshot,
@@ -63,7 +65,17 @@ impl SessionReplay {
         let mut compacted_positions = HashMap::new();
         let mut all_messages = Vec::new();
         let mut all_positions = HashMap::new();
+        let mut checkpoint = None;
         for record in &records {
+            if let Event::Checkpoint {
+                flow_run_id,
+                messages,
+                ..
+            } = &record.envelope.event
+                && message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned)
+            {
+                checkpoint = Some(messages.as_slice());
+            }
             apply_envelope_to_messages(
                 &record.envelope,
                 &ownership.spawned,
@@ -101,9 +113,11 @@ impl SessionReplay {
                 observer.observe(entry);
             }
         }
+        let checkpoint_epoch = checkpoint.map(crate::context_state::checkpoint_epoch_digest);
         let events = records.into_iter().map(|record| record.envelope).collect();
         ReplayBundle {
             last_seq,
+            checkpoint_epoch,
             compacted_messages,
             all_messages,
             context,

@@ -17,6 +17,8 @@ pub struct ContextReplay {
     pub(crate) compacted: Vec<(u64, Message)>,
     window_start: usize,
     pub raw: Vec<(u64, Message)>,
+    /// Digest of the last checkpoint selected by the ancestry and cutoff.
+    pub checkpoint_epoch: Option<String>,
 }
 
 impl ContextReplay {
@@ -139,6 +141,7 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
     let mut window_start = 0;
     let mut raw = Vec::new();
     let mut raw_positions = HashMap::new();
+    let mut checkpoint = None;
     for envelope in events {
         if cutoffs
             .get(&envelope.context_id)
@@ -155,6 +158,15 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
         } else {
             &ownership.spawned
         };
+        if let Event::Checkpoint {
+            flow_run_id,
+            messages,
+            ..
+        } = &envelope.event
+            && message_belongs_to_root(flow_run_id.as_ref(), excluded)
+        {
+            checkpoint = Some(messages.as_slice());
+        }
         if apply_envelope_to_messages(envelope, excluded, &mut window, &mut positions) {
             if let Some((message, _)) = envelope.event.context_message() {
                 if is_compaction_summary(message) {
@@ -181,6 +193,7 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
         compacted: window,
         window_start,
         raw,
+        checkpoint_epoch: checkpoint.map(crate::context_state::checkpoint_epoch_digest),
     })
 }
 
@@ -377,6 +390,63 @@ mod tests {
                     .window()
             ),
             ["parent checkpoint"]
+        );
+    }
+
+    #[test]
+    fn checkpoint_epoch_respects_ancestry_cutoffs_and_empty_checkpoints() {
+        let sink = EventSink::new();
+        let (parent_id, parent) = create(&sink, None);
+        let checkpoint = vec![Message::user_text(TurnId::now(), "retained")];
+        parent.emit(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: None,
+            messages: checkpoint.clone(),
+            window_tokens: 10,
+        });
+        let (child_id, child) = create(&sink, Some(target(&parent_id, sink.published_seq())));
+        parent.emit(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: None,
+            messages: Vec::new(),
+            window_tokens: 0,
+        });
+        push(&child, "later", None);
+        let inherited = target(&child_id, sink.published_seq());
+        let expected = Some(crate::context_state::checkpoint_epoch_digest(&checkpoint));
+        assert_eq!(
+            replay_context(&sink.snapshot_envelopes(), &inherited)
+                .unwrap()
+                .checkpoint_epoch,
+            expected
+        );
+        child.emit(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: None,
+            messages: Vec::new(),
+            window_tokens: 0,
+        });
+        let (independent_id, _) = create(&sink, None);
+        let events = sink.snapshot_envelopes();
+        assert_eq!(
+            replay_context(&events, &inherited)
+                .unwrap()
+                .checkpoint_epoch,
+            expected
+        );
+        for id in [&parent_id, &child_id] {
+            let replay = replay_context(&events, &target(id, sink.published_seq())).unwrap();
+            assert!(replay.window().is_empty());
+            assert_eq!(
+                replay.checkpoint_epoch,
+                Some(crate::context_state::checkpoint_epoch_digest(&[]))
+            );
+        }
+        assert_eq!(
+            replay_context(&events, &target(&independent_id, sink.published_seq()))
+                .unwrap()
+                .checkpoint_epoch,
+            None
         );
     }
 

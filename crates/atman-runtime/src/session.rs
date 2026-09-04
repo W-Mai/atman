@@ -1,4 +1,6 @@
-use crate::context_state::{CompactionState, ContextState, checkpoint_epoch_digest};
+#[cfg(test)]
+use crate::context_state::checkpoint_epoch_digest;
+use crate::context_state::{CompactionState, ContextState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -72,15 +74,6 @@ pub struct WatchHub {
     pub todos: watch::Sender<Vec<crate::memory::todo::Todo>>,
     pub plans: watch::Sender<Vec<crate::memory::plan::Plan>>,
     _keepalive: WatchKeepalive,
-}
-
-fn replayed_checkpoint_epoch(messages: &[(u64, Message)]) -> Option<String> {
-    let checkpoint = messages
-        .iter()
-        .filter(|(seq, _)| *seq > u64::MAX / 2)
-        .map(|(_, message)| message.clone())
-        .collect::<Vec<_>>();
-    (!checkpoint.is_empty()).then(|| checkpoint_epoch_digest(&checkpoint))
 }
 
 pub struct InteractionServices {
@@ -1147,7 +1140,7 @@ impl Session {
             .iter()
             .map(|(_, message)| message.clone())
             .collect();
-        let checkpoint_epoch = replayed_checkpoint_epoch(&initial_msgs);
+        let checkpoint_epoch = replay.checkpoint_epoch;
         let all_msgs = replay.all_messages;
         let events = replay.events;
         if let Some(last_seq) = replay.last_seq {
@@ -3339,20 +3332,68 @@ mod tests {
         assert_eq!(&*replay.window(), replacement.as_slice());
     }
 
-    #[test]
-    fn replayed_context_epoch_ignores_messages_appended_after_checkpoint() {
-        let checkpoint = vec![Message::assistant_text(TurnId::now(), "rewritten")];
-        let mut replay = checkpoint
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, message)| (u64::MAX - index as u64, message))
-            .collect::<Vec<_>>();
-        let expected = replayed_checkpoint_epoch(&replay);
-        replay.push((42, Message::user_text(TurnId::now(), "later")));
-
-        assert_eq!(replayed_checkpoint_epoch(&replay), expected);
-        assert_eq!(expected, Some(checkpoint_epoch_digest(&checkpoint)));
+    #[tokio::test]
+    async fn restored_epoch_uses_the_checkpoint_fact_instead_of_remaining_message_positions() {
+        for checkpoint in [
+            Vec::new(),
+            vec![
+                Message::user_text(TurnId::now(), "retained user"),
+                Message::assistant_text(TurnId::now(), "retained answer"),
+            ],
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let session = Session::open(dir.path()).unwrap();
+            session.append_message(Message::user_text(TurnId::now(), "x".repeat(40_000)), None);
+            session
+                .commit_rewritten_window(checkpoint.clone(), 10_000, 10_000, 1)
+                .unwrap();
+            let expected = Some(checkpoint_epoch_digest(&checkpoint));
+            assert_eq!(session.context_epoch(), expected);
+            if !checkpoint.is_empty() {
+                let summary =
+                    Message::system_compact_summary(TurnId::now(), "later summary", 0, 0, 1);
+                let summary_seq = AppendMessageCommand {
+                    msg: summary,
+                    flow_run_id: None,
+                }
+                .execute(&session);
+                session.sink().emit(Event::ContextCompact {
+                    session_id: session.id().to_string(),
+                    flow_run_id: None,
+                    before_tokens: 100,
+                    after_tokens: 10,
+                    compacted_range_start: 0,
+                    compacted_range_end: 0,
+                    summary_text: None,
+                    replacement_msg_seq: Some(summary_seq),
+                });
+            }
+            let child = FlowRunId::now();
+            session.sink().emit(Event::FlowStart {
+                run_id: child.clone(),
+                turn_id: None,
+                flow_name: "child".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: true,
+            });
+            session.sink().emit(Event::Checkpoint {
+                session_id: session.id().to_string(),
+                flow_run_id: Some(child),
+                messages: vec![Message::user_text(TurnId::now(), "unrelated child")],
+                window_tokens: 10,
+            });
+            session.append_message(Message::user_text(TurnId::now(), "later user"), None);
+            let window = session.messages().to_vec();
+            assert_ne!(window, checkpoint);
+            assert_eq!(session.context_epoch(), expected);
+            session.flush_writer().await.unwrap();
+            let restored = Session::open_existing(dir.path(), &session.id().to_string()).unwrap();
+            assert_eq!(restored.messages().to_vec(), window);
+            assert_eq!(restored.context_epoch(), expected);
+            session.shutdown().await;
+            restored.shutdown().await;
+        }
     }
 
     #[test]
