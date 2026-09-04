@@ -1,15 +1,16 @@
-use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
 
+#[cfg(test)]
 use crate::event::Event;
 use crate::event_log::reader::{
     ReplayRecord, context_snapshot_from_records, read_replay_records, scan_replay_records,
 };
+#[cfg(test)]
 use crate::message::Message;
+use crate::projection::context::{ContextReplay, replay_default_context};
 use crate::projection::message_window::{
-    FlowOwnership, TranscriptEntry, apply_attachment_degradation, apply_envelope_to_messages,
-    message_belongs_to_root, project_transcript_records,
+    FlowOwnership, TranscriptEntry, project_transcript_records,
 };
 use crate::session::{ContextSnapshot, SessionOpenError};
 
@@ -28,10 +29,7 @@ where
 
 pub struct ReplayBundle {
     pub last_seq: Option<u64>,
-    /// Digest of the last root checkpoint before subsequent message mutations.
-    pub checkpoint_epoch: Option<String>,
-    pub compacted_messages: Vec<(u64, Message)>,
-    pub all_messages: Vec<(u64, Message)>,
+    pub view: ContextReplay,
     pub context: ContextSnapshot,
     pub events: Vec<crate::event::EventEnvelope>,
 }
@@ -44,7 +42,10 @@ impl SessionReplay {
         observer: Option<&mut dyn TranscriptReplayObserver>,
     ) -> Result<ReplayBundle, SessionOpenError> {
         let records = read_replay_records(path)?;
-        Ok(Self::from_records(records, observer))
+        Self::from_records(records, observer).map_err(|source| SessionOpenError::Replay {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     pub fn from_reader<R: BufRead>(
@@ -52,73 +53,30 @@ impl SessionReplay {
         observer: Option<&mut dyn TranscriptReplayObserver>,
     ) -> std::io::Result<ReplayBundle> {
         let records = scan_replay_records(reader)?;
-        Ok(Self::from_records(records, observer))
+        Self::from_records(records, observer)
     }
 
     fn from_records(
         records: Vec<ReplayRecord>,
         observer: Option<&mut dyn TranscriptReplayObserver>,
-    ) -> ReplayBundle {
+    ) -> std::io::Result<ReplayBundle> {
+        let view = replay_default_context(records.iter().map(|record| &record.envelope))?;
         let ownership =
             FlowOwnership::from_events(records.iter().map(|record| &record.envelope.event));
-        let mut compacted_messages = Vec::new();
-        let mut compacted_positions = HashMap::new();
-        let mut all_messages = Vec::new();
-        let mut all_positions = HashMap::new();
-        let mut checkpoint = None;
-        for record in &records {
-            if record.envelope.context_id.is_some() {
-                continue;
-            }
-            if let Event::Checkpoint {
-                flow_run_id,
-                messages,
-                ..
-            } = &record.envelope.event
-                && message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned)
-            {
-                checkpoint = Some(messages.as_slice());
-            }
-            apply_envelope_to_messages(
-                &record.envelope,
-                &ownership.spawned,
-                &mut compacted_messages,
-                &mut compacted_positions,
-            );
-            if let Some((message, flow_run_id)) = record.envelope.event.context_message()
-                && message_belongs_to_root(flow_run_id, &ownership.spawned)
-            {
-                all_positions.insert(record.envelope.seq, all_messages.len());
-                all_messages.push((
-                    record.envelope.seq,
-                    message.replayed(record.envelope.seq, None),
-                ));
-            }
-            if let Event::AttachmentDegraded {
-                flow_run_id, patch, ..
-            } = &record.envelope.event
-                && message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned)
-            {
-                apply_attachment_degradation(&mut all_messages, &all_positions, patch);
-            }
-        }
-        let context = context_snapshot_from_records(&records);
+        let context = context_snapshot_from_records(&records, &view.selection);
         let last_seq = records.last().map(|record| record.envelope.seq);
         if let Some(observer) = observer {
             for entry in project_transcript_records(&records, &ownership) {
                 observer.observe(entry);
             }
         }
-        let checkpoint_epoch = checkpoint.map(crate::context_state::checkpoint_epoch_digest);
         let events = records.into_iter().map(|record| record.envelope).collect();
-        ReplayBundle {
+        Ok(ReplayBundle {
             last_seq,
-            checkpoint_epoch,
-            compacted_messages,
-            all_messages,
+            view,
             context,
             events,
-        }
+        })
     }
 }
 
@@ -157,6 +115,45 @@ mod tests {
 
         assert_eq!(crate::event_log::reader::parse_attempts(), 3);
         assert_eq!(bundle.last_seq, Some(1));
+    }
+
+    #[test]
+    fn invalid_head_lineage_fails_before_transcript_publication() {
+        use crate::event::{ContextId, EventEnvelope, TurnId};
+        let turn = TurnId::now();
+        let initial = EventEnvelope::new(
+            1,
+            Event::UserMsg {
+                turn_id: turn.clone(),
+                flow_run_id: None,
+                message: Message::user_text(turn.clone(), "retained"),
+            },
+        );
+        for scope in [None, Some(ContextId::now())] {
+            let mut selection = EventEnvelope::new(
+                2,
+                Event::ContextHeadSelected {
+                    turn_id: turn.clone(),
+                },
+            );
+            selection.context_id = scope;
+            let events = [initial.clone(), selection];
+            let input = events
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut observed = Vec::new();
+            let error = SessionReplay::from_reader(
+                input.as_bytes(),
+                Some(&mut |entry| observed.push(entry)),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(observed.is_empty());
+            assert!(crate::event_log::reader::context_snapshot_from_envelopes(&events).is_err());
+        }
     }
 
     #[test]

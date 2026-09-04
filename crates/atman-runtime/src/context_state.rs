@@ -31,10 +31,11 @@ impl ContextState {
 
     pub(crate) fn from_stream(
         stream: MessageStream,
-        messages: Vec<Message>,
         compaction: CompactionState,
         sink: crate::event::EventSink,
     ) -> Self {
+        stream.assert_bound_to(&sink);
+        let messages = stream.window().to_vec();
         Self {
             messages: Arc::new(Mutex::new(messages)),
             stream: Some(stream),
@@ -54,7 +55,6 @@ impl ContextState {
         };
         let _messages = self.messages.lock().expect("context messages poisoned");
         let (stream, sink) = stream.fork(sink, inheritance);
-        let messages = stream.window().to_vec();
         let compaction = CompactionState {
             manual_pending: std::sync::atomic::AtomicBool::new(false),
             model_window_tokens: std::sync::atomic::AtomicU64::new(
@@ -86,7 +86,7 @@ impl ContextState {
             ),
             context_epoch: Mutex::new(self.epoch()),
         };
-        Ok(Self::from_stream(stream, messages, compaction, sink))
+        Ok(Self::from_stream(stream, compaction, sink))
     }
 
     pub fn context_id(&self) -> Option<&crate::event::ContextId> {
@@ -205,23 +205,8 @@ impl ContextState {
         call_identity: crate::context_plan::ContextCallIdentity,
         record: crate::context_plan::ContextUsageRecord,
     ) {
-        let input_tokens = record.window_input_tokens();
-        if call_purpose == crate::context_plan::ContextCallPurpose::General && input_tokens > 0 {
-            self.compaction
-                .model_window_tokens
-                .store(input_tokens, std::sync::atomic::Ordering::Relaxed);
-        }
-        let key = crate::context_plan::ContextUsageKey {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            call_purpose,
-            call_identity,
-        };
         self.compaction
-            .last_context_usage
-            .lock()
-            .expect("context usage lock poisoned")
-            .insert(key, record);
+            .record_call(provider, model, call_purpose, call_identity, record);
     }
 
     pub fn last_usage(
@@ -278,6 +263,31 @@ pub(crate) struct CompactionState {
 }
 
 impl CompactionState {
+    pub(crate) fn record_call(
+        &self,
+        provider: &str,
+        model: &str,
+        call_purpose: crate::context_plan::ContextCallPurpose,
+        call_identity: crate::context_plan::ContextCallIdentity,
+        record: crate::context_plan::ContextUsageRecord,
+    ) {
+        let input_tokens = record.window_input_tokens();
+        if call_purpose == crate::context_plan::ContextCallPurpose::General && input_tokens > 0 {
+            self.model_window_tokens
+                .store(input_tokens, std::sync::atomic::Ordering::Relaxed);
+        }
+        let key = crate::context_plan::ContextUsageKey {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            call_purpose,
+            call_identity,
+        };
+        self.last_context_usage
+            .lock()
+            .expect("context usage lock poisoned")
+            .insert(key, record);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             manual_pending: std::sync::atomic::AtomicBool::new(false),
@@ -288,6 +298,73 @@ impl CompactionState {
             last_context_prefix: Mutex::new(crate::context_plan::ContextPrefixTracker::default()),
             context_epoch: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn from_replay<'a>(
+        selection: &crate::projection::context::ContextSelection,
+        events: impl Iterator<Item = &'a crate::event::EventEnvelope> + Clone,
+    ) -> (Self, u64) {
+        use crate::event::Event;
+        let state = Self::new();
+        let mut state_seq = 0;
+        let mut checkpoint = None;
+        let ownership = crate::projection::message_window::FlowOwnership::from_events(
+            events.clone().map(|envelope| &envelope.event),
+        );
+        for envelope in events.filter(|envelope| selection.includes(envelope)) {
+            match &envelope.event {
+                Event::ContextHeadSelected { .. } => state_seq = envelope.seq,
+                Event::LlmCall {
+                    provider,
+                    model,
+                    context_plan_id: Some(plan_id),
+                    managed_context,
+                    context_call_purpose: Some(purpose),
+                    context_call_identity: Some(identity),
+                    usage,
+                    ..
+                } if managed_context.unwrap_or(true)
+                    && (envelope.context_id.is_some()
+                        || identity.scope == crate::context_plan::ContextCallScope::Root) =>
+                {
+                    if *purpose == crate::context_plan::ContextCallPurpose::General {
+                        state_seq = envelope.seq;
+                    }
+                    state.record_call(
+                        provider,
+                        model,
+                        *purpose,
+                        identity.clone(),
+                        crate::context_plan::ContextUsageRecord {
+                            plan_id: plan_id.clone(),
+                            usage: usage.clone(),
+                        },
+                    );
+                }
+                Event::Checkpoint {
+                    flow_run_id,
+                    window_tokens,
+                    messages,
+                    ..
+                } if envelope.context_id.is_some()
+                    || crate::projection::message_window::message_belongs_to_root(
+                        flow_run_id.as_ref(),
+                        &ownership.spawned,
+                    ) =>
+                {
+                    state_seq = envelope.seq;
+                    checkpoint = Some(messages);
+                    state
+                        .model_window_tokens
+                        .store(*window_tokens, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+        if let Some(messages) = checkpoint {
+            state.update_context_epoch(messages);
+        }
+        (state, state_seq)
     }
 
     pub(crate) fn restore_context_epoch(&self, epoch: Option<String>) {
@@ -586,7 +663,8 @@ mod tests {
                 }
                 assert_eq!(
                     bundle
-                        .all_messages
+                        .view
+                        .raw
                         .iter()
                         .map(|(_, message)| message.clone())
                         .collect::<Vec<_>>(),
@@ -689,8 +767,8 @@ mod tests {
                     None,
                 )
                 .unwrap();
-                assert_eq!(replay.compacted_messages[0].1, replacement[0]);
-                assert_eq!(replay.all_messages[0].1, original[0]);
+                assert_eq!(replay.view.compacted[0].1, replacement[0]);
+                assert_eq!(replay.view.raw[0].1, original[0]);
             }
         }
     }
@@ -1122,7 +1200,7 @@ mod tests {
                     }).collect();
                     assert_eq!(calls.len(), 1, "{diagnostics}/{watched}/{inline}");
                     assert_eq!(calls[0].context_id, Some(context_id));
-                    let replay = crate::event_log::reader::context_snapshot_from_envelopes(&events);
+                    let replay = crate::event_log::reader::context_snapshot_from_envelopes(&events).unwrap();
                     assert!(replay.model.is_empty());
                     assert!(replay.provider.is_empty());
                     let traced_calls: Vec<_> = trace.snapshot().into_iter().filter(|event| {

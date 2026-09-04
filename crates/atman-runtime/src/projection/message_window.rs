@@ -1898,7 +1898,8 @@ mod tests {
                         .unwrap();
                 assert_eq!(
                     replay
-                        .compacted_messages
+                        .view
+                        .compacted
                         .iter()
                         .map(|(_, message)| message.clone())
                         .collect::<Vec<_>>(),
@@ -1906,7 +1907,8 @@ mod tests {
                 );
                 assert_eq!(
                     replay
-                        .all_messages
+                        .view
+                        .raw
                         .iter()
                         .map(|(_, message)| message.clone())
                         .collect::<Vec<_>>(),
@@ -2217,17 +2219,12 @@ mod tests {
                 .unwrap();
 
         assert!(
-            replay.compacted_messages[0]
+            replay.view.compacted[0]
                 .1
                 .text_concat()
                 .contains("missing.png")
         );
-        assert!(
-            replay.all_messages[0]
-                .1
-                .text_concat()
-                .contains("missing.png")
-        );
+        assert!(replay.view.raw[0].1.text_concat().contains("missing.png"));
         let transcript = crate::event_log::replay::transcript_from_envelopes(&events);
         assert!(matches!(
             &transcript[0],
@@ -2355,11 +2352,12 @@ mod tests {
             .join("\n");
         let replay =
             crate::event_log::replay::SessionReplay::from_reader(jsonl.as_bytes(), None).unwrap();
-        assert_eq!(replay.all_messages, replay.compacted_messages);
+        assert_eq!(replay.view.raw, replay.view.compacted);
         assert_eq!(
             *stream.full_messages(),
             replay
-                .all_messages
+                .view
+                .raw
                 .iter()
                 .map(|(_, message)| message.clone())
                 .collect::<Vec<_>>()
@@ -2369,7 +2367,7 @@ mod tests {
         std::fs::write(&path, jsonl).unwrap();
         assert_eq!(
             super::replay_all_messages_with_seq(&path).unwrap(),
-            replay.all_messages
+            replay.view.raw
         );
     }
 

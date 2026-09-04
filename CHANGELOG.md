@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Restored context views** — `ReplayBundle::view` contains the selected message view and checkpoint epoch. `MessageStream::with_initial` requires an explicit optional context identity. Context snapshot readers return errors for invalid lineage.
 - **Context usage targets** — `Session::record_context_plan_call` accepts an optional managed context and plan identity. An absent target or plan records aggregate usage without updating message-window statistics.
 - **Compaction targets** — budget-aware compaction, manual scheduling, and session compaction commits require the target `ContextState`. Manual request consumption is internal to that owner.
 - **Attachment rejection ownership** — the session-wide `Session::record_attachment_degrade` method is removed. Managed LLM calls apply image rejection patches through their bound message context.
@@ -45,6 +46,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Session head restoration** — reopening a session binds its selected window, raw history, writable handle, usage, and journal to the same context. Other branches and stale state caches cannot replace the restored head's model or window reading. Session appends publish canonical records before live frames.
 - **Failed-request isolation** — isolated prompt and message-list failures do not schedule compaction of managed history. Reasoning configuration failures share canonical call accounting with provider attempts, retaining zero usage and consistent live and restored call counts.
 - **Explicit-request accounting** — bare prompts and explicit message lists contribute to call totals without replacing the managed window's usage or model. LLM events retain this distinction during replay and daemon projection; managed and explicit requests retain separate bounded cache-prefix observations.
 - **LLM call journals** — successful, failed, and retried calls publish usage through their context's canonical journal even without execution diagnostics. Independent diagnostic traces receive a copy; a shared journal receives one scoped event.

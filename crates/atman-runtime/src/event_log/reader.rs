@@ -123,15 +123,32 @@ pub fn find_last_seq(path: &Path) -> Result<Option<u64>, SessionOpenError> {
         .map(|record| record.envelope.seq))
 }
 
-pub(crate) fn context_snapshot_from_records(records: &[ReplayRecord]) -> ContextSnapshot {
+pub(crate) fn context_snapshot_from_records(
+    records: &[ReplayRecord],
+    selection: &crate::projection::context::ContextSelection,
+) -> ContextSnapshot {
+    context_snapshot_from_selected(records.iter().map(|record| &record.envelope), selection)
+}
+
+fn context_snapshot_from_selected<'a>(
+    events: impl Iterator<Item = &'a EventEnvelope> + Clone,
+    selection: &crate::projection::context::ContextSelection,
+) -> ContextSnapshot {
     let mut snapshot = ContextSnapshot::default();
-    for record in records {
-        apply_context_record(&mut snapshot, &record.envelope);
+    for envelope in events.clone() {
+        apply_context_record(&mut snapshot, envelope, selection.includes(envelope));
+    }
+    let (compaction, _) = crate::context_state::CompactionState::from_replay(selection, events);
+    snapshot.window_tokens = compaction
+        .model_window_tokens
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if !snapshot.model.is_empty() {
+        snapshot.window_budget = crate::model_registry::model_info(&snapshot.model).context_budget;
     }
     snapshot
 }
 
-fn apply_context_record(snapshot: &mut ContextSnapshot, envelope: &EventEnvelope) {
+fn apply_context_record(snapshot: &mut ContextSnapshot, envelope: &EventEnvelope, selected: bool) {
     let Event::LlmCall {
         model,
         provider,
@@ -199,7 +216,7 @@ fn apply_context_record(snapshot: &mut ContextSnapshot, envelope: &EventEnvelope
     if purpose == ContextCallPurpose::General
         && scope == ContextCallScope::Root
         && managed_context.unwrap_or(true)
-        && envelope.context_id.is_none()
+        && selected
     {
         snapshot.provider.clone_from(provider);
         snapshot.model.clone_from(model);
@@ -208,16 +225,21 @@ fn apply_context_record(snapshot: &mut ContextSnapshot, envelope: &EventEnvelope
     }
 }
 
-pub fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
-    read_replay_records(path)
-        .map(|records| context_snapshot_from_records(&records))
-        .unwrap_or_default()
+pub fn replay_context_snapshot_from(path: &Path) -> Result<ContextSnapshot, SessionOpenError> {
+    let records = read_replay_records(path)?;
+    let selection = crate::projection::context::select_default_context(
+        records.iter().map(|record| &record.envelope),
+    )
+    .map_err(|source| SessionOpenError::Replay {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(context_snapshot_from_records(&records, &selection))
 }
 
-pub fn context_snapshot_from_envelopes(events: &[EventEnvelope]) -> ContextSnapshot {
-    let mut snapshot = ContextSnapshot::default();
-    for envelope in events {
-        apply_context_record(&mut snapshot, envelope);
-    }
-    snapshot
+pub fn context_snapshot_from_envelopes(
+    events: &[EventEnvelope],
+) -> std::io::Result<ContextSnapshot> {
+    let selection = crate::projection::context::select_default_context(events)?;
+    Ok(context_snapshot_from_selected(events.iter(), &selection))
 }

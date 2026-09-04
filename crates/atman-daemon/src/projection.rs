@@ -1317,7 +1317,7 @@ pub(crate) async fn load_historical_projection(
                         let context =
                             atman_runtime::event_log::reader::context_snapshot_from_envelopes(
                                 &events,
-                            );
+                            )?;
                         let projector = SessionProjector::from_events(
                             replay_session_id.clone(),
                             meta.clone(),

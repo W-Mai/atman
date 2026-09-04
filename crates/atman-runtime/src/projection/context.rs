@@ -11,11 +11,25 @@ use super::message_window::{
     FlowOwnership, apply_envelope_to_messages, message_belongs_to_root, message_positions,
 };
 
+/// Validated ancestry membership without materialized message contents.
+#[derive(Debug, PartialEq)]
+pub struct ContextSelection {
+    pub context_id: Option<ContextId>,
+    cutoffs: HashMap<Option<ContextId>, u64>,
+}
+
+impl ContextSelection {
+    pub fn includes(&self, envelope: &EventEnvelope) -> bool {
+        self.cutoffs
+            .get(&envelope.context_id)
+            .is_some_and(|end| envelope.seq <= *end)
+    }
+}
+
 /// One materialized context. Raw history ignores checkpoints and range replacement.
 #[derive(Debug, PartialEq)]
 pub struct ContextReplay {
-    pub context_id: Option<ContextId>,
-    cutoffs: HashMap<Option<ContextId>, u64>,
+    pub selection: ContextSelection,
     pub(crate) compacted: Vec<(u64, Message)>,
     window_start: usize,
     pub raw: Vec<(u64, Message)>,
@@ -26,9 +40,7 @@ pub struct ContextReplay {
 impl ContextReplay {
     /// Whether an event falls inside this view's fixed ancestry boundaries.
     pub fn includes(&self, envelope: &EventEnvelope) -> bool {
-        self.cutoffs
-            .get(&envelope.context_id)
-            .is_some_and(|end| envelope.seq <= *end)
+        self.selection.includes(envelope)
     }
 
     pub fn window(&self) -> &[(u64, Message)] {
@@ -148,7 +160,7 @@ fn retain_active_window(
 }
 
 /// Selects the last accepted head, independent of later output from other contexts.
-pub fn replay_default_context<'a, I>(events: I) -> io::Result<ContextReplay>
+pub fn select_default_context<'a, I>(events: I) -> io::Result<ContextSelection>
 where
     I: IntoIterator<Item = &'a EventEnvelope>,
     I::IntoIter: Clone,
@@ -169,7 +181,22 @@ where
         },
         None => ContextBase::LegacyRoot { through_seq },
     };
-    replay_context(events, &target)
+    let cutoffs = ContextLineage::from_envelopes(events)?.cutoffs(&target)?;
+    Ok(ContextSelection {
+        context_id: target.context_id().cloned(),
+        cutoffs,
+    })
+}
+
+/// Materializes the selected default ancestry while preserving raw history separately.
+pub fn replay_default_context<'a, I>(events: I) -> io::Result<ContextReplay>
+where
+    I: IntoIterator<Item = &'a EventEnvelope>,
+    I::IntoIter: Clone,
+{
+    let events = events.into_iter();
+    let selection = select_default_context(events.clone())?;
+    Ok(replay_selected_context(events, selection))
 }
 
 /// Replays one selected ancestry without materializing every historical branch.
@@ -181,6 +208,19 @@ where
 {
     let events = events.into_iter();
     let cutoffs = ContextLineage::from_envelopes(events.clone())?.cutoffs(target)?;
+    Ok(replay_selected_context(
+        events,
+        ContextSelection {
+            context_id: target.context_id().cloned(),
+            cutoffs,
+        },
+    ))
+}
+
+fn replay_selected_context<'a>(
+    events: impl Iterator<Item = &'a EventEnvelope> + Clone,
+    selection: ContextSelection,
+) -> ContextReplay {
     let ownership = FlowOwnership::from_events(events.clone().map(|envelope| &envelope.event));
     let no_exclusions = HashSet::new();
     let mut window = Vec::new();
@@ -190,10 +230,7 @@ where
     let mut raw_positions = HashMap::new();
     let mut checkpoint = None;
     for envelope in events {
-        if cutoffs
-            .get(&envelope.context_id)
-            .is_none_or(|end| envelope.seq > *end)
-        {
+        if !selection.includes(envelope) {
             continue;
         }
         if let Event::ContextCreated { inheritance, .. } = &envelope.event {
@@ -240,14 +277,13 @@ where
             apply_envelope_to_messages(envelope, excluded, &mut raw, &mut raw_positions);
         }
     }
-    Ok(ContextReplay {
-        context_id: target.context_id().cloned(),
-        cutoffs,
+    ContextReplay {
+        selection,
         compacted: window,
         window_start,
         raw,
         checkpoint_epoch: checkpoint.map(crate::context_state::checkpoint_epoch_digest),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -615,7 +651,7 @@ mod tests {
                         .collect::<Vec<_>>();
                     let grand =
                         replay_context(&events, &target(&grand_id, sink.published_seq())).unwrap();
-                    assert_ne!(grand.context_id, at_fork.context_id);
+                    assert_ne!(grand.selection.context_id, at_fork.selection.context_id);
                     assert_eq!(grand.window(), at_fork.window());
                     assert_eq!(grand.raw, at_fork.raw);
                     assert_eq!(grand.checkpoint_epoch, at_fork.checkpoint_epoch);
@@ -935,7 +971,11 @@ mod tests {
         let unrelated_input = push(&unrelated, "unrelated", None);
         let events = sink.snapshot_envelopes();
         let selected = replay_default_context(events.iter()).unwrap();
-        assert_eq!(selected.context_id, Some(second_id));
+        assert_eq!(
+            select_default_context(events.iter()).unwrap(),
+            selected.selection
+        );
+        assert_eq!(selected.selection.context_id, Some(second_id));
         assert_eq!(
             texts(selected.window()),
             ["legacy", "first input", "second input"]
@@ -974,7 +1014,7 @@ mod tests {
             );
         }
         let empty = replay_default_context(&[]).unwrap();
-        assert!(empty.context_id.is_none());
+        assert!(empty.selection.context_id.is_none());
         assert!(empty.window().is_empty());
         assert!(empty.raw.is_empty());
     }

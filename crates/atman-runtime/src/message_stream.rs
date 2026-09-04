@@ -87,6 +87,7 @@ impl MessageStream {
 
     pub fn with_initial(
         events: Arc<Mutex<Vec<EventEnvelope>>>,
+        context_id: Option<ContextId>,
         compacted: Vec<(u64, Message)>,
         raw: Vec<(u64, Message)>,
     ) -> Self {
@@ -105,7 +106,7 @@ impl MessageStream {
         let compacted_positions = crate::projection::message_window::message_positions(&compacted);
         let full_positions = crate::projection::message_window::message_positions(&raw);
         Self {
-            context_id: None,
+            context_id,
             events,
             acc: Mutex::new(Acc {
                 compacted,
@@ -136,8 +137,12 @@ impl MessageStream {
                 through_seq,
             },
         )?;
-        let mut stream = Self::with_initial(Arc::clone(&events), replay.compacted, replay.raw);
-        stream.context_id = Some(context_id);
+        let mut stream = Self::with_initial(
+            Arc::clone(&events),
+            Some(context_id),
+            replay.compacted,
+            replay.raw,
+        );
         stream.acc.get_mut().expect("acc poisoned").replayed = history.len();
         Ok(stream)
     }
@@ -170,11 +175,27 @@ impl MessageStream {
             base: Some(base),
             inheritance,
         });
-        let mut stream = Self::with_initial(self.events.clone(), compacted, acc.full_raw.clone());
-        stream.context_id = Some(context_id);
+        let mut stream = Self::with_initial(
+            self.events.clone(),
+            Some(context_id),
+            compacted,
+            acc.full_raw.clone(),
+        );
         stream.acc.get_mut().expect("acc poisoned").replayed = batch.records().len();
         drop(batch);
         (stream, sink)
+    }
+
+    pub(crate) fn assert_bound_to(&self, sink: &crate::event::EventSink) {
+        assert_eq!(
+            self.context_id.as_ref(),
+            sink.context_id(),
+            "context scope mismatch"
+        );
+        assert!(
+            Arc::ptr_eq(&self.events, &sink.events_handle()),
+            "context journal mismatch"
+        );
     }
 
     pub fn full_messages(&self) -> Arc<Vec<Message>> {
@@ -372,9 +393,12 @@ mod tests {
             let restored =
                 crate::event_log::replay::SessionReplay::from_reader(jsonl.as_bytes(), None)
                     .unwrap();
-            assert_eq!(restored.compacted_messages, expected_legacy.compacted);
-            assert_eq!(restored.all_messages, expected_legacy.raw);
-            assert_eq!(restored.checkpoint_epoch, expected_legacy.checkpoint_epoch);
+            assert_eq!(restored.view.compacted, expected_legacy.compacted);
+            assert_eq!(restored.view.raw, expected_legacy.raw);
+            assert_eq!(
+                restored.view.checkpoint_epoch,
+                expected_legacy.checkpoint_epoch
+            );
             let replay = crate::projection::context::replay_context(
                 &sink.snapshot_envelopes(),
                 &ContextBase::Context {
@@ -671,6 +695,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let stream = MessageStream::with_initial(
             Arc::clone(&events),
+            None,
             vec![(1, user("window"))],
             vec![(1, user("full"))],
         );
@@ -740,7 +765,7 @@ mod tests {
         ];
         let raw = compacted.clone();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let stream = MessageStream::with_initial(Arc::clone(&events), compacted, raw);
+        let stream = MessageStream::with_initial(Arc::clone(&events), None, compacted, raw);
         let full_before = stream.full_messages();
         let window_before = stream.window();
         events.lock().unwrap().push(EventEnvelope::new(
@@ -779,6 +804,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let stream = MessageStream::with_initial(
             Arc::clone(&events),
+            None,
             vec![(5, message.clone())],
             vec![(5, message)],
         );
@@ -1036,6 +1062,7 @@ mod tests {
         let initial_raw = vec![(1, user("dead user")), (2, assistant("dead assistant"))];
         let ms = MessageStream::with_initial(
             Arc::new(Mutex::new(Vec::new())),
+            None,
             initial_compacted,
             initial_raw,
         );
@@ -1065,7 +1092,7 @@ mod tests {
             (2, assistant("tail assistant")),
         ];
         let events = Arc::new(Mutex::new(Vec::new()));
-        let ms = MessageStream::with_initial(events.clone(), initial_compacted, initial_raw);
+        let ms = MessageStream::with_initial(events.clone(), None, initial_compacted, initial_raw);
 
         events.lock().unwrap().push(EventEnvelope::new(
             1,
@@ -1104,7 +1131,7 @@ mod tests {
             (3, assistant("old assistant")),
         ];
         let events = Arc::new(Mutex::new(Vec::new()));
-        let ms = MessageStream::with_initial(events.clone(), initial_compacted, initial_raw);
+        let ms = MessageStream::with_initial(events.clone(), None, initial_compacted, initial_raw);
 
         events.lock().unwrap().push(EventEnvelope::new(
             10,

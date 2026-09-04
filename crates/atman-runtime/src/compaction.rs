@@ -1419,7 +1419,6 @@ mod tests {
                                 Arc::new(ContextState::from_stream(
                                     MessageStream::from_context(sink.events_handle(), id.clone())
                                         .unwrap(),
-                                    history.clone(),
                                     CompactionState::new(),
                                     sink,
                                 ))

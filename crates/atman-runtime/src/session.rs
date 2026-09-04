@@ -770,6 +770,10 @@ fn load_goal(dir: &Path) -> Option<String> {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedContextState {
     #[serde(default)]
+    context_id: Option<crate::event::ContextId>,
+    #[serde(default)]
+    through_seq: Option<u64>,
+    #[serde(default)]
     model: String,
     #[serde(default)]
     window_tokens: u64,
@@ -782,11 +786,9 @@ impl PersistedContextState {
         dir.join("context_state.json")
     }
 
-    fn load(dir: &Path) -> Self {
-        match std::fs::read_to_string(Self::path(dir)) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+    fn load(dir: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(Self::path(dir)).ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     fn save(&self, dir: &Path) {
@@ -926,7 +928,6 @@ impl Session {
             sink: sink.clone(),
             context: std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::new(events_handle),
-                Vec::new(),
                 CompactionState::new(),
                 sink,
             )),
@@ -1113,6 +1114,8 @@ impl Session {
                 dir: dir.clone(),
             });
         }
+        let events_path = dir.join("events.jsonl");
+        let replay = SessionReplay::from_path(&events_path, observer)?;
         let writer = EventWriter::spawn_full(
             &dir,
             redactor.clone(),
@@ -1124,27 +1127,54 @@ impl Session {
         if let Some(r) = redactor {
             sink = sink.with_redactor(r);
         }
-        let events_path = dir.join("events.jsonl");
-        let replay = SessionReplay::from_path(&events_path, observer)?;
-        let initial_msgs = replay.compacted_messages;
-        let messages = initial_msgs
-            .iter()
-            .map(|(_, message)| message.clone())
-            .collect();
-        let checkpoint_epoch = replay.checkpoint_epoch;
-        let all_msgs = replay.all_messages;
+        let view = replay.view;
         let events = replay.events;
         if let Some(last_seq) = replay.last_seq {
             sink.restore_seq(last_seq);
             writer.restore_durable_seq(last_seq);
         }
+        let context_sink = match &view.selection.context_id {
+            Some(id) => sink.clone().with_context(id.clone()),
+            None => sink.clone(),
+        };
+        let (compaction, required_seq) =
+            CompactionState::from_replay(&view.selection, events.iter());
         let mut initial_context = replay.context;
-        let persisted = PersistedContextState::load(&dir);
-        if !persisted.model.is_empty() {
-            initial_context.model = persisted.model;
+        initial_context.window_tokens = compaction
+            .model_window_tokens
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if initial_context.window_tokens == 0 {
+            initial_context.window_tokens = view
+                .window()
+                .iter()
+                .map(|(_, message)| crate::compaction::estimate_tokens_for_message(message))
+                .sum();
         }
-        initial_context.window_tokens = persisted.window_tokens;
-        initial_context.window_budget = persisted.window_budget;
+        if !initial_context.model.is_empty() {
+            initial_context.window_budget =
+                crate::model_registry::model_info(&initial_context.model).context_budget;
+        }
+        if let Some(persisted) = PersistedContextState::load(&dir)
+            && persisted.context_id == view.selection.context_id
+            && persisted
+                .through_seq
+                .map_or(view.selection.context_id.is_none(), |seq| {
+                    seq >= required_seq && seq <= replay.last_seq.unwrap_or(0)
+                })
+        {
+            if !persisted.model.is_empty() {
+                if initial_context.model != persisted.model {
+                    initial_context.provider.clear();
+                }
+                initial_context.model = persisted.model;
+            }
+            initial_context.window_tokens = persisted.window_tokens;
+            initial_context.window_budget = persisted.window_budget;
+            compaction.model_window_tokens.store(
+                persisted.window_tokens,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let initial_goal = load_goal(&dir);
         let injection_queue = crate::injection::InjectionQueue::new(Some(sink.clone()));
         let (stream_tx, _) = broadcast::channel(2048);
@@ -1165,22 +1195,12 @@ impl Session {
             context: std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::with_initial(
                     events_handle,
-                    initial_msgs,
-                    all_msgs,
+                    view.selection.context_id,
+                    view.compacted,
+                    view.raw,
                 ),
-                messages,
-                {
-                    let c = CompactionState::new();
-                    c.restore_context_epoch(checkpoint_epoch);
-                    if persisted.window_tokens > 0 {
-                        c.model_window_tokens.store(
-                            persisted.window_tokens,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    c
-                },
-                sink,
+                compaction,
+                context_sink,
             )),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
@@ -1233,7 +1253,6 @@ impl Session {
             sink: sink.clone(),
             context: std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::new(events_handle),
-                Vec::new(),
                 CompactionState::new(),
                 sink,
             )),
@@ -1660,6 +1679,8 @@ impl Session {
         });
         let snap = self.watch.context.borrow();
         PersistedContextState {
+            context_id: self.context.context_id().cloned(),
+            through_seq: Some(self.sink.published_seq()),
             model,
             window_tokens: snap.window_tokens,
             window_budget: snap.window_budget,
@@ -1695,6 +1716,8 @@ impl Session {
         });
         let snap = self.watch.context.borrow();
         PersistedContextState {
+            context_id: self.context.context_id().cloned(),
+            through_seq: Some(self.sink.published_seq()),
             model,
             window_tokens: snap.window_tokens,
             window_budget: snap.window_budget,
@@ -2464,61 +2487,61 @@ impl AppendMessageCommand {
         );
         msg.ensure_part_ids();
         let is_internal = msg.origin == crate::message::MessageOrigin::Internal;
-        let event =
-            match msg.role {
-                MessageRole::User => Event::UserMsg {
-                    turn_id: msg.turn_id.clone(),
-                    flow_run_id: self.flow_run_id.clone(),
-                    message: msg.clone(),
-                },
-                MessageRole::Assistant => {
-                    if !is_internal {
-                        let _ = session.watch.stream_tx.send(
-                            crate::stream::StreamFrame::AssistantMsg {
-                                flow_run_id: flow_run_id_str.clone(),
-                                message: msg.clone(),
-                            },
-                        );
-                        for source in extract_mermaid_blocks(&msg) {
-                            let _ = session.watch.stream_tx.send(
-                                crate::stream::StreamFrame::MermaidDiagram {
-                                    source: source.clone(),
-                                },
-                            );
-                            session
-                                .sink
-                                .emit(crate::event::Event::MermaidDiagram { source });
-                        }
-                    }
-                    Event::AssistantMsg {
-                        turn_id: msg.turn_id.clone(),
-                        flow_run_id: self.flow_run_id.clone(),
-                        message: msg.clone(),
-                    }
-                }
-                MessageRole::Tool => {
-                    if !is_internal {
-                        let _ = session.watch.stream_tx.send(
-                            crate::stream::StreamFrame::ToolResultMsg {
-                                flow_run_id: flow_run_id_str.clone(),
-                                message: msg.clone(),
-                            },
-                        );
-                    }
-                    Event::ToolResultMsg {
-                        turn_id: msg.turn_id.clone(),
-                        flow_run_id: self.flow_run_id.clone(),
-                        message: msg.clone(),
-                    }
-                }
-                MessageRole::System => Event::SystemMsg {
-                    turn_id: msg.turn_id.clone(),
-                    flow_run_id: self.flow_run_id.clone(),
-                    message: msg.clone(),
-                },
-            };
-        let seq = session.sink.emit_returning_seq(event);
+        let event = match msg.role {
+            MessageRole::User => Event::UserMsg {
+                turn_id: msg.turn_id.clone(),
+                flow_run_id: self.flow_run_id.clone(),
+                message: msg.clone(),
+            },
+            MessageRole::Assistant => Event::AssistantMsg {
+                turn_id: msg.turn_id.clone(),
+                flow_run_id: self.flow_run_id.clone(),
+                message: msg.clone(),
+            },
+            MessageRole::Tool => Event::ToolResultMsg {
+                turn_id: msg.turn_id.clone(),
+                flow_run_id: self.flow_run_id.clone(),
+                message: msg.clone(),
+            },
+            MessageRole::System => Event::SystemMsg {
+                turn_id: msg.turn_id.clone(),
+                flow_run_id: self.flow_run_id.clone(),
+                message: msg.clone(),
+            },
+        };
+        let sink = session
+            .context
+            .sink()
+            .expect("session context has a journal");
+        let seq = sink.emit_returning_seq(event);
         messages.push(msg.clone());
+        if !is_internal {
+            let frame = match msg.role {
+                MessageRole::Assistant => Some(crate::stream::StreamFrame::AssistantMsg {
+                    flow_run_id: flow_run_id_str,
+                    message: msg.clone(),
+                }),
+                MessageRole::Tool => Some(crate::stream::StreamFrame::ToolResultMsg {
+                    flow_run_id: flow_run_id_str,
+                    message: msg.clone(),
+                }),
+                MessageRole::User | MessageRole::System => None,
+            };
+            if let Some(frame) = frame {
+                let _ = session.watch.stream_tx.send(frame);
+            }
+            if msg.role == MessageRole::Assistant {
+                for source in extract_mermaid_blocks(&msg) {
+                    sink.emit(Event::MermaidDiagram {
+                        source: source.clone(),
+                    });
+                    let _ = session
+                        .watch
+                        .stream_tx
+                        .send(crate::stream::StreamFrame::MermaidDiagram { source });
+                }
+            }
+        }
         seq
     }
 }
@@ -2714,6 +2737,281 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_head_reopens_with_one_bound_window_usage_and_journal() {
+        use crate::context_plan::{
+            ContextCallIdentity, ContextCallPurpose, ContextCallScope, ContextPlanId,
+            ContextUsageKey,
+        };
+        use crate::event::ContextInheritance;
+        use crate::message::{ImageData, ImageSource, MessagePart};
+
+        for checkpoint in [false, true] {
+            for cache in ["another-context", "stale", "ahead", "current"] {
+                let root = TempDir::new().unwrap();
+                let session = Session::open_with_context(root.path(), None, None).unwrap();
+                let turn = TurnId::now();
+                let identity = ContextCallIdentity {
+                    scope: ContextCallScope::Root,
+                    session_id: Some(session.id().to_string()),
+                    flow_run_id: None,
+                };
+                let emit_call = |sink: &EventSink, model: &str, tokens, managed, purpose| {
+                    let plan = ContextPlanId::now();
+                    sink.emit(
+                        serde_json::from_value(serde_json::json!({
+                            "type": "llm_call", "model": model, "provider": "test-provider",
+                            "context_plan_id": plan, "managed_context": managed,
+                            "context_call_purpose": purpose, "context_call_identity": identity,
+                            "usage": {"input": tokens}, "ttft_ms": 10,
+                        }))
+                        .unwrap(),
+                    );
+                    plan
+                };
+                session
+                    .append_message(Message::user_text(turn.clone(), "legacy".repeat(700)), None);
+                emit_call(
+                    session.sink(),
+                    "legacy-model",
+                    100_u64,
+                    true,
+                    ContextCallPurpose::General,
+                );
+                let owner = session.context().fork(ContextInheritance::Full).unwrap();
+                let head = owner.context_id().cloned().unwrap();
+                let sink = owner.sink().unwrap();
+                sink.emit(Event::ContextHeadSelected {
+                    turn_id: turn.clone(),
+                });
+                let mut image_message =
+                    Message::assistant_text(turn.clone(), "selected".repeat(700));
+                image_message.parts.push(MessagePart::Image {
+                    id: None,
+                    source: ImageSource {
+                        media_type: "image/png".into(),
+                        data: ImageData::Base64 {
+                            data: "AA==".into(),
+                        },
+                        detail: Default::default(),
+                    },
+                });
+                image_message.ensure_part_ids();
+                sink.emit(Event::AssistantMsg {
+                    turn_id: turn.clone(),
+                    flow_run_id: None,
+                    message: image_message.clone(),
+                });
+                let selected_plan = emit_call(
+                    sink,
+                    "selected-model",
+                    400,
+                    true,
+                    ContextCallPurpose::General,
+                );
+                if checkpoint {
+                    sink.emit(Event::Checkpoint {
+                        session_id: session.id().to_string(),
+                        flow_run_id: None,
+                        messages: vec![image_message.clone()],
+                        window_tokens: 300,
+                    });
+                }
+                emit_call(
+                    sink,
+                    "explicit-model",
+                    900,
+                    false,
+                    ContextCallPurpose::General,
+                );
+                emit_call(
+                    sink,
+                    "classifier-model",
+                    600,
+                    true,
+                    ContextCallPurpose::Classification,
+                );
+                emit_call(
+                    session.sink(),
+                    "late-legacy-model",
+                    2000,
+                    true,
+                    ContextCallPurpose::General,
+                );
+                session.append_message(Message::assistant_text(turn.clone(), "late legacy"), None);
+                PersistedContextState {
+                    context_id: (cache != "another-context").then_some(head.clone()),
+                    through_seq: Some(if cache == "stale" {
+                        0
+                    } else if cache == "ahead" {
+                        session.sink().published_seq() + 100
+                    } else {
+                        session.sink().published_seq()
+                    }),
+                    model: "selected-setting".into(),
+                    window_tokens: 777,
+                    window_budget: 96_000,
+                }
+                .save(session.dir());
+                emit_call(
+                    sink,
+                    "late-explicit-model",
+                    0,
+                    false,
+                    ContextCallPurpose::General,
+                );
+                let expected = crate::projection::context::replay_default_context(
+                    &session.sink().snapshot_envelopes(),
+                )
+                .unwrap();
+                let expected_window = expected
+                    .window()
+                    .iter()
+                    .map(|(_, message)| message.clone())
+                    .collect::<Vec<_>>();
+                let expected_raw = expected
+                    .raw
+                    .iter()
+                    .map(|(_, message)| message.clone())
+                    .collect::<Vec<_>>();
+                let sid = session.id().to_string();
+                session.flush_writer().await.unwrap();
+                session.shutdown().await;
+
+                let restored =
+                    std::sync::Arc::new(Session::open_existing(root.path(), &sid).unwrap());
+                assert_eq!(restored.context().context_id(), Some(&head));
+                assert_eq!(restored.context().sink().unwrap().context_id(), Some(&head));
+                assert!(restored.sink().context_id().is_none());
+                assert_eq!(restored.messages().to_vec(), expected_window);
+                assert_eq!(*restored.messages_handle().lock().unwrap(), expected_window);
+                assert_eq!(*restored.messages_full(), expected_raw);
+                assert_eq!(restored.context_epoch(), expected.checkpoint_epoch);
+                let snap = restored.subscribe_context().borrow().clone();
+                assert_eq!(snap.tokens_in, 4000);
+                assert_eq!(
+                    snap.usage_buckets
+                        .iter()
+                        .map(|bucket| bucket.calls)
+                        .sum::<u64>(),
+                    6
+                );
+                assert_eq!(
+                    snap.model,
+                    if cache == "current" {
+                        "selected-setting"
+                    } else {
+                        "selected-model"
+                    }
+                );
+                assert_eq!(
+                    restored.last_input_tokens(),
+                    if cache == "current" {
+                        777
+                    } else if checkpoint {
+                        300
+                    } else {
+                        400
+                    }
+                );
+                let key = ContextUsageKey {
+                    provider: "test-provider".into(),
+                    model: "selected-model".into(),
+                    call_purpose: ContextCallPurpose::General,
+                    call_identity: identity.clone(),
+                };
+                assert_eq!(
+                    restored.last_context_usage(&key).unwrap().plan_id,
+                    selected_plan
+                );
+                let mut frames = restored.stream_subscribe();
+                restored
+                    .append_message(Message::assistant_text(turn.clone(), "after restore"), None);
+                let ctx = crate::tool::ToolCtx::new().with_session_runtime(restored.clone());
+                crate::tools::session::append_message_to_context(
+                    &ctx,
+                    Message::user_text(turn.clone(), "owned tool append"),
+                )
+                .unwrap();
+                restored.append_context_records(
+                    turn.clone(),
+                    [crate::context_plan::ContextRecordSpec::new(
+                        "test.record",
+                        crate::context_plan::ContextRecordAuthority::Runtime,
+                        crate::context_plan::ContextRecordRetention::Latest,
+                        crate::context_plan::ContextRecordBody::text("state"),
+                    )],
+                );
+                let part_id = image_message
+                    .parts
+                    .iter()
+                    .find_map(|part| match part {
+                        MessagePart::Image { id, .. } => *id,
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(
+                    restored
+                        .context()
+                        .degrade_attachment(part_id, "test rejection", Some(turn.clone()), None)
+                        .is_some()
+                );
+                assert!(
+                    restored
+                        .messages()
+                        .iter()
+                        .any(|message| message.text_concat().contains("test rejection"))
+                );
+                assert!(
+                    restored
+                        .messages_full()
+                        .iter()
+                        .any(|message| message.text_concat().contains("test rejection"))
+                );
+                assert!(matches!(
+                    frames.try_recv().unwrap(),
+                    StreamFrame::AssistantMsg { .. }
+                ));
+                let window = restored.messages().to_vec();
+                assert_eq!(*restored.messages_handle().lock().unwrap(), window);
+                assert!(
+                    restored
+                        .compact_messages(
+                            "retained summary".into(),
+                            crate::compaction::CompactRange {
+                                start: 0,
+                                end: 1,
+                                tokens_saved_estimate: 0
+                            },
+                            400
+                        )
+                        .is_some()
+                );
+                let suffix = restored.sink().snapshot_envelopes();
+                assert!(!suffix.is_empty());
+                assert!(
+                    suffix
+                        .iter()
+                        .all(|envelope| envelope.context_id.as_ref() == Some(&head))
+                );
+                let expected_window = restored.messages().to_vec();
+                let expected_raw = restored.messages_full();
+                let expected_epoch = restored.context_epoch();
+                let expected_tokens = restored.last_input_tokens();
+                restored.flush_writer().await.unwrap();
+                restored.shutdown().await;
+                let reopened = Session::open_existing(root.path(), &sid).unwrap();
+                assert_eq!(reopened.context().context_id(), Some(&head));
+                assert_eq!(reopened.messages().to_vec(), expected_window);
+                assert_eq!(*reopened.messages_handle().lock().unwrap(), expected_window);
+                assert_eq!(*reopened.messages_full(), *expected_raw);
+                assert_eq!(reopened.context_epoch(), expected_epoch);
+                assert_eq!(reopened.last_input_tokens(), expected_tokens);
+                reopened.shutdown().await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn restored_session_returns_projection_history_from_the_same_scan() {
         let root = TempDir::new().unwrap();
         let context_id = crate::event::ContextId::now();
@@ -2725,6 +3023,10 @@ mod tests {
         let sid = created.id().to_string();
         let unscoped = created.sink().clone();
         let scoped = unscoped.clone().with_context(context_id.clone());
+        scoped.emit(Event::ContextCreated {
+            base: None,
+            inheritance: crate::event::ContextInheritance::Full,
+        });
         let sources = [&unscoped, &scoped, &unscoped];
         let emitted = sources.map(|sink| {
             let turn_id = crate::event::TurnId::now();
@@ -2748,9 +3050,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(crate::event_log::reader::parse_attempts(), 3);
-        assert_eq!(restored.events.len(), 3);
-        for (restored, original) in restored.events.iter().zip(&emitted) {
+        assert_eq!(crate::event_log::reader::parse_attempts(), 4);
+        assert_eq!(restored.events.len(), 4);
+        for (restored, original) in restored.events.iter().skip(1).zip(&emitted) {
             assert_eq!(restored.seq, original.seq);
             assert_eq!(restored.ts, original.ts);
             assert_eq!(restored.context_id, original.context_id);
@@ -3638,7 +3940,7 @@ mod tests {
             r#"{"type":"llm_call","seq":3,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":200,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:01Z"}"#,
         ];
         write_events(dir.path(), &events);
-        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl")).unwrap();
         assert_eq!(snap.model, "anthropic/claude-4");
         assert_eq!(snap.provider, "anthropic");
         assert_eq!(snap.tokens_in, 310);
@@ -3655,7 +3957,7 @@ mod tests {
             r#"{"type":"llm_call","seq":2,"model":"gpt-4o-mini","provider":"openai","usage":{"input":200,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":null,"ts":"2026-07-08T00:00:01Z"}"#,
         ];
         write_events(dir.path(), &events);
-        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl")).unwrap();
         assert_eq!(snap.model, "zhipuai/glm-5.2");
         assert_eq!(snap.tokens_in, 100);
         assert_eq!(snap.tokens_out, 50);
@@ -3670,7 +3972,7 @@ mod tests {
             r#"{"type":"llm_call","seq":2,"model":"helper-model","provider":"helper-provider","context_call_purpose":"extraction","context_call_identity":{"scope":"detached"},"usage":{"input":1000,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":null,"ts":"2026-07-08T00:00:01Z"}"#,
         ];
         write_events(dir.path(), &events);
-        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl")).unwrap();
 
         assert_eq!(snap.model, "primary-model");
         assert_eq!(snap.provider, "primary-provider");
