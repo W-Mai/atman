@@ -335,6 +335,21 @@ impl SessionActorHandle {
         .await?
     }
 
+    pub async fn admit_run(
+        &self,
+        run: LiveRun,
+        admission: RunAdmission,
+        user_message: atman_runtime::message::Message,
+    ) -> Result<Arc<atman_runtime::context_state::ContextState>> {
+        request(&self.tx, |reply| Command::AdmitRun {
+            run,
+            admission,
+            user_message,
+            reply,
+        })
+        .await?
+    }
+
     pub fn runtime_session(&self) -> Arc<atman_runtime::Session> {
         self.session.clone()
     }
@@ -611,6 +626,12 @@ enum Command {
         admission: RunAdmission,
         reply: oneshot::Sender<Result<()>>,
     },
+    AdmitRun {
+        run: LiveRun,
+        admission: RunAdmission,
+        user_message: atman_runtime::message::Message,
+        reply: oneshot::Sender<Result<Arc<atman_runtime::context_state::ContextState>>>,
+    },
     FinishRun {
         run_id: FlowRunId,
     },
@@ -850,6 +871,35 @@ impl SessionActor {
         }
     }
 
+    fn validate_run_admission(&self, run: &LiveRun, admission: RunAdmission) -> Result<()> {
+        anyhow::ensure!(
+            !self.runs.contains_key(&run.run_id),
+            "run {} is already registered",
+            run.run_id
+        );
+        anyhow::ensure!(
+            admission != RunAdmission::IdleSession || self.runs.is_empty(),
+            "session {} already has an active root run",
+            self.session_id
+        );
+        Ok(())
+    }
+
+    fn register_live_run(&mut self, run: LiveRun) {
+        let delta = self.projection.register_run(
+            run.run_id.clone(),
+            run.turn_id.clone(),
+            run.flow_name.clone(),
+            run.started_at,
+        );
+        self.runs.insert(run.run_id.clone(), run);
+        if let Some(delta) = delta {
+            self.publish_projection_delta(delta);
+        } else {
+            self.publish();
+        }
+    }
+
     fn handle_command(&mut self, command: Command) {
         match command {
             Command::AddRun {
@@ -857,28 +907,35 @@ impl SessionActor {
                 admission,
                 reply,
             } => {
-                let result = if self.runs.contains_key(&run.run_id) {
-                    Err(anyhow::anyhow!("run {} is already registered", run.run_id))
-                } else if admission == RunAdmission::IdleSession && !self.runs.is_empty() {
-                    Err(anyhow::anyhow!(
-                        "session {} already has an active root run",
-                        self.session_id
-                    ))
-                } else {
-                    let delta = self.projection.register_run(
-                        run.run_id.clone(),
-                        run.turn_id.clone(),
-                        run.flow_name.clone(),
-                        run.started_at,
-                    );
-                    self.runs.insert(run.run_id.clone(), run);
-                    if let Some(delta) = delta {
-                        self.publish_projection_delta(delta);
-                    } else {
-                        self.publish();
+                let result = self.validate_run_admission(&run, admission).map(|()| {
+                    self.register_live_run(run);
+                });
+                let _ = reply.send(result);
+            }
+            Command::AdmitRun {
+                run,
+                admission,
+                user_message,
+                reply,
+            } => {
+                let result = self.validate_run_admission(&run, admission).and_then(|()| {
+                    let context = self
+                        .session
+                        .admit_turn_with_cancel(user_message, run.cancel.clone())?;
+                    let target_seq = context
+                        .event_sink()
+                        .expect("admitted context has a journal")
+                        .published_seq();
+                    if let Err(error) = self.catch_up_through(target_seq) {
+                        eprintln!(
+                            "warning: rebuilding session projection after admission for {}: {error:#}",
+                            self.session_id
+                        );
+                        self.catch_up_projection();
                     }
-                    Ok(())
-                };
+                    self.register_live_run(run);
+                    Ok(context)
+                });
                 let _ = reply.send(result);
             }
             Command::FinishRun { run_id } => {

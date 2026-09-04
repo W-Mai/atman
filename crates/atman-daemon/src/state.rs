@@ -276,6 +276,28 @@ impl DaemonState {
         .await
     }
 
+    pub(crate) async fn admit_session_run(
+        &self,
+        id: SessionId,
+        session: std::sync::Arc<atman_runtime::Session>,
+        run: LiveRun,
+        user_message: atman_runtime::message::Message,
+        owner_principal: impl Into<String>,
+        admission: RunAdmission,
+    ) -> Result<std::sync::Arc<atman_runtime::context_state::ContextState>> {
+        let owner_principal = owner_principal.into();
+        self.register_session(id.clone(), session.clone(), owner_principal.clone())
+            .await?;
+        let actor = self
+            .authorized_actor(&id, &owner_principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?;
+        anyhow::ensure!(
+            actor.owns_session(&session),
+            "session {id} is already registered with another runtime"
+        );
+        actor.lease()?.admit_run(run, admission, user_message).await
+    }
+
     async fn register_session_with_runs(
         &self,
         id: SessionId,
@@ -1308,6 +1330,16 @@ mod tests {
     use super::*;
     use crate::projection::SessionProjector;
 
+    fn live_run(flow_name: &str) -> LiveRun {
+        LiveRun {
+            run_id: FlowRunId(uuid::Uuid::now_v7()),
+            turn_id: atman_runtime::event::TurnId::now(),
+            flow_name: flow_name.into(),
+            cancel: CancellationToken::new(),
+            started_at: chrono::Utc::now(),
+        }
+    }
+
     #[test]
     fn deletion_blocks_every_non_terminal_resource_state() {
         for state in [
@@ -1328,6 +1360,62 @@ mod tests {
         ] {
             assert!(!resource_blocks_session_deletion(state));
         }
+    }
+
+    #[tokio::test]
+    async fn actor_admission_selects_the_head_before_registering_the_run() {
+        let state = DaemonState::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        let first = live_run("first");
+        let first_turn = first.turn_id.clone();
+        let context = state
+            .admit_session_run(
+                session_id.clone(),
+                session.clone(),
+                first,
+                atman_runtime::message::Message::user_text(first_turn, "accepted"),
+                "owner",
+                RunAdmission::IdleSession,
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&context, &session.context()));
+        assert_eq!(session.messages()[0].text_concat(), "accepted");
+        assert!(state.has_live_runs(&session_id));
+
+        let selected_head = context.context_id().cloned();
+        let rejected = live_run("second");
+        let rejected_turn = rejected.turn_id.clone();
+        let error = match state
+            .admit_session_run(
+                session_id.clone(),
+                session.clone(),
+                rejected,
+                atman_runtime::message::Message::user_text(rejected_turn, "rejected"),
+                "owner",
+                RunAdmission::IdleSession,
+            )
+            .await
+        {
+            Ok(_) => panic!("idle admission must reject a second active run"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("already has an active root run"));
+        assert_eq!(session.context().context_id(), selected_head.as_ref());
+        assert_eq!(session.messages().len(), 1);
+        assert_eq!(
+            session
+                .sink()
+                .snapshot_envelopes()
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    atman_runtime::event::Event::ContextHeadSelected { .. }
+                ))
+                .count(),
+            1
+        );
     }
 
     #[cfg(unix)]

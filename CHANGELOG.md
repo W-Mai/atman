@@ -55,6 +55,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Durable run admission** — daemon run acceptance records the user message and selected context head before executor bootstrap. Each invocation keeps that captured history owner through provider work, rejected idle-session starts leave the head unchanged, and bootstrap failures publish a terminal run fact.
+
 - **Attachment sanitizer replay** — session sanitization applies existing attachment patches before checking raw history and materialized windows, repairs checkpoint-only images by stable part identity, preserves root and child context ownership, and produces no duplicate repair events on repeated runs.
 
 - **Projection snapshot serialization** — workflow permission requests use ordered entry-list encoding instead of treating structured request identities as JSON object keys. Snapshot loading rejects duplicate identities and restores the same projection as a complete event replay.

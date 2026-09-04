@@ -125,6 +125,104 @@ fn prepare_run_images(
         .map_err(Into::into)
 }
 
+fn prepare_flow(
+    path: &Path,
+    config_dir: Option<&Path>,
+    prepared: Option<PreparedFlow>,
+) -> Result<PreparedFlow> {
+    if path_is_managed_agent_at(path, config_dir)
+        && let Some(dir) = config_dir
+    {
+        atman_runtime::templates::ensure_managed_agent_at(dir)?;
+    }
+    std::fs::metadata(path).with_context(|| format!("stat flow {}", path.display()))?;
+    let prepared = match prepared {
+        Some(prepared) => prepared,
+        None => {
+            let source = std::fs::read_to_string(path)
+                .with_context(|| format!("reading flow {}", path.display()))?;
+            let file = atman_dsl::parse::parse_file(&source)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let flow_name = file
+                .flows
+                .first()
+                .map(|flow| flow.name.name.clone())
+                .ok_or_else(|| anyhow::anyhow!("{} contains no flows", path.display()))?;
+            PreparedFlow { file, flow_name }
+        }
+    };
+    anyhow::ensure!(
+        prepared
+            .file
+            .flows
+            .iter()
+            .any(|flow| flow.name.name == prepared.flow_name),
+        "flow `{}` not found in {}",
+        prepared.flow_name,
+        path.display()
+    );
+    Ok(prepared)
+}
+
+fn prepare_user_message(
+    turn_id: atman_runtime::event::TurnId,
+    flow_name: &str,
+    args: &[(String, atman_runtime::Value)],
+    turn: Option<RunTurn>,
+    images: Vec<atman_runtime::message::ImageSource>,
+) -> atman_runtime::message::Message {
+    let (text, origin) = turn.map_or_else(
+        || {
+            let text = if args.is_empty() {
+                flow_name.to_owned()
+            } else {
+                args.iter()
+                    .map(|(key, value)| format!("{key}={}", render_value(value)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            (text, atman_runtime::message::MessageOrigin::User)
+        },
+        |turn| (turn.text, turn.origin),
+    );
+    let mut parts = images
+        .into_iter()
+        .map(|source| atman_runtime::message::MessagePart::Image { source, id: None })
+        .collect::<Vec<_>>();
+    parts.push(atman_runtime::message::MessagePart::Text { text });
+    atman_runtime::message::Message {
+        role: atman_runtime::message::MessageRole::User,
+        parts,
+        turn_id,
+        origin,
+    }
+}
+
+fn emit_pre_execution_failure(
+    session: &atman_runtime::Session,
+    context: &atman_runtime::context_state::ContextState,
+    run_id: &RuntimeRunId,
+    flow_name: &str,
+    error: &anyhow::Error,
+) {
+    if let Some(sink) = context.event_sink() {
+        sink.emit(atman_runtime::event::Event::FlowEnd {
+            run_id: run_id.clone(),
+            flow_name: flow_name.to_owned(),
+            status: atman_runtime::event::FlowStatus::errored(error.to_string()),
+        });
+    }
+    let _ = session
+        .stream_tx()
+        .send(atman_runtime::stream::StreamFrame::FlowDone {
+            run_id: run_id.to_string(),
+            flow_name: flow_name.to_owned(),
+            ok: false,
+            cancelled: false,
+            suicide: false,
+        });
+}
+
 struct RegistryCleanup {
     state: Arc<DaemonState>,
     session_id: ProtoSessionId,
@@ -581,13 +679,13 @@ impl RunLauncher {
         require_idle: bool,
     ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
-        std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
         let RunOptions {
             reasoning,
             images,
             prepared_flow,
             turn,
         } = options;
+        let prepared_flow = prepare_flow(&path, self.config_dir.as_deref(), prepared_flow)?;
         let invocation_env = invocation_env_from_reasoning(reasoning)?;
 
         reload_model_config(self.config_dir.as_deref());
@@ -602,43 +700,41 @@ impl RunLauncher {
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
         let turn_id = atman_runtime::event::TurnId::now();
-        let flow_name = prepared_flow
-            .as_ref()
-            .map(|prepared| prepared.flow_name.clone())
-            .unwrap_or_default();
+        let flow_name = prepared_flow.flow_name.clone();
+        let user_message = prepare_user_message(turn_id.clone(), &flow_name, &args, turn, images);
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let live_run = LiveRun {
             run_id: run_id_proto.clone(),
             turn_id: turn_id.clone(),
-            flow_name,
+            flow_name: flow_name.clone(),
             cancel: cancel.clone(),
             started_at: chrono::Utc::now(),
         };
-        if require_idle {
-            state
-                .register_session_root_run(
-                    sid_proto.clone(),
-                    session.clone(),
-                    live_run,
-                    owner_principal,
-                )
-                .await?;
+        let admission = if require_idle {
+            crate::session_actor::RunAdmission::IdleSession
         } else {
-            state
-                .register_session_run(
-                    sid_proto.clone(),
-                    session.clone(),
-                    live_run,
-                    owner_principal,
-                )
-                .await?;
-        }
+            crate::session_actor::RunAdmission::Concurrent
+        };
+        let context = state
+            .admit_session_run(
+                sid_proto.clone(),
+                session.clone(),
+                live_run,
+                user_message,
+                owner_principal,
+                admission,
+            )
+            .await?;
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
         let sid_for_task = sid_proto.clone();
         let run_id_for_task = run_id_proto.clone();
+        let flow_name_for_task = flow_name.clone();
+        let context_for_task = context.clone();
+        let run_id_runtime_for_task = run_id_runtime.clone();
+        let session_for_task = session.clone();
 
         let spawn_result = spawn_with_provider_lifecycle(
             std::thread::Builder::new().name(format!("atman-run-{}", sid_proto)),
@@ -655,17 +751,25 @@ impl RunLauncher {
                 {
                     Ok(rt) => rt,
                     Err(error) => {
-                        atman_runtime::notify!(error, "build flow runtime failed: {error:#}");
+                        let error = anyhow::Error::from(error).context("build flow runtime");
+                        emit_pre_execution_failure(
+                            &session_for_task,
+                            &context_for_task,
+                            &run_id_runtime_for_task,
+                            &flow_name_for_task,
+                            &error,
+                        );
+                        atman_runtime::notify!(error, "flow run failed: {error:#}");
                         return;
                     }
                 };
                 let state_for_run = state_for_task.clone();
                 rt.block_on(async move {
                     if let Err(e) = run_flow_inner(
-                        session.clone(),
+                        session_for_task.clone(),
                         &path,
                         args,
-                        run_id_runtime,
+                        run_id_runtime_for_task.clone(),
                         turn_id,
                         project_root,
                         scope_root,
@@ -675,21 +779,29 @@ impl RunLauncher {
                         provider_catalog_refresh,
                         invocation_env,
                         prepared_flow,
-                        turn,
-                        images,
+                        context_for_task.clone(),
                         cancel,
                     )
                     .await
                     {
+                        emit_pre_execution_failure(
+                            &session_for_task,
+                            &context_for_task,
+                            &run_id_runtime_for_task,
+                            &flow_name_for_task,
+                            &e,
+                        );
                         atman_runtime::notify!(error, "flow run failed: {e:#}");
                     }
-                    session.flush_writer().await;
+                    session_for_task.flush_writer().await;
                 });
             },
         );
         if let Err(error) = spawn_result {
+            let error = anyhow::Error::from(error).context("spawn run thread");
+            emit_pre_execution_failure(&session, &context, &run_id_runtime, &flow_name, &error);
             state.finish_run(&sid_proto, &run_id_proto);
-            return Err(error).context("spawn run thread");
+            return Err(error);
         }
 
         Ok(SpawnedRun {
@@ -713,30 +825,14 @@ async fn run_flow_inner(
     daemon_state: Option<Arc<crate::DaemonState>>,
     provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
     invocation_env: atman_runtime::InvocationEnv,
-    prepared_flow: Option<PreparedFlow>,
-    turn: Option<RunTurn>,
-    images: Vec<atman_runtime::message::ImageSource>,
+    prepared_flow: PreparedFlow,
+    context: Arc<atman_runtime::context_state::ContextState>,
     flow_cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    if path_is_managed_agent_at(path, config_dir.as_deref()) {
-        if let Some(dir) = &config_dir {
-            atman_runtime::templates::ensure_managed_agent_at(dir)?;
-        }
-    }
-    let (parsed, requested_flow) = match prepared_flow {
-        Some(prepared) => (prepared.file, Some(prepared.flow_name)),
-        None => {
-            let source = std::fs::read_to_string(path)
-                .with_context(|| format!("reading flow {}", path.display()))?;
-            let parsed = atman_dsl::parse::parse_file(&source)
-                .with_context(|| format!("parsing {}", path.display()))?;
-            (parsed, None)
-        }
-    };
-    if parsed.flows.is_empty() {
-        anyhow::bail!("{} contains no flows", path.display());
-    }
-    let flow_name = requested_flow.unwrap_or_else(|| parsed.flows[0].name.name.clone());
+    let PreparedFlow {
+        file: parsed,
+        flow_name,
+    } = prepared_flow;
 
     let workspace_generation = daemon_state
         .as_ref()
@@ -809,37 +905,6 @@ async fn run_flow_inner(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
         .await;
 
-    let (user_text, origin) = turn.map_or_else(
-        || {
-            let text = if args.is_empty() {
-                flow_name.clone()
-            } else {
-                args.iter()
-                    .map(|(key, value)| format!("{key}={}", render_value(value)))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            };
-            (text, atman_runtime::message::MessageOrigin::User)
-        },
-        |turn| (turn.text, turn.origin),
-    );
-    let mut parts: Vec<atman_runtime::message::MessagePart> = images
-        .into_iter()
-        .map(|source| atman_runtime::message::MessagePart::Image { source, id: None })
-        .collect();
-    parts.push(atman_runtime::message::MessagePart::Text {
-        text: user_text.clone(),
-    });
-    let user_msg = atman_runtime::message::Message {
-        role: atman_runtime::message::MessageRole::User,
-        parts,
-        turn_id: turn_id.clone(),
-        origin,
-    };
-    {
-        let _compact_guard = session.acquire_compact_lock().await;
-        session.begin_turn_with_cancel(user_msg, flow_cancel.clone());
-    }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
         .await;
@@ -851,7 +916,7 @@ async fn run_flow_inner(
             atman_runtime::RootInvocation {
                 turn_id: Some(turn_id.clone()),
                 session: Some(session.clone()),
-                context: None,
+                context: Some(context),
                 first_run_id: Some(run_id),
                 flow_cancel: Some(flow_cancel),
                 env: invocation_env,
@@ -1343,6 +1408,24 @@ mod tests {
                 .parts
                 .iter()
                 .filter(|part| matches!(part, atman_runtime::message::MessagePart::Image { .. }))
+                .count(),
+            1
+        );
+        let events = session.sink().snapshot_envelopes();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, atman_runtime::event::Event::UserMsg { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    atman_runtime::event::Event::ContextHeadSelected { .. }
+                ))
                 .count(),
             1
         );

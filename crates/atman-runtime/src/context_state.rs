@@ -94,8 +94,13 @@ impl ContextState {
         self.sink().and_then(crate::event::EventSink::context_id)
     }
 
-    pub(crate) fn sink(&self) -> Option<&crate::event::EventSink> {
+    /// Returns the journal sink carrying this context's identity.
+    pub fn event_sink(&self) -> Option<&crate::event::EventSink> {
         self.sink.as_ref()
+    }
+
+    pub(crate) fn sink(&self) -> Option<&crate::event::EventSink> {
+        self.event_sink()
     }
 
     pub fn messages(&self) -> MessageWindow {
