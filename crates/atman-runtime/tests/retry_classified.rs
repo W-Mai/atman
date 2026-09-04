@@ -319,16 +319,28 @@ fn attachment_failures_are_bound_to_the_request_and_context_owner() {
                 assert_eq!(session.messages().as_ref(), original.as_slice());
             }
             let events = session.sink().snapshot_envelopes();
+            let calls: Vec<_> = events
+                .iter()
+                .filter(|envelope| matches!(envelope.event, Event::LlmCall { .. }))
+                .collect();
+            assert_eq!(calls.len(), provider.call_count());
+            assert!(
+                calls
+                    .iter()
+                    .all(|envelope| envelope.context_id == context_id)
+            );
             assert!(trace.snapshot().iter().all(|event| {
                 event.context_message().is_none()
                     && !matches!(event, Event::AttachmentDegraded { .. })
             }));
             if owner_kind.ends_with("-traced") {
-                assert!(
+                assert_eq!(
                     trace
                         .snapshot()
                         .iter()
-                        .any(|event| matches!(event, Event::LlmCall { .. }))
+                        .filter(|event| matches!(event, Event::LlmCall { .. }))
+                        .count(),
+                    provider.call_count(),
                 );
             }
             let patches: Vec<_> = events

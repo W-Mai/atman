@@ -274,8 +274,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             Err(error) => {
                 let error =
                     RuntimeError::ToolFailed(format!("model `{model}` reasoning config: {error}"));
-                if let Some(sink) = ctx.events.as_ref() {
-                    sink.emit(crate::event::Event::LlmCall {
+                emit_llm_call(
+                    ctx,
+                    crate::event::Event::LlmCall {
                         model: model.clone(),
                         provider: provider.name().to_string(),
                         context_plan_id: None,
@@ -297,8 +298,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         },
                         run_id: ctx.flow_run_id.clone(),
                         node_id: ctx.current_node_id.clone(),
-                    });
-                }
+                    },
+                );
                 send_llm_diagnostic(
                     ctx,
                     crate::notify::NotifyLevel::Error,
@@ -503,8 +504,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ),
                 Err(_) => (None, None),
             };
-            if let Some(sink) = ctx.events.as_ref() {
-                sink.emit(crate::event::Event::LlmCall {
+            emit_llm_call(
+                ctx,
+                crate::event::Event::LlmCall {
                     model: model.clone(),
                     provider: provider.name().to_string(),
                     context_plan_id: Some(context_plan_id.clone()),
@@ -522,8 +524,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     status,
                     run_id: ctx.flow_run_id.clone(),
                     node_id: ctx.current_node_id.clone(),
-                });
-            }
+                },
+            );
             if let Some(tx) = stream_tx.as_ref() {
                 let _ = tx.send(crate::stream::StreamFrame::LlmCallStats {
                     model: model.clone(),
@@ -896,6 +898,20 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         format!("LLM call failed: {error}"),
     );
     Value::Err(error)
+}
+
+fn emit_llm_call(ctx: &ToolCtx, event: crate::event::Event) {
+    let owner = ctx.context_sink();
+    if let Some(sink) = owner {
+        sink.emit(event.clone());
+    }
+    if let Some(diagnostics) = ctx.events.as_ref()
+        && owner.is_none_or(|sink| {
+            !std::sync::Arc::ptr_eq(&sink.events_handle(), &diagnostics.events_handle())
+        })
+    {
+        diagnostics.emit(event);
+    }
 }
 
 fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::ContextCompactResult) {

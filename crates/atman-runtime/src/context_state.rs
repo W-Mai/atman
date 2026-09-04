@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn execution_paths_preserve_the_bound_context() {
-        use crate::event::{FlowRunId, TurnId};
+        use crate::event::{ContextId, ContextInheritance, Event, EventSink, FlowRunId, TurnId};
         use crate::provider::{AssistantMessage, LlmRequest, Provider};
         use crate::tool::{BoxFut, ContextOwner, ToolCtx};
         use crate::value::Value;
@@ -969,13 +969,27 @@ mod tests {
         for detached in [false, true] {
             for watched in [false, true] {
                 for inline in [false, true] {
+                  for diagnostics in ["absent", "shared", "independent"] {
                     let session = Arc::new(crate::Session::open_ephemeral());
                     let turn = TurnId::now();
                     session.begin_turn(Message::user_text(turn.clone(), "unselected head"));
-                    let selected = Arc::new(ContextState::new(vec![Message::user_text(
+                    let context_id = ContextId::now();
+                    let sink = session.sink().clone().with_context(context_id.clone());
+                    sink.emit(Event::ContextCreated {
+                        base: None,
+                        inheritance: ContextInheritance::Full,
+                    });
+                    let initial = Message::user_text(
                         turn.clone(),
                         "selected history",
-                    )], Some(session.sink().clone())));
+                    );
+                    sink.emit(Event::UserMsg {
+                        turn_id: turn.clone(),
+                        flow_run_id: None,
+                        message: initial.clone(),
+                    });
+                    let selected = Arc::new(ContextState::new(vec![initial], Some(sink)));
+                    let trace = EventSink::new();
                     let run_id = FlowRunId::now();
                     let identity = session
                         .flow_registry
@@ -1007,6 +1021,11 @@ mod tests {
                     }
                     tool_ctx.flow_identity = Some(identity);
                     tool_ctx.flow_run_id = Some(run_id.clone());
+                    tool_ctx.events = match diagnostics {
+                        "absent" => None,
+                        "shared" => Some(session.sink().clone()),
+                        _ => Some(trace.clone()),
+                    };
                     let tools = crate::tool::ToolRegistry::new();
                     crate::tools::register_tier_zero(&tools);
                     tools.register(Arc::new(crate::tools::memory::MemoryRecentTurns));
@@ -1084,6 +1103,21 @@ mod tests {
                         ]
                     );
                     assert_eq!(session.messages_handle().lock().unwrap().len(), 1);
+                    assert_eq!(session.messages().len(), 1);
+                    let events = session.sink().snapshot_envelopes();
+                    let calls: Vec<_> = events.iter().filter(|envelope| {
+                        matches!(envelope.event, Event::LlmCall { .. })
+                    }).collect();
+                    assert_eq!(calls.len(), 1, "{diagnostics}/{watched}/{inline}");
+                    assert_eq!(calls[0].context_id, Some(context_id));
+                    let traced_calls: Vec<_> = trace.snapshot().into_iter().filter(|event| {
+                        matches!(event, Event::LlmCall { .. })
+                    }).collect();
+                    assert_eq!(traced_calls.len(), usize::from(diagnostics == "independent"));
+                    if let Some(traced) = traced_calls.first() {
+                        assert_eq!(serde_json::to_value(traced).unwrap(),
+                            serde_json::to_value(&calls[0].event).unwrap());
+                    }
                     assert!(
                         selected.compaction.model_window_tokens.load(
                             std::sync::atomic::Ordering::Relaxed,
@@ -1121,6 +1155,7 @@ mod tests {
                             .collect::<Vec<_>>()
                     );
                     session.end_turn(&turn);
+                  }
                 }
             }
         }

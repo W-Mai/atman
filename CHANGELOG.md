@@ -43,6 +43,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **LLM call journals** — successful, failed, and retried calls publish usage through their context's canonical journal even without execution diagnostics. Independent diagnostic traces receive a copy; a shared journal receives one scoped event.
 - **Compaction scheduling ownership** — automatic scheduling, manual requests, and overflow retries retain the selected message context through locking, summarization, and checkpoint publication. Default-window statistics and streaming panels are not replaced by another context's compaction.
 - **Message-view scope isolation** — unscoped session history no longer consumes messages, checkpoints, or attachment patches from typed contexts. Live and restored default windows preserve their own history while selected context replay retains inherited messages and branch-local changes.
 - **Canonical context journals** — context owners retain their history event sink independently of tool diagnostics. Captured steering and attachment patches publish through that owner, preserving context scope during live updates and replay even when the control queue or diagnostic sink uses another scope.
