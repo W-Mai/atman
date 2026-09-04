@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Attachment error identities** — `RuntimeError::AttachmentError` includes an optional `part_id`, and `attachment_store::image_base64` accepts the current image part identity. Local encoding failures retain that identity; unlocated remote and import errors leave it unset.
 - **Image part identities** — `MessagePart::Image` includes an optional `MessagePartId`. Context insertion assigns missing identities; persisted legacy images remain readable.
 - **Isolated compaction commits** — `maybe_auto_compact_handle_locked` requires a synchronous commit callback, invoked after snapshot validation while the message lock is held.
 - **Runtime context ownership** — `ToolCtx::with_context` and `with_session_runtime` bind a complete context owner instead of independent message and lock handles. `Session::context` and `FlowEntry::context` expose the shared state; `ToolCtx::session_runtime()` returns a session only for a session-bound owner.

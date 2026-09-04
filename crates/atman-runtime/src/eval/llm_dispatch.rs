@@ -260,6 +260,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         return Value::Err(RuntimeError::AttachmentError {
             reason: format!("model `{model}` does not advertise image input support"),
+            part_id: None,
         });
     }
     let requested_reasoning = args

@@ -27,7 +27,10 @@ pub enum RuntimeError {
     Redirect(String),
 
     #[error("attachment error: {reason}")]
-    AttachmentError { reason: String },
+    AttachmentError {
+        reason: String,
+        part_id: Option<crate::message::MessagePartId>,
+    },
 
     #[error("thinking signature missing")]
     ThinkingSignatureMissing,

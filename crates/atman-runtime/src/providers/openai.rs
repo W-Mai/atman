@@ -292,8 +292,8 @@ fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError
                 text: summary.clone(),
             }),
             MessagePart::Text { text } => out.push(ChatPart::Text { text: text.clone() }),
-            MessagePart::Image { source, .. } => {
-                let data = crate::attachment_store::image_base64(source)?;
+            MessagePart::Image { source, id } => {
+                let data = crate::attachment_store::image_base64(source, *id)?;
                 let url = format!("data:{};base64,{}", source.media_type, data);
                 out.push(ChatPart::ImageUrl {
                     image_url: ImageUrl {
@@ -416,7 +416,10 @@ impl Provider for OpenAiProvider {
             } else {
                 let body_text = resp.text().await.unwrap_or_default();
                 if let Some(reason) = classify_attachment_error(status.as_u16(), &body_text) {
-                    return Err(RuntimeError::AttachmentError { reason });
+                    return Err(RuntimeError::AttachmentError {
+                        reason,
+                        part_id: None,
+                    });
                 }
                 return Err(RuntimeError::ToolFailed(format!(
                     "openai http {status}: {body_text}"
@@ -450,7 +453,10 @@ impl Provider for OpenAiProvider {
                 if !status.is_success() {
                     let body = resp.text().await.unwrap_or_default();
                     if let Some(reason) = classify_attachment_error(status.as_u16(), &body) {
-                        return Err(RuntimeError::AttachmentError { reason });
+                        return Err(RuntimeError::AttachmentError {
+                            reason,
+                            part_id: None,
+                        });
                     }
                     return Err(RuntimeError::ToolFailed(format!(
                         "openai http {status}: {body}"

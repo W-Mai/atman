@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 
 use crate::error::RuntimeError;
-use crate::message::{ImageData, ImageSource};
+use crate::message::{ImageData, ImageSource, MessagePartId};
 
 const ATTACHMENTS_DIR: &str = "attachments";
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -27,6 +27,7 @@ impl AttachmentStore {
     pub fn import_path(&self, path: impl AsRef<Path>) -> Result<ImageSource, RuntimeError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|error| RuntimeError::AttachmentError {
+            part_id: None,
             reason: format!("cannot read {}: {error}", path.display()),
         })?;
         self.import_bytes(&bytes, path.file_name().and_then(|name| name.to_str()))
@@ -41,6 +42,7 @@ impl AttachmentStore {
             .decode(data)
             .map_err(|error| RuntimeError::AttachmentError {
                 reason: format!("invalid base64 image: {error}"),
+                part_id: None,
             })?;
         self.import_bytes(&bytes, name)
     }
@@ -65,6 +67,7 @@ impl AttachmentStore {
         let path = self.root.join(format!("{id}.{extension}"));
         if !path.is_file() {
             std::fs::create_dir_all(&self.root).map_err(|error| RuntimeError::AttachmentError {
+                part_id: None,
                 reason: format!("cannot create attachment store: {error}"),
             })?;
             let temp_path = self
@@ -84,6 +87,7 @@ impl AttachmentStore {
                 if !path.is_file() {
                     return Err(RuntimeError::AttachmentError {
                         reason: format!("cannot persist attachment: {error}"),
+                        part_id: None,
                     });
                 }
             }
@@ -106,16 +110,19 @@ pub fn image_bytes(source: &ImageSource) -> Result<Vec<u8>, RuntimeError> {
             .decode(data)
             .map_err(|error| RuntimeError::AttachmentError {
                 reason: format!("invalid base64 image: {error}"),
+                part_id: None,
             })?,
         ImageData::Path { path } | ImageData::Artifact { path, .. } => std::fs::read(path)
             .map_err(|error| RuntimeError::AttachmentError {
                 reason: format!("cannot read {}: {error}", path.display()),
+                part_id: None,
             })?,
     };
     validate_size(&bytes)?;
     let (actual_media_type, _) = detect_image_type(&bytes)?;
     if source.media_type != actual_media_type {
         return Err(RuntimeError::AttachmentError {
+            part_id: None,
             reason: format!(
                 "image media type mismatch: declared {}, detected {actual_media_type}",
                 source.media_type
@@ -127,18 +134,27 @@ pub fn image_bytes(source: &ImageSource) -> Result<Vec<u8>, RuntimeError> {
         if actual_id != *id {
             return Err(RuntimeError::AttachmentError {
                 reason: format!("attachment integrity check failed for {id}"),
+                part_id: None,
             });
         }
     }
     Ok(bytes)
 }
 
-pub fn image_base64(source: &ImageSource) -> Result<String, RuntimeError> {
+pub fn image_base64(
+    source: &ImageSource,
+    part_id: Option<MessagePartId>,
+) -> Result<String, RuntimeError> {
+    let bytes = image_bytes(source).map_err(|error| match error {
+        RuntimeError::AttachmentError { reason, .. } => {
+            RuntimeError::AttachmentError { reason, part_id }
+        }
+        error => error,
+    })?;
     if let ImageData::Base64 { data } = &source.data {
-        image_bytes(source)?;
         return Ok(data.clone());
     }
-    Ok(base64::engine::general_purpose::STANDARD.encode(image_bytes(source)?))
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 pub fn display_name(source: &ImageSource) -> String {
@@ -157,10 +173,12 @@ fn validate_size(bytes: &[u8]) -> Result<(), RuntimeError> {
     if bytes.is_empty() {
         return Err(RuntimeError::AttachmentError {
             reason: "image is empty".into(),
+            part_id: None,
         });
     }
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(RuntimeError::AttachmentError {
+            part_id: None,
             reason: format!(
                 "image is too large: {} bytes exceeds the {} byte limit",
                 bytes.len(),
@@ -185,6 +203,7 @@ fn detect_image_type(bytes: &[u8]) -> Result<(&'static str, &'static str), Runti
     };
     detected.ok_or_else(|| RuntimeError::AttachmentError {
         reason: "unsupported image format; expected PNG, JPEG, GIF, or WebP".into(),
+        part_id: None,
     })
 }
 

@@ -284,6 +284,8 @@ This is retrieval before the main loop plus full active-session context inside t
 
 Provider attachment errors require an HTTP 400/413 response with explicit image or attachment evidence. Generic unsupported parameters, request-size errors without that evidence, authentication failures, rate limits, and server errors do not trigger attachment degradation.
 
+Local image encoding errors carry the failing `MessagePartId` when the caller supplied one. Import failures and remote errors without a concrete image location leave `part_id` unset. The identity is diagnostic metadata, not part of the provider request or the displayed error text.
+
 ## Implementation references
 
 - `crates/atman-runtime/src/context_state.rs` — message views, compaction locks, checkpoint epochs, usage, and prefix observations

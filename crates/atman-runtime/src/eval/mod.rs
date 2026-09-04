@@ -1099,7 +1099,9 @@ pub(super) async fn call_and_maybe_stream(
     };
     if let (
         Some(sess),
-        Err(crate::streaming::StreamFailure::Error(RuntimeError::AttachmentError { reason })),
+        Err(crate::streaming::StreamFailure::Error(RuntimeError::AttachmentError {
+            reason, ..
+        })),
     ) = (stream_ctx.session, &result)
     {
         let count = sess.record_attachment_degrade(reason);

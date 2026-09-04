@@ -486,7 +486,7 @@ async fn cmd_daemon_run(
                 .import_path(&path)
                 .with_context(|| format!("reading image {}", path.display()))?;
             Ok(atman_proto::InlineImage {
-                data_base64: atman_runtime::attachment_store::image_base64(&source)?,
+                data_base64: atman_runtime::attachment_store::image_base64(&source, None)?,
                 name: path
                     .file_name()
                     .and_then(|name| name.to_str())

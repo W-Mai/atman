@@ -95,7 +95,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn providers_share_attachment_error_classification_across_call_modes() {
+    async fn providers_preserve_attachment_error_boundaries_across_call_modes() {
         use crate::provider::{LlmRequest, Provider, ReasoningSelection};
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -140,8 +140,12 @@ mod tests {
                     };
                     let error = result.unwrap_err();
                     match (reason, &error) {
-                        (Some(expected), crate::RuntimeError::AttachmentError { reason }) => {
-                            assert_eq!(reason, expected)
+                        (
+                            Some(expected),
+                            crate::RuntimeError::AttachmentError { reason, part_id },
+                        ) => {
+                            assert_eq!(reason, expected);
+                            assert_eq!(*part_id, None);
                         }
                         (None, crate::RuntimeError::ToolFailed(message)) => {
                             assert!(message.contains(&status.to_string()))
@@ -155,5 +159,75 @@ mod tests {
             }
             drop(mock);
         }
+
+        use crate::message::{ImageData, ImageSource, MessagePart, MessagePartId};
+        let tmp = tempfile::tempdir().unwrap();
+        let valid = ImageSource {
+            media_type: "image/jpeg".into(),
+            data: ImageData::Base64 {
+                data: "/9j/AA==".into(),
+            },
+            detail: crate::provider::ImageDetail::Auto,
+        };
+        let invalid_sources = [
+            ImageSource {
+                data: ImageData::Base64 {
+                    data: "invalid".into(),
+                },
+                ..valid.clone()
+            },
+            ImageSource {
+                data: ImageData::Base64 {
+                    data: String::new(),
+                },
+                ..valid.clone()
+            },
+            ImageSource {
+                media_type: "image/png".into(),
+                ..valid.clone()
+            },
+            ImageSource {
+                data: ImageData::Path {
+                    path: tmp.path().join("missing.jpg"),
+                },
+                ..valid.clone()
+            },
+        ];
+        server.reset().await;
+        for source in invalid_sources {
+            for id in [None, Some(MessagePartId(uuid::Uuid::now_v7()))] {
+                let mut request = request.clone();
+                request.messages[0].parts.extend([
+                    MessagePart::Image {
+                        source: valid.clone(),
+                        id: Some(MessagePartId(uuid::Uuid::now_v7())),
+                    },
+                    MessagePart::Image {
+                        source: source.clone(),
+                        id,
+                    },
+                ]);
+                for provider in &providers {
+                    for streaming in [false, true] {
+                        let result = if streaming {
+                            provider.call_streaming(request.clone()).output.await
+                        } else {
+                            provider.call(request.clone()).await
+                        };
+                        let error = result.unwrap_err();
+                        assert!(
+                            matches!(&error, crate::RuntimeError::AttachmentError { part_id, .. } if *part_id == id),
+                            "{} streaming={streaming}: {error:?}",
+                            provider.name()
+                        );
+                        assert_eq!(error.kind(), crate::error::ErrorKind::InvalidRequest);
+                        if let Some(id) = id {
+                            assert!(!error.to_string().contains(&id.0.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

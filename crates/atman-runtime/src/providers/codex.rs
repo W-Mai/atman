@@ -298,8 +298,8 @@ fn build_user_content(parts: &[MessagePart]) -> Result<InputContent, RuntimeErro
             MessagePart::Text { text } => {
                 parts_out.push(ResponseInputContent::InputText { text: text.clone() });
             }
-            MessagePart::Image { source, .. } => {
-                let data = crate::attachment_store::image_base64(source)?;
+            MessagePart::Image { source, id } => {
+                let data = crate::attachment_store::image_base64(source, *id)?;
                 parts_out.push(ResponseInputContent::InputImage {
                     image_url: format!("data:{};base64,{}", source.media_type, data),
                     detail: (!matches!(source.detail, crate::provider::ImageDetail::Auto))
@@ -603,7 +603,10 @@ impl Provider for CodexProvider {
                     if let Some(reason) =
                         super::classify_attachment_error(status.as_u16(), &body_text)
                     {
-                        return Err(RuntimeError::AttachmentError { reason });
+                        return Err(RuntimeError::AttachmentError {
+                            reason,
+                            part_id: None,
+                        });
                     }
                     return Err(RuntimeError::ToolFailed(format!(
                         "codex http {status}: {body_text}"
