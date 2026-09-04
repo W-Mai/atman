@@ -46,6 +46,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Pending interaction publication** — form and approval registries publish their latest queue before waking resolved callers. Form events retain registration order, and disconnected clients no longer recover stale pending entries after resolution.
 - **Session head restoration** — reopening a session binds its selected window, raw history, writable handle, usage, and journal to the same context. Other branches and stale state caches cannot replace the restored head's model or window reading. Session appends publish canonical records before live frames.
 - **Failed-request isolation** — isolated prompt and message-list failures do not schedule compaction of managed history. Reasoning configuration failures share canonical call accounting with provider attempts, retaining zero usage and consistent live and restored call counts.
 - **Explicit-request accounting** — bare prompts and explicit message lists contribute to call totals without replacing the managed window's usage or model. LLM events retain this distinction during replay and daemon projection; managed and explicit requests retain separate bounded cache-prefix observations.

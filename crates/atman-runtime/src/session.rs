@@ -345,19 +345,17 @@ impl FormRegistry {
             let _ = tx.send(crate::form::FormSubmission::Rejected);
             return rx;
         }
-        {
-            let mut entries = self.entries.lock().unwrap();
-            entries.push(FormEntry {
-                pending: pending.clone(),
-                responder: tx,
-            });
-        }
+        let mut entries = self.entries.lock().unwrap();
+        entries.push(FormEntry {
+            pending: pending.clone(),
+            responder: tx,
+        });
         if let Some(sink) = &self.event_sink {
             sink.emit(crate::event::Event::FormRequested {
                 form: pending.clone(),
             });
         }
-        self.broadcast_snapshot();
+        self.broadcast_snapshot(&entries);
         rx
     }
 
@@ -379,33 +377,24 @@ impl FormRegistry {
         submission: crate::form::FormSubmission,
         abandoned: bool,
     ) -> Result<Option<FormResolutionCommit>, String> {
-        let entry = {
-            let mut entries = self.entries.lock().unwrap();
-            let pos = entries.iter().position(|e| e.pending.form_id == form_id);
-            match pos {
-                Some(pos) => {
-                    entries[pos].pending.form.validate_submission(&submission)?;
-                    Some(entries.remove(pos))
-                }
-                None => None,
-            }
+        let mut entries = self.entries.lock().unwrap();
+        let Some(pos) = entries.iter().position(|e| e.pending.form_id == form_id) else {
+            return Ok(None);
         };
-        match entry {
-            Some(e) => {
-                let event = self.event_sink.as_ref().map(|sink| {
-                    sink.emit_returning_envelope(crate::event::Event::FormResolved {
-                        form_id: form_id.to_owned(),
-                        run_id: e.pending.run_id.clone(),
-                        submission: submission.clone(),
-                        abandoned,
-                    })
-                });
-                let _ = e.responder.send(submission);
-                self.broadcast_snapshot();
-                Ok(Some(FormResolutionCommit { event }))
-            }
-            None => Ok(None),
-        }
+        entries[pos].pending.form.validate_submission(&submission)?;
+        let entry = entries.remove(pos);
+        let event = self.event_sink.as_ref().map(|sink| {
+            sink.emit_returning_envelope(crate::event::Event::FormResolved {
+                form_id: form_id.to_owned(),
+                run_id: entry.pending.run_id.clone(),
+                submission: submission.clone(),
+                abandoned,
+            })
+        });
+        self.broadcast_snapshot(&entries);
+        drop(entries);
+        let _ = entry.responder.send(submission);
+        Ok(Some(FormResolutionCommit { event }))
     }
 
     pub fn cancel(&self, form_id: &str) -> bool {
@@ -413,22 +402,23 @@ impl FormRegistry {
     }
 
     pub fn cancel_all(&self) {
-        let drained: Vec<FormEntry> = {
-            let mut entries = self.entries.lock().unwrap();
-            std::mem::take(&mut *entries)
-        };
-        for entry in drained {
+        let mut entries = self.entries.lock().unwrap();
+        let drained = std::mem::take(&mut *entries);
+        for entry in &drained {
             if let Some(sink) = &self.event_sink {
                 sink.emit(crate::event::Event::FormResolved {
-                    form_id: entry.pending.form_id,
-                    run_id: entry.pending.run_id,
+                    form_id: entry.pending.form_id.clone(),
+                    run_id: entry.pending.run_id.clone(),
                     submission: crate::form::FormSubmission::Rejected,
                     abandoned: true,
                 });
             }
+        }
+        self.broadcast_snapshot(&entries);
+        drop(entries);
+        for entry in drained {
             let _ = entry.responder.send(crate::form::FormSubmission::Rejected);
         }
-        self.broadcast_snapshot();
     }
 
     pub fn promote(&self, form_id: &str) {
@@ -440,19 +430,12 @@ impl FormRegistry {
             let entry = entries.remove(pos);
             entries.insert(0, entry);
         }
-        drop(entries);
-        self.broadcast_snapshot();
+        self.broadcast_snapshot(&entries);
     }
 
-    fn broadcast_snapshot(&self) {
-        let snap = self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|e| e.pending.clone())
-            .collect();
-        let _ = self.watch_tx.send(snap);
+    fn broadcast_snapshot(&self, entries: &std::sync::MutexGuard<'_, Vec<FormEntry>>) {
+        self.watch_tx
+            .send_replace(entries.iter().map(|e| e.pending.clone()).collect());
     }
 }
 
@@ -527,15 +510,13 @@ impl ApprovalRegistry {
         let entry_id = self
             .next_entry_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut entries = self.entries.lock().unwrap();
-            entries.push(ApprovalEntry {
-                entry_id,
-                pending,
-                responder: tx,
-            });
-        }
-        self.broadcast_snapshot();
+        let mut entries = self.entries.lock().unwrap();
+        entries.push(ApprovalEntry {
+            entry_id,
+            pending,
+            responder: tx,
+        });
+        self.broadcast_snapshot(&entries);
         (Some(ApprovalTicket(entry_id)), rx)
     }
 
@@ -547,11 +528,11 @@ impl ApprovalRegistry {
             return false;
         };
         let entry = entries.remove(pos);
+        self.broadcast_snapshot(&entries);
+        drop(entries);
         let _ = entry.responder.send(ApprovalDecision::Deny {
             reason: reason.into(),
         });
-        drop(entries);
-        self.broadcast_snapshot();
         true
     }
 
@@ -562,9 +543,9 @@ impl ApprovalRegistry {
             .position(|e| e.pending.tool_use_id == tool_use_id)
         {
             let entry = entries.remove(pos);
-            let _ = entry.responder.send(decision);
+            self.broadcast_snapshot(&entries);
             drop(entries);
-            self.broadcast_snapshot();
+            let _ = entry.responder.send(decision);
             true
         } else {
             false
@@ -573,24 +554,19 @@ impl ApprovalRegistry {
 
     pub fn decide_all(&self, decision: ApprovalDecision) -> usize {
         let mut entries = self.entries.lock().unwrap();
-        let count = entries.len();
-        for entry in entries.drain(..) {
+        let drained = std::mem::take(&mut *entries);
+        let count = drained.len();
+        self.broadcast_snapshot(&entries);
+        drop(entries);
+        for entry in drained {
             let _ = entry.responder.send(decision.clone());
         }
-        drop(entries);
-        self.broadcast_snapshot();
         count
     }
 
-    fn broadcast_snapshot(&self) {
-        let snapshot = self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|e| e.pending.clone())
-            .collect();
-        let _ = self.watch_tx.send(snapshot);
+    fn broadcast_snapshot(&self, entries: &std::sync::MutexGuard<'_, Vec<ApprovalEntry>>) {
+        self.watch_tx
+            .send_replace(entries.iter().map(|e| e.pending.clone()).collect());
     }
 }
 
@@ -4060,6 +4036,56 @@ mod tests {
                 }],
             },
             emitted_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn interaction_snapshots_survive_disconnected_resolution() {
+        for resolution in ["one", "cancel", "all"] {
+            let forms = FormRegistry::new();
+            let subscriber = forms.subscribe();
+            let mut response = forms.request(mk_form("pending", "Continue?"));
+            assert_eq!(subscriber.borrow().len(), 1);
+            drop(subscriber);
+            match resolution {
+                "one" => assert!(forms.submit("pending", crate::form::FormSubmission::Rejected)),
+                "cancel" => assert!(forms.cancel("pending")),
+                _ => forms.cancel_all(),
+            }
+            assert_eq!(
+                response.try_recv().unwrap(),
+                crate::form::FormSubmission::Rejected
+            );
+            assert!(forms.subscribe().borrow().is_empty());
+            assert!(forms.list_pending().is_empty());
+
+            let approvals = ApprovalRegistry::new();
+            let subscriber = approvals.subscribe();
+            let (ticket, mut response) = approvals.request_tracked(PendingApproval {
+                tool_use_id: "pending".into(),
+                tool_name: "fs.write".into(),
+                args_preview: "{}".into(),
+                preview: None,
+                level: crate::tool::ApprovalLevel::Approve,
+                run_id: FlowRunId::now(),
+                emitted_at: chrono::Utc::now(),
+            });
+            assert_eq!(subscriber.borrow().len(), 1);
+            drop(subscriber);
+            let decision = ApprovalDecision::Deny {
+                reason: "cancelled".into(),
+            };
+            match resolution {
+                "one" => assert!(approvals.decide("pending", decision)),
+                "cancel" => assert!(approvals.cancel(ticket.unwrap(), "cancelled")),
+                _ => assert_eq!(approvals.decide_all(decision), 1),
+            }
+            assert!(matches!(
+                response.try_recv().unwrap(),
+                ApprovalDecision::Deny { .. }
+            ));
+            assert!(approvals.subscribe().borrow().is_empty());
+            assert!(approvals.list_pending().is_empty());
         }
     }
 

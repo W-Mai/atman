@@ -31,6 +31,8 @@ The main policy actions are:
 
 The permission decision is made once for each invocation. A cloned, invocation-specific context carries the resulting authorization to the tool, so one call cannot reuse another call's approval.
 
+Form and approval registries retain the current pending queue even without subscribers. Queue mutation and snapshot publication are serialized; form request and resolution records use the same boundary. Resolved callers resume after publication, and reconnecting subscribers receive the current queue rather than already-settled entries. These publication rules do not change permission decisions or the no-client behavior of individual interaction services.
+
 ## Trust modes
 
 `TrustMode` selects the baseline Tier policy:
