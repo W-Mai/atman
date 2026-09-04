@@ -312,7 +312,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 crate::message::normalize_tool_pairs_for_model(&final_messages);
             for message in &mut sanitized_messages {
                 for part in &mut message.parts {
-                    if let crate::message::MessagePart::Image { source } = part
+                    if let crate::message::MessagePart::Image { source, .. } = part
                         && matches!(source.detail, crate::provider::ImageDetail::Auto)
                     {
                         source.detail = model_info.image_detail;

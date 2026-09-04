@@ -183,7 +183,7 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
             && message_belongs_to_root(owner, excluded)
         {
             raw_positions.insert(envelope.seq, raw.len());
-            raw.push((envelope.seq, message.clone()));
+            raw.push((envelope.seq, message.replayed(envelope.seq, None)));
         }
         if matches!(envelope.event, Event::AttachmentDegraded { .. }) {
             apply_envelope_to_messages(envelope, excluded, &mut raw, &mut raw_positions);
@@ -457,6 +457,7 @@ mod tests {
         let (parent_id, parent) = create(&sink, None);
         let mut image = Message::user_text(TurnId::now(), "image");
         image.parts.push(MessagePart::Image {
+            id: None,
             source: ImageSource {
                 media_type: "image/png".into(),
                 data: ImageData::Base64 {
@@ -507,7 +508,7 @@ mod tests {
                 .iter()
                 .map(|(_, message)| message)
                 .collect::<Vec<_>>(),
-            [&image, &captured]
+            [&image.replayed(image_seq, None), &captured]
         );
         patch(&child, "child only");
         let events = sink.snapshot_envelopes();

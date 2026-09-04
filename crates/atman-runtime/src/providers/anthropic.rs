@@ -187,7 +187,7 @@ fn build_wire_message(
                     None
                 },
             },
-            MessagePart::Image { source } => {
+            MessagePart::Image { source, .. } => {
                 let data = crate::attachment_store::image_base64(source)?;
                 ContentPart::Image {
                     source: ImageSourceWire {

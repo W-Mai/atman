@@ -103,6 +103,7 @@ async fn anthropic_multimodal_request_includes_image_block() {
         role: atman_runtime::message::MessageRole::User,
         parts: vec![
             atman_runtime::message::MessagePart::Image {
+                id: None,
                 source: atman_runtime::message::ImageSource {
                     media_type: "image/png".into(),
                     data: atman_runtime::message::ImageData::Path {

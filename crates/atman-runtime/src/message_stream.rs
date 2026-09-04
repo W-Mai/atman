@@ -186,7 +186,7 @@ impl MessageStream {
                 )
             {
                 acc.full_positions.insert(ev.seq, acc.full_raw.len());
-                acc.full_raw.push((ev.seq, message.clone()));
+                acc.full_raw.push((ev.seq, message.replayed(ev.seq, None)));
                 full_changed = true;
             }
             if matches!(ev.event, crate::event::Event::AttachmentDegraded { .. }) {

@@ -2575,11 +2575,12 @@ impl AppendMessageCommand {
 
     fn execute_with_messages(&self, session: &Session, messages: &mut Vec<Message>) -> u64 {
         let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
-        let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
+        let mut msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
             &self.msg,
             Some(&session.output_store),
             session.tool_output_budget(),
         );
+        msg.ensure_part_ids();
         let is_internal = msg.origin == crate::message::MessageOrigin::Internal;
         let event =
             match msg.role {
@@ -2641,7 +2642,7 @@ impl AppendMessageCommand {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, p)| match p {
-                    crate::message::MessagePart::Image { source } => {
+                    crate::message::MessagePart::Image { source, .. } => {
                         let basename = match &source.data {
                             crate::message::ImageData::Path { path } => path
                                 .file_name()
@@ -3911,6 +3912,7 @@ mod tests {
             Message {
                 role: MessageRole::User,
                 parts: vec![crate::message::MessagePart::Image {
+                    id: None,
                     source: crate::message::ImageSource {
                         media_type: "image/png".into(),
                         data: crate::message::ImageData::Path { path: path.into() },

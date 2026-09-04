@@ -1969,6 +1969,7 @@ mod tests {
                 text: "here".into(),
             },
             MessagePart::Image {
+                id: None,
                 source: ImageSource {
                     media_type: "image/png".into(),
                     data: ImageData::Path {

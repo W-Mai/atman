@@ -15,7 +15,10 @@ pub struct ContextState {
 }
 
 impl ContextState {
-    pub fn new(messages: Vec<Message>) -> Self {
+    pub fn new(mut messages: Vec<Message>) -> Self {
+        for message in &mut messages {
+            message.ensure_part_ids();
+        }
         Self {
             messages: Arc::new(Mutex::new(messages)),
             stream: None,
@@ -166,7 +169,8 @@ impl CompactionState {
 }
 
 pub(crate) fn checkpoint_epoch_digest(messages: &[Message]) -> String {
-    let bytes = serde_json::to_vec(messages).expect("checkpoint messages must serialize");
+    let content = messages.iter().map(Message::content).collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&content).expect("checkpoint messages must serialize");
     format!("blake3:{}", blake3::hash(&bytes).to_hex())
 }
 
@@ -205,6 +209,92 @@ impl LastContextUsageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_ids_match_live_handles_checkpoints_and_replay() {
+        use crate::event::{ContextBase, ContextId, Event, TurnId};
+        use crate::message::MessagePart;
+        for detached in [false, true] {
+            let session = Arc::new(crate::session::Session::open_ephemeral());
+            let context_id = ContextId::now();
+            let sink = session.sink().clone().with_context(context_id.clone());
+            sink.emit(Event::ContextCreated { base: None });
+            let context = Arc::new(ContextState::new(Vec::new()));
+            let ctx = crate::tool::ToolCtx::new()
+                .with_context(context.clone())
+                .with_events(sink.clone());
+            let message: Message = serde_json::from_value(serde_json::json!({
+                "role": "user", "turn_id": TurnId::now(), "parts": [
+                    {"type": "text", "text": "inspect"},
+                    {"type": "image", "source": {"media_type": "image/png", "data": {"kind": "base64", "data": "iVBORw0KGgo="}}}
+                ]
+            })).unwrap();
+            if detached {
+                crate::tools::session::append_message_to_context(&ctx, message).unwrap();
+            } else {
+                session.append_message(message, None);
+            }
+            let owner = if detached {
+                &context
+            } else {
+                session.context()
+            };
+            let original = owner.messages_handle().lock().unwrap().clone();
+            assert!(matches!(
+                original[0].parts[1],
+                MessagePart::Image { id: Some(_), .. }
+            ));
+            let mut replacement = original.clone();
+            replacement[0].parts.remove(0);
+            if detached {
+                let mut messages = owner.messages_handle().lock().unwrap();
+                sink.emit(Event::Checkpoint {
+                    session_id: session.id().to_string(),
+                    flow_run_id: None,
+                    messages: replacement.clone(),
+                    window_tokens: 1,
+                });
+                *messages = replacement.clone();
+            } else {
+                assert!(
+                    session
+                        .commit_rewritten_window(replacement.clone(), 100_000, 100_000, 1)
+                        .is_some()
+                );
+            }
+            let events = session.sink().snapshot_envelopes();
+            let base = if detached {
+                ContextBase::Context {
+                    context_id: context_id.clone(),
+                    through_seq: sink.published_seq(),
+                }
+            } else {
+                ContextBase::LegacyRoot {
+                    through_seq: sink.published_seq(),
+                }
+            };
+            let replay = crate::projection::context::replay_context(&events, &base).unwrap();
+            assert_eq!(replay.window()[0].1, replacement[0]);
+            assert_eq!(replay.raw[0].1, original[0]);
+            assert_eq!(*owner.messages_handle().lock().unwrap(), replacement);
+            if !detached {
+                assert_eq!(session.messages().as_ref(), replacement.as_slice());
+                assert_eq!(*session.messages_full(), original);
+                let jsonl = events
+                    .iter()
+                    .map(|event| serde_json::to_string(event).unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let replay = crate::event_log::replay::SessionReplay::from_reader(
+                    std::io::Cursor::new(jsonl),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(replay.compacted_messages[0].1, replacement[0]);
+                assert_eq!(replay.all_messages[0].1, original[0]);
+            }
+        }
+    }
 
     #[test]
     fn message_writers_acquire_the_context_before_publishing() {

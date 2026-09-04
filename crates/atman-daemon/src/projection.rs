@@ -1631,7 +1631,7 @@ fn message_part(part: &atman_runtime::message::MessagePart) -> MessagePart {
         atman_runtime::message::MessagePart::Thinking { thinking, .. } => MessagePart::Thinking {
             thinking: thinking.clone(),
         },
-        atman_runtime::message::MessagePart::Image { source } => {
+        atman_runtime::message::MessagePart::Image { source, .. } => {
             let (artifact_id, name) = match &source.data {
                 ImageData::Base64 { .. } => (None, None),
                 ImageData::Path { path } => (
@@ -2131,6 +2131,7 @@ mod tests {
         image_message
             .parts
             .push(atman_runtime::message::MessagePart::Image {
+                id: None,
                 source: atman_runtime::message::ImageSource {
                     media_type: "image/png".into(),
                     data: ImageData::Base64 {

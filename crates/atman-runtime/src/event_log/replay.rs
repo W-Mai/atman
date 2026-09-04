@@ -86,7 +86,10 @@ impl SessionReplay {
                 && message_belongs_to_root(flow_run_id, &ownership.spawned)
             {
                 all_positions.insert(record.envelope.seq, all_messages.len());
-                all_messages.push((record.envelope.seq, message.clone()));
+                all_messages.push((
+                    record.envelope.seq,
+                    message.replayed(record.envelope.seq, None),
+                ));
             }
             if let Event::AttachmentDegraded {
                 message_seq,

@@ -824,7 +824,7 @@ async fn run_flow_inner(
     );
     let mut parts: Vec<atman_runtime::message::MessagePart> = images
         .into_iter()
-        .map(|source| atman_runtime::message::MessagePart::Image { source })
+        .map(|source| atman_runtime::message::MessagePart::Image { source, id: None })
         .collect();
     parts.push(atman_runtime::message::MessagePart::Text {
         text: user_text.clone(),

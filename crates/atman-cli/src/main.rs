@@ -806,6 +806,7 @@ async fn cmd_run(
     let mut parts = Vec::with_capacity(images.len() + 1);
     for image in images {
         parts.push(atman_runtime::message::MessagePart::Image {
+            id: None,
             source: session.import_image_path(image)?,
         });
     }
@@ -1217,7 +1218,7 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
             continue;
         };
         for (idx, part) in msg.parts.iter().enumerate() {
-            let MessagePart::Image { source } = part else {
+            let MessagePart::Image { source, .. } = part else {
                 continue;
             };
             if already_degraded.contains(&(seq, idx)) {
@@ -3523,6 +3524,7 @@ fn build_user_message(
     let mut imported = Vec::with_capacity(attachments.len());
     for path in attachments {
         imported.push(MessagePart::Image {
+            id: None,
             source: session.import_image_path(path)?,
         });
     }
@@ -3531,7 +3533,7 @@ fn build_user_message(
         .unwrap_or_else(|| session.take_pending_images());
     let mut parts: Vec<MessagePart> = pending
         .into_iter()
-        .map(|source| MessagePart::Image { source })
+        .map(|source| MessagePart::Image { source, id: None })
         .collect();
     parts.extend(imported);
     if !text.is_empty() {
@@ -7557,7 +7559,7 @@ mod tests {
 
         assert!(matches!(
             &message.parts[0],
-            atman_runtime::message::MessagePart::Image { source } if source == &submitted
+            atman_runtime::message::MessagePart::Image { source, .. } if source == &submitted
         ));
         assert_eq!(session.pending_image_count(), 1);
     }

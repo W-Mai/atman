@@ -298,7 +298,7 @@ fn build_user_content(parts: &[MessagePart]) -> Result<InputContent, RuntimeErro
             MessagePart::Text { text } => {
                 parts_out.push(ResponseInputContent::InputText { text: text.clone() });
             }
-            MessagePart::Image { source } => {
+            MessagePart::Image { source, .. } => {
                 let data = crate::attachment_store::image_base64(source)?;
                 parts_out.push(ResponseInputContent::InputImage {
                     image_url: format!("data:{};base64,{}", source.media_type, data),
@@ -1521,6 +1521,7 @@ mod tests {
                 role: crate::message::MessageRole::User,
                 parts: vec![
                     crate::message::MessagePart::Image {
+                        id: None,
                         source: crate::message::ImageSource {
                             media_type: "image/png".into(),
                             data: crate::message::ImageData::Base64 { data: image },

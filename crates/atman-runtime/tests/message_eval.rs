@@ -30,7 +30,7 @@ async fn user_msg_with_attachments_prepends_image_parts() {
         panic!("expected message");
     };
     assert_eq!(msg.parts.len(), 2);
-    let MessagePart::Image { source } = &msg.parts[0] else {
+    let MessagePart::Image { source, .. } = &msg.parts[0] else {
         panic!("first part should be image, got {:?}", msg.parts[0]);
     };
     assert_eq!(source.media_type, "image/png");

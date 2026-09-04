@@ -46,7 +46,7 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
             MessagePart::Text { text } => text.len(),
             MessagePart::Thinking { thinking, .. } => thinking.len(),
             MessagePart::ToolResult { content, .. } => content.len(),
-            MessagePart::Image { source } => {
+            MessagePart::Image { source, .. } => {
                 fixed_tokens = fixed_tokens.saturating_add(match source.detail {
                     crate::provider::ImageDetail::Low => 85,
                     crate::provider::ImageDetail::Auto => 1_024,

@@ -292,7 +292,7 @@ fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError
                 text: summary.clone(),
             }),
             MessagePart::Text { text } => out.push(ChatPart::Text { text: text.clone() }),
-            MessagePart::Image { source } => {
+            MessagePart::Image { source, .. } => {
                 let data = crate::attachment_store::image_base64(source)?;
                 let url = format!("data:{};base64,{}", source.media_type, data);
                 out.push(ChatPart::ImageUrl {

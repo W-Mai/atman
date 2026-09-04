@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::TurnId;
 
+/// Persistent identity of a message part, independent of its position or payload.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct MessagePartId(pub uuid::Uuid);
+
 pub const TOOL_CALL_INTENT_FIELD: &str = "_atman_intent";
 pub const TOOL_CALL_INTENT_MAX_CHARS: usize = 120;
 
@@ -157,6 +162,8 @@ pub enum MessagePart {
     },
     Image {
         source: ImageSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<MessagePartId>,
     },
     ToolUse {
         id: String,
@@ -171,6 +178,81 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "core::ops::Not::not")]
         is_error: bool,
     },
+}
+
+impl Message {
+    pub(crate) fn ensure_part_ids(&mut self) {
+        for part in &mut self.parts {
+            if let MessagePart::Image { id, .. } = part {
+                id.get_or_insert_with(|| MessagePartId(uuid::Uuid::now_v7()));
+            }
+        }
+    }
+
+    pub(crate) fn replayed(&self, seq: u64, checkpoint_index: Option<usize>) -> Self {
+        let mut message = self.clone();
+        for (index, part) in message.parts.iter_mut().enumerate() {
+            if let MessagePart::Image { id, .. } = part {
+                id.get_or_insert_with(|| {
+                    let mut hash = blake3::Hasher::new();
+                    hash.update(b"atman.message-part.v1");
+                    hash.update(message.turn_id.0.as_bytes());
+                    hash.update(&seq.to_le_bytes());
+                    hash.update(
+                        &checkpoint_index
+                            .map_or(u64::MAX, |i| i as u64)
+                            .to_le_bytes(),
+                    );
+                    hash.update(&(index as u64).to_le_bytes());
+                    let mut bytes = [0; 16];
+                    bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+                    MessagePartId(uuid::Uuid::from_bytes(bytes))
+                });
+            }
+        }
+        message
+    }
+
+    /// Borrows model-facing content without storage-only part identities.
+    pub(crate) fn content(&self) -> impl Serialize + '_ {
+        #[derive(Serialize)]
+        struct Content<'a> {
+            role: MessageRole,
+            parts: ContentParts<'a>,
+            turn_id: &'a TurnId,
+            #[serde(skip_serializing_if = "is_default_origin")]
+            origin: MessageOrigin,
+        }
+        Content {
+            role: self.role,
+            parts: ContentParts(&self.parts),
+            turn_id: &self.turn_id,
+            origin: self.origin,
+        }
+    }
+}
+
+struct ContentParts<'a>(&'a [MessagePart]);
+
+impl Serialize for ContentParts<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        #[derive(Serialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum ImageContent<'a> {
+            Image { source: &'a ImageSource },
+        }
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for part in self.0 {
+            match part {
+                MessagePart::Image { source, .. } => {
+                    seq.serialize_element(&ImageContent::Image { source })?;
+                }
+                _ => seq.serialize_element(part)?,
+            }
+        }
+        seq.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -464,6 +546,110 @@ mod tests {
     use super::*;
 
     #[test]
+    fn image_part_identity_survives_copy_reordering_and_replay() {
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"media_type": "image/png", "data": {"kind": "base64", "data": "iVBORw0KGgo="}}
+        });
+        let mut message: Message = serde_json::from_value(serde_json::json!({
+            "role": "user", "turn_id": TurnId::now(), "parts": [image.clone(), image]
+        }))
+        .unwrap();
+        let legacy = message.clone();
+        let restored = legacy.replayed(10, None);
+        assert_eq!(restored, legacy.replayed(10, None));
+        assert_ne!(restored, legacy.replayed(11, None));
+        assert_ne!(restored.parts[0], restored.parts[1]);
+        assert_ne!(restored, legacy.replayed(10, Some(0)));
+        assert_ne!(legacy.replayed(10, Some(0)), legacy.replayed(10, Some(1)));
+
+        message.ensure_part_ids();
+        assert_ne!(message.parts[0], message.parts[1]);
+        let anchored = message.clone();
+        message.ensure_part_ids();
+        assert_eq!(message, anchored);
+        assert_eq!(message, message.replayed(99, Some(7)));
+        message.parts.remove(0);
+        assert_eq!(message.parts[0], anchored.parts[1]);
+        let persisted = serde_json::to_vec(&message).unwrap();
+        assert_eq!(
+            message,
+            serde_json::from_slice::<Message>(&persisted).unwrap()
+        );
+        let mut invalid = serde_json::to_value(&message).unwrap();
+        invalid["parts"][0]["id"] = serde_json::json!("invalid");
+        assert!(serde_json::from_value::<Message>(invalid).is_err());
+    }
+
+    #[test]
+    fn storage_part_ids_do_not_change_model_content_prefixes_or_epochs() {
+        use crate::context_plan::ContextPrefixSnapshot;
+        use crate::provider::{LlmRequest, Provider};
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "role": "user", "turn_id": TurnId::now(), "parts": [
+                {"type": "text", "text": "inspect"},
+                {"type": "image", "source": {"media_type": "image/png", "data": {"kind": "base64", "data": "iVBORw0KGgo="}}}
+            ]
+        })).unwrap();
+        let mut anchored = message.clone();
+        anchored.ensure_part_ids();
+        assert_ne!(
+            serde_json::to_value(&message).unwrap(),
+            serde_json::to_value(&anchored).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&message).unwrap(),
+            serde_json::to_vec(&anchored.content()).unwrap()
+        );
+        assert_eq!(
+            crate::context_state::checkpoint_epoch_digest(std::slice::from_ref(&message)),
+            crate::context_state::checkpoint_epoch_digest(std::slice::from_ref(&anchored))
+        );
+        let mut request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![message],
+            system: None,
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: true,
+            prompt_cache_key: None,
+            tools: Vec::new(),
+            reasoning: crate::provider::ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(crate::providers::openai::OpenAiProvider::new(
+                "openai", "key",
+            )),
+            Box::new(crate::providers::anthropic::AnthropicProvider::new(
+                "anthropic",
+                "key",
+            )),
+            Box::new(crate::providers::codex::CodexProvider::new(
+                "codex", "key", "account",
+            )),
+        ];
+        let before = providers
+            .iter()
+            .map(|p| p.context_prefix(&request).unwrap())
+            .collect::<Vec<_>>();
+        let neutral = ContextPrefixSnapshot::provider_neutral(&request).unwrap();
+        request.messages = vec![anchored];
+        assert_eq!(
+            neutral,
+            ContextPrefixSnapshot::provider_neutral(&request).unwrap()
+        );
+        for (provider, expected) in providers.iter().zip(before) {
+            assert_eq!(
+                expected,
+                provider.context_prefix(&request).unwrap(),
+                "{}",
+                provider.name()
+            );
+        }
+    }
+
+    #[test]
     fn user_text_roundtrips_via_serde_json() {
         let msg = Message::user_text(TurnId::now(), "hello");
         let s = serde_json::to_string(&msg).unwrap();
@@ -498,6 +684,7 @@ mod tests {
             parts: vec![
                 MessagePart::Text { text: "a ".into() },
                 MessagePart::Image {
+                    id: None,
                     source: ImageSource {
                         media_type: "image/png".into(),
                         data: ImageData::Path {

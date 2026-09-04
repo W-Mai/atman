@@ -629,7 +629,7 @@ impl ContextPrefixSnapshot {
                 } else {
                     ContextPrefixLane::Messages
                 },
-                message,
+                &message.content(),
             )?;
         }
         Ok(builder.finish())

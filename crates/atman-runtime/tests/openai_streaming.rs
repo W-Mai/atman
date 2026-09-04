@@ -186,6 +186,7 @@ async fn openai_multimodal_request_uses_image_url_parts() {
         role: atman_runtime::message::MessageRole::User,
         parts: vec![
             atman_runtime::message::MessagePart::Image {
+                id: None,
                 source: atman_runtime::message::ImageSource {
                     media_type: "image/jpeg".into(),
                     data: atman_runtime::message::ImageData::Path {

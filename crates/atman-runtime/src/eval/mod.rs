@@ -1908,7 +1908,7 @@ async fn eval_message_node<'a>(
                 detail: crate::provider::ImageDetail::Auto,
             }
         };
-        parts.push(MessagePart::Image { source });
+        parts.push(MessagePart::Image { source, id: None });
     }
     if let Some(t) = text {
         parts.push(MessagePart::Text { text: t });

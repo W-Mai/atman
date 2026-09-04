@@ -79,12 +79,16 @@ impl Tool for SessionPush {
     }
 }
 
-pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(), RuntimeError> {
+pub(crate) fn append_message_to_context(
+    ctx: &ToolCtx,
+    mut msg: Message,
+) -> Result<(), RuntimeError> {
     let Some(handle) = ctx.context().map(|context| context.messages_handle()) else {
         return Err(RuntimeError::ToolFailed(
             "session message context is unavailable".into(),
         ));
     };
+    msg.ensure_part_ids();
     let flow_run_id = match msg.role {
         MessageRole::Assistant | MessageRole::Tool => {
             ctx.flow_run_id.as_ref().map(|run_id| run_id.0.to_string())

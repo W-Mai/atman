@@ -200,7 +200,7 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
             && message_belongs_to_root(flow_run_id, &spawned_flow_ids)
         {
             positions.insert(env.seq, messages.len());
-            messages.push((env.seq, message.clone()));
+            messages.push((env.seq, message.replayed(env.seq, None)));
         }
         if let crate::event::Event::AttachmentDegraded {
             message_seq,
@@ -583,6 +583,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     && let Ok(mut msg) = serde_json::from_value::<Message>(m.clone())
                 {
                     let seq = v["seq"].as_u64().unwrap_or(0);
+                    msg = msg.replayed(seq, None);
                     let belongs_to_root = raw_event_belongs_to_root(v, &spawned_flow_ids);
                     if let Some(ps) = patches.get(&seq) {
                         apply_attachment_patches(&mut msg, ps);
@@ -1119,7 +1120,7 @@ pub(crate) fn project_transcript_records(
             turn_activity.observe(&record.envelope.event);
         }
         if let Some((message, flow_run_id)) = record.envelope.event.context_message() {
-            let mut message = message.clone();
+            let mut message = message.replayed(seq, None);
             let belongs_to_root = message_belongs_to_root(flow_run_id, &ownership.spawned);
             if let Some(patches) = patches.get(&seq) {
                 apply_attachment_patches(&mut message, patches);
@@ -1649,7 +1650,7 @@ pub(crate) fn apply_envelope_to_messages(
             return false;
         }
         positions.insert(env.seq, acc.len());
-        acc.push((env.seq, message.clone()));
+        acc.push((env.seq, message.replayed(env.seq, None)));
         return true;
     }
     match &env.event {
@@ -1712,9 +1713,13 @@ pub(crate) fn apply_envelope_to_messages(
         } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
             let checkpoint = messages
                 .iter()
-                .cloned()
                 .enumerate()
-                .map(|(index, message)| (u64::MAX.saturating_sub(index as u64), message))
+                .map(|(index, message)| {
+                    (
+                        u64::MAX.saturating_sub(index as u64),
+                        message.replayed(env.seq, Some(index)),
+                    )
+                })
                 .collect::<Vec<_>>();
             if *acc == checkpoint {
                 false
@@ -2131,6 +2136,7 @@ mod tests {
         let image = Message {
             role: MessageRole::User,
             parts: vec![MessagePart::Image {
+                id: None,
                 source: ImageSource {
                     media_type: "image/png".into(),
                     data: ImageData::Path {

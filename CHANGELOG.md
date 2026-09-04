@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Image part identities** — `MessagePart::Image` includes an optional `MessagePartId`. Context insertion assigns missing identities; persisted legacy images remain readable.
 - **Isolated compaction commits** — `maybe_auto_compact_handle_locked` requires a synchronous commit callback, invoked after snapshot validation while the message lock is held.
 - **Runtime context ownership** — `ToolCtx::with_context` and `with_session_runtime` bind a complete context owner instead of independent message and lock handles. `Session::context` and `FlowEntry::context` expose the shared state; `ToolCtx::session_runtime()` returns a session only for a session-bound owner.
 - **Context replay windows** — `ContextReplay::window()` exposes the active window as a borrowed slice while retaining the complete reducer state for live continuation.
@@ -37,6 +38,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Attachment reference stability** — image identities survive message copies, part filtering, checkpoints, and replay. Legacy references are derived from event coordinates; storage identities are excluded from model input, cache prefixes, and checkpoint epochs.
 - **Checkpoint epoch recovery** — session and context-branch replay recover the epoch from the last applicable checkpoint, including empty checkpoints. Later message rewrites and unrelated child checkpoints do not change that persisted identity.
 - **Inline context cache identity** — inline calls retain their owner's usage and prefix-observation identity and provider cache route. Execution events and tool permissions keep the inline run identity.
 - **Child checkpoint consistency** — normal and overflow-triggered child compaction publish the checkpoint and update the epoch within the message commit lock. Concurrently changed histories reject the candidate without publishing compaction records.
