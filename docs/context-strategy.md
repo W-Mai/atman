@@ -14,6 +14,8 @@ Execution binds its message context once through `ToolCtx`; evaluators and indiv
 
 The context also binds its canonical event sink at construction. Changing a tool's diagnostic sink does not redirect messages, records, compaction publication, or attachment patches. Steering consumption publishes its captured message through the destination context under the message lock, while pending and control-only transitions continue through the shared queue. Queue subscribers still receive the same state transitions. In-memory contexts explicitly omit a journal sink.
 
+An unscoped message view selects only unscoped history, not every context in the session log. Typed contexts select their own events and the ancestry captured at creation. A child checkpoint or attachment patch cannot rewrite its source's default window or raw history; the full event log remains available for branch replay and transcript projection.
+
 Usage records and measured general-call window sizes belong to the bound context. Session aggregation keeps provider/model/purpose/scope buckets and cumulative input, output, and cache usage; only a general root call belonging to the session's default context updates its model, window, and latency display. Auxiliary calls and results from another context do not replace those default-context statistics.
 
 Every `llm.call` is assembled from four independent inputs:

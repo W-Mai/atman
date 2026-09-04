@@ -67,6 +67,9 @@ impl SessionReplay {
         let mut all_positions = HashMap::new();
         let mut checkpoint = None;
         for record in &records {
+            if record.envelope.context_id.is_some() {
+                continue;
+            }
             if let Event::Checkpoint {
                 flow_run_id,
                 messages,

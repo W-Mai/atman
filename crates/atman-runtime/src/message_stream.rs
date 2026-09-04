@@ -168,9 +168,7 @@ impl MessageStream {
             }
         }
         for ev in &events[acc.replayed..] {
-            if let Some(id) = &self.context_id
-                && ev.context_id.as_ref() != Some(id)
-            {
+            if ev.context_id != self.context_id {
                 continue;
             }
             compacted_changed |= crate::projection::message_window::apply_envelope_to_messages(
@@ -266,11 +264,31 @@ mod tests {
     fn scoped_stream_matches_replay_after_each_update_and_ignores_other_branches() {
         use crate::event::{EventSink, FlowRunId};
         let sink = EventSink::new();
+        let image_id = crate::message::MessagePartId(uuid::Uuid::now_v7());
+        let mut legacy_image = user("legacy image");
+        legacy_image.parts.push(MessagePart::Image {
+            id: Some(image_id),
+            source: crate::message::ImageSource {
+                media_type: "image/png".into(),
+                data: crate::message::ImageData::Base64 {
+                    data: "AA==".into(),
+                },
+                detail: Default::default(),
+            },
+        });
+        let legacy_seq = sink.emit_returning_seq(Event::UserMsg {
+            turn_id: legacy_image.turn_id.clone(),
+            flow_run_id: None,
+            message: legacy_image,
+        });
+        let legacy = MessageStream::new(sink.events_handle());
         let parent_id = ContextId::now();
         let child_id = ContextId::now();
         let parent = sink.clone().with_context(parent_id.clone());
         parent.emit(Event::ContextCreated {
-            base: None,
+            base: Some(ContextBase::LegacyRoot {
+                through_seq: legacy_seq,
+            }),
             inheritance: crate::event::ContextInheritance::Full,
         });
         let shared = user("shared");
@@ -289,6 +307,39 @@ mod tests {
         });
         let stream = MessageStream::from_context(sink.events_handle(), child_id.clone()).unwrap();
         let verify = || {
+            let envelopes = sink.snapshot_envelopes();
+            let expected_legacy = crate::projection::context::replay_context(
+                &envelopes,
+                &ContextBase::LegacyRoot {
+                    through_seq: sink.published_seq(),
+                },
+            )
+            .unwrap();
+            let legacy_messages = |messages: &[(u64, Message)]| {
+                messages
+                    .iter()
+                    .map(|(_, message)| message.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                legacy.window().to_vec(),
+                legacy_messages(expected_legacy.window())
+            );
+            assert_eq!(
+                *legacy.full_messages(),
+                legacy_messages(&expected_legacy.raw)
+            );
+            let jsonl = envelopes
+                .iter()
+                .map(|envelope| serde_json::to_string(envelope).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let restored =
+                crate::event_log::replay::SessionReplay::from_reader(jsonl.as_bytes(), None)
+                    .unwrap();
+            assert_eq!(restored.compacted_messages, expected_legacy.compacted);
+            assert_eq!(restored.all_messages, expected_legacy.raw);
+            assert_eq!(restored.checkpoint_epoch, expected_legacy.checkpoint_epoch);
             let replay = crate::projection::context::replay_context(
                 &sink.snapshot_envelopes(),
                 &ContextBase::Context {
@@ -354,6 +405,28 @@ mod tests {
             message: owned,
         });
         verify();
+        child.emit(Event::AttachmentDegraded {
+            turn_id: None,
+            flow_run_id: None,
+            patch: crate::message::AttachmentPatch {
+                target: crate::message::AttachmentTarget::Part { part_id: image_id },
+                file_basename: "inherited.png".into(),
+                reason: "invalid_image".into(),
+            },
+        });
+        verify();
+        assert!(
+            legacy.full_messages()[0]
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Image { .. }))
+        );
+        assert!(
+            !stream.full_messages()[0]
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Image { .. }))
+        );
         let summary = compact_summary("summary");
         let replacement_seq = child.emit_returning_seq(Event::SystemMsg {
             turn_id: summary.turn_id.clone(),

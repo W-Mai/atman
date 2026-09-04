@@ -41,6 +41,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Message-view scope isolation** — unscoped session history no longer consumes messages, checkpoints, or attachment patches from typed contexts. Live and restored default windows preserve their own history while selected context replay retains inherited messages and branch-local changes.
 - **Canonical context journals** — context owners retain their history event sink independently of tool diagnostics. Captured steering and attachment patches publish through that owner, preserving context scope during live updates and replay even when the control queue or diagnostic sink uses another scope.
 - **Context usage ownership** — general LLM calls update the calling context's window usage. Calls belonging to another context retain their own usage records and contribute to session totals without replacing the default context's model, window, or latency statistics.
 - **Execution context binding** — ordinary calls, watched calls, and inline flows retain the message context selected by their execution owner. Recent-turn queries read that context directly instead of inheriting a stale parent snapshot, while preserving raw history across checkpoints.
