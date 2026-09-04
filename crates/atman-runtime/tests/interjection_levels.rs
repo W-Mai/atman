@@ -141,6 +141,9 @@ flow second() -> string {
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session
+        .enqueue_injection_with_level("deferred correction", InjectionLevel::L2CourseCorrect, None)
+        .unwrap();
+    session
         .enqueue_injection_with_level("second", InjectionLevel::L3Redirect, Some("second".into()))
         .unwrap();
 

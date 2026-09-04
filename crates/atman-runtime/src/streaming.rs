@@ -631,70 +631,59 @@ pub(crate) fn handle_pending_injections(
     cancel: &CancellationToken,
     call_purpose: ContextCallPurpose,
 ) -> Result<(), RuntimeError> {
-    let mut pending = Vec::new();
-    entry
-        .pending_injections
-        .lock()
-        .unwrap()
-        .retain(|injection| {
-            let consume = call_purpose.accepts_steering_messages()
-                || matches!(
-                    injection.level,
-                    crate::injection::InjectionLevel::L3Redirect
-                        | crate::injection::InjectionLevel::L4HardStop
-                );
+    let mut queue = entry.pending_injections.lock().unwrap();
+    let interruption = crate::injection::next_interruption(&queue, |injection| {
+        call_purpose.accepts_steering_messages()
+            || matches!(
+                injection.level,
+                crate::injection::InjectionLevel::L3Redirect
+                    | crate::injection::InjectionLevel::L4HardStop
+            )
+    })
+    .map(|index| queue.remove(index));
+    let mut nudges = Vec::new();
+    if interruption.is_none() && call_purpose.accepts_steering_messages() {
+        queue.retain(|injection| {
+            let consume = injection.state == crate::injection::InjectionState::Pending
+                && injection.level == crate::injection::InjectionLevel::L1Nudge;
             if consume {
-                pending.push(injection.clone());
+                nudges.push(injection.clone());
             }
             !consume
         });
-    for inj in &pending {
-        if matches!(inj.level, crate::injection::InjectionLevel::L1Nudge) {
-            entry
-                .messages
-                .lock()
-                .unwrap()
-                .push(crate::message::Message::user_text(
-                    crate::event::TurnId::now(),
-                    format!("[interjection] {}", inj.text),
-                ));
-        }
     }
-    if let Some(inj) = pending
-        .iter()
-        .find(|i| !matches!(i.level, crate::injection::InjectionLevel::L1Nudge))
-    {
+    drop(queue);
+    for injection in nudges {
+        entry
+            .messages
+            .lock()
+            .unwrap()
+            .push(crate::message::Message::user_text(
+                injection.turn_id,
+                format!("[interjection] {}", injection.text),
+            ));
+    }
+    if let Some(injection) = interruption {
         cancel.cancel();
-        return Err(match inj.level {
-            crate::injection::InjectionLevel::L4HardStop => {
-                RuntimeError::Cancelled(format!("hard stop: {}", inj.text))
-            }
-            crate::injection::InjectionLevel::L3Redirect => {
-                if let Some(target) = &inj.redirect_target {
-                    RuntimeError::Redirect(target.clone())
-                } else {
-                    RuntimeError::Cancelled(format!("redirect (no target): {}", inj.text))
-                }
-            }
+        return Err(match injection.level {
             crate::injection::InjectionLevel::L2CourseCorrect => {
                 entry
                     .messages
                     .lock()
                     .unwrap()
                     .push(crate::message::Message::user_text(
-                        crate::event::TurnId::now(),
-                        format!("[course correct] {}", inj.text),
+                        injection.turn_id.clone(),
+                        format!("[course correct] {}", injection.text),
                     ));
                 RuntimeError::L2Restart {
-                    correction_text: inj.text.clone(),
+                    correction_text: injection.text,
                     partial_output: entry.output.lock().unwrap().clone(),
                     partial_tokens: 0,
                 }
             }
-            crate::injection::InjectionLevel::L1Nudge => {
-                crate::notify!(warn, "L1Nudge reached streaming injection handler");
-                RuntimeError::Cancelled("L1Nudge should not reach here".into())
-            }
+            _ => injection
+                .control_error()
+                .expect("interruption selection excludes nudges"),
         });
     }
     Ok(())
@@ -1115,6 +1104,59 @@ mod tests {
         ContextCallPurpose::Compaction,
         ContextCallPurpose::InterjectionClassification,
     ];
+
+    #[test]
+    fn stream_interruptions_preserve_unselected_messages_and_same_level_order() {
+        for purpose in std::iter::once(ContextCallPurpose::General).chain(AUXILIARY_PURPOSES) {
+            let entry = entry();
+            for (level, text, target) in [
+                (InjectionLevel::L1Nudge, "note", None),
+                (InjectionLevel::L2CourseCorrect, "first correction", None),
+                (InjectionLevel::L2CourseCorrect, "second correction", None),
+                (InjectionLevel::L3Redirect, "redirect", Some("first")),
+                (InjectionLevel::L3Redirect, "redirect", Some("second")),
+                (InjectionLevel::L4HardStop, "stop", None),
+            ] {
+                push_injection(&entry, level, text, target);
+            }
+            let original = entry.pending_injections.lock().unwrap().clone();
+            let cancel = CancellationToken::new();
+            assert!(
+                matches!(handle_pending_injections(&entry, &cancel, purpose),
+                Err(RuntimeError::Cancelled(text)) if text == "hard stop: stop")
+            );
+            assert!(cancel.is_cancelled());
+            assert_eq!(*entry.pending_injections.lock().unwrap(), original[..5]);
+            assert!(entry.messages.lock().unwrap().is_empty());
+            for target in ["first", "second"] {
+                assert!(
+                    matches!(handle_pending_injections(&entry, &CancellationToken::new(), purpose),
+                    Err(RuntimeError::Redirect(actual)) if actual == target)
+                );
+            }
+            assert_eq!(*entry.pending_injections.lock().unwrap(), original[..3]);
+            if purpose.accepts_steering_messages() {
+                for text in ["first correction", "second correction"] {
+                    assert!(
+                        matches!(handle_pending_injections(&entry, &CancellationToken::new(), purpose),
+                        Err(RuntimeError::L2Restart { correction_text, .. }) if correction_text == text)
+                    );
+                }
+                assert_eq!(*entry.pending_injections.lock().unwrap(), original[..1]);
+                handle_pending_injections(&entry, &CancellationToken::new(), purpose).unwrap();
+                assert!(entry.pending_injections.lock().unwrap().is_empty());
+                let messages = entry.messages.lock().unwrap();
+                assert_eq!(messages.len(), 3);
+                assert_eq!(messages[0].turn_id, original[1].turn_id);
+                assert_eq!(messages[1].turn_id, original[2].turn_id);
+                assert_eq!(messages[2].turn_id, original[0].turn_id);
+            } else {
+                handle_pending_injections(&entry, &CancellationToken::new(), purpose).unwrap();
+                assert_eq!(*entry.pending_injections.lock().unwrap(), original[..3]);
+                assert!(entry.messages.lock().unwrap().is_empty());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn auxiliary_streams_preserve_steering_without_disabling_output() {

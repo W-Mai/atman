@@ -2533,30 +2533,22 @@ impl Session {
         self.injection_tx.subscribe()
     }
 
-    pub fn mark_injection_consumed(&self, id: &InjectionId) {
+    /// Atomically consume the highest-priority stop or redirect for this turn.
+    /// Corrections and nudges remain pending for an agent call.
+    pub fn take_pending_control(&self, turn_id: &TurnId) -> Option<crate::error::RuntimeError> {
         let mut q = self.injection_queue.lock().unwrap();
-        let updated = q.iter_mut().find_map(|inj| {
-            if inj.id == *id && inj.state == InjectionState::Pending {
-                inj.state = InjectionState::Injected;
-                return Some(inj.clone());
-            }
-            None
-        });
-        drop(q);
-        if let Some(injection) = updated {
-            self.publish_injection_update(injection, None);
-        }
-    }
-
-    pub fn peek_pending_l2_or_higher(&self, turn_id: &TurnId) -> Option<Injection> {
-        let q = self.injection_queue.lock().unwrap();
-        q.iter()
-            .find(|i| {
-                i.state == InjectionState::Pending
-                    && i.turn_id == *turn_id
-                    && !matches!(i.level, crate::injection::InjectionLevel::L1Nudge)
-            })
-            .cloned()
+        let index = crate::injection::next_interruption(&q, |inj| {
+            inj.turn_id == *turn_id
+                && matches!(
+                    inj.level,
+                    crate::injection::InjectionLevel::L3Redirect
+                        | crate::injection::InjectionLevel::L4HardStop
+                )
+        })?;
+        let injection = &mut q[index];
+        injection.state = InjectionState::Injected;
+        self.publish_injection_update(injection.clone(), None);
+        injection.control_error()
     }
 
     /// Consume pending nudges and corrections in creation order, preserving controls.

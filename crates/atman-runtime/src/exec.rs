@@ -88,32 +88,19 @@ pub fn exec_stmts_prefixed<'a>(
             // Check for pending L4 stop / L3 redirect between statements.
             if let Some(session) = ctx.session_runtime.as_ref()
                 && let Some(turn_id) = ctx.turn_id.as_ref()
+                && let Some(control) = session.take_pending_control(turn_id)
             {
-                if let Some(inj) = session.peek_pending_l2_or_higher(turn_id) {
-                    match inj.level {
-                        crate::injection::InjectionLevel::L4HardStop => {
-                            session.mark_injection_consumed(&inj.id);
-                            emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
-                            emit_flow_node_end(
-                                ctx,
-                                &node_id,
-                                &StmtOutcome::Continue,
-                                parent_node_id.as_deref(),
-                                Some("cancelled: hard stop"),
-                            );
-                            return StmtOutcome::Err(RuntimeError::Cancelled(
-                                "hard stop from user".into(),
-                            ));
-                        }
-                        crate::injection::InjectionLevel::L3Redirect => {
-                            if let Some(target) = inj.redirect_target.clone() {
-                                session.mark_injection_consumed(&inj.id);
-                                return StmtOutcome::Err(RuntimeError::Redirect(target));
-                            }
-                        }
-                        _ => {}
-                    }
+                if matches!(control, RuntimeError::Cancelled(_)) {
+                    emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
+                    emit_flow_node_end(
+                        ctx,
+                        &node_id,
+                        &StmtOutcome::Continue,
+                        parent_node_id.as_deref(),
+                        Some("cancelled: user control"),
+                    );
                 }
+                return StmtOutcome::Err(control);
             }
             emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
             let stmt_ctx = ctx.with_node(&node_id);

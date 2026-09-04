@@ -185,12 +185,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         );
     }
     if let Some(session) = ctx.session_runtime.as_ref()
-        && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
-        && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
-        && let Some(target) = &l3_or_l2.redirect_target
+        && let Some(control) = session.take_pending_control(&turn_id)
     {
-        session.mark_injection_consumed(&l3_or_l2.id);
-        return Value::Err(RuntimeError::Redirect(target.clone()));
+        return Value::Err(control);
     }
     let prompt = prompt_for_budget;
     let mut rewrite_used = false;

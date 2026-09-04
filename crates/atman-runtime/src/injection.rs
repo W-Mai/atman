@@ -79,7 +79,45 @@ fn default_level() -> InjectionLevel {
     InjectionLevel::L1Nudge
 }
 
+pub(crate) fn next_interruption(
+    queue: &[Injection],
+    eligible: impl Fn(&Injection) -> bool,
+) -> Option<usize> {
+    queue
+        .iter()
+        .enumerate()
+        .filter(|(_, injection)| injection.state == InjectionState::Pending && eligible(injection))
+        .filter_map(|(index, injection)| {
+            let priority = match injection.level {
+                InjectionLevel::L4HardStop => 0,
+                InjectionLevel::L3Redirect => 1,
+                InjectionLevel::L2CourseCorrect => 2,
+                InjectionLevel::L1Nudge => return None,
+            };
+            Some((index, priority))
+        })
+        .min_by_key(|(_, priority)| *priority)
+        .map(|(index, _)| index)
+}
+
 impl Injection {
+    pub(crate) fn control_error(&self) -> Option<crate::error::RuntimeError> {
+        match self.level {
+            InjectionLevel::L3Redirect => Some(match &self.redirect_target {
+                Some(target) => crate::error::RuntimeError::Redirect(target.clone()),
+                None => crate::error::RuntimeError::Cancelled(format!(
+                    "redirect (no target): {}",
+                    self.text,
+                )),
+            }),
+            InjectionLevel::L4HardStop => Some(crate::error::RuntimeError::Cancelled(format!(
+                "hard stop: {}",
+                self.text,
+            ))),
+            _ => None,
+        }
+    }
+
     pub(crate) fn context_message(&self) -> crate::message::Message {
         let (intro, tag, source) = match &self.source {
             InjectionSource::User => (

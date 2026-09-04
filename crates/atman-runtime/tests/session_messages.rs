@@ -288,6 +288,104 @@ fn end_turn_marks_pending_injections_cancelled() {
 }
 
 #[test]
+fn controls_are_claimed_once_by_priority_without_consuming_steering_or_other_turns() {
+    use atman_runtime::RuntimeError;
+    use atman_runtime::event::FlowRunId;
+    use atman_runtime::injection::{InjectionLevel, InjectionState};
+
+    let session = Session::open_ephemeral();
+    let turn = session.begin_turn(user_msg(TurnId::now(), "task"));
+    session.enqueue_injection("nudge").unwrap();
+    session
+        .enqueue_injection_with_level("correction", InjectionLevel::L2CourseCorrect, None)
+        .unwrap();
+    for index in 0..8 {
+        session
+            .enqueue_injection_with_level(
+                "redirect",
+                InjectionLevel::L3Redirect,
+                Some(format!("target-{index}")),
+            )
+            .unwrap();
+    }
+    session
+        .enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None)
+        .unwrap();
+    let other_turn = session.begin_turn(user_msg(TurnId::now(), "other task"));
+    session
+        .enqueue_injection_for_run(
+            "other stop",
+            InjectionLevel::L4HardStop,
+            None,
+            Some((&other_turn, FlowRunId::now())),
+        )
+        .unwrap();
+    assert!(
+        matches!(session.take_pending_control(&turn), Some(RuntimeError::Cancelled(text)) if text == "hard stop: stop")
+    );
+    assert!(
+        matches!(session.take_pending_control(&turn), Some(RuntimeError::Redirect(target)) if target == "target-0")
+    );
+
+    let mut claimed = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut claimed = Vec::new();
+                    for _ in 0..10 {
+                        let Some(control) = session.take_pending_control(&turn) else {
+                            break;
+                        };
+                        match control {
+                            RuntimeError::Redirect(target) => claimed.push(target),
+                            other => panic!("unexpected control: {other}"),
+                        }
+                    }
+                    claimed
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    claimed.sort();
+    assert_eq!(
+        claimed,
+        (1..8)
+            .map(|index| format!("target-{index}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(session.list_pending_injections().len(), 3);
+    assert!(
+        matches!(session.take_pending_control(&other_turn), Some(RuntimeError::Cancelled(text)) if text == "hard stop: other stop")
+    );
+    assert_eq!(session.list_pending_injections().len(), 2);
+    let consumed: Vec<_> = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            atman_runtime::Event::UserInject {
+                injection,
+                context_message: None,
+                ..
+            } if injection.state == InjectionState::Injected => Some(injection.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(consumed.len(), 10);
+    assert_eq!(
+        consumed
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        10
+    );
+}
+
+#[test]
 fn user_inject_event_is_emitted_on_enqueue() {
     let session = Session::open_ephemeral();
     let turn_id = TurnId::now();

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Session controls** — `Session::take_pending_control` atomically consumes a stop or redirect and returns its control error, replacing separate peek and acknowledgement methods.
 - **History index filters** — `AnchorIndex::count_events` and `read_events_paginated` accept `EventFilter` to distinguish raw events, selected event kinds, and message history.
 - **Steering consumption API** — `Session::drain_injections` is asynchronous and consumes only nudges and corrections under the compaction lock. `Event::UserInject` includes an optional captured context message; older serialized events remain readable.
 - **Explicit turn lifecycle** — `Session::end_turn`, `mark_streamed`, `take_streamed_flag`, and `flow_cancel_token` require a `TurnId`; cancellation lookup returns `None` for an inactive turn. Active turn state is private, and `current_turn` returns a value only when one turn is active.
@@ -27,6 +28,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Interjection ordering** — hard stops take priority over redirects and corrections; equal-priority controls retain arrival order. Stream interruption consumes only the selected control, and concurrent session consumers cannot claim the same control twice.
 - **Indexed steering history** — consumed interjections participate in history counts, pagination, and search. Pending, cancelled, and legacy queue-only updates do not become messages. Index rebuild uses the same message text and ownership anchors as live writes.
 - **Interjection history** — consumed session steering retains its rendered text through later requests, compaction retries, and resume without adding transcript turn boundaries or duplicate retry suffixes.
 - **Interjection consumption** — auxiliary LLM calls leave pending nudges and course corrections for the agent, including during streaming; helper output and stream-level stop controls remain connected.
