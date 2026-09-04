@@ -1007,7 +1007,7 @@ impl SessionActor {
             }
             Command::Snapshot { reply } => {
                 self.refresh_watch_projections();
-                let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+                let target_seq = self.session.sink().published_seq();
                 let result = self
                     .catch_up_through(target_seq)
                     .map(|()| (self.event_cursor, self.projection.snapshot()));
@@ -1019,7 +1019,7 @@ impl SessionActor {
                 reply,
             } => {
                 self.refresh_watch_projections();
-                let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+                let target_seq = self.session.sink().published_seq();
                 let result = self
                     .catch_up_through(target_seq)
                     .map(|()| self.updates_response(after_cursor, limit));
@@ -1124,7 +1124,7 @@ impl SessionActor {
         {
             return Ok(false);
         }
-        let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let target_seq = self.session.sink().published_seq();
         if let Err(error) = self.catch_up_through(target_seq) {
             if leases == 0 {
                 self.leases.store(0, Ordering::Release);
@@ -1195,7 +1195,7 @@ impl SessionActor {
                 atman_runtime::session::CompactReviewDecision::Reject,
             );
         }
-        let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let target_seq = self.session.sink().published_seq();
         self.catch_up_through(target_seq)
     }
 
@@ -1207,7 +1207,7 @@ impl SessionActor {
         {
             self.publish_projection_delta(delta);
         }
-        let target_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let target_seq = self.session.sink().published_seq();
         self.catch_up_through(target_seq)
     }
 
@@ -1392,7 +1392,7 @@ impl SessionActor {
         id: String,
         decision: CompactReviewDecision,
     ) -> Result<CompactReviewResolutionCommit> {
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         self.catch_up_through(published_seq)?;
         let status = match self
             .session
@@ -1514,7 +1514,7 @@ impl SessionActor {
     }
 
     fn apply_runtime_signal(&mut self, frame: StreamFrame) {
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         if self.projection.last_runtime_seq() < published_seq
             && let Err(error) = self.catch_up_through(published_seq)
         {
@@ -1787,7 +1787,7 @@ impl SessionActor {
     }
 
     fn terminate_resource(&mut self, resource_id: ResourceId) -> Result<ResourceTerminationCommit> {
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         self.catch_up_through(published_seq)?;
         let resource = self
             .projection
@@ -1814,7 +1814,7 @@ impl SessionActor {
             Some(_) => match task_id_from_resource_id(&resource_id) {
                 Some(task_id) => match self.task_registry.kill_from_operator(&task_id) {
                     atman_runtime::task_registry::KillOutcome::Killed { .. } => {
-                        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+                        let published_seq = self.session.sink().published_seq();
                         self.catch_up_through(published_seq)?;
                         ResourceTerminationStatus::Terminating
                     }
@@ -1847,7 +1847,7 @@ impl SessionActor {
     ) -> Result<TerminalResizeCommit> {
         anyhow::ensure!(rows > 0, "terminal rows must be greater than zero");
         anyhow::ensure!(cols > 1, "terminal columns must be greater than one");
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         self.catch_up_through(published_seq)?;
         let resource = self
             .projection
@@ -1946,7 +1946,7 @@ impl SessionActor {
         action: WorkspaceMutationAction,
         resource_id: &ResourceId,
     ) -> Result<WorkspaceMutationPreparation> {
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         self.catch_up_through(published_seq)?;
         let resource = self
             .projection
@@ -2184,7 +2184,7 @@ impl SessionActor {
             label,
             &revisions,
         )?;
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         self.catch_up_through(published_seq)?;
         Ok(CreatePermissionGroupResponse {
             session_id: self.session_id.clone(),
@@ -2232,7 +2232,7 @@ impl SessionActor {
             scope,
             reason,
         )?;
-        let published_seq = self.session.sink().next_seq_peek().saturating_sub(1);
+        let published_seq = self.session.sink().published_seq();
         self.catch_up_through(published_seq)?;
         Ok(ResolvePermissionRequestsResponse {
             session_id: self.session_id.clone(),

@@ -25,6 +25,21 @@ async fn checkpoint_event_written_after_compaction() {
     session
         .compact_messages_auto("test summary".into())
         .unwrap();
+    let events = session.sink().snapshot_envelopes();
+    let replacement_seq = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::ContextCompact {
+                replacement_msg_seq,
+                ..
+            } => *replacement_msg_seq,
+            _ => None,
+        })
+        .expect("compaction references its summary");
+    assert!(events.iter().any(|envelope| envelope.seq == replacement_seq
+        && matches!(&envelope.event, Event::SystemMsg { message, .. }
+            if atman_runtime::compaction::is_compaction_summary(message)
+                && message.text_concat().contains("test summary"))));
     session.shutdown().await;
 
     let events_path = tmp.path().join("sessions").join(&sid).join("events.jsonl");

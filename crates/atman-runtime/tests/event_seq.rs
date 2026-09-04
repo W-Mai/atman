@@ -95,6 +95,19 @@ fn concurrent_emitters_publish_in_persisted_sequence_order() {
             })
         })
         .collect::<Vec<_>>();
+    let mut published = Vec::new();
+    while workers.iter().any(|worker| !worker.is_finished()) {
+        let target = sink.published_seq();
+        while published.last().copied().unwrap_or(0) < target {
+            published.push(
+                receiver
+                    .try_recv()
+                    .expect("published event must be available")
+                    .seq,
+            );
+        }
+        std::thread::yield_now();
+    }
     for worker in workers {
         worker.join().unwrap();
     }
@@ -105,9 +118,7 @@ fn concurrent_emitters_publish_in_persisted_sequence_order() {
         .into_iter()
         .map(|event| event.seq)
         .collect::<Vec<_>>();
-    let published = std::iter::from_fn(|| receiver.try_recv().ok())
-        .map(|event| event.seq)
-        .collect::<Vec<_>>();
+    published.extend(std::iter::from_fn(|| receiver.try_recv().ok()).map(|event| event.seq));
     assert_eq!(persisted, expected);
     assert_eq!(published, expected);
 }
@@ -135,11 +146,24 @@ fn reserve_seq_advances_counter_atomically() {
     let b = sink.reserve_seq();
     let c = sink.reserve_seq();
     assert_eq!((a, b, c), (1, 2, 3));
+    assert_eq!(sink.published_seq(), 0);
     assert_eq!(
         sink.next_seq_peek(),
         4,
         "peek after 3 reservations must see counter=3, next=4"
     );
+    sink.emit(make_flow_start());
+    assert_eq!(sink.published_seq(), 4);
+    sink.reserve_seq();
+    assert_eq!(sink.clone().published_seq(), 4);
+    sink.drain();
+    assert_eq!(sink.published_seq(), 4);
+    sink.restore_seq(20);
+    assert_eq!(sink.published_seq(), 20);
+    sink.reserve_seq();
+    assert_eq!(sink.published_seq(), 20);
+    sink.emit(make_flow_end());
+    assert_eq!(sink.published_seq(), 22);
 }
 
 #[test]

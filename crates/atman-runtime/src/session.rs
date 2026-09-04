@@ -2340,8 +2340,7 @@ impl Session {
             )
         });
         self.sink.mark_compacted();
-        let replacement_seq = self.sink.next_seq_peek();
-        self.sink.emit(Event::SystemMsg {
+        let replacement_seq = self.sink.emit_returning_seq(Event::SystemMsg {
             turn_id: turn_id.clone(),
             flow_run_id: None,
             message: replacement_msg,

@@ -524,6 +524,7 @@ pub struct EventSink {
     event_tx: broadcast::Sender<EventEnvelope>,
     forwarder: Option<mpsc::UnboundedSender<EventEnvelope>>,
     seq_counter: Arc<std::sync::atomic::AtomicU64>,
+    published_seq: Arc<std::sync::atomic::AtomicU64>,
     redactor: Option<Arc<crate::redact::Redactor>>,
     last_compact_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
@@ -536,6 +537,7 @@ impl Default for EventSink {
             event_tx,
             forwarder: None,
             seq_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            published_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             redactor: None,
             last_compact_at: Arc::new(Mutex::new(None)),
         }
@@ -564,10 +566,19 @@ impl EventSink {
         self.seq_counter.load(std::sync::atomic::Ordering::SeqCst) + 1
     }
 
+    /// Highest sequence published to subscribers or restored from the event log.
+    /// Excludes reservations and in-flight emission; does not imply a disk flush.
+    pub fn published_seq(&self) -> u64 {
+        self.published_seq
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn restore_seq(&self, last_seq: u64) {
         let _events = self.events.lock().expect("event sink poisoned");
         self.seq_counter
             .store(last_seq, std::sync::atomic::Ordering::SeqCst);
+        self.published_seq
+            .store(last_seq, std::sync::atomic::Ordering::Release);
     }
 
     // Atomic reserve for the future parallel-dispatch case: returns a seq value that
@@ -596,6 +607,8 @@ impl EventSink {
         }
         events.push(envelope.clone());
         let _ = self.event_tx.send(envelope.clone());
+        self.published_seq
+            .store(next, std::sync::atomic::Ordering::Release);
         envelope
     }
 

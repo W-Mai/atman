@@ -302,6 +302,12 @@ async fn session_actor_projects_durable_events_and_watch_state() {
     while state.session_projection_revision(&sid) == Some(event_revision) {
         tokio::task::yield_now().await;
     }
+    session.sink().reserve_seq();
+    let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+    assert_eq!(
+        snapshot.projection.goal.as_deref(),
+        Some("Keep clients convergent")
+    );
 }
 
 #[tokio::test]
