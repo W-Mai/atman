@@ -31,7 +31,6 @@ pub struct EvalCtx<'a> {
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
-    pub flow_cancel: tokio_util::sync::CancellationToken,
     pub safety: Option<&'a crate::safety::SafetyConfig>,
     pub current_node_id: Option<String>,
     /// Directory of the .at source file. When set, relative `@` paths
@@ -739,7 +738,7 @@ async fn dispatch_tool_call<'a>(
     env: &'a Env,
     ctx: &'a EvalCtx<'a>,
 ) -> Value {
-    if ctx.flow_cancel.is_cancelled() {
+    if ctx.tool_ctx.flow_cancel.is_cancelled() {
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
     let name = tool_name(path);
@@ -780,7 +779,7 @@ async fn dispatch_tool_call<'a>(
             }
         }
     }
-    let mut ctx_with_anchors = ctx
+    let ctx_with_anchors = ctx
         .tool_ctx
         .clone()
         .with_anchors(
@@ -789,7 +788,6 @@ async fn dispatch_tool_call<'a>(
             ctx.events.map(|s| s.next_seq_peek()),
         )
         .with_registry(std::sync::Arc::new(ctx.tools.clone()));
-    ctx_with_anchors.flow_cancel = ctx.flow_cancel.clone();
     let ctx_with_anchors = if let Some(sink) = ctx.events {
         ctx_with_anchors.with_events(sink.clone())
     } else {
@@ -1293,7 +1291,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
-    if ctx.flow_cancel.is_cancelled() {
+    if ctx.tool_ctx.flow_cancel.is_cancelled() {
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
     match node {
@@ -2307,7 +2305,6 @@ mod tests {
             turn_id: None,
             flow_run_id: None,
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2404,7 +2401,6 @@ mod tests {
             turn_id: None,
             flow_run_id: None,
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2466,7 +2462,6 @@ mod tests {
             turn_id: None,
             flow_run_id: Some(run_id),
             session_runtime: Some(Arc::clone(&session)),
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2521,7 +2516,6 @@ mod tests {
                 .as_ref()
                 .map(|identity| identity.run_id.clone()),
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2563,7 +2557,6 @@ mod tests {
             turn_id: None,
             flow_run_id: None,
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2621,7 +2614,6 @@ mod tests {
                 .as_ref()
                 .map(|identity| identity.run_id.clone()),
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2663,7 +2655,6 @@ mod tests {
             turn_id: None,
             flow_run_id: None,
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2692,7 +2683,6 @@ mod tests {
             turn_id: None,
             flow_run_id: None,
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2876,7 +2866,6 @@ flow parent() -> Int {
                 .as_ref()
                 .map(|identity| identity.run_id.clone()),
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
             source_dir: None,
@@ -2912,7 +2901,6 @@ flow parent() -> Int {
             turn_id: None,
             flow_run_id: Some(crate::event::FlowRunId::now()),
             session_runtime: None,
-            flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: Some("stmt_1".into()),
             source_dir: None,

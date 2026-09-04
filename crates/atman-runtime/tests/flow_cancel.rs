@@ -57,6 +57,13 @@ async fn root_invocation_cancel_token_is_independent_from_session_slot() {
         r#"flow ask() -> string {
     return llm.call(model: "mock", prompt: "hi", context: "session")
 }
+flow watched() -> string {
+    reply = llm.call(model: "mock", prompt: "hi", context: "session")
+    watch reply {
+        on token(match: "unused") { warn("unused") }
+    }
+    return reply
+}
 "#,
     )
     .unwrap();
@@ -87,28 +94,31 @@ async fn root_invocation_cancel_token_is_independent_from_session_slot() {
         .unwrap_err();
     assert!(matches!(error, RuntimeError::Cancelled(_)));
 
-    let cancelled_session_slot = Arc::new(Session::open_ephemeral());
-    let live_turn = TurnId::now();
-    cancelled_session_slot.begin_turn(user_msg(live_turn.clone(), "continue"));
-    cancelled_session_slot.cancel_flow();
-    let output = executor
-        .run_with_invocation(
-            &file,
-            "ask",
-            vec![],
-            RootInvocation {
-                turn_id: Some(live_turn),
-                session: Some(cancelled_session_slot),
-                flow_cancel: Some(CancellationToken::new()),
-                ..RootInvocation::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(
-        !output.is_err(),
-        "explicit live token must keep the run active"
-    );
+    executor.tool_ctx.flow_cancel.cancel();
+    for flow in ["ask", "watched"] {
+        let cancelled_session_slot = Arc::new(Session::open_ephemeral());
+        let live_turn = TurnId::now();
+        cancelled_session_slot.begin_turn(user_msg(live_turn.clone(), "continue"));
+        cancelled_session_slot.cancel_flow();
+        let output = executor
+            .run_with_invocation(
+                &file,
+                flow,
+                vec![],
+                RootInvocation {
+                    turn_id: Some(live_turn),
+                    session: Some(cancelled_session_slot),
+                    flow_cancel: Some(CancellationToken::new()),
+                    ..RootInvocation::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !output.is_err(),
+            "{flow}: explicit live token must keep the run active"
+        );
+    }
 }
 
 struct CancelAfterFirstProvider {

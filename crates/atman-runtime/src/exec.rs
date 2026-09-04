@@ -651,9 +651,11 @@ pub async fn exec_flow_with_siblings(
     safety: Option<&crate::safety::SafetyConfig>,
     source_dir: Option<PathBuf>,
 ) -> Result<Value, RuntimeError> {
+    let mut tool_ctx = tool_ctx.clone();
+    tool_ctx.flow_cancel = flow_cancel;
     let ctx = EvalCtx {
         tools,
-        tool_ctx,
+        tool_ctx: &tool_ctx,
         providers,
         flows,
         contract: flow.contract.as_ref(),
@@ -661,7 +663,6 @@ pub async fn exec_flow_with_siblings(
         turn_id,
         flow_run_id,
         session_runtime: session,
-        flow_cancel,
         safety,
         current_node_id: None,
         source_dir,
