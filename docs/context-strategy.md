@@ -215,6 +215,8 @@ Root and child compaction commit against the exact source messages used to build
 
 Compaction review policy belongs to the target context. Pending reviews form an ordered collection with independent IDs and context identities; accepting, rejecting, or abandoning one does not replace another. Registration publishes its canonical request and pending snapshot before returning the response future. Dropping that future records abandonment and removes the request. The TUI retains the current review's draft and scroll position across collection updates, then opens the next pending review after resolution. Initial attachment also reads existing pending reviews.
 
+Automatic compaction has a 60-second cooldown per context, measured with a monotonic clock. A fork captures the source cooldown without sharing subsequent updates. Only a successful window commit starts the cooldown; stale candidates and standalone `replace_messages_range` list transformations do not. Manual and overflow compaction retain their forced behavior. Process restart resets the in-memory cooldown.
+
 For session-context calls without an explicit `messages:` override, the runtime
 computes a history budget from:
 

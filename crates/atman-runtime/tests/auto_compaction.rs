@@ -213,6 +213,20 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
     assert!(result.compacted_count > 0);
 
     *messages.lock().unwrap() = history.clone();
+    assert!(!context.compaction_cooldown_elapsed());
+    assert!(
+        maybe_auto_compact_context_locked(
+            &context,
+            "mock-summary",
+            &providers,
+            CompactionBudgetContext::default(),
+            false,
+            |_| panic!("cooldown must prevent a repeated automatic commit"),
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(*messages.lock().unwrap(), history);
     provider
         .mutate
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -221,7 +235,7 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
         "mock-summary",
         &providers,
         CompactionBudgetContext::default(),
-        false,
+        true,
         |_| panic!("stale candidates must not publish or update the epoch"),
     )
     .await;
@@ -273,7 +287,7 @@ async fn context_compaction_rejects_changed_sources_before_publication() {
             .iter()
             .any(|event| matches!(event, atman_runtime::event::Event::Checkpoint { .. }))
     );
-    assert!(session.sink().last_compact_ago_seconds().is_none());
+    assert!(session.context().compaction_cooldown_elapsed());
     let mut phases = Vec::new();
     while let Ok(frame) = frames.try_recv() {
         if let atman_runtime::stream::StreamFrame::CompactionSummary { phase, .. } = frame {
@@ -700,7 +714,42 @@ async fn cooldown_blocks_repeat_compaction_within_window() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
-    assert!(session.approval_cooldown_ok_for_compact());
+    let sibling = session
+        .context()
+        .fork(atman_runtime::event::ContextInheritance::Full)
+        .unwrap();
+    assert!(session.context().compaction_cooldown_elapsed());
+    assert!(sibling.compaction_cooldown_elapsed());
     let _ = session.compact_messages_auto("first".into()).unwrap();
-    assert!(!session.approval_cooldown_ok_for_compact());
+    assert!(!session.context().compaction_cooldown_elapsed());
+    assert!(sibling.compaction_cooldown_elapsed());
+    let descendant = session
+        .context()
+        .fork(atman_runtime::event::ContextInheritance::Full)
+        .unwrap();
+    assert!(!descendant.compaction_cooldown_elapsed());
+
+    let original = sibling.messages();
+    let range = atman_runtime::compaction::CompactRange {
+        start: 0,
+        end: 2,
+        tokens_saved_estimate: 0,
+    };
+    let replacement = atman_runtime::compaction::replace_range_with_summary(
+        &original,
+        &range,
+        "independent summary".into(),
+        original[0].turn_id.clone(),
+    );
+    session
+        .commit_compacted_window(
+            &sibling,
+            "independent summary".into(),
+            replacement,
+            range,
+            atman_runtime::compaction::estimate_tokens_for_messages(&original),
+            &original,
+        )
+        .unwrap();
+    assert!(!sibling.compaction_cooldown_elapsed());
 }

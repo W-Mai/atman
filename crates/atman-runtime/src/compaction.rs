@@ -420,7 +420,7 @@ async fn maybe_auto_compact_locked(
     if !forced && current <= trigger {
         return;
     }
-    if !forced && !session.approval_cooldown_ok_for_compact() {
+    if !forced && !context.compaction_cooldown_elapsed() {
         return;
     }
     let Some(range) = find_compact_range(&msgs, target) else {
@@ -1102,7 +1102,7 @@ pub async fn maybe_auto_compact_context_locked(
         .unwrap_or_else(|| info.compaction_target_after());
     let before_tokens = estimate_tokens_for_messages(&snapshot);
     let current = budget_context.estimated_input_tokens(before_tokens);
-    if !forced && current <= trigger {
+    if !forced && (current <= trigger || !context.compaction_cooldown_elapsed()) {
         return None;
     }
 

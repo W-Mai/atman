@@ -2033,10 +2033,6 @@ impl Session {
             .send(crate::stream::StreamFrame::Note(text));
     }
 
-    pub fn approval_cooldown_ok_for_compact(&self) -> bool {
-        self.sink.last_compact_ago_seconds().is_none_or(|s| s >= 60)
-    }
-
     pub fn emit_compact_warning(
         &self,
         context: &ContextState,
@@ -2182,7 +2178,6 @@ impl Session {
             let Some(sink) = context.sink() else {
                 return;
             };
-            sink.mark_compacted();
             let mut batch = sink.batch();
             let replacement_msg_seq = summary_message.map(|message| {
                 batch
@@ -3708,7 +3703,7 @@ mod tests {
                 let epoch = session.context_epoch();
                 let window_tokens = session.last_input_tokens();
                 let seq = session.sink().published_seq();
-                let compacted = session.sink().last_compact_ago_seconds().is_some();
+                let compacted = !session.context().compaction_cooldown_elapsed();
                 let mut frames = session.stream_subscribe();
                 let committed = if rewrite {
                     session.commit_rewritten_window(
@@ -3754,10 +3749,7 @@ mod tests {
                     assert_eq!(session.context_epoch(), epoch);
                     assert_eq!(session.last_input_tokens(), window_tokens);
                     assert_eq!(session.sink().published_seq(), seq);
-                    assert_eq!(
-                        session.sink().last_compact_ago_seconds().is_some(),
-                        compacted
-                    );
+                    assert_eq!(!session.context().compaction_cooldown_elapsed(), compacted);
                     assert!(frames.try_recv().is_err());
                 }
                 assert_eq!(*session.messages_full(), *raw);

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Compaction cooldown ownership** — `ContextState::compaction_cooldown_elapsed` replaces the session and event-sink cooldown methods. Committed context changes own their cooldown state.
 - **Compaction review collections** — interaction snapshots and TUI handles expose a list of pending reviews. `CompactReviewRegistry::request` registers through an `Arc` and returns a future that abandons its request when dropped. Review payloads carry their context identity.
 - **Restored context views** — `ReplayBundle::view` contains the selected message view and checkpoint epoch. `MessageStream::with_initial` requires an explicit optional context identity. Context snapshot readers return errors for invalid lineage.
 - **Context usage targets** — `Session::record_context_plan_call` accepts an optional managed context and plan identity. An absent target or plan records aggregate usage without updating message-window statistics.
@@ -47,6 +48,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Independent compaction cooldowns** — compacting one context does not delay an existing sibling. New forks capture the source cooldown, and failed commits or standalone message-list transformations do not restart it. Elapsed time uses a monotonic clock.
 - **Independent compaction reviews** — pending reviews no longer replace each other. Review policy comes from the target context; cancellation removes only the matching request. Daemon form and review projections use canonical events without competing watch-state writes. TUI review updates preserve the current draft and scroll position until that review is resolved.
 - **Pending interaction publication** — form and approval registries publish their latest queue before waking resolved callers. Form events retain registration order, and disconnected clients no longer recover stale pending entries after resolution.
 - **Session head restoration** — reopening a session binds its selected window, raw history, writable handle, usage, and journal to the same context. Other branches and stale state caches cannot replace the restored head's model or window reading. Session appends publish canonical records before live frames.

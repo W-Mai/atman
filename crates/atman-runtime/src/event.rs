@@ -663,7 +663,6 @@ pub struct EventSink {
     seq_counter: Arc<std::sync::atomic::AtomicU64>,
     published_seq: Arc<std::sync::atomic::AtomicU64>,
     redactor: Option<Arc<crate::redact::Redactor>>,
-    last_compact_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
 }
 
 /// Serializes related records against other emitters and shared-log readers.
@@ -709,7 +708,6 @@ impl Default for EventSink {
             seq_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             published_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             redactor: None,
-            last_compact_at: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -801,17 +799,6 @@ impl EventSink {
 
     pub fn redactor(&self) -> Option<Arc<crate::redact::Redactor>> {
         self.redactor.clone()
-    }
-
-    pub fn mark_compacted(&self) {
-        *self.last_compact_at.lock().expect("last_compact poisoned") = Some(chrono::Utc::now());
-    }
-
-    pub fn last_compact_ago_seconds(&self) -> Option<i64> {
-        self.last_compact_at
-            .lock()
-            .expect("last_compact poisoned")
-            .map(|t| (chrono::Utc::now() - t).num_seconds())
     }
 
     pub fn drain(&self) -> Vec<Event> {

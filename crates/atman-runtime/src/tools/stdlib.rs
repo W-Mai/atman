@@ -264,7 +264,6 @@ impl Tool for ReplaceMessagesRange {
                 crate::compaction::replace_range_with_summary(&messages, &range, summary, turn_id);
             let after_tokens = crate::compaction::estimate_tokens_for_messages(&out);
             if let Some(sink) = &ctx.events {
-                sink.mark_compacted();
                 sink.emit(crate::event::Event::ContextCompact {
                     session_id: ctx
                         .turn_id

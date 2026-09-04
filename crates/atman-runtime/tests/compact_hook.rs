@@ -81,14 +81,18 @@ fn find_compact_summaries_ignores_plain_system_messages() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
+async fn replace_messages_range_emits_context_compact_without_committing_a_window() {
     use atman_runtime::event::{Event, EventSink};
     use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
     use atman_runtime::tools::stdlib::ReplaceMessagesRange;
     use atman_runtime::value::Value;
 
     let sink = EventSink::new();
-    let mut ctx = ToolCtx::new();
+    let context = std::sync::Arc::new(atman_runtime::context_state::ContextState::new(
+        Vec::new(),
+        Some(sink.clone()),
+    ));
+    let mut ctx = ToolCtx::new().with_context(context.clone());
     ctx.events = Some(sink.clone());
     let msgs = vec![
         Value::Message(user(&"a".repeat(400))),
@@ -138,8 +142,8 @@ async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
     );
     assert_eq!(start, 0);
     assert_eq!(end, 2);
-    let ago = sink.last_compact_ago_seconds().expect("timestamp recorded");
-    assert!(ago >= 0);
+    assert!(context.compaction_cooldown_elapsed());
+    assert!(context.messages().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

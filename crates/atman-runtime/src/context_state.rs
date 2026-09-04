@@ -85,6 +85,7 @@ impl ContextState {
                     .clone(),
             ),
             context_epoch: Mutex::new(self.epoch()),
+            last_compact_at: Mutex::new(*self.compaction.last_compact_at.lock().unwrap()),
         };
         Ok(Self::from_stream(stream, compaction, sink))
     }
@@ -125,6 +126,14 @@ impl ContextState {
         }
     }
 
+    pub fn compaction_cooldown_elapsed(&self) -> bool {
+        self.compaction
+            .last_compact_at
+            .lock()
+            .unwrap()
+            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(60))
+    }
+
     pub fn compact_lock(&self) -> &Arc<tokio::sync::Mutex<()>> {
         &self.compaction.lock
     }
@@ -158,6 +167,7 @@ impl ContextState {
             .store(result.after_tokens, std::sync::atomic::Ordering::Relaxed);
         publish();
         *messages = result.checkpoint_messages.clone();
+        *self.compaction.last_compact_at.lock().unwrap() = Some(std::time::Instant::now());
         true
     }
 
@@ -260,6 +270,7 @@ pub(crate) struct CompactionState {
     last_context_usage: Mutex<LastContextUsageStore>,
     last_context_prefix: Mutex<crate::context_plan::ContextPrefixTracker>,
     context_epoch: Mutex<Option<String>>,
+    last_compact_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl CompactionState {
@@ -297,6 +308,7 @@ impl CompactionState {
             last_context_usage: Mutex::new(LastContextUsageStore::default()),
             last_context_prefix: Mutex::new(crate::context_plan::ContextPrefixTracker::default()),
             context_epoch: Mutex::new(None),
+            last_compact_at: Mutex::new(None),
         }
     }
 
