@@ -168,36 +168,47 @@ flow second() -> string {
 
 #[tokio::test]
 async fn l3_redirect_chain_limit_returns_error() {
-    let src = r#"flow a() -> string { return llm.call(model: "mock", prompt: "x") }
-flow b() -> string { return llm.call(model: "mock", prompt: "x") }
-flow c() -> string { return llm.call(model: "mock", prompt: "x") }
-flow d() -> string { return llm.call(model: "mock", prompt: "x") }
-flow e() -> string { return llm.call(model: "mock", prompt: "x") }
-flow f() -> string { return llm.call(model: "mock", prompt: "x") }
-flow g() -> string { return "reached" }
-"#;
-    let file = parse_file(src).unwrap();
-    let session = std::sync::Arc::new(Session::open_ephemeral());
-    let turn_id = TurnId::now();
-    session.begin_turn(user_msg(turn_id.clone(), "start"));
-    for target in ["b", "c", "d", "e", "f", "g"] {
-        session
-            .enqueue_injection_with_level(target, InjectionLevel::L3Redirect, Some(target.into()))
-            .unwrap();
+    use atman_runtime::tool::{Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+
+    struct RequestRedirect;
+    impl Tool for RequestRedirect {
+        fn name(&self) -> &str {
+            "request_redirect"
+        }
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+        fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                let Value::Str(target) = args.positional(0)? else {
+                    panic!("expected target");
+                };
+                ctx.agent_entry.as_ref().unwrap().interject(
+                    "redirect this execution",
+                    InjectionLevel::L3Redirect,
+                    Some(target.clone()),
+                )?;
+                Ok(Value::Unit)
+            })
+        }
     }
 
-    let ex = Executor::new();
-    ex.providers.register(Arc::new(
-        MockProvider::new("mock").with_model("mock", Value::Str("x".into())),
-    ));
-
-    let err = ex
-        .run_in_turn(&file, "a", vec![], Some(turn_id), Some(session.clone()))
+    let mut source = ["a", "b", "c", "d", "e", "f", "g"].windows(2).map(|names| {
+        format!("flow {}() -> string {{\n    request_redirect(\"{}\")\n    return \"not reached\"\n}}\n", names[0], names[1])
+    }).collect::<String>();
+    source.push_str("flow g() -> string { return \"reached\" }\n");
+    let file = parse_file(&source).unwrap();
+    let session = Arc::new(Session::open_ephemeral());
+    let turn_id = session.begin_turn(user_msg(TurnId::now(), "start"));
+    let executor = Executor::new();
+    executor.tools.register(Arc::new(RequestRedirect));
+    let error = executor
+        .run_in_turn(&file, "a", vec![], Some(turn_id), Some(session))
         .await
         .unwrap_err();
     assert!(
-        format!("{err}").contains("redirect chain exceeded"),
-        "got: {err}"
+        error.to_string().contains("redirect chain exceeded"),
+        "{error}"
     );
 }
 

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use crate::event::TurnId;
 
@@ -77,6 +79,191 @@ pub struct Injection {
 
 fn default_level() -> InjectionLevel {
     InjectionLevel::L1Nudge
+}
+
+#[derive(Default)]
+struct QueueState {
+    pending: Vec<Injection>,
+    claimed: HashSet<InjectionId>,
+}
+
+/// Pending inputs and their durable state transitions. Context remains owned by the run.
+pub struct InjectionQueue {
+    state: Mutex<QueueState>,
+    events: Option<crate::event::EventSink>,
+    updates: tokio::sync::broadcast::Sender<Injection>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+impl InjectionQueue {
+    pub fn new(events: Option<crate::event::EventSink>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(QueueState::default()),
+            events,
+            updates: tokio::sync::broadcast::channel(32).0,
+            changed: tokio::sync::watch::channel(()).0,
+        })
+    }
+
+    pub(crate) fn enqueue(&self, injection: Injection) -> Option<crate::event::EventEnvelope> {
+        let mut state = self.state.lock().unwrap();
+        let envelope = self.publish(&injection, None);
+        state.pending.push(injection);
+        self.changed.send_replace(());
+        envelope
+    }
+
+    fn publish(
+        &self,
+        injection: &Injection,
+        context_message: Option<crate::message::Message>,
+    ) -> Option<crate::event::EventEnvelope> {
+        let envelope = self.events.as_ref().map(|events| {
+            events.emit_returning_envelope(crate::event::Event::UserInject {
+                turn_id: injection.turn_id.clone(),
+                injection: injection.clone(),
+                context_message,
+            })
+        });
+        let _ = self.updates.send(injection.clone());
+        envelope
+    }
+
+    pub fn pending(&self) -> Vec<Injection> {
+        self.state.lock().unwrap().pending.clone()
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Injection> {
+        self.updates.subscribe()
+    }
+
+    pub(crate) fn watch(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+
+    pub(crate) fn bind_turn(&self, turn_id: &TurnId, run_id: &crate::event::FlowRunId) {
+        let mut state = self.state.lock().unwrap();
+        for injection in &mut state.pending {
+            if injection.turn_id == *turn_id && injection.flow_run_id.is_none() {
+                injection.flow_run_id = Some(run_id.clone());
+                self.publish(injection, None);
+            }
+        }
+        self.changed.send_replace(());
+    }
+
+    pub(crate) fn cancel(&self, eligible: impl Fn(&Injection) -> bool) {
+        let mut state = self.state.lock().unwrap();
+        let mut cancelled = Vec::new();
+        state.pending.retain(|injection| {
+            if eligible(injection) {
+                cancelled.push(injection.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for mut injection in cancelled {
+            state.claimed.remove(&injection.id);
+            injection.state = InjectionState::Cancelled;
+            self.publish(&injection, None);
+        }
+        self.changed.send_replace(());
+    }
+
+    pub(crate) fn claim_interruption(
+        self: &Arc<Self>,
+        eligible: impl Fn(&Injection) -> bool,
+    ) -> Option<InjectionClaim> {
+        self.claim(|state| {
+            next_interruption(&state.pending, |injection| {
+                !state.claimed.contains(&injection.id) && eligible(injection)
+            })
+        })
+    }
+
+    pub(crate) fn claim_steering(
+        self: &Arc<Self>,
+        eligible: impl Fn(&Injection) -> bool,
+    ) -> Option<InjectionClaim> {
+        self.claim(|state| {
+            state.pending.iter().position(|injection| {
+                !state.claimed.contains(&injection.id)
+                    && eligible(injection)
+                    && matches!(
+                        injection.level,
+                        InjectionLevel::L1Nudge | InjectionLevel::L2CourseCorrect
+                    )
+            })
+        })
+    }
+
+    fn claim(
+        self: &Arc<Self>,
+        select: impl FnOnce(&QueueState) -> Option<usize>,
+    ) -> Option<InjectionClaim> {
+        let mut state = self.state.lock().unwrap();
+        let injection = state.pending.get(select(&state)?)?.clone();
+        state.claimed.insert(injection.id.clone());
+        Some(InjectionClaim {
+            queue: Arc::clone(self),
+            injection,
+        })
+    }
+}
+
+/// A cancellation-safe claim: dropping it leaves the input available unless the run has ended.
+pub(crate) struct InjectionClaim {
+    queue: Arc<InjectionQueue>,
+    pub(crate) injection: Injection,
+}
+
+impl std::fmt::Debug for InjectionClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InjectionClaim")
+            .field("injection", &self.injection)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InjectionClaim {
+    pub(crate) fn commit(
+        self,
+        context: Option<&Mutex<Vec<crate::message::Message>>>,
+        before: impl FnOnce(),
+    ) -> Option<Injection> {
+        let mut state = self.queue.state.lock().unwrap();
+        let index = state
+            .pending
+            .iter()
+            .position(|injection| injection.id == self.injection.id)?;
+        before();
+        let mut injection = state.pending.remove(index);
+        state.claimed.remove(&injection.id);
+        injection.state = InjectionState::Injected;
+        let mut messages = context.map(|messages| messages.lock().unwrap());
+        let message = context.map(|_| injection.context_message());
+        self.queue.publish(&injection, message.clone());
+        if let (Some(messages), Some(message)) = (&mut messages, message) {
+            messages.push(message);
+        }
+        Some(injection)
+    }
+}
+
+impl Drop for InjectionClaim {
+    fn drop(&mut self) {
+        if self
+            .queue
+            .state
+            .lock()
+            .unwrap()
+            .claimed
+            .remove(&self.injection.id)
+        {
+            self.queue.changed.send_replace(());
+        }
+    }
 }
 
 pub(crate) fn next_interruption(
@@ -189,6 +376,70 @@ impl Injection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claims_are_exclusive_retryable_and_cannot_resurrect_cancelled_inputs() {
+        let sink = crate::event::EventSink::new();
+        let queue = InjectionQueue::new(Some(sink.clone()));
+        let turn = TurnId::now();
+        let first =
+            Injection::with_level(turn.clone(), "same", InjectionLevel::L2CourseCorrect, None);
+        let second = Injection::with_level(turn, "same", InjectionLevel::L2CourseCorrect, None);
+        queue.enqueue(first.clone());
+        queue.enqueue(second.clone());
+        let claim = queue.claim_interruption(|_| true).unwrap();
+        assert_eq!(claim.injection.id, first.id);
+        let other = queue.claim_interruption(|_| true).unwrap();
+        assert_eq!(other.injection.id, second.id);
+        assert!(queue.claim_interruption(|_| true).is_none());
+        drop(claim);
+        let claim = queue.claim_interruption(|_| true).unwrap();
+        assert_eq!(claim.injection.id, first.id);
+        let messages = Mutex::new(Vec::new());
+        claim.commit(Some(&messages), || {}).unwrap();
+        assert_eq!(messages.lock().unwrap().len(), 1);
+        queue.cancel(|_| true);
+        assert!(
+            other
+                .commit(Some(&messages), || panic!(
+                    "cancelled claim must not publish partial output"
+                ))
+                .is_none()
+        );
+        assert!(queue.pending().is_empty());
+        assert!(queue.claim_interruption(|_| true).is_none());
+        let events = sink.snapshot();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    crate::event::Event::UserInject {
+                        context_message: Some(_),
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event, crate::event::Event::UserInject { injection, .. } if injection.state == InjectionState::Cancelled)).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn queue_changes_are_visible_to_every_subscriber_without_lost_wakeups() {
+        let queue = InjectionQueue::new(None);
+        let mut first = queue.watch();
+        let mut second = queue.watch();
+        queue.enqueue(Injection::new_pending(TurnId::now(), "note"));
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+        first.changed().await.unwrap();
+        second.changed().await.unwrap();
+        let claim = queue.claim_steering(|_| true).unwrap();
+        drop(claim);
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+    }
 
     #[test]
     fn injection_roundtrips_via_serde_json() {

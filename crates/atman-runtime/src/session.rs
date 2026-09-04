@@ -11,7 +11,7 @@ use crate::event::{Event, EventSink, FlowRunId, TurnId};
 use crate::event_log::reader::replay_context_snapshot_from;
 use crate::event_log::replay::{SessionReplay, TranscriptReplayObserver};
 use crate::event_writer::EventWriter;
-use crate::injection::{Injection, InjectionId, InjectionState};
+use crate::injection::{Injection, InjectionId};
 use crate::message::{Message, MessageRole};
 use crate::projection::message_window::replay_transcript_from;
 #[cfg(test)]
@@ -200,8 +200,7 @@ pub struct Session {
     successful_flow_count: std::sync::atomic::AtomicU64,
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
-    injection_queue: Mutex<Vec<Injection>>,
-    injection_tx: broadcast::Sender<Injection>,
+    injection_queue: std::sync::Arc<crate::injection::InjectionQueue>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     pending_images: Mutex<Vec<crate::message::ImageSource>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
@@ -1005,7 +1004,7 @@ impl Session {
         if let Some(r) = redactor {
             sink = sink.with_redactor(r);
         }
-        let (injection_tx, _) = broadcast::channel(32);
+        let injection_queue = crate::injection::InjectionQueue::new(Some(sink.clone()));
         let (stream_tx, _) = broadcast::channel(2048);
         let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
         let (goal_watch, goal_rx) = watch::channel(None);
@@ -1044,8 +1043,7 @@ impl Session {
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
             interactions,
-            injection_queue: Mutex::new(Vec::new()),
-            injection_tx,
+            injection_queue,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -1242,7 +1240,7 @@ impl Session {
         initial_context.window_tokens = persisted.window_tokens;
         initial_context.window_budget = persisted.window_budget;
         let initial_goal = load_goal(&dir);
-        let (injection_tx, _) = broadcast::channel(32);
+        let injection_queue = crate::injection::InjectionQueue::new(Some(sink.clone()));
         let (stream_tx, _) = broadcast::channel(2048);
         let (context_watch, context_rx) = watch::channel(initial_context);
         let (goal_watch, goal_rx) = watch::channel(initial_goal);
@@ -1295,8 +1293,7 @@ impl Session {
                 c
             },
             interactions,
-            injection_queue: Mutex::new(Vec::new()),
-            injection_tx,
+            injection_queue,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -1309,14 +1306,14 @@ impl Session {
     }
 
     pub fn open_ephemeral() -> Self {
-        let (injection_tx, _) = broadcast::channel(32);
+        let sink = EventSink::new();
+        let injection_queue = crate::injection::InjectionQueue::new(Some(sink.clone()));
         let (stream_tx, _) = broadcast::channel(2048);
         let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
         let (goal_watch, goal_rx) = watch::channel(None);
         let (attach_watch, attach_rx) = watch::channel(0);
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
-        let sink = EventSink::new();
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
@@ -1349,8 +1346,7 @@ impl Session {
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
             interactions,
-            injection_queue: Mutex::new(Vec::new()),
-            injection_tx,
+            injection_queue,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -2443,18 +2439,8 @@ impl Session {
     pub fn end_turn(&self, turn_id: &TurnId) {
         let mut turns = self.turns.lock().unwrap();
         if turns.remove(turn_id).is_some() {
-            let mut q = self.injection_queue.lock().unwrap();
-            let mut cancelled = Vec::new();
-            for inj in q.iter_mut() {
-                if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
-                    inj.state = InjectionState::Cancelled;
-                    cancelled.push(inj.clone());
-                }
-            }
-            drop(q);
-            for injection in cancelled {
-                self.publish_injection_update(injection, None);
-            }
+            self.injection_queue
+                .cancel(|injection| injection.turn_id == *turn_id);
             self.sink.emit(Event::TurnEnd {
                 turn_id: turn_id.clone(),
             });
@@ -2511,33 +2497,69 @@ impl Session {
                 _ => return Err(EnqueueError::AmbiguousTurn),
             },
         };
-        let inj = Injection::with_level_for_run(
-            turn_id.clone(),
-            text,
-            level,
-            redirect_target,
-            flow_run_id,
-        );
-        let id = inj.id.clone();
-        let envelope = self.sink.emit_returning_envelope(Event::UserInject {
-            turn_id,
-            injection: inj.clone(),
-            context_message: None,
-        });
-        self.injection_queue.lock().unwrap().push(inj.clone());
-        let _ = self.injection_tx.send(inj);
-        Ok((id, envelope))
+        self.flow_registry.with_lifecycle_arbitration(|| {
+            let entry = match flow_run_id.as_ref() {
+                Some(run_id) => {
+                    if matches!(
+                        self.flow_registry.execution_state(run_id),
+                        Some(crate::flow_authority::FlowExecutionState::Terminal)
+                    ) {
+                        return Err(EnqueueError::InactiveRun(run_id.clone()));
+                    }
+                    self.flow_registry.entry_for_run(run_id)
+                }
+                None => self.flow_registry.lookup("root").ok().filter(|entry| {
+                    entry.turn_id == turn_id
+                        && !matches!(
+                            self.flow_registry.execution_state(&entry.child_run_id),
+                            Some(crate::flow_authority::FlowExecutionState::Terminal)
+                        )
+                }),
+            };
+            let envelope = if let Some(entry) = entry {
+                if entry.turn_id != turn_id {
+                    return Err(EnqueueError::InactiveRun(entry.child_run_id.clone()));
+                }
+                entry
+                    .interject(text, level, redirect_target)
+                    .map_err(|_| EnqueueError::InactiveRun(entry.child_run_id.clone()))?
+                    .expect("session event sink")
+            } else {
+                let inj = Injection::with_level_for_run(
+                    turn_id.clone(),
+                    text,
+                    level,
+                    redirect_target,
+                    flow_run_id,
+                );
+                let envelope = self
+                    .injection_queue
+                    .enqueue(inj)
+                    .expect("session event sink");
+                if level == crate::injection::InjectionLevel::L4HardStop {
+                    turns
+                        .get(&turn_id)
+                        .expect("active turn")
+                        .flow_cancel
+                        .cancel();
+                }
+                envelope
+            };
+            let Event::UserInject { injection, .. } = &envelope.event else {
+                unreachable!()
+            };
+            Ok((injection.id.clone(), envelope))
+        })
     }
 
     pub fn subscribe_injections(&self) -> broadcast::Receiver<Injection> {
-        self.injection_tx.subscribe()
+        self.injection_queue.subscribe()
     }
 
     /// Atomically consume the highest-priority stop or redirect for this turn.
     /// Corrections and nudges remain pending for an agent call.
     pub fn take_pending_control(&self, turn_id: &TurnId) -> Option<crate::error::RuntimeError> {
-        let mut q = self.injection_queue.lock().unwrap();
-        let index = crate::injection::next_interruption(&q, |inj| {
+        let claim = self.injection_queue.claim_interruption(|inj| {
             inj.turn_id == *turn_id
                 && matches!(
                     inj.level,
@@ -2545,58 +2567,31 @@ impl Session {
                         | crate::injection::InjectionLevel::L4HardStop
                 )
         })?;
-        let injection = &mut q[index];
-        injection.state = InjectionState::Injected;
-        self.publish_injection_update(injection.clone(), None);
-        injection.control_error()
+        claim.commit(None, || {})?.control_error()
     }
 
     /// Consume pending nudges and corrections in creation order, preserving controls.
     /// Persists each rendered context message with its consumption state under the compaction lock.
     pub async fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
         let _compact_guard = self.acquire_compact_lock().await;
-        let mut q = self.injection_queue.lock().unwrap();
         let mut out = Vec::new();
-        for inj in q.iter_mut() {
-            if inj.state == InjectionState::Pending
-                && inj.turn_id == *turn_id
-                && matches!(
-                    inj.level,
-                    crate::injection::InjectionLevel::L1Nudge
-                        | crate::injection::InjectionLevel::L2CourseCorrect
-                )
-            {
-                inj.state = InjectionState::Injected;
-                self.publish_injection_update(inj.clone(), Some(inj.context_message()));
-                out.push(inj.clone());
+        while let Some(claim) = self
+            .injection_queue
+            .claim_steering(|inj| inj.turn_id == *turn_id)
+        {
+            if let Some(injection) = claim.commit(Some(&self.messages), || {}) {
+                out.push(injection);
             }
         }
         out
     }
 
-    fn publish_injection_update(&self, injection: Injection, context_message: Option<Message>) {
-        let mut messages = context_message
-            .as_ref()
-            .map(|_| self.messages.lock().unwrap());
-        self.sink.emit(Event::UserInject {
-            turn_id: injection.turn_id.clone(),
-            injection: injection.clone(),
-            context_message: context_message.clone(),
-        });
-        if let (Some(messages), Some(message)) = (messages.as_mut(), context_message) {
-            messages.push(message);
-        }
-        let _ = self.injection_tx.send(injection);
+    pub(crate) fn injection_queue(&self) -> std::sync::Arc<crate::injection::InjectionQueue> {
+        std::sync::Arc::clone(&self.injection_queue)
     }
 
     pub fn list_pending_injections(&self) -> Vec<Injection> {
-        self.injection_queue
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|i| i.state == InjectionState::Pending)
-            .cloned()
-            .collect()
+        self.injection_queue.pending()
     }
 
     /// Cancels the sole active turn for embedded clients. Daemon clients target a run token.
@@ -2643,6 +2638,8 @@ pub enum EnqueueError {
     AmbiguousTurn,
     #[error("turn {0} is not active")]
     InactiveTurn(TurnId),
+    #[error("flow {0} is not active")]
+    InactiveRun(FlowRunId),
 }
 
 pub struct AppendMessageCommand {

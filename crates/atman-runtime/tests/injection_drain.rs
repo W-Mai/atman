@@ -131,7 +131,14 @@ async fn consumed_steering_is_persistent_and_respects_request_context_selection(
                 | Ok(atman_runtime::Value::Err(RuntimeError::MissingArg(_)))
         ));
         assert!(calls.lock().unwrap().is_empty());
-        assert_eq!(session.list_pending_injections().len(), ids.len());
+        assert!(session.list_pending_injections().is_empty());
+        assert!(session.sink().snapshot().iter().all(|event| !matches!(event,
+            atman_runtime::Event::UserInject { injection, context_message: Some(_), .. } if ids.contains(&injection.id)
+        )));
+        let ids = [
+            session.enqueue_injection("same steering").unwrap(),
+            session.enqueue_injection("same steering").unwrap(),
+        ];
         let file = parse_file(&format!(
             r#"flow ask() -> string {{
     llm.call(model: "prov", {selection})

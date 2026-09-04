@@ -13,6 +13,22 @@ use crate::session::Session;
 use crate::stream::StreamFrame;
 use crate::tools::agent_ctrl::{FlowEntry, FlowEvent};
 
+#[derive(Debug)]
+pub(crate) enum StreamFailure {
+    Error(RuntimeError),
+    Correction {
+        claim: Box<crate::injection::InjectionClaim>,
+        partial_output: String,
+        partial_tokens: u64,
+    },
+}
+
+impl From<RuntimeError> for StreamFailure {
+    fn from(error: RuntimeError) -> Self {
+        Self::Error(error)
+    }
+}
+
 pub(crate) struct LlmStream<'a> {
     pub(crate) provider: &'a dyn Provider,
     pub(crate) req: LlmRequest,
@@ -20,9 +36,6 @@ pub(crate) struct LlmStream<'a> {
     pub(crate) event_sink: Option<&'a EventSink>,
     pub(crate) turn_id: Option<TurnId>,
     pub(crate) flow_run_id: Option<FlowRunId>,
-    pub(crate) correction: Option<String>,
-    pub(crate) prior_partial: Option<String>,
-    pub(crate) restart_count: u32,
     pub(crate) first_token_at: Option<Instant>,
     pub(crate) request_start: Instant,
 }
@@ -30,7 +43,7 @@ pub(crate) struct LlmStream<'a> {
 /// Streaming-enabled LlmStream. Created by `LlmStream::with_stream_tx()`.
 pub(crate) struct StreamingLlmStream<'a> {
     base: LlmStream<'a>,
-    stream_tx: Sender<StreamFrame>,
+    stream_tx: Option<Sender<StreamFrame>>,
     frame_tx: Option<Sender<StreamFrame>>,
     session: Option<&'a Session>,
     entry: Option<&'a Arc<FlowEntry>>,
@@ -51,9 +64,6 @@ impl<'a> LlmStream<'a> {
             event_sink: None,
             turn_id: None,
             flow_run_id: None,
-            correction: None,
-            prior_partial: None,
-            restart_count: 0,
             first_token_at: None,
             request_start: Instant::now(),
         }
@@ -74,7 +84,7 @@ impl<'a> LlmStream<'a> {
         self
     }
 
-    pub(crate) fn with_stream_tx(self, tx: Sender<StreamFrame>) -> StreamingLlmStream<'a> {
+    pub(crate) fn with_stream_tx(self, tx: Option<Sender<StreamFrame>>) -> StreamingLlmStream<'a> {
         StreamingLlmStream {
             base: self,
             stream_tx: tx,
@@ -88,33 +98,9 @@ impl<'a> LlmStream<'a> {
 
     pub(crate) async fn run(&mut self) -> Result<AssistantMessage, RuntimeError> {
         self.provider
-            .call(self.rebuild_req())
+            .call(self.req.clone())
             .await
             .map(|am| self.finalize_timing(am))
-    }
-
-    pub(crate) fn rebuild_req(&self) -> LlmRequest {
-        let mut req = self.req.clone();
-        if let Some(partial) = &self.prior_partial {
-            req.messages.push(crate::message::Message::assistant_text(
-                self.turn_id.clone().unwrap_or_else(TurnId::now),
-                format!("[partial output before user correction]\n{partial}"),
-            ));
-        }
-        if let Some(correction) = &self.correction {
-            let last_prompt = req
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, crate::message::MessageRole::User))
-                .map(|m| m.text_concat())
-                .unwrap_or_else(|| req.input.to_json().to_string());
-            req.messages.push(crate::message::Message::user_text(
-                self.turn_id.clone().unwrap_or_else(TurnId::now),
-                format!("<user_correction>{correction}</user_correction>\n\n{last_prompt}"),
-            ));
-        }
-        req
     }
 
     pub(crate) fn finalize_timing(&self, mut am: AssistantMessage) -> AssistantMessage {
@@ -161,8 +147,9 @@ impl<'a> StreamingLlmStream<'a> {
     }
 
     pub(crate) fn with_entry(mut self, entry: &'a Arc<FlowEntry>) -> Self {
-        self.frame_tx = Some(entry.frame_tx.clone());
+        self.frame_tx = self.stream_tx.as_ref().map(|_| entry.frame_tx.clone());
         self.entry = Some(entry);
+        self.flow_cancel = Some(entry.cancel.clone());
         self
     }
 
@@ -193,42 +180,26 @@ impl<'a> StreamingLlmStream<'a> {
         self
     }
 
-    pub(crate) async fn run(&mut self) -> Result<AssistantMessage, RuntimeError> {
-        loop {
-            self.base.first_token_at = None;
-            self.base.request_start = Instant::now();
-            match self.single_attempt().await {
-                Ok(am) => return Ok(self.base.finalize_timing(am)),
-                Err(RuntimeError::L2Restart {
-                    correction_text,
-                    partial_output,
-                    partial_tokens,
-                }) => {
-                    if self.base.restart_count < 3 {
-                        self.base.emit_partial_call(partial_tokens);
-                        self.base.restart_count += 1;
-                        self.base.correction = Some(correction_text);
-                        self.base.prior_partial = Some(partial_output);
-                        continue;
-                    }
-                    return Err(RuntimeError::Cancelled("l2 restart exhausted".into()));
-                }
-                Err(e) => return Err(e),
-            }
-        }
+    pub(crate) async fn run(&mut self) -> Result<AssistantMessage, StreamFailure> {
+        self.base.first_token_at = None;
+        self.base.request_start = Instant::now();
+        self.single_attempt()
+            .await
+            .map(|am| self.base.finalize_timing(am))
     }
 
-    async fn single_attempt(&mut self) -> Result<AssistantMessage, RuntimeError> {
-        let req = self.base.rebuild_req();
+    async fn single_attempt(&mut self) -> Result<AssistantMessage, StreamFailure> {
+        let req = self.base.req.clone();
         let model_name = req.model.clone();
         let run_id = self.base.flow_run_id.as_ref().map(|r| r.0.to_string());
         let stall_secs = req.stall_timeout_secs;
+        let flow_cancel = self.flow_cancel.clone().unwrap_or_default();
+        let mut injection_changes = self.entry.map(|entry| entry.injections.watch());
+        if let Some(entry) = self.entry {
+            handle_pending_injections(entry, self.base.call_purpose)?;
+        }
         let obs = self.base.provider.call_streaming(req);
         let cancel = obs.cancel.clone();
-        let flow_cancel = self.flow_cancel.clone().unwrap_or_default();
-        if let Some(entry) = self.entry {
-            handle_pending_injections(entry, &cancel, self.base.call_purpose)?;
-        }
         let mut events = obs.events;
         let output = obs.output;
         tokio::pin!(output);
@@ -260,18 +231,19 @@ impl<'a> StreamingLlmStream<'a> {
                 biased;
                 _ = flow_cancel.cancelled(), if self.flow_cancel.is_some() => {
                     cancel.cancel();
-                    break Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+                    break Err(RuntimeError::Cancelled("flow cancelled by user".into()).into());
                 }
                 _ = async {
-                    if let Some(entry) = self.entry {
-                        entry.injection_notify.notified().await;
+                    if let Some(changes) = injection_changes.as_mut() {
+                        let _ = changes.changed().await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 }, if self.entry.is_some() => {
                     if let Some(entry) = self.entry
-                        && let Err(err) = handle_pending_injections(entry, &cancel, self.base.call_purpose)
+                        && let Err(err) = handle_pending_injections(entry, self.base.call_purpose)
                     {
+                        cancel.cancel();
                         break Err(err);
                     }
                 }
@@ -307,7 +279,7 @@ impl<'a> StreamingLlmStream<'a> {
                             },
                             &model_name,
                             run_id.as_deref(),
-                            Some(&self.stream_tx),
+                            self.stream_tx.as_ref(),
                             self.frame_tx.as_ref(),
                         ),
                         Ok(NodeEvent::LlmDone { total_tokens }) => {
@@ -322,13 +294,13 @@ impl<'a> StreamingLlmStream<'a> {
                 _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason.is_none() => {
                     state.abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
                     cancel.cancel();
-                    break Err(RuntimeError::Cancelled("elapsed".into()));
+                    break Err(RuntimeError::Cancelled("elapsed".into()).into());
                 }
                 _ = &mut stall_sleep, if stall_active => {
                     cancel.cancel();
-                    break Err(RuntimeError::ToolFailed(format!("llm stall timeout after {}s", stall_secs)));
+                    break Err(RuntimeError::ToolFailed(format!("llm stall timeout after {}s", stall_secs)).into());
                 }
-                result = &mut output => break result,
+                result = &mut output => break result.map_err(Into::into),
             }
         };
 
@@ -364,7 +336,7 @@ impl<'a> StreamingLlmStream<'a> {
                     },
                     &model_name,
                     run_id.as_deref(),
-                    Some(&self.stream_tx),
+                    self.stream_tx.as_ref(),
                     self.frame_tx.as_ref(),
                 ),
                 NodeEvent::LlmDone { total_tokens } => {
@@ -380,9 +352,19 @@ impl<'a> StreamingLlmStream<'a> {
         }
 
         if let Some(reason) = state.abort_reason {
-            return Err(RuntimeError::Aborted(reason));
+            return Err(RuntimeError::Aborted(reason).into());
         }
-        final_result.map_err(|e| merge_restart_error(e, state.text_captured, state.tokens_seen))
+        final_result.map_err(|error| match error {
+            StreamFailure::Correction { claim, .. } => {
+                self.base.emit_partial_call(state.tokens_seen);
+                StreamFailure::Correction {
+                    claim,
+                    partial_output: state.text_captured,
+                    partial_tokens: state.tokens_seen,
+                }
+            }
+            error => error,
+        })
     }
 
     fn on_chunk(
@@ -392,12 +374,15 @@ impl<'a> StreamingLlmStream<'a> {
         text: &str,
         cumulative_tokens: u64,
     ) {
+        self.base.mark_first_token();
+        if self.stream_tx.is_none() && self.frame_tx.is_none() {
+            return;
+        }
         if let Some(session) = self.session
             && let Some(turn_id) = &self.base.turn_id
         {
             session.mark_streamed(turn_id);
         }
-        self.base.mark_first_token();
         emit_stream_event(
             NodeEvent::LlmChunk {
                 text: text.to_string(),
@@ -405,7 +390,7 @@ impl<'a> StreamingLlmStream<'a> {
             },
             model_name,
             run_id,
-            Some(&self.stream_tx),
+            self.stream_tx.as_ref(),
             self.frame_tx.as_ref(),
         );
         if let Some(entry) = self.entry {
@@ -419,17 +404,20 @@ impl<'a> StreamingLlmStream<'a> {
             NodeEvent::ThinkingChunk { text },
             model_name,
             run_id,
-            Some(&self.stream_tx),
+            self.stream_tx.as_ref(),
             self.frame_tx.as_ref(),
         );
     }
 
     fn on_done(&mut self, model_name: &str, run_id: Option<&str>, total_tokens: u64) {
+        if self.stream_tx.is_none() && self.frame_tx.is_none() {
+            return;
+        }
         emit_stream_event(
             NodeEvent::LlmDone { total_tokens },
             model_name,
             run_id,
-            Some(&self.stream_tx),
+            self.stream_tx.as_ref(),
             self.frame_tx.as_ref(),
         );
         if let Some(entry) = self.entry {
@@ -439,29 +427,6 @@ impl<'a> StreamingLlmStream<'a> {
             let out = entry.output.lock().unwrap().clone();
             let _ = entry.stream_tx.send(FlowEvent::AssistantDone { text: out });
         }
-    }
-}
-
-fn merge_restart_error(
-    err: RuntimeError,
-    partial_output: String,
-    partial_tokens: u64,
-) -> RuntimeError {
-    match err {
-        RuntimeError::L2Restart {
-            correction_text,
-            partial_output: fallback_output,
-            partial_tokens: fallback_tokens,
-        } => RuntimeError::L2Restart {
-            correction_text,
-            partial_output: if partial_output.is_empty() {
-                fallback_output
-            } else {
-                partial_output
-            },
-            partial_tokens: partial_tokens.max(fallback_tokens),
-        },
-        other => other,
     }
 }
 
@@ -628,63 +593,22 @@ impl<'a> StreamMonitor<'a> {
 
 pub(crate) fn handle_pending_injections(
     entry: &Arc<FlowEntry>,
-    cancel: &CancellationToken,
     call_purpose: ContextCallPurpose,
-) -> Result<(), RuntimeError> {
-    let mut queue = entry.pending_injections.lock().unwrap();
-    let interruption = crate::injection::next_interruption(&queue, |injection| {
-        call_purpose.accepts_steering_messages()
-            || matches!(
-                injection.level,
-                crate::injection::InjectionLevel::L3Redirect
-                    | crate::injection::InjectionLevel::L4HardStop
-            )
-    })
-    .map(|index| queue.remove(index));
-    let mut nudges = Vec::new();
-    if interruption.is_none() && call_purpose.accepts_steering_messages() {
-        queue.retain(|injection| {
-            let consume = injection.state == crate::injection::InjectionState::Pending
-                && injection.level == crate::injection::InjectionLevel::L1Nudge;
-            if consume {
-                nudges.push(injection.clone());
-            }
-            !consume
-        });
-    }
-    drop(queue);
-    for injection in nudges {
-        entry
-            .messages
-            .lock()
-            .unwrap()
-            .push(crate::message::Message::user_text(
-                injection.turn_id,
-                format!("[interjection] {}", injection.text),
-            ));
-    }
-    if let Some(injection) = interruption {
-        cancel.cancel();
-        return Err(match injection.level {
-            crate::injection::InjectionLevel::L2CourseCorrect => {
-                entry
-                    .messages
-                    .lock()
-                    .unwrap()
-                    .push(crate::message::Message::user_text(
-                        injection.turn_id.clone(),
-                        format!("[course correct] {}", injection.text),
-                    ));
-                RuntimeError::L2Restart {
-                    correction_text: injection.text,
-                    partial_output: entry.output.lock().unwrap().clone(),
-                    partial_tokens: 0,
-                }
-            }
-            _ => injection
-                .control_error()
-                .expect("interruption selection excludes nudges"),
-        });
+) -> Result<(), StreamFailure> {
+    if let Some(claim) = entry.injections.claim_interruption(|injection| {
+        entry.owns_injection(injection)
+            && (call_purpose.accepts_steering_messages() || injection.control_error().is_some())
+    }) {
+        if claim.injection.level == crate::injection::InjectionLevel::L2CourseCorrect {
+            return Err(StreamFailure::Correction {
+                claim: Box::new(claim),
+                partial_output: String::new(),
+                partial_tokens: 0,
+            });
+        }
+        if let Some(injection) = claim.commit(None, || {}) {
+            return Err(injection.control_error().expect("selected control").into());
+        }
     }
     Ok(())
 }
@@ -775,7 +699,7 @@ mod tests {
 
     use super::*;
     use crate::event::Observable;
-    use crate::injection::{Injection, InjectionLevel};
+    use crate::injection::InjectionLevel;
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use crate::provider::{StopReason, TokenUsage, estimate_tokens, user_text_message};
     use crate::tool::BoxFut;
@@ -916,13 +840,24 @@ mod tests {
     }
 
     fn entry() -> Arc<FlowEntry> {
-        crate::tools::agent_ctrl::FlowRegistry::new().create_entry(
-            "h".into(),
-            "g".into(),
-            "m".into(),
-            crate::event::FlowRunId::now(),
-            Default::default(),
-        )
+        let registry = crate::tools::agent_ctrl::FlowRegistry::new();
+        let run_id = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                "session".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        registry
+            .create_entry(
+                "h".into(),
+                "g".into(),
+                "m".into(),
+                run_id,
+                Default::default(),
+            )
+            .unwrap()
     }
 
     fn push_injection(
@@ -932,16 +867,8 @@ mod tests {
         redirect: Option<&str>,
     ) {
         entry
-            .pending_injections
-            .lock()
-            .unwrap()
-            .push(Injection::with_level(
-                crate::event::TurnId::now(),
-                text,
-                level,
-                redirect.map(str::to_string),
-            ));
-        entry.injection_notify.notify_one();
+            .interject(text, level, redirect.map(str::to_string))
+            .unwrap();
     }
 
     #[tokio::test]
@@ -963,7 +890,7 @@ mod tests {
         let (stream_tx, _stream_rx) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, request, ContextCallPurpose::General)
             .with_turn_id(Some(current_turn.clone()))
-            .with_stream_tx(stream_tx);
+            .with_stream_tx(Some(stream_tx));
         let stream_message = stream.run().await.unwrap();
         assert_eq!(stream_message.message.turn_id, current_turn);
     }
@@ -978,7 +905,7 @@ mod tests {
         ]]);
         let (stream_tx, mut stream_rx) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx);
+            .with_stream_tx(Some(stream_tx));
         let am = stream.run().await.unwrap();
         assert_eq!(am.text_concat(), "hello");
         assert!(am.timing.total_ms > 0 || am.timing.ttft_ms == Some(0));
@@ -1009,13 +936,13 @@ mod tests {
         ]]);
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(0), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx);
+            .with_stream_tx(Some(stream_tx));
         stream.base.req.stall_timeout_secs = 1;
         let out = tokio::time::timeout(Duration::from_secs(2), stream.run())
             .await
             .unwrap();
         assert!(
-            matches!(out, Err(RuntimeError::ToolFailed(msg)) if msg.contains("llm stall timeout"))
+            matches!(out, Err(StreamFailure::Error(RuntimeError::ToolFailed(msg))) if msg.contains("llm stall timeout"))
         );
     }
 
@@ -1029,73 +956,58 @@ mod tests {
         ]]);
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx);
+            .with_stream_tx(Some(stream_tx));
         assert_eq!(stream.run().await.unwrap().text_concat(), "ab");
     }
 
     #[tokio::test]
-    async fn l2_restart_rebuilds_request_and_succeeds() {
-        let provider = ScriptProvider::new(vec![
-            vec![Step::Chunk("bad", 1), Step::WaitCancel],
-            vec![Step::Chunk("good", 1), Step::Done(1)],
-        ]);
+    async fn correction_returns_a_claim_and_partial_without_rebuilding_the_request() {
+        let provider = ScriptProvider::new(vec![vec![Step::Chunk("partial", 1), Step::WaitCancel]]);
         let entry = entry();
-        let (stream_tx, _) = broadcast::channel(16);
-        let sink = EventSink::new();
+        let (stream_tx, mut frames) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
-            .with_entry(&entry)
-            .with_event_sink(Some(&sink));
-        let entry_for_task = entry.clone();
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            push_injection(
-                &entry_for_task,
-                InjectionLevel::L2CourseCorrect,
-                "fix",
-                None,
-            );
-        });
-        assert_eq!(stream.run().await.unwrap().text_concat(), "good");
-        assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 2);
-        let prompts = provider.seen_prompts.lock().unwrap().clone();
-        assert!(prompts[1].contains("<user_correction>fix</user_correction>"));
-        assert!(
-            sink.snapshot()
-                .iter()
-                .any(|e| matches!(e, crate::event::Event::LlmPartialCall { .. }))
-        );
+            .with_stream_tx(Some(stream_tx))
+            .with_entry(&entry);
+        let inject = async {
+            frames.recv().await.unwrap();
+            push_injection(&entry, InjectionLevel::L2CourseCorrect, "fix", None);
+        };
+        let (out, ()) = tokio::join!(stream.run(), inject);
+        let Err(StreamFailure::Correction {
+            claim,
+            partial_output,
+            partial_tokens,
+        }) = out
+        else {
+            panic!("expected correction");
+        };
+        assert_eq!(partial_output, "partial");
+        assert_eq!(partial_tokens, 1);
+        assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(entry.pending_injections().len(), 1);
+        assert!(entry.messages.lock().unwrap().is_empty());
+        drop(claim);
+        assert!(matches!(
+            handle_pending_injections(&entry, ContextCallPurpose::General),
+            Err(StreamFailure::Correction { .. })
+        ));
     }
 
     #[tokio::test]
-    async fn l2_restart_exhaustion_cancels() {
-        let provider = ScriptProvider::new(vec![
-            vec![Step::WaitCancel],
-            vec![Step::WaitCancel],
-            vec![Step::WaitCancel],
-            vec![Step::WaitCancel],
-        ]);
+    async fn pending_correction_does_not_start_provider_io() {
+        let provider = ScriptProvider::new(vec![]);
         let entry = entry();
+        push_injection(&entry, InjectionLevel::L2CourseCorrect, "fix", None);
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
+            .with_stream_tx(Some(stream_tx))
             .with_entry(&entry);
-        let entry_for_task = entry.clone();
-        tokio::spawn(async move {
-            for i in 0..4 {
-                tokio::task::yield_now().await;
-                push_injection(
-                    &entry_for_task,
-                    InjectionLevel::L2CourseCorrect,
-                    &format!("fix{i}"),
-                    None,
-                );
-            }
-        });
-        let out = stream.run().await;
-        assert!(
-            matches!(out, Err(RuntimeError::Cancelled(msg)) if msg.contains("l2 restart exhausted"))
-        );
+        assert!(matches!(
+            stream.run().await,
+            Err(StreamFailure::Correction { .. })
+        ));
+        assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(entry.pending_injections().len(), 1);
     }
 
     const AUXILIARY_PURPOSES: [ContextCallPurpose; 5] = [
@@ -1120,40 +1032,37 @@ mod tests {
             ] {
                 push_injection(&entry, level, text, target);
             }
-            let original = entry.pending_injections.lock().unwrap().clone();
-            let cancel = CancellationToken::new();
-            assert!(
-                matches!(handle_pending_injections(&entry, &cancel, purpose),
-                Err(RuntimeError::Cancelled(text)) if text == "hard stop: stop")
-            );
-            assert!(cancel.is_cancelled());
-            assert_eq!(*entry.pending_injections.lock().unwrap(), original[..5]);
+            let original = entry.pending_injections();
+            assert!(matches!(handle_pending_injections(&entry, purpose),
+                Err(StreamFailure::Error(RuntimeError::Cancelled(text))) if text == "hard stop: stop"));
+            assert!(entry.cancel.is_cancelled());
+            assert_eq!(entry.pending_injections(), original[..5]);
             assert!(entry.messages.lock().unwrap().is_empty());
             for target in ["first", "second"] {
-                assert!(
-                    matches!(handle_pending_injections(&entry, &CancellationToken::new(), purpose),
-                    Err(RuntimeError::Redirect(actual)) if actual == target)
-                );
+                assert!(matches!(handle_pending_injections(&entry, purpose),
+                    Err(StreamFailure::Error(RuntimeError::Redirect(actual))) if actual == target));
             }
-            assert_eq!(*entry.pending_injections.lock().unwrap(), original[..3]);
+            assert_eq!(entry.pending_injections(), original[..3]);
             if purpose.accepts_steering_messages() {
                 for text in ["first correction", "second correction"] {
-                    assert!(
-                        matches!(handle_pending_injections(&entry, &CancellationToken::new(), purpose),
-                        Err(RuntimeError::L2Restart { correction_text, .. }) if correction_text == text)
-                    );
+                    let Err(StreamFailure::Correction { claim, .. }) =
+                        handle_pending_injections(&entry, purpose)
+                    else {
+                        panic!("expected correction");
+                    };
+                    assert_eq!(claim.injection.text, text);
+                    claim.commit(Some(&entry.messages), || {}).unwrap();
                 }
-                assert_eq!(*entry.pending_injections.lock().unwrap(), original[..1]);
-                handle_pending_injections(&entry, &CancellationToken::new(), purpose).unwrap();
-                assert!(entry.pending_injections.lock().unwrap().is_empty());
+                assert_eq!(entry.pending_injections(), original[..1]);
+                handle_pending_injections(&entry, purpose).unwrap();
+                assert_eq!(entry.pending_injections(), original[..1]);
                 let messages = entry.messages.lock().unwrap();
-                assert_eq!(messages.len(), 3);
+                assert_eq!(messages.len(), 2);
                 assert_eq!(messages[0].turn_id, original[1].turn_id);
                 assert_eq!(messages[1].turn_id, original[2].turn_id);
-                assert_eq!(messages[2].turn_id, original[0].turn_id);
             } else {
-                handle_pending_injections(&entry, &CancellationToken::new(), purpose).unwrap();
-                assert_eq!(*entry.pending_injections.lock().unwrap(), original[..3]);
+                handle_pending_injections(&entry, purpose).unwrap();
+                assert_eq!(entry.pending_injections(), original[..3]);
                 assert!(entry.messages.lock().unwrap().is_empty());
             }
         }
@@ -1170,14 +1079,14 @@ mod tests {
             let entry = entry();
             push_injection(&entry, InjectionLevel::L1Nudge, "note", None);
             push_injection(&entry, InjectionLevel::L2CourseCorrect, "fix", None);
-            let pending = entry.pending_injections.lock().unwrap().clone();
+            let pending = entry.pending_injections();
             let (stream_tx, mut frames) = broadcast::channel(16);
             let mut stream = LlmStream::new(&provider, req(1), purpose)
-                .with_stream_tx(stream_tx)
+                .with_stream_tx(Some(stream_tx))
                 .with_entry(&entry);
             assert_eq!(stream.run().await.unwrap().text_concat(), "ok");
             assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 1);
-            assert_eq!(*entry.pending_injections.lock().unwrap(), pending);
+            assert_eq!(entry.pending_injections(), pending);
             assert!(entry.messages.lock().unwrap().is_empty());
             assert_eq!(*entry.output.lock().unwrap(), "ok");
             assert!(
@@ -1198,44 +1107,45 @@ mod tests {
                     push_injection(&entry, InjectionLevel::L1Nudge, "note", None);
                     push_injection(&entry, InjectionLevel::L2CourseCorrect, "fix", None);
                 }
-                let pending = entry.pending_injections.lock().unwrap().clone();
+                let pending = entry.pending_injections();
                 push_injection(&entry, level, "control", Some("review"));
                 let (stream_tx, _) = broadcast::channel(16);
                 let mut stream = LlmStream::new(&provider, req(1), purpose)
-                    .with_stream_tx(stream_tx)
+                    .with_stream_tx(Some(stream_tx))
                     .with_entry(&entry);
                 let result = stream.run().await;
                 match level {
                     InjectionLevel::L3Redirect => assert!(
-                        matches!(result, Err(RuntimeError::Redirect(target)) if target == "review")
+                        matches!(result, Err(StreamFailure::Error(RuntimeError::Redirect(target))) if target == "review")
                     ),
                     InjectionLevel::L4HardStop => assert!(
-                        matches!(result, Err(RuntimeError::Cancelled(msg)) if msg.contains("hard stop"))
+                        matches!(result, Err(StreamFailure::Error(RuntimeError::Cancelled(msg))) if msg.contains("hard stop"))
                     ),
                     _ => unreachable!(),
                 }
-                assert_eq!(*entry.pending_injections.lock().unwrap(), pending);
+                assert_eq!(entry.pending_injections(), pending);
             }
         }
     }
 
     #[tokio::test]
-    async fn l1_nudge_adds_message_and_continues() {
+    async fn l1_nudge_stays_pending_until_another_agent_call() {
         let provider = ScriptProvider::new(vec![vec![Step::Chunk("ok", 1), Step::Done(1)]]);
         let entry = entry();
         push_injection(&entry, InjectionLevel::L1Nudge, "note", None);
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
+            .with_stream_tx(Some(stream_tx))
             .with_entry(&entry);
         assert_eq!(stream.run().await.unwrap().text_concat(), "ok");
+        assert!(entry.messages.lock().unwrap().is_empty());
+        assert_eq!(entry.pending_injections().len(), 1);
+        entry.drain_injections().await;
+        assert!(entry.pending_injections().is_empty());
         assert!(
-            entry
-                .messages
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|m| m.text_concat().contains("[interjection] note"))
+            entry.messages.lock().unwrap()[0]
+                .text_concat()
+                .contains("note")
         );
     }
 
@@ -1247,7 +1157,7 @@ mod tests {
         let turn_id = session.begin_turn(user_text_message("hi"));
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
+            .with_stream_tx(Some(stream_tx))
             .with_session(&session, session.flow_cancel_token(&turn_id).unwrap());
         let fut = async {
             tokio::task::yield_now().await;
@@ -1263,7 +1173,7 @@ mod tests {
         let mut flow_rx = entry.stream_tx.subscribe();
         let (stream_tx, _) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
+            .with_stream_tx(Some(stream_tx))
             .with_entry(&entry);
         stream.run().await.unwrap();
         assert_eq!(*entry.output.lock().unwrap(), "hi");
@@ -1288,11 +1198,11 @@ mod tests {
             ..Default::default()
         };
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
+            .with_stream_tx(Some(stream_tx))
             .with_watch_rules(rules)
             .with_event_sink(Some(&sink));
         assert!(
-            matches!(stream.run().await, Err(RuntimeError::Aborted(msg)) if msg.contains("danger"))
+            matches!(stream.run().await, Err(StreamFailure::Error(RuntimeError::Aborted(msg))) if msg.contains("danger"))
         );
         assert!(sink.snapshot().iter().any(
             |e| matches!(e, crate::event::Event::WatchWarn { message, .. } if message == "warn")
@@ -1305,7 +1215,7 @@ mod tests {
         let (stream_tx, mut stream_rx) = broadcast::channel(16);
         let (frame_tx, mut frame_rx) = broadcast::channel(16);
         let mut stream = LlmStream::new(&provider, req(1), ContextCallPurpose::General)
-            .with_stream_tx(stream_tx)
+            .with_stream_tx(Some(stream_tx))
             .with_frame_tx(Some(frame_tx));
         stream.run().await.unwrap();
         assert!(matches!(
@@ -1325,5 +1235,32 @@ mod tests {
         assert_eq!(stream.run().await.unwrap().text_concat(), "call-path");
         assert_eq!(provider.call_hits.load(Ordering::SeqCst), 1);
         assert_eq!(provider.stream_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn hidden_monitors_do_not_mark_visible_output_or_publish_entry_frames() {
+        for purpose in std::iter::once(ContextCallPurpose::General).chain(AUXILIARY_PURPOSES) {
+            let provider = ScriptProvider::new(vec![vec![
+                Step::Thinking("hidden"),
+                Step::Chunk("result", 1),
+                Step::Done(1),
+            ]]);
+            let entry = entry();
+            let session = Session::open_ephemeral();
+            let turn = session.begin_turn(user_text_message("task"));
+            let mut frames = entry.frame_tx.subscribe();
+            let mut stream = LlmStream::new(&provider, req(1), purpose)
+                .with_turn_id(Some(turn.clone()))
+                .with_stream_tx(None)
+                .with_session(&session, session.flow_cancel_token(&turn).unwrap())
+                .with_entry(&entry);
+            let response = stream.run().await.unwrap();
+            assert_eq!(response.text_concat(), "result");
+            assert!(response.timing.ttft_ms.is_some());
+            assert!(!session.take_streamed_flag(&turn));
+            assert!(entry.output.lock().unwrap().is_empty());
+            assert_eq!(entry.iteration.load(Ordering::Relaxed), 0);
+            assert!(frames.try_recv().is_err());
+        }
     }
 }

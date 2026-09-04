@@ -1078,14 +1078,14 @@ pub(super) async fn call_and_maybe_stream(
     req: crate::provider::LlmRequest,
     stream_ctx: StreamCallCtx<'_>,
     watch_rules: Option<crate::streaming::WatchRules>,
-) -> Result<crate::provider::AssistantMessage, RuntimeError> {
+) -> Result<crate::provider::AssistantMessage, crate::streaming::StreamFailure> {
     let mut base = LlmStream::new(provider, req, stream_ctx.call_purpose)
         .with_event_sink(stream_ctx.event_sink)
         .with_turn_id(stream_ctx.turn_id)
         .with_flow_run_id(stream_ctx.flow_run_id.cloned());
 
-    let result = if let Some(tx) = stream_ctx.stream_tx {
-        let mut stream = base.with_stream_tx(tx);
+    let result = if stream_ctx.stream_tx.is_some() || stream_ctx.agent_entry.is_some() {
+        let mut stream = base.with_stream_tx(stream_ctx.stream_tx);
         if let Some(rules) = watch_rules {
             stream = stream.with_watch_rules(rules);
         }
@@ -1097,10 +1097,12 @@ pub(super) async fn call_and_maybe_stream(
         }
         stream.run().await
     } else {
-        base.run().await
+        base.run().await.map_err(Into::into)
     };
-    if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) =
-        (stream_ctx.session, &result)
+    if let (
+        Some(sess),
+        Err(crate::streaming::StreamFailure::Error(RuntimeError::AttachmentError { reason })),
+    ) = (stream_ctx.session, &result)
     {
         let count = sess.record_attachment_degrade(reason);
         if count > 0 {
@@ -3170,7 +3172,7 @@ mod sanitize_tests {
         )
         .await;
         match result {
-            Err(RuntimeError::ToolFailed(msg)) => {
+            Err(crate::streaming::StreamFailure::Error(RuntimeError::ToolFailed(msg))) => {
                 assert!(
                     msg.contains("llm stall timeout after 1s"),
                     "expected stall message, got: {msg}"
@@ -3278,7 +3280,7 @@ mod sanitize_tests {
         )
         .await;
         assert!(
-            matches!(&result, Err(RuntimeError::ToolFailed(msg)) if msg.contains("stall timeout")),
+            matches!(&result, Err(crate::streaming::StreamFailure::Error(RuntimeError::ToolFailed(msg))) if msg.contains("stall timeout")),
             "expected stall timeout, got: {result:?}"
         );
     }

@@ -90,7 +90,10 @@ flow test() -> string {
         ))
         .unwrap();
     assert!(matches!(result, Value::Str(text) if text == "done"));
-    assert_eq!(session.list_pending_injections(), pending);
+    assert!(session.list_pending_injections().is_empty());
+    assert!(session.sink().snapshot().iter().all(|event| !matches!(event,
+        Event::UserInject { injection, context_message: Some(_), .. } if pending.iter().any(|queued| queued.id == injection.id)
+    )));
     session.end_turn(&turn_id);
     let events = executor.events.snapshot();
     let purposes: Vec<_> = events

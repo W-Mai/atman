@@ -55,9 +55,19 @@ pub struct FlowEntryOptions {
     pub display_label: Option<String>,
     pub workspace: Option<WorkspaceBinding>,
     pub cancel: tokio_util::sync::CancellationToken,
+    pub turn_id: Option<crate::event::TurnId>,
+    pub events: Option<crate::event::EventSink>,
+    pub context: Option<FlowEntryContext>,
+}
+
+pub struct FlowEntryContext {
+    pub messages: Arc<Mutex<Vec<Message>>>,
+    pub compact_lock: Arc<tokio::sync::Mutex<()>>,
+    pub injections: Arc<crate::injection::InjectionQueue>,
 }
 
 pub struct FlowEntry {
+    identity: Arc<crate::flow_authority::FlowIdentity>,
     pub handle: String,
     pub goal: String,
     pub display_label: String,
@@ -71,9 +81,8 @@ pub struct FlowEntry {
     pub model: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub compact_lock: Arc<tokio::sync::Mutex<()>>,
-    pub interjection_tx: tokio::sync::broadcast::Sender<crate::injection::Injection>,
-    pub pending_injections: Arc<std::sync::Mutex<Vec<crate::injection::Injection>>>,
-    pub injection_notify: Arc<tokio::sync::Notify>,
+    pub turn_id: crate::event::TurnId,
+    pub injections: Arc<crate::injection::InjectionQueue>,
     pub frame_tx: tokio::sync::broadcast::Sender<crate::stream::StreamFrame>,
     pub workspace: Option<WorkspaceBinding>,
     pub workspace_state: Arc<Mutex<Option<WorkspaceState>>>,
@@ -81,6 +90,66 @@ pub struct FlowEntry {
 }
 
 impl FlowEntry {
+    pub fn interject(
+        &self,
+        text: impl Into<String>,
+        level: crate::injection::InjectionLevel,
+        redirect_target: Option<String>,
+    ) -> Result<Option<crate::event::EventEnvelope>, RuntimeError> {
+        let state = self.identity.execution_state.lock().unwrap();
+        if matches!(*state, crate::flow_authority::FlowExecutionState::Terminal) {
+            return Err(RuntimeError::ToolFailed(
+                "flow.interject: target is not running".into(),
+            ));
+        }
+        let injection = crate::injection::Injection::with_level_for_run(
+            self.turn_id.clone(),
+            text,
+            level,
+            redirect_target,
+            Some(self.child_run_id.clone()),
+        );
+        let envelope = self.injections.enqueue(injection);
+        if level == crate::injection::InjectionLevel::L4HardStop {
+            self.cancel.cancel();
+        }
+        Ok(envelope)
+    }
+
+    pub(crate) fn owns_injection(&self, injection: &crate::injection::Injection) -> bool {
+        injection.flow_run_id.as_ref() == Some(&self.child_run_id)
+            && injection.turn_id == self.turn_id
+    }
+
+    pub fn pending_injections(&self) -> Vec<crate::injection::Injection> {
+        self.injections
+            .pending()
+            .into_iter()
+            .filter(|injection| self.owns_injection(injection))
+            .collect()
+    }
+
+    pub(crate) fn take_pending_control(&self) -> Option<RuntimeError> {
+        let claim = self.injections.claim_interruption(|injection| {
+            self.owns_injection(injection) && injection.control_error().is_some()
+        })?;
+        claim.commit(None, || {})?.control_error()
+    }
+
+    pub(crate) async fn drain_injections(&self) -> Vec<crate::injection::Injection> {
+        let _guard = self.compact_lock.lock().await;
+        let mut consumed = Vec::new();
+        while let Some(claim) = self
+            .injections
+            .claim_steering(|injection| self.owns_injection(injection))
+        {
+            if let Some(injection) = claim.commit(Some(&self.messages), || {}) {
+                consumed.push(injection);
+            }
+        }
+        consumed
+    }
+
     pub(crate) fn finish(&self, result: &ToolResult) -> FlowRunStatus {
         let mut status = self.status.lock().unwrap();
         if !status.is_running() {
@@ -191,6 +260,7 @@ pub(crate) trait FlowTerminalObserver: Send + Sync {
 #[derive(Default)]
 pub struct FlowRegistry {
     entries: Mutex<std::collections::HashMap<String, Arc<FlowEntry>>>,
+    entries_by_run: Mutex<std::collections::HashMap<FlowRunId, std::sync::Weak<FlowEntry>>>,
     runs: Mutex<std::collections::HashMap<FlowRunId, Arc<crate::flow_authority::FlowIdentity>>>,
     /// Serializes every identity/execution-state transition. Held around observer
     /// notification so a run cannot go terminal between a liveness check and a
@@ -434,6 +504,11 @@ impl FlowRegistry {
         };
         *identity.execution_state.lock().unwrap() =
             crate::flow_authority::FlowExecutionState::Terminal;
+        if let Some(entry) = self.entry_for_run(run_id) {
+            entry
+                .injections
+                .cancel(|injection| entry.owns_injection(injection));
+        }
         let observers: Vec<_> = {
             let mut observers = self.terminal_observers.lock().unwrap();
             observers.retain(|existing| existing.strong_count() > 0);
@@ -538,45 +613,101 @@ impl FlowRegistry {
         model: String,
         child_run_id: FlowRunId,
         options: FlowEntryOptions,
-    ) -> Arc<FlowEntry> {
-        let FlowEntryOptions {
-            display_label,
-            workspace,
-            cancel,
-        } = options;
-        let display_label = display_label.unwrap_or_else(|| goal.clone());
-        let (stream_tx, _) = tokio::sync::broadcast::channel(64);
-        let entry = Arc::new(FlowEntry {
-            handle: handle.clone(),
-            goal,
-            display_label,
-            status: Arc::new(Mutex::new(FlowRunStatus::Running {
+    ) -> Result<Arc<FlowEntry>, RuntimeError> {
+        self.with_lifecycle_arbitration(|| {
+            let identity = self.lookup_run(&child_run_id).ok_or_else(|| {
+                RuntimeError::ToolFailed("flow entry requires a registered execution".into())
+            })?;
+            if matches!(
+                identity.execution_state(),
+                crate::flow_authority::FlowExecutionState::Terminal
+            ) {
+                return Err(RuntimeError::ToolFailed(
+                    "flow entry requires a live execution".into(),
+                ));
+            }
+            let FlowEntryOptions {
+                display_label,
+                workspace,
+                cancel,
+                turn_id,
+                events,
+                context,
+            } = options;
+            let turn_id = turn_id.unwrap_or_else(crate::event::TurnId::now);
+            let FlowEntryContext {
+                messages,
+                compact_lock,
+                injections,
+            } = context.unwrap_or_else(|| FlowEntryContext {
+                messages: Arc::new(Mutex::new(Vec::new())),
+                compact_lock: Arc::new(tokio::sync::Mutex::new(())),
+                injections: crate::injection::InjectionQueue::new(events),
+            });
+            injections.bind_turn(&turn_id, &child_run_id);
+            let display_label = display_label.unwrap_or_else(|| goal.clone());
+            let (stream_tx, _) = tokio::sync::broadcast::channel(64);
+            let entry = Arc::new(FlowEntry {
+                identity,
+                handle: handle.clone(),
+                goal,
+                display_label,
+                status: Arc::new(Mutex::new(FlowRunStatus::Running {
+                    started_at: chrono::Utc::now(),
+                })),
+                output: Arc::new(Mutex::new(String::new())),
+                cancel,
+                stream_tx,
+                messages,
+                iteration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                child_run_id,
+                model,
                 started_at: chrono::Utc::now(),
-            })),
-            output: Arc::new(Mutex::new(String::new())),
-            cancel,
-            stream_tx,
-            messages: Arc::new(Mutex::new(Vec::new())),
-            iteration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            child_run_id,
-            model,
-            started_at: chrono::Utc::now(),
-            compact_lock: Arc::new(tokio::sync::Mutex::new(())),
-            interjection_tx: tokio::sync::broadcast::channel(32).0,
-            pending_injections: Arc::new(std::sync::Mutex::new(Vec::new())),
-            injection_notify: Arc::new(tokio::sync::Notify::new()),
-            frame_tx: tokio::sync::broadcast::channel(256).0,
-            workspace_state: Arc::new(Mutex::new(
-                workspace.as_ref().map(|_| WorkspaceState::Active),
-            )),
-            workspace,
-            cleanup_error: Arc::new(Mutex::new(None)),
-        });
-        self.entries
+                compact_lock,
+                turn_id,
+                injections,
+                frame_tx: tokio::sync::broadcast::channel(256).0,
+                workspace_state: Arc::new(Mutex::new(
+                    workspace.as_ref().map(|_| WorkspaceState::Active),
+                )),
+                workspace,
+                cleanup_error: Arc::new(Mutex::new(None)),
+            });
+            if entry
+                .pending_injections()
+                .iter()
+                .any(|injection| injection.level == crate::injection::InjectionLevel::L4HardStop)
+            {
+                entry.cancel.cancel();
+            }
+            self.entries_by_run
+                .lock()
+                .unwrap()
+                .insert(entry.child_run_id.clone(), Arc::downgrade(&entry));
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(handle, Arc::clone(&entry));
+            Ok(entry)
+        })
+    }
+
+    pub(crate) fn entry_for_run(&self, run_id: &FlowRunId) -> Option<Arc<FlowEntry>> {
+        self.entries_by_run
             .lock()
             .unwrap()
-            .insert(handle, Arc::clone(&entry));
-        entry
+            .get(run_id)
+            .and_then(std::sync::Weak::upgrade)
+    }
+
+    pub fn interject(
+        &self,
+        handle: &str,
+        text: impl Into<String>,
+        level: crate::injection::InjectionLevel,
+        redirect_target: Option<String>,
+    ) -> Result<Option<crate::event::EventEnvelope>, RuntimeError> {
+        self.lookup(handle)?.interject(text, level, redirect_target)
     }
 
     pub fn lookup(&self, handle: &str) -> Result<Arc<FlowEntry>, RuntimeError> {
@@ -846,7 +977,7 @@ impl PreparedFlowAgent {
         ctx: &ToolCtx,
         run_id: FlowRunId,
         mut options: FlowEntryOptions,
-    ) -> Arc<FlowEntry> {
+    ) -> Result<Arc<FlowEntry>, RuntimeError> {
         let goal = arguments
             .iter()
             .find_map(|(_, value)| match value {
@@ -858,6 +989,8 @@ impl PreparedFlowAgent {
             .call_intent
             .as_ref()
             .map(|intent| intent.as_str().into());
+        options.turn_id = ctx.turn_id.clone();
+        options.events = ctx.events.clone();
         let model = arguments
             .iter()
             .find_map(|(name, value)| match (name.as_str(), value) {
@@ -1000,7 +1133,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             cancel: ctx.cancel.child_token(),
             ..Default::default()
         },
-    );
+    )?;
     workspace_guard = workspace_guard.with_projections(
         Arc::clone(&entry.workspace_state),
         Arc::clone(&entry.cleanup_error),
@@ -1063,7 +1196,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             workspace: workspace.clone(),
             ..Default::default()
         },
-    );
+    )?;
     let handle = entry.handle.clone();
     workspace_guard = workspace_guard.with_projections(
         Arc::clone(&entry.workspace_state),
@@ -1389,15 +1522,7 @@ impl Tool for FlowInterject {
             let reg = ctx.flow_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("flow.interject: no agent registry".into())
             })?;
-            let entry = reg.lookup(&handle)?;
-            let inj = crate::injection::Injection::with_level(
-                crate::event::TurnId::now(),
-                text,
-                level,
-                redirect_target,
-            );
-            entry.pending_injections.lock().unwrap().push(inj);
-            entry.injection_notify.notify_one();
+            reg.interject(&handle, text, level, redirect_target)?;
             Ok(Value::Unit)
         })
     }
@@ -1915,29 +2040,50 @@ mod tests {
     #[test]
     fn flow_entry_keeps_execution_goal_separate_from_display_label() {
         let registry = FlowRegistry::new();
-        let entry = registry.create_entry(
-            "agent-test".into(),
-            "Audit the full provider chain".into(),
-            "smart".into(),
-            crate::event::FlowRunId::now(),
-            super::FlowEntryOptions {
-                display_label: Some("Review provider routing".into()),
-                ..Default::default()
-            },
-        );
+        let run_id = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                "session".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        let entry = registry
+            .create_entry(
+                "agent-test".into(),
+                "Audit the full provider chain".into(),
+                "smart".into(),
+                run_id,
+                super::FlowEntryOptions {
+                    display_label: Some("Review provider routing".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(entry.goal, "Audit the full provider chain");
         assert_eq!(entry.display_label, "Review provider routing");
     }
 
     #[test]
     fn flow_entry_completion_publishes_one_terminal_state() {
-        let entry = FlowRegistry::new().create_entry(
-            "agent-test".into(),
-            String::new(),
-            String::new(),
-            crate::event::FlowRunId::now(),
-            Default::default(),
-        );
+        let registry = FlowRegistry::new();
+        let run_id = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                "session".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        let entry = registry
+            .create_entry(
+                "agent-test".into(),
+                String::new(),
+                String::new(),
+                run_id,
+                Default::default(),
+            )
+            .unwrap();
         let mut events = entry.stream_tx.subscribe();
         assert!(matches!(
             entry.finish(&Ok(Value::Str("complete".into()))),
@@ -1955,6 +2101,113 @@ mod tests {
             }
         ));
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn run_inboxes_keep_same_turn_owners_and_terminal_claims_isolated() {
+        use crate::injection::InjectionLevel;
+        let session = crate::session::Session::open_ephemeral();
+        let turn = session.begin_turn(Message::user_text(crate::event::TurnId::now(), "task"));
+        let registry = &session.flow_registry;
+        let root = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                session.id().to_string(),
+                root.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        let staged = session.enqueue_injection("root nudge").unwrap();
+        let root_entry = registry
+            .create_entry(
+                "root".into(),
+                "task".into(),
+                "model".into(),
+                root.clone(),
+                super::FlowEntryOptions {
+                    turn_id: Some(turn.clone()),
+                    context: Some(super::FlowEntryContext {
+                        messages: session.messages_handle(),
+                        compact_lock: session.compact_lock_handle(),
+                        injections: session.injection_queue(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(root_entry.pending_injections()[0].id, staged);
+        assert_eq!(
+            root_entry.pending_injections()[0].flow_run_id.as_ref(),
+            Some(&root)
+        );
+        let child = crate::event::FlowRunId::now();
+        registry
+            .register_child(
+                &root,
+                child.clone(),
+                crate::flow_authority::InvocationKind::SpawnAsync,
+                false,
+                crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+            )
+            .unwrap();
+        let child_entry = registry
+            .create_entry(
+                "child".into(),
+                "child".into(),
+                "model".into(),
+                child.clone(),
+                super::FlowEntryOptions {
+                    turn_id: Some(turn.clone()),
+                    events: Some(session.sink().clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        session.sink().emit(crate::event::Event::FlowStart {
+            run_id: child.clone(),
+            turn_id: Some(turn.clone()),
+            flow_name: "child".into(),
+            parent_run_id: Some(root.clone()),
+            parent_node_id: None,
+            spawned: true,
+        });
+        child_entry
+            .interject("child correction", InjectionLevel::L2CourseCorrect, None)
+            .unwrap();
+        assert_eq!(session.list_pending_injections().len(), 1);
+        registry.mark_terminal(&root);
+        session.end_turn(&turn);
+        assert!(root_entry.pending_injections().is_empty());
+        assert!(
+            root_entry
+                .interject("late", InjectionLevel::L1Nudge, None)
+                .is_err()
+        );
+        assert_eq!(child_entry.pending_injections().len(), 1);
+        child_entry.drain_injections().await;
+        assert_eq!(child_entry.messages.lock().unwrap().len(), 1);
+        assert!(
+            !session
+                .messages()
+                .iter()
+                .any(|message| message.text_concat().contains("child correction"))
+        );
+        child_entry
+            .interject("late correction", InjectionLevel::L2CourseCorrect, None)
+            .unwrap();
+        let claim = child_entry.injections.claim_interruption(|_| true).unwrap();
+        registry.mark_terminal(&child);
+        assert!(
+            claim
+                .commit(Some(&child_entry.messages), || panic!("terminal run"))
+                .is_none()
+        );
+        assert!(child_entry.pending_injections().is_empty());
+        assert!(
+            child_entry
+                .interject("late", InjectionLevel::L1Nudge, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2351,16 +2604,22 @@ flow plain(user_prompt: string) -> string {
                 crate::flow_authority::EffectiveAuthority::root(&trust, false, None),
             )
             .unwrap();
-        let root_entry = flows.create_entry(
-            "root".into(),
-            "parent prompt".into(),
-            String::new(),
-            root_run_id.clone(),
-            Default::default(),
-        );
-        root_entry.pending_injections.lock().unwrap().push(
-            crate::injection::Injection::new_pending(crate::event::TurnId::now(), "parent only"),
-        );
+        let root_entry = flows
+            .create_entry(
+                "root".into(),
+                "parent prompt".into(),
+                String::new(),
+                root_run_id.clone(),
+                Default::default(),
+            )
+            .unwrap();
+        root_entry
+            .interject(
+                "parent only",
+                crate::injection::InjectionLevel::L1Nudge,
+                None,
+            )
+            .unwrap();
         let parent_messages = Arc::new(std::sync::Mutex::new(vec![
             crate::message::Message::user_text(crate::event::TurnId::now(), "parent prompt"),
         ]));
@@ -2402,7 +2661,7 @@ flow plain(user_prompt: string) -> string {
             .unwrap();
 
         assert!(matches!(result, Value::Str(text) if text == "child prompt"));
-        assert_eq!(root_entry.pending_injections.lock().unwrap().len(), 1);
+        assert_eq!(root_entry.pending_injections().len(), 1);
         let sync_child = flows
             .entries
             .lock()

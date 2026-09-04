@@ -334,9 +334,7 @@ impl Executor {
         if let Some(sess) = session.as_ref() {
             tool_ctx.stream_tx = Some(sess.stream_tx());
             tool_ctx.session_messages_handle = Some(sess.messages_handle());
-            // Register root so flow.output/interject("root") work. Root's llm
-            // context stays on session MessageStream; entry is for output +
-            // interjection addressing.
+            // Root controls and context share the session's canonical storage.
             let entry = sess.flow_registry.create_entry(
                 "root".to_string(),
                 sess.goal().unwrap_or_else(|| flow.name.name.clone()),
@@ -344,9 +342,15 @@ impl Executor {
                 run_id.clone(),
                 crate::tools::agent_ctrl::FlowEntryOptions {
                     cancel: flow_cancel.clone(),
+                    turn_id: turn_id.clone(),
+                    context: Some(crate::tools::agent_ctrl::FlowEntryContext {
+                        messages: sess.messages_handle(),
+                        compact_lock: sess.compact_lock_handle(),
+                        injections: sess.injection_queue(),
+                    }),
                     ..Default::default()
                 },
-            );
+            )?;
             tool_ctx.agent_entry = Some(std::sync::Arc::clone(&entry));
             root_entry = Some(entry);
             sess.set_current_root("root".to_string());

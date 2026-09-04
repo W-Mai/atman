@@ -660,21 +660,13 @@ impl Tool for HasPendingInjections {
     }
     fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            if ctx
-                .agent_entry
-                .as_ref()
-                .is_some_and(|entry| !entry.pending_injections.lock().unwrap().is_empty())
-            {
-                return Ok(Value::Bool(true));
+            if let Some(entry) = ctx.agent_entry.as_ref() {
+                return Ok(Value::Bool(!entry.pending_injections().is_empty()));
             }
             let Some(session) = ctx.session_runtime.as_ref() else {
-                return if ctx.agent_entry.is_some() {
-                    Ok(Value::Bool(false))
-                } else {
-                    Err(RuntimeError::ToolFailed(
-                        "has_pending_injections: no current flow".into(),
-                    ))
-                };
+                return Err(RuntimeError::ToolFailed(
+                    "has_pending_injections: no current flow".into(),
+                ));
             };
             let turn_id = ctx.turn_id.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("has_pending_injections: no turn id".into())
@@ -709,13 +701,23 @@ mod tests {
         ));
 
         let registry = crate::tools::agent_ctrl::FlowRegistry::new();
-        let entry = registry.create_entry(
-            "child".into(),
-            "goal".into(),
-            String::new(),
-            crate::event::FlowRunId::now(),
-            Default::default(),
-        );
+        let run_id = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                "session".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
+        let entry = registry
+            .create_entry(
+                "child".into(),
+                "goal".into(),
+                String::new(),
+                run_id,
+                Default::default(),
+            )
+            .unwrap();
         let child_ctx = ToolCtx::new().with_agent_entry(Arc::clone(&entry));
         assert!(matches!(
             HasPendingInjections
@@ -725,15 +727,12 @@ mod tests {
             Value::Bool(false)
         ));
         entry
-            .pending_injections
-            .lock()
-            .unwrap()
-            .push(crate::injection::Injection::with_level(
-                crate::event::TurnId::now(),
+            .interject(
                 "child correction",
                 crate::injection::InjectionLevel::L1Nudge,
                 None,
-            ));
+            )
+            .unwrap();
         assert!(matches!(
             HasPendingInjections
                 .call(ToolArgs::default(), &child_ctx)

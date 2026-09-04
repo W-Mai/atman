@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Run inbox API** — flow entries expose checked `interject` and read-only `pending_injections` methods instead of a mutable queue and notifier. Entry registration requires a live execution identity and returns a result. Course correction is an internal streaming outcome, not a `RuntimeError` variant.
 - **Flow entry registration** — `FlowRegistry::create_entry` accepts `FlowEntryOptions` for display labels, workspace bindings, and execution cancellation; separate workspace-specific registration methods are removed.
 - **Session controls** — `Session::take_pending_control` atomically consumes a stop or redirect and returns its control error, replacing separate peek and acknowledgement methods.
 - **History index filters** — `AnchorIndex::count_events` and `read_events_paginated` accept `EventFilter` to distinguish raw events, selected event kinds, and message history.
@@ -29,6 +30,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Canonical course corrections** — session and handle-based interjections share the root inbox and canonical context; spawned flows retain separate inboxes. Nudges remain pending until another agent call. Course corrections preserve partial assistant output and rebuild requests without duplicating the user prompt or imposing a three-correction limit. Terminal runs reject late input and cancel only their own pending messages.
 - **Flow control ownership** — root handles cancel their actual invocation token. Synchronous spawned flows own separate output, message, compaction, and cancellation state; normal root and child completion publishes one terminal entry state. Cancellation is classified consistently in flow events, task status, and entry status.
 - **Interjection ordering** — hard stops take priority over redirects and corrections; equal-priority controls retain arrival order. Stream interruption consumes only the selected control, and concurrent session consumers cannot claim the same control twice.
 - **Indexed steering history** — consumed interjections participate in history counts, pagination, and search. Pending, cancelled, and legacy queue-only updates do not become messages. Index rebuild uses the same message text and ownership anchors as live writes.

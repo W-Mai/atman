@@ -99,14 +99,18 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
         }
     }
-    let injections = if args.call_purpose.accepts_steering_messages()
-        && let Some(session) = ctx.session_runtime.as_ref()
-    {
-        session.drain_injections(&turn_id).await
+    let injections = if args.call_purpose.accepts_steering_messages() {
+        if let Some(entry) = ctx.agent_entry.as_ref() {
+            entry.drain_injections().await
+        } else if let Some(session) = ctx.session_runtime.as_ref() {
+            session.drain_injections(&turn_id).await
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
-    let context_mode = match context_mode {
+    let mut context_mode = match context_mode {
         ContextMode::SessionRecent(count) => {
             ContextMode::SessionRecent(count.saturating_add(injections.len()))
         }
@@ -176,17 +180,22 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         Err(v) => return v,
     };
     let mut final_messages = llm_context.messages;
+    let mut call_suffix: Vec<_> = injections
+        .iter()
+        .map(crate::injection::Injection::context_message)
+        .collect();
     let prompt_for_budget = llm_context.budget_text;
     if !uses_managed_context {
-        final_messages.extend(
-            injections
-                .iter()
-                .map(crate::injection::Injection::context_message),
-        );
+        final_messages.extend(call_suffix.iter().cloned());
     }
-    if let Some(session) = ctx.session_runtime.as_ref()
-        && let Some(control) = session.take_pending_control(&turn_id)
-    {
+    let control = if let Some(entry) = ctx.agent_entry.as_ref() {
+        entry.take_pending_control()
+    } else {
+        ctx.session_runtime
+            .as_ref()
+            .and_then(|session| session.take_pending_control(&turn_id))
+    };
+    if let Some(control) = control {
         return Value::Err(control);
     }
     let prompt = prompt_for_budget;
@@ -394,6 +403,79 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
+            let outcome = match outcome {
+                Err(crate::streaming::StreamFailure::Correction {
+                    claim,
+                    partial_output,
+                    partial_tokens: _partial_tokens,
+                }) => {
+                    let entry = ctx.agent_entry.as_ref().expect("stream correction owner");
+                    // The current managed call already holds this owner's compaction lock.
+                    let write_guard = if compact_guard.is_none() {
+                        Some(entry.compact_lock.lock().await)
+                    } else {
+                        None
+                    };
+                    let partial = (!partial_output.is_empty()).then(|| {
+                        crate::message::Message::assistant_text(turn_id.clone(), partial_output)
+                    });
+                    if partial.is_some()
+                        && ctx.session_runtime.is_none()
+                        && ctx.session_messages_handle.is_none()
+                    {
+                        return Value::Err(RuntimeError::ToolFailed(
+                            "correction requires its run message context".into(),
+                        ));
+                    }
+                    let consumed = claim.commit(Some(&entry.messages), || {
+                        if let Some(message) = partial.as_ref() {
+                            if let Some(session) = ctx.session_runtime.as_ref() {
+                                session.append_message(message.clone(), ctx.flow_run_id.clone());
+                            } else {
+                                crate::tools::session::append_message_to_context(
+                                    ctx,
+                                    message.clone(),
+                                )
+                                .expect("validated run context");
+                            }
+                        }
+                    });
+                    let Some(injection) = consumed else {
+                        return Value::Err(RuntimeError::Cancelled(
+                            "correction target ended".into(),
+                        ));
+                    };
+                    if let ContextMode::SessionRecent(count) = &mut context_mode {
+                        *count = count.saturating_add(1 + usize::from(partial.is_some()));
+                    }
+                    call_suffix.extend(partial);
+                    call_suffix.push(injection.context_message());
+                    match llm_context::build_llm_context(
+                        &args,
+                        context_mode,
+                        ctx.session_runtime.as_ref(),
+                        ctx.session_messages_handle.as_ref(),
+                        &turn_id,
+                        ctx.events.as_ref(),
+                        ctx.flow_run_id.as_ref(),
+                    ) {
+                        Ok(context) => final_messages = context.messages,
+                        Err(value) => return value,
+                    }
+                    if !uses_managed_context {
+                        final_messages.extend(call_suffix.iter().cloned());
+                    }
+                    drop(write_guard);
+                    if let Some(tx) = stream_tx.as_ref() {
+                        let _ = tx.send(crate::stream::StreamFrame::LlmRetry {
+                            run_id: ctx.flow_run_id.as_ref().map(ToString::to_string),
+                        });
+                    }
+                    continue 'llm_attempts;
+                }
+                Err(crate::streaming::StreamFailure::Error(error)) => Err(error),
+                Ok(message) => Ok(message),
+            };
             let elapsed_ms = start.elapsed().as_millis() as u64;
             let provider_usage = outcome
                 .as_ref()
@@ -543,7 +625,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     if matches!(
                         e,
                         RuntimeError::Cancelled(_)
-                            | RuntimeError::L2Restart { .. }
+                            | RuntimeError::Redirect(_)
                             | RuntimeError::Aborted(_)
                     ) {
                         return Value::Err(e);

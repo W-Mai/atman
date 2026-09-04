@@ -86,10 +86,15 @@ pub fn exec_stmts_prefixed<'a>(
                 format!("{prefix}.{i}")
             };
             // Check for pending L4 stop / L3 redirect between statements.
-            if let Some(session) = ctx.session_runtime.as_ref()
-                && let Some(turn_id) = ctx.turn_id.as_ref()
-                && let Some(control) = session.take_pending_control(turn_id)
-            {
+            let control = if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
+                entry.take_pending_control()
+            } else {
+                ctx.session_runtime
+                    .as_ref()
+                    .zip(ctx.turn_id.as_ref())
+                    .and_then(|(session, turn)| session.take_pending_control(turn))
+            };
+            if let Some(control) = control {
                 if matches!(control, RuntimeError::Cancelled(_)) {
                     emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
                     emit_flow_node_end(

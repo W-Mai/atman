@@ -161,13 +161,15 @@ fn ancestry_and_handle_removal_matrix_preserves_run_identities() {
         vec![child.clone(), root.clone()]
     );
 
-    registry.create_entry(
-        "child-handle".into(),
-        "child".into(),
-        "m".into(),
-        child.clone(),
-        Default::default(),
-    );
+    registry
+        .create_entry(
+            "child-handle".into(),
+            "child".into(),
+            "m".into(),
+            child.clone(),
+            Default::default(),
+        )
+        .unwrap();
     registry.remove("child-handle");
     assert!(registry.lookup("child-handle").is_err());
     assert!(registry.lookup_run(&child).is_some());
@@ -351,20 +353,30 @@ async fn no_session_no_root_registration() {
 #[tokio::test]
 async fn flow_interject_delivers_to_target_entry_channel() {
     let registry = Arc::new(FlowRegistry::new());
-    let entry = registry.create_entry(
-        "sub_1".into(),
-        "g".into(),
-        "m".into(),
-        FlowRunId::now(),
-        Default::default(),
-    );
+    let run_id = FlowRunId::now();
+    registry
+        .register_root(
+            "session".into(),
+            run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let entry = registry
+        .create_entry(
+            "sub_1".into(),
+            "g".into(),
+            "m".into(),
+            run_id,
+            Default::default(),
+        )
+        .unwrap();
     let ctx = ToolCtx::new().with_flow_registry(registry);
     let args = ToolArgs {
         positional: vec![Value::Str("sub_1".into()), Value::Str("wake up".into())],
         named: vec![],
     };
     FlowInterject.call(args, &ctx).await.unwrap();
-    let pending = entry.pending_injections.lock().unwrap();
+    let pending = entry.pending_injections();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].text, "wake up");
 }
@@ -526,6 +538,10 @@ async fn l1_nudge_text_appears_in_entry_messages() {
 flow test_flow(goal: string) -> string {
     session.push(message.user(goal))
     reply = llm.call(model: "mock", context: "session")
+    when has_pending_injections() {
+        next = llm.call(model: "mock", context: "session")
+        return text_concat(next)
+    }
     return text_concat(reply)
 }
 "#;
@@ -591,21 +607,21 @@ flow test_flow(goal: string) -> string {
         _ => panic!("expected struct"),
     };
 
-    // Push an L1 nudge.
-    let inj = atman_runtime::injection::Injection::new_pending(
-        atman_runtime::event::TurnId::now(),
-        String::from("NUDGE: check config"),
-    );
     let entry = registry.lookup(&handle).unwrap();
-    entry.pending_injections.lock().unwrap().push(inj);
-    entry.injection_notify.notify_one();
+    entry
+        .interject(
+            "NUDGE: check config",
+            atman_runtime::injection::InjectionLevel::L1Nudge,
+            None,
+        )
+        .unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Check sub-agent status first.
     let entry = registry.lookup(&handle).unwrap();
     let status = entry.status.lock().unwrap().clone();
-    let pending_count = entry.pending_injections.lock().unwrap().len();
+    let pending_count = entry.pending_injections().len();
     let msgs = entry.messages.lock().unwrap();
     let has_nudge = msgs
         .iter()
@@ -619,7 +635,7 @@ flow test_flow(goal: string) -> string {
     );
 
     // Verify pending_injections is empty (drained).
-    let pending = entry.pending_injections.lock().unwrap();
+    let pending = entry.pending_injections();
     assert!(
         pending.is_empty(),
         "pending_injections should be empty after drain"

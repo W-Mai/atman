@@ -1,102 +1,216 @@
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use atman_dsl::parse::parse_file;
-use atman_runtime::event::Event;
-use atman_runtime::injection::InjectionLevel;
-use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, Session, Value};
+use atman_runtime::event::{Event, NodeEvent, Observable, TurnId};
+use atman_runtime::injection::{InjectionLevel, InjectionState};
+use atman_runtime::message::Message;
+use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider};
+use atman_runtime::tool::BoxFut;
+use atman_runtime::{Executor, RuntimeError, Session};
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn l2_injection_mid_stream_triggers_restart_with_correction() {
+struct CorrectingProvider {
+    session: Weak<Session>,
+    calls: Arc<Mutex<Vec<LlmRequest>>>,
+}
+
+impl Provider for CorrectingProvider {
+    fn name(&self) -> &str {
+        "correcting"
+    }
+
+    fn call<'a>(&'a self, _: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        panic!("run controls must also be monitored without a UI stream subscriber")
+    }
+
+    fn call_streaming(&self, request: LlmRequest) -> Observable<AssistantMessage> {
+        let index = {
+            let mut calls = self.calls.lock().unwrap();
+            let index = calls.len();
+            calls.push(request);
+            index
+        };
+        let session = self.session.upgrade().unwrap();
+        let (tx, events) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let request_cancel = cancel.clone();
+        let output = Box::pin(async move {
+            let text = if index < 4 {
+                format!("partial-{index}")
+            } else {
+                "complete".into()
+            };
+            tx.send(NodeEvent::LlmChunk {
+                text: text.clone(),
+                cumulative_tokens: 1,
+            })
+            .unwrap();
+            if index < 4 {
+                if index % 2 == 0 {
+                    session
+                        .enqueue_injection_with_level(
+                            "same correction",
+                            InjectionLevel::L2CourseCorrect,
+                            None,
+                        )
+                        .unwrap();
+                } else {
+                    session
+                        .flow_registry
+                        .interject(
+                            "root",
+                            "same correction",
+                            InjectionLevel::L2CourseCorrect,
+                            None,
+                        )
+                        .unwrap();
+                }
+                request_cancel.cancelled().await;
+                return Err(RuntimeError::Cancelled("interrupted".into()));
+            }
+            tx.send(NodeEvent::LlmDone { total_tokens: 1 }).unwrap();
+            Ok(AssistantMessage::text_only(Message::assistant_text(
+                TurnId::now(),
+                text,
+            )))
+        });
+        Observable {
+            output,
+            events,
+            cancel,
+        }
+    }
+}
+
+#[tokio::test]
+async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplicate_prompt() {
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
-            "mock-slow",
-            "mock",
-            8_192,
+            "model",
+            "correcting",
+            100_000,
             None,
         )]))
         .await;
-    let root = tempfile::tempdir().unwrap();
-    let session = std::sync::Arc::new(Session::open(root.path()).unwrap());
-    let sink = session.sink().clone();
-
-    let ex = Executor::with_events(sink.clone());
-    ex.providers.register(Arc::new(
-        MockProvider::new("mock")
-            .with_chunk_delay(Duration::from_millis(200))
-            .with_model("mock-slow", Value::Str("a".repeat(500))),
-    ));
-
-    let src = r#"
-flow t(user: string) -> string {
-    reply = llm.call(model: "mock-slow", prompt: user, context: "session")
-    watch reply {
-        on token(match: "___never_match_but_forces_streaming___") {
-            abort("unused")
+    for inline in [false, true] {
+        for selection in [
+            "context: \"session\"",
+            "context: \"session_recent(1)\"",
+            "prompt: \"explicit\"",
+            "messages: [message.user(\"explicit\")]",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let session = Arc::new(Session::open(dir.path()).unwrap());
+            let turn = session.begin_turn(Message::user_text(TurnId::now(), "task"));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let executor = Executor::with_events(session.sink().clone());
+            executor.providers.register(Arc::new(CorrectingProvider {
+                session: Arc::downgrade(&session),
+                calls: calls.clone(),
+            }));
+            let source = if inline {
+                format!(
+                    "flow main() -> string {{ return subflow(agent) }}\nflow agent() -> string {{ return llm.call(model: \"model\", {selection}) }}"
+                )
+            } else {
+                format!(
+                    "flow main() -> string {{ return llm.call(model: \"model\", {selection}) }}"
+                )
+            };
+            let file = parse_file(&source).unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                executor.run_in_turn(
+                    &file,
+                    "main",
+                    vec![],
+                    Some(turn.clone()),
+                    Some(session.clone()),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                !matches!(result, atman_runtime::Value::Err(_)),
+                "{result:?}"
+            );
+            session.end_turn(&turn);
+            let requests = calls.lock().unwrap().clone();
+            assert_eq!(requests.len(), 5, "{selection}, inline={inline}");
+            for (index, request) in requests.iter().enumerate() {
+                let texts: Vec<_> = request.messages.iter().map(Message::text_concat).collect();
+                assert_eq!(
+                    texts
+                        .iter()
+                        .filter(|text| text.contains("same correction"))
+                        .count(),
+                    index
+                );
+                for partial in 0..index {
+                    assert_eq!(
+                        texts
+                            .iter()
+                            .filter(|text| **text == format!("partial-{partial}"))
+                            .count(),
+                        1
+                    );
+                }
+                if selection.starts_with("prompt:") || selection.starts_with("messages:") {
+                    assert_eq!(
+                        texts
+                            .iter()
+                            .filter(|text| text.as_str() == "explicit")
+                            .count(),
+                        1
+                    );
+                }
+                if index > 0 && selection == "context: \"session\"" {
+                    let previous = &requests[index - 1].messages;
+                    assert_eq!(&request.messages[..previous.len()], previous);
+                }
+            }
+            let entry = session.flow_registry.lookup("root").unwrap();
+            assert!(Arc::ptr_eq(&entry.messages, &session.messages_handle()));
+            assert!(Arc::ptr_eq(
+                &entry.compact_lock,
+                &session.compact_lock_handle()
+            ));
+            assert!(entry.pending_injections().is_empty());
+            let events = session.sink().snapshot();
+            let consumed: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::UserInject {
+                        injection,
+                        context_message: Some(message),
+                        ..
+                    } if injection.state == InjectionState::Injected => Some((injection, message)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(consumed.len(), 4);
+            for (injection, message) in consumed {
+                assert_eq!(injection.flow_run_id.as_ref(), Some(&entry.child_run_id));
+                assert_eq!(message.turn_id, turn);
+            }
+            let expected = session.messages().to_vec();
+            assert_eq!(
+                expected
+                    .iter()
+                    .filter(|message| message.text_concat().starts_with("partial-"))
+                    .count(),
+                4
+            );
+            session.flush_writer().await.unwrap();
+            let restored = Session::open_existing(dir.path(), &session.id().to_string()).unwrap();
+            assert_eq!(restored.messages().to_vec(), expected);
+            session.shutdown().await;
+            restored.shutdown().await;
         }
     }
-    return reply
-}
-"#;
-    let file = parse_file(src).unwrap();
-
-    let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), "start");
-    session.begin_turn(user_msg);
-
-    let injector = async {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let entry = session
-            .flow_registry
-            .lookup("root")
-            .expect("root flow entry");
-        entry.pending_injections.lock().unwrap().push(
-            atman_runtime::injection::Injection::with_level(
-                turn_id.clone(),
-                "use tokio not std::thread",
-                InjectionLevel::L2CourseCorrect,
-                None,
-            ),
-        );
-        entry.injection_notify.notify_one();
-    };
-
-    let flow = ex.run_in_turn(
-        &file,
-        "t",
-        vec![("user".into(), Value::Str("start".into()))],
-        Some(turn_id.clone()),
-        Some(session.clone()),
-    );
-
-    let (result, ()) = tokio::join!(flow, injector);
-    let result = result.unwrap();
-    session.end_turn(&turn_id);
-
-    match result {
-        Value::Message(_) | Value::Err(_) => {}
-        other => panic!("expected message or err, got {other:?}"),
-    }
-
-    let events = sink.snapshot();
-    let partial_hits: Vec<_> = events
-        .iter()
-        .filter_map(|e| match e {
-            Event::LlmPartialCall {
-                restart_reason,
-                tokens_before_abort,
-                ..
-            } => Some((restart_reason.clone(), *tokens_before_abort)),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !partial_hits.is_empty(),
-        "expected at least one llm_partial_call event, event count: {}",
-        events.len()
-    );
-    assert_eq!(partial_hits[0].0, "l2_course_correct");
 }

@@ -1361,7 +1361,9 @@ pub(crate) async fn run_frames(
                 if let Some(inj) = inj {
                     // Keep only pending injections, drop consumed/cancelled ones.
                     if matches!(inj.state, atman_runtime::injection::InjectionState::Pending) {
-                        if !app.app.pending_injections.iter().any(|i| i.id == inj.id) {
+                        if let Some(existing) = app.app.pending_injections.iter_mut().find(|i| i.id == inj.id) {
+                            *existing = inj;
+                        } else {
                             app.app.pending_injections.push(inj);
                         }
                     } else {
