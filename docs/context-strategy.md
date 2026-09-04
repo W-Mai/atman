@@ -98,6 +98,8 @@ child requests.
 
 `MessageStream::from_context` creates a live view from that validated ancestry while holding the shared log lock across initialization. It records the consumed log position and subsequently processes only newly appended events owned by its context. Other branches do not rebuild its cached window or raw history. The existing default constructors retain their legacy behavior.
 
+Compaction commits the complete selected replacement window to both live message handles and its persisted checkpoint. Latest retained context records, including tombstones that clear a previous value, remain after the summary. Raw history remains independent of this replacement.
+
 The flow chooses one message source:
 
 | Form | Messages sent |

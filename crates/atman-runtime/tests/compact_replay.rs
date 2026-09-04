@@ -8,6 +8,84 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::value::Value;
 use std::sync::Arc;
 
+#[tokio::test]
+async fn compact_commit_preserves_the_selected_window_in_live_and_restored_views() {
+    use atman_runtime::compaction::{
+        CompactRange, estimate_tokens_for_messages, replace_range_with_summary,
+    };
+    use atman_runtime::context_plan::{
+        ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+    };
+    use atman_runtime::message::MessagePart;
+
+    for start in [0, 2] {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session::open(tmp.path()).unwrap();
+        let turn = TurnId::now();
+        let record = |revision, body| {
+            Message::context_record(
+                turn.clone(),
+                ContextRecord::new(
+                    "session.goal",
+                    revision,
+                    ContextRecordAuthority::Runtime,
+                    ContextRecordRetention::Latest,
+                    body,
+                ),
+            )
+        };
+        let latest = record(2, ContextRecordBody::tombstone());
+        let original = vec![
+            record(1, ContextRecordBody::text("superseded goal")),
+            latest.clone(),
+            Message::user_text(turn.clone(), "old task ".repeat(2_000)),
+            Message::assistant_text(turn.clone(), "old output ".repeat(2_000)),
+            Message::user_text(turn.clone(), "retained input"),
+        ];
+        for message in &original {
+            session.append_message(message.clone(), None);
+        }
+        let tokens = estimate_tokens_for_messages(&original);
+        let range = CompactRange {
+            start,
+            end: 4,
+            tokens_saved_estimate: tokens,
+        };
+        let expected = replace_range_with_summary(&original, &range, "summary".into(), turn);
+        assert_eq!(expected[1], latest);
+        assert_eq!(expected[2], original[4]);
+
+        let result = session
+            .compact_messages("summary".into(), range, tokens)
+            .unwrap();
+        assert_eq!(session.messages().to_vec(), expected);
+        assert_eq!(*session.messages_handle().lock().unwrap(), expected);
+        assert_eq!(
+            session.subscribe_context().borrow().window_tokens,
+            result.after_tokens
+        );
+        let full = session.messages_full();
+        assert_eq!(&full[..original.len()], original.as_slice());
+        assert!(matches!(
+            full.last().unwrap().parts[0],
+            MessagePart::CompactSummary { .. }
+        ));
+        let id = session.id().to_string();
+        session.shutdown().await;
+        drop(session);
+
+        let restored = Session::open_existing(tmp.path(), &id).unwrap();
+        assert_eq!(restored.messages().to_vec(), expected);
+        assert_eq!(*restored.messages_handle().lock().unwrap(), expected);
+        assert_eq!(*restored.messages_full(), *full);
+        assert_eq!(
+            restored.subscribe_context().borrow().window_tokens,
+            result.after_tokens
+        );
+        restored.shutdown().await;
+    }
+}
+
 fn build_long_history(session: &Session, msg_count: usize) {
     let base = "x".repeat(4000);
     for i in 0..msg_count {

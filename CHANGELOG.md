@@ -35,6 +35,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction context retention** — direct session compaction commits the complete replacement window, including retained context records and tombstones, to live handles and checkpoints. Window metrics refresh after that checkpoint is visible.
 - **Compaction replay identity** — reconstructed summaries retain their persisted replacement-message turn identity instead of generating a new identity on each replay.
 - **Child context persistence** — spawned workspace, handoff, and retrieved records share a versioned append path that persists each change with its child owner. Repeated content remains a no-op, and replay retains the records used by corrected requests.
 - **Canonical course corrections** — session and handle-based interjections share the root inbox and canonical context; spawned flows retain separate inboxes. Nudges remain pending until another agent call. Course corrections preserve partial assistant output and rebuild requests without duplicating the user prompt or imposing a three-correction limit. Terminal runs reject late input and cancel only their own pending messages.

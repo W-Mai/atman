@@ -2373,27 +2373,20 @@ impl Session {
                 after_tokens,
                 compacted_count: range.end - range.start,
             });
-        let checkpoint_messages = self.messages();
-        let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
         self.compaction
             .model_window_tokens
-            .store(window_tokens, std::sync::atomic::Ordering::Relaxed);
-        self.compaction
-            .update_context_epoch(checkpoint_messages.as_ref());
-        // Sync the messages Vec (root's messages_handle) with the compacted
-        // windowed view so root's llm context via messages_handle respects
-        // compaction (branch2 retired → unified on messages_handle).
-        let window_owned = checkpoint_messages.to_vec();
+            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.compaction.update_context_epoch(&after);
         if let Ok(mut vec) = self.messages.lock() {
-            *vec = window_owned;
+            *vec = after.clone();
         }
-        self.refresh_window_snapshot();
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
             flow_run_id: None,
-            messages: checkpoint_messages.to_vec(),
-            window_tokens,
+            messages: after,
+            window_tokens: after_tokens,
         });
+        self.refresh_window_snapshot();
         Some(CompactResult {
             before_tokens,
             after_tokens,
