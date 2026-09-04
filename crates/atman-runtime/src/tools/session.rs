@@ -85,7 +85,6 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
             "session message context is unavailable".into(),
         ));
     };
-    emit_message_event(ctx, &msg);
     let flow_run_id = match msg.role {
         MessageRole::Assistant | MessageRole::Tool => {
             ctx.flow_run_id.as_ref().map(|run_id| run_id.0.to_string())
@@ -93,7 +92,7 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
         MessageRole::User => ctx.message_flow_run_id().map(|run_id| run_id.0.to_string()),
         MessageRole::System => None,
     };
-    if msg.origin != crate::message::MessageOrigin::Internal
+    let frame = if msg.origin != crate::message::MessageOrigin::Internal
         && msg.role != MessageRole::System
         && let Some(tx) = &ctx.stream_tx
     {
@@ -108,10 +107,17 @@ pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(
             },
             MessageRole::System => unreachable!(),
         };
+        Some((tx, frame))
+    } else {
+        None
+    };
+    let mut messages = handle.lock().unwrap();
+    emit_message_event(ctx, &msg);
+    messages.push(msg);
+    drop(messages);
+    if let Some((tx, frame)) = frame {
         let _ = tx.send(frame);
     }
-    let mut messages = handle.lock().unwrap();
-    messages.push(msg);
     Ok(())
 }
 

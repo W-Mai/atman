@@ -206,6 +206,96 @@ impl LastContextUsageStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn message_writers_acquire_the_context_before_publishing() {
+        for writer_kind in ["root", "tool", "record", "injection"] {
+            let session = Arc::new(crate::session::Session::open_ephemeral());
+            let context = if writer_kind == "root" {
+                session.context().clone()
+            } else {
+                Arc::new(ContextState::new(Vec::new()))
+            };
+            let sink = session.sink().clone();
+            let turn = crate::event::TurnId::now();
+            let ctx = crate::tool::ToolCtx::new()
+                .with_context(context.clone())
+                .with_events(sink.clone())
+                .with_anchors(Some(turn.clone()), None, None);
+            let queue = crate::injection::InjectionQueue::new(Some(sink.clone()));
+            queue.enqueue(crate::injection::Injection::new_pending(
+                turn.clone(),
+                "steering",
+            ));
+            let claim = queue.claim_steering(|_| true).unwrap();
+            let batch = sink.batch();
+            std::thread::scope(|scope| {
+                let writer = scope.spawn(|| match writer_kind {
+                    "root" => {
+                        session.append_message(Message::user_text(turn, "root"), None);
+                    }
+                    "tool" => {
+                        crate::tools::session::append_message_to_context(
+                            &ctx,
+                            Message::assistant_text(turn, "assistant"),
+                        )
+                        .unwrap();
+                    }
+                    "record" => {
+                        crate::tools::context::append_context_records(
+                            &ctx,
+                            turn,
+                            [crate::context_plan::ContextRecordSpec::new(
+                                "agent.rule.test",
+                                crate::context_plan::ContextRecordAuthority::Retrieved,
+                                crate::context_plan::ContextRecordRetention::Latest,
+                                crate::context_plan::ContextRecordBody::text("rule"),
+                            )],
+                        )
+                        .unwrap();
+                    }
+                    "injection" => {
+                        claim
+                            .commit(Some(context.messages_handle()), || {})
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let holds_context = loop {
+                    if matches!(
+                        context.messages.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ) {
+                        break true;
+                    }
+                    if writer.is_finished() || std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::yield_now();
+                };
+                // Release the log before joining, including when the lock-order assertion fails.
+                drop(batch);
+                writer.join().unwrap();
+                assert!(
+                    holds_context,
+                    "{writer_kind} published before acquiring its context"
+                );
+            });
+            let published: Vec<_> = sink
+                .snapshot_envelopes()
+                .iter()
+                .filter_map(|envelope| {
+                    envelope
+                        .event
+                        .context_message()
+                        .map(|(message, _)| message.clone())
+                })
+                .collect();
+            assert_eq!(context.messages().to_vec(), published, "{writer_kind}");
+            assert_eq!(published.len(), 1);
+        }
+    }
+
     #[tokio::test]
     async fn owner_binding_keeps_messages_locks_epochs_and_observations_together() {
         use crate::context_plan::{

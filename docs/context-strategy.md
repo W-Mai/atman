@@ -106,6 +106,8 @@ When retained turns also exceed the budget, their output can be summarized or re
 
 Root and child compaction records hold the shared event-log lock across publication. Log snapshots and context-view initialization therefore see the batch before or after its complete publication, while event subscribers and the writer still receive individual records. This lock does not span provider requests and does not make multiple JSONL records a disk transaction.
 
+Message appends acquire the context message lock before the event-log lock. Root messages, explicit `session.push`, child assistant output, context records, and captured steering use this lock order. The shared append path updates its message handle before sending the live frame. A context snapshot must respect this ordering; an event watermark read outside the commit locks is not an atomic snapshot of the mutable handle.
+
 The flow chooses one message source:
 
 | Form | Messages sent |

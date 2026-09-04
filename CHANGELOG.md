@@ -36,6 +36,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Message publication ordering** — shared message appends acquire the context before publishing the event and update the message handle before sending the live frame, matching root, record, and steering writes.
 - **Context state isolation** — message views, compaction locks, checkpoint epochs, recent usage, and cache-prefix observations share one owner across ordinary and watched calls. Inline execution retains that owner; spawned flows bind independent state and record their own usage.
 - **Retained-turn context records** — output rewriting preserves current dynamic records and tombstones when a retained turn exceeds its budget. Summary, omission, and minimum-window policies share the same record-preserving replacement path.
 - **Compaction event boundaries** — root and child compaction records publish under one shared-log lock. Snapshot readers cannot capture a partial batch, and root completion frames are sent after the replacement checkpoint is published.
