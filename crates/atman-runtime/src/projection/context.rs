@@ -14,8 +14,15 @@ use super::message_window::{
 /// One materialized context. Raw history ignores checkpoints and range replacement.
 #[derive(Debug, PartialEq)]
 pub struct ContextReplay {
-    pub window: Vec<(u64, Message)>,
+    pub(crate) compacted: Vec<(u64, Message)>,
+    window_start: usize,
     pub raw: Vec<(u64, Message)>,
+}
+
+impl ContextReplay {
+    pub fn window(&self) -> &[(u64, Message)] {
+        &self.compacted[self.window_start..]
+    }
 }
 
 struct CreatedContext {
@@ -170,8 +177,11 @@ pub fn replay_context(events: &[EventEnvelope], target: &ContextBase) -> io::Res
             apply_envelope_to_messages(envelope, excluded, &mut raw, &mut raw_positions);
         }
     }
-    retain_active_window(&mut window, &mut positions, &mut window_start);
-    Ok(ContextReplay { window, raw })
+    Ok(ContextReplay {
+        compacted: window,
+        window_start,
+        raw,
+    })
 }
 
 #[cfg(test)]
@@ -240,21 +250,21 @@ mod tests {
         let events = sink.snapshot_envelopes();
         let right_target = target(&right_id, sink.published_seq());
         let expected = replay_context(&events, &right_target).unwrap();
-        assert_eq!(texts(&expected.window), ["shared", "left", "right"]);
-        assert_eq!(expected.raw, expected.window);
+        assert_eq!(texts(expected.window()), ["shared", "left", "right"]);
+        assert_eq!(expected.raw, expected.window());
         assert_eq!(
             texts(
-                &replay_context(&events, &target(&left_id, sink.published_seq()))
+                replay_context(&events, &target(&left_id, sink.published_seq()))
                     .unwrap()
-                    .window
+                    .window()
             ),
             ["shared", "left", "late parent"]
         );
         assert_eq!(
             texts(
-                &replay_context(&events, &target(&empty_id, sink.published_seq()))
+                replay_context(&events, &target(&empty_id, sink.published_seq()))
                     .unwrap()
-                    .window
+                    .window()
             ),
             ["isolated"]
         );
@@ -336,8 +346,8 @@ mod tests {
         push(&child, "child", None);
         let selected = target(&child_id, sink.published_seq());
         let before = replay_context(&sink.snapshot_envelopes(), &selected).unwrap();
-        assert_eq!(texts(&before.window), ["branch", "retained", "child"]);
-        assert_eq!(before.window[0].1, summary);
+        assert_eq!(texts(before.window()), ["branch", "retained", "child"]);
+        assert_eq!(before.window()[0].1, summary);
         assert_eq!(
             texts(&before.raw),
             [
@@ -357,14 +367,14 @@ mod tests {
         });
         let events = sink.snapshot_envelopes();
         let after = replay_context(&events, &target(&child_id, sink.published_seq())).unwrap();
-        assert_eq!(texts(&after.window), ["child checkpoint"]);
+        assert_eq!(texts(after.window()), ["child checkpoint"]);
         assert_eq!(after.raw, before.raw);
         assert_eq!(replay_context(&events, &selected).unwrap(), before);
         assert_eq!(
             texts(
-                &replay_context(&events, &target(&parent_id, sink.published_seq()))
+                replay_context(&events, &target(&parent_id, sink.published_seq()))
                     .unwrap()
-                    .window
+                    .window()
             ),
             ["parent checkpoint"]
         );
@@ -423,7 +433,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             before
-                .window
+                .window()
                 .iter()
                 .map(|(_, message)| message)
                 .collect::<Vec<_>>(),
@@ -432,11 +442,11 @@ mod tests {
         patch(&child, "child only");
         let events = sink.snapshot_envelopes();
         let after = replay_context(&events, &target(&child_id, sink.published_seq())).unwrap();
-        assert!(after.window[0].1.text_concat().contains("child only"));
-        assert_eq!(after.raw, after.window);
+        assert!(after.window()[0].1.text_concat().contains("child only"));
+        assert_eq!(after.raw, after.window());
         let parent = replay_context(&events, &target(&parent_id, sink.published_seq())).unwrap();
-        assert_eq!(parent.window.len(), 1);
-        assert!(parent.window[0].1.text_concat().contains("parent only"));
+        assert_eq!(parent.window().len(), 1);
+        assert!(parent.window()[0].1.text_concat().contains("parent only"));
     }
 
     #[test]
@@ -502,7 +512,7 @@ mod tests {
             base = Some(target(&id, sink.published_seq()));
         }
         let replay = replay_context(&sink.snapshot_envelopes(), &base.unwrap()).unwrap();
-        assert_eq!(replay.window.len(), 2_000);
-        assert_eq!(replay.raw, replay.window);
+        assert_eq!(replay.window().len(), 2_000);
+        assert_eq!(replay.raw, replay.window());
     }
 }

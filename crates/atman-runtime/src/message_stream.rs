@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use crate::compaction::is_compaction_summary;
-use crate::event::EventEnvelope;
+use crate::event::{ContextBase, ContextId, EventEnvelope};
 use crate::message::Message;
 use crate::projection::message_window::FlowOwnership;
 
@@ -48,6 +48,7 @@ struct Acc {
 }
 
 pub struct MessageStream {
+    context_id: Option<ContextId>,
     events: Arc<Mutex<Vec<EventEnvelope>>>,
     acc: Mutex<Acc>,
 }
@@ -56,6 +57,7 @@ impl MessageStream {
     pub fn new(events: Arc<Mutex<Vec<EventEnvelope>>>) -> Self {
         let empty = Arc::new(Vec::new());
         Self {
+            context_id: None,
             events,
             acc: Mutex::new(Acc {
                 compacted: Vec::new(),
@@ -94,6 +96,7 @@ impl MessageStream {
         let compacted_positions = crate::projection::message_window::message_positions(&compacted);
         let full_positions = crate::projection::message_window::message_positions(&raw);
         Self {
+            context_id: None,
             events,
             acc: Mutex::new(Acc {
                 compacted,
@@ -107,6 +110,27 @@ impl MessageStream {
                 window_cache: window,
             }),
         }
+    }
+
+    /// Starts a live view from a validated context ancestry in the shared event log.
+    /// Later events from other contexts leave this view and its caches unchanged.
+    pub fn from_context(
+        events: Arc<Mutex<Vec<EventEnvelope>>>,
+        context_id: ContextId,
+    ) -> std::io::Result<Self> {
+        let history = events.lock().expect("events poisoned");
+        let through_seq = history.iter().map(|event| event.seq).max().unwrap_or(0);
+        let replay = crate::projection::context::replay_context(
+            &history,
+            &ContextBase::Context {
+                context_id: context_id.clone(),
+                through_seq,
+            },
+        )?;
+        let mut stream = Self::with_initial(Arc::clone(&events), replay.compacted, replay.raw);
+        stream.context_id = Some(context_id);
+        stream.acc.get_mut().expect("acc poisoned").replayed = history.len();
+        Ok(stream)
     }
 
     pub fn full_messages(&self) -> Arc<Vec<Message>> {
@@ -129,10 +153,17 @@ impl MessageStream {
         }
         let mut compacted_changed = false;
         let mut full_changed = false;
-        for event in &events[acc.replayed..] {
-            acc.ownership.observe(&event.event);
+        if self.context_id.is_none() {
+            for event in &events[acc.replayed..] {
+                acc.ownership.observe(&event.event);
+            }
         }
         for ev in &events[acc.replayed..] {
+            if let Some(id) = &self.context_id
+                && ev.context_id.as_ref() != Some(id)
+            {
+                continue;
+            }
             compacted_changed |= crate::projection::message_window::apply_envelope_to_messages(
                 ev,
                 &acc.ownership.spawned,
@@ -220,6 +251,197 @@ mod tests {
 
     fn compact_summary(text: &str) -> Message {
         Message::system_compact_summary(TurnId::now(), text, 0, 1, 2)
+    }
+
+    #[test]
+    fn scoped_stream_matches_replay_after_each_update_and_ignores_other_branches() {
+        use crate::event::{EventSink, FlowRunId};
+        let sink = EventSink::new();
+        let parent_id = ContextId::now();
+        let child_id = ContextId::now();
+        let parent = sink.clone().with_context(parent_id.clone());
+        parent.emit(Event::ContextCreated { base: None });
+        let shared = user("shared");
+        let shared_seq = parent.emit_returning_seq(Event::UserMsg {
+            turn_id: shared.turn_id.clone(),
+            flow_run_id: None,
+            message: shared,
+        });
+        let child = sink.clone().with_context(child_id.clone());
+        child.emit(Event::ContextCreated {
+            base: Some(ContextBase::Context {
+                context_id: parent_id,
+                through_seq: shared_seq,
+            }),
+        });
+        let stream = MessageStream::from_context(sink.events_handle(), child_id.clone()).unwrap();
+        let verify = || {
+            let replay = crate::projection::context::replay_context(
+                &sink.snapshot_envelopes(),
+                &ContextBase::Context {
+                    context_id: child_id.clone(),
+                    through_seq: sink.published_seq(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                stream.window().to_vec(),
+                replay
+                    .window()
+                    .iter()
+                    .map(|(_, message)| message.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                *stream.full_messages(),
+                replay
+                    .raw
+                    .into_iter()
+                    .map(|(_, message)| message)
+                    .collect::<Vec<_>>()
+            );
+        };
+        verify();
+        let before_window = stream.window();
+        let before_raw = stream.full_messages();
+        let revision = stream.acc.lock().unwrap().projection_revision;
+        parent.emit(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: None,
+            messages: vec![user("parent checkpoint")],
+            window_tokens: 5,
+        });
+        let detached = user("unscoped suffix");
+        sink.emit(Event::UserMsg {
+            turn_id: detached.turn_id.clone(),
+            flow_run_id: None,
+            message: detached,
+        });
+        verify();
+        assert!(Arc::ptr_eq(
+            &before_window.messages,
+            &stream.window().messages
+        ));
+        assert!(Arc::ptr_eq(&before_raw, &stream.full_messages()));
+        assert_eq!(stream.acc.lock().unwrap().projection_revision, revision);
+
+        let run_id = FlowRunId::now();
+        child.emit(Event::FlowStart {
+            run_id: run_id.clone(),
+            turn_id: None,
+            flow_name: "spawned".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: true,
+        });
+        let owned = assistant("owned child output");
+        child.emit(Event::AssistantMsg {
+            turn_id: owned.turn_id.clone(),
+            flow_run_id: Some(run_id.clone()),
+            message: owned,
+        });
+        verify();
+        let summary = compact_summary("summary");
+        let replacement_seq = child.emit_returning_seq(Event::SystemMsg {
+            turn_id: summary.turn_id.clone(),
+            flow_run_id: Some(run_id.clone()),
+            message: summary,
+        });
+        verify();
+        let midway = MessageStream::from_context(sink.events_handle(), child_id.clone()).unwrap();
+        child.emit(Event::ContextCompact {
+            session_id: "session".into(),
+            flow_run_id: Some(run_id.clone()),
+            before_tokens: 100,
+            after_tokens: 10,
+            compacted_range_start: 0,
+            compacted_range_end: 0,
+            summary_text: Some("summary".into()),
+            replacement_msg_seq: Some(replacement_seq),
+        });
+        verify();
+        assert_eq!(midway.window().to_vec(), stream.window().to_vec());
+        assert_eq!(*midway.full_messages(), *stream.full_messages());
+        let raw_before_checkpoint = stream.full_messages();
+        child.emit(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: Some(run_id),
+            messages: vec![user("child checkpoint")],
+            window_tokens: 5,
+        });
+        verify();
+        assert!(Arc::ptr_eq(&raw_before_checkpoint, &stream.full_messages()));
+        let final_message = user("after checkpoint");
+        let final_seq = child.emit_returning_seq(Event::UserMsg {
+            turn_id: final_message.turn_id.clone(),
+            flow_run_id: None,
+            message: final_message,
+        });
+        verify();
+        child.emit(Event::AttachmentDegraded {
+            turn_id: None,
+            flow_run_id: None,
+            message_seq: final_seq,
+            part_index: 0,
+            file_basename: "image.png".into(),
+            reason: "missing".into(),
+        });
+        verify();
+        assert_eq!(
+            stream.acc.lock().unwrap().replayed,
+            sink.snapshot_envelopes().len()
+        );
+    }
+
+    #[test]
+    fn scoped_stream_initialization_and_concurrent_append_share_one_log_boundary() {
+        use crate::event::EventSink;
+        let sink = EventSink::new();
+        let context_id = ContextId::now();
+        let scoped = sink.clone().with_context(context_id.clone());
+        scoped.emit(Event::ContextCreated { base: None });
+        assert!(MessageStream::from_context(sink.events_handle(), ContextId::now()).is_err());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let gate = Arc::clone(&barrier);
+        let writer = std::thread::spawn(move || {
+            gate.wait();
+            for index in 0..64 {
+                let message = user(&format!("message {index}"));
+                scoped.emit(Event::UserMsg {
+                    turn_id: message.turn_id.clone(),
+                    flow_run_id: None,
+                    message,
+                });
+            }
+        });
+        barrier.wait();
+        let stream = MessageStream::from_context(sink.events_handle(), context_id.clone()).unwrap();
+        writer.join().unwrap();
+        let replay = crate::projection::context::replay_context(
+            &sink.snapshot_envelopes(),
+            &ContextBase::Context {
+                context_id,
+                through_seq: sink.published_seq(),
+            },
+        )
+        .unwrap();
+        assert_eq!(stream.window().len(), 64);
+        assert_eq!(
+            stream.window().to_vec(),
+            replay
+                .window()
+                .iter()
+                .map(|(_, message)| message.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            *stream.full_messages(),
+            replay
+                .raw
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>()
+        );
     }
 
     fn make_msg_event(ty: &str, msg: &Message, _seq: u64) -> Event {
