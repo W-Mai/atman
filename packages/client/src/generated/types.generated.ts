@@ -129,6 +129,8 @@ export type RunLifecycle =
 export type TodoState = 'pending' | 'in_progress' | 'done' | 'cancelled'
 export type TranscriptItem =
   | {
+      checkpoint_index?: number | null
+      context_id?: null | ContextId
       message: MessageProjection
       run_id?: null | FlowRunId
       seq: number
@@ -198,6 +200,7 @@ export type TranscriptItem =
       type: 'extension'
       [k: string]: unknown
     }
+export type ContextId = string
 export type MessageOrigin = 'user' | 'watcher' | 'interjection' | 'internal'
 export type MessagePart =
   | {
@@ -229,6 +232,7 @@ export type MessagePart =
   | {
       artifact_id?: string | null
       detail: ImageDetail
+      id?: null | MessagePartId
       media_type: string
       name?: string | null
       type: 'image'
@@ -252,6 +256,7 @@ export type MessagePart =
       [k: string]: unknown
     }
 export type ImageDetail = 'low' | 'high' | 'original' | 'auto'
+export type MessagePartId = string
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool'
 export type NoticeLevel = 'debug' | 'info' | 'success' | 'warning' | 'error'
 export type TrustPolicyAction = 'auto' | 'ask' | 'deny'

@@ -708,6 +708,10 @@
         "already_running"
       ]
     },
+    "ContextId": {
+      "type": "string",
+      "format": "uuid"
+    },
     "ContextProjection": {
       "type": "object",
       "properties": {
@@ -1991,6 +1995,16 @@
             "detail": {
               "$ref": "#/$defs/ImageDetail"
             },
+            "id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/MessagePartId"
+                }
+              ]
+            },
             "media_type": {
               "type": "string"
             },
@@ -2066,6 +2080,10 @@
           }
         }
       ]
+    },
+    "MessagePartId": {
+      "type": "string",
+      "format": "uuid"
     },
     "MessageProjection": {
       "type": "object",
@@ -4736,6 +4754,23 @@
             "type"
           ],
           "properties": {
+            "checkpoint_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "context_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/ContextId"
+                }
+              ]
+            },
             "message": {
               "$ref": "#/$defs/MessageProjection"
             },

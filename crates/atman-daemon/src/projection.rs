@@ -14,6 +14,7 @@ use atman_proto::{
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
+use atman_runtime::projection::message_window::FlowOwnership;
 use atman_runtime::projection::workflow::WorkflowProjection as RuntimeWorkflowProjection;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,7 @@ pub(crate) struct SessionProjector {
     event_usage: UsageProjection,
     watch_usage: UsageProjection,
     last_runtime_seq: u64,
+    ownership: FlowOwnership,
 }
 
 pub(crate) struct HistoricalProjection {
@@ -66,6 +68,7 @@ impl SessionProjector {
             event_usage: UsageProjection::default(),
             watch_usage: UsageProjection::default(),
             last_runtime_seq: 0,
+            ownership: FlowOwnership::default(),
         }
     }
 
@@ -228,6 +231,7 @@ impl SessionProjector {
             return None;
         }
         self.last_runtime_seq = envelope.seq;
+        self.ownership.observe(&envelope.event);
         let mut changes = Vec::new();
 
         match &envelope.event {
@@ -367,7 +371,12 @@ impl SessionProjector {
                     seq: envelope.seq,
                     ts: envelope.ts,
                     run_id: flow_run_id.as_ref().map(|id| FlowRunId(id.0)),
-                    message: message_projection(message),
+                    context_id: envelope
+                        .context_id
+                        .as_ref()
+                        .map(|id| atman_proto::ContextId(id.0)),
+                    checkpoint_index: None,
+                    message: message_projection(message, envelope.seq, None),
                 },
                 &mut changes,
             ),
@@ -442,6 +451,7 @@ impl SessionProjector {
             } => {
                 if replacement_msg_seq.is_some_and(|replacement_seq| {
                     self.compact_transcript_messages(
+                        envelope.context_id.as_ref(),
                         flow_run_id.as_ref(),
                         *compacted_range_start as usize,
                         *compacted_range_end as usize,
@@ -461,14 +471,59 @@ impl SessionProjector {
                 let run_id = flow_run_id.as_ref().map(|id| FlowRunId(id.0));
                 let replacement = messages
                     .iter()
-                    .map(|message| TranscriptItem::Message {
+                    .enumerate()
+                    .map(|(index, message)| TranscriptItem::Message {
                         seq: envelope.seq,
                         ts: envelope.ts,
                         run_id: run_id.clone(),
-                        message: message_projection(message),
+                        context_id: envelope
+                            .context_id
+                            .as_ref()
+                            .map(|id| atman_proto::ContextId(id.0)),
+                        checkpoint_index: Some(index),
+                        message: message_projection(message, envelope.seq, Some(index)),
                     })
                     .collect();
-                if self.replace_transcript_messages(flow_run_id.as_ref(), replacement) {
+                if self.replace_transcript_messages(
+                    envelope.context_id.as_ref(),
+                    flow_run_id.as_ref(),
+                    replacement,
+                ) {
+                    changes.push(ProjectionChange::TranscriptReplace {
+                        items: self.projection.transcript.clone(),
+                    });
+                }
+            }
+            Event::AttachmentDegraded {
+                flow_run_id, patch, ..
+            } => {
+                let slots = transcript_message_slots(
+                    &self.projection.transcript,
+                    &self.ownership,
+                    envelope.context_id.as_ref(),
+                    flow_run_id.as_ref(),
+                );
+                let mut changed = false;
+                for (output_index, seq) in slots {
+                    let TranscriptItem::Message { message, .. } =
+                        &mut self.projection.transcript[output_index]
+                    else {
+                        continue;
+                    };
+                    for (part_index, part) in message.parts.iter_mut().enumerate() {
+                        if let MessagePart::Image { id, .. } = part
+                            && patch.target.matches(
+                                id.map(|id| atman_runtime::message::MessagePartId(id.0)),
+                                seq,
+                                part_index,
+                            )
+                        {
+                            *part = MessagePart::Text { text: patch.text() };
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
                     changes.push(ProjectionChange::TranscriptReplace {
                         items: self.projection.transcript.clone(),
                     });
@@ -1002,12 +1057,18 @@ impl SessionProjector {
 
     fn compact_transcript_messages(
         &mut self,
+        context_id: Option<&atman_runtime::event::ContextId>,
         run_id: Option<&atman_runtime::event::FlowRunId>,
         range_start: usize,
         range_end: usize,
         replacement_seq: u64,
     ) -> bool {
-        let slots = transcript_message_slots(&self.projection.transcript, run_id);
+        let slots = transcript_message_slots(
+            &self.projection.transcript,
+            &self.ownership,
+            context_id,
+            run_id,
+        );
         if range_start > range_end || range_end >= slots.len() {
             return false;
         }
@@ -1044,10 +1105,16 @@ impl SessionProjector {
 
     fn replace_transcript_messages(
         &mut self,
+        context_id: Option<&atman_runtime::event::ContextId>,
         run_id: Option<&atman_runtime::event::FlowRunId>,
         replacement: Vec<TranscriptItem>,
     ) -> bool {
-        let slots = transcript_message_slots(&self.projection.transcript, run_id);
+        let slots = transcript_message_slots(
+            &self.projection.transcript,
+            &self.ownership,
+            context_id,
+            run_id,
+        );
         let existing = slots
             .iter()
             .map(|(output_index, _)| &self.projection.transcript[*output_index])
@@ -1308,9 +1375,11 @@ pub(crate) async fn load_historical_projection(
 
 fn transcript_message_slots(
     transcript: &[TranscriptItem],
+    ownership: &FlowOwnership,
+    context_id: Option<&atman_runtime::event::ContextId>,
     run_id: Option<&atman_runtime::event::FlowRunId>,
 ) -> Vec<(usize, u64)> {
-    let run_id = run_id.map(|id| id.0);
+    let context_run = ownership.context_run(run_id);
     transcript
         .iter()
         .enumerate()
@@ -1318,8 +1387,23 @@ fn transcript_message_slots(
             TranscriptItem::Message {
                 seq,
                 run_id: item_run_id,
+                context_id: item_context_id,
+                checkpoint_index,
                 ..
-            } if item_run_id.as_ref().map(|id| id.0) == run_id => Some((output_index, *seq)),
+            } if item_context_id.as_ref().map(|id| id.0) == context_id.map(|id| id.0)
+                && (context_id.is_some()
+                    || ownership.context_run(
+                        item_run_id
+                            .as_ref()
+                            .map(|id| atman_runtime::event::FlowRunId(id.0))
+                            .as_ref(),
+                    ) == context_run) =>
+            {
+                Some((
+                    output_index,
+                    checkpoint_index.map_or(*seq, |index| u64::MAX.saturating_sub(index as u64)),
+                ))
+            }
             _ => None,
         })
         .collect()
@@ -1437,7 +1521,11 @@ pub(crate) fn runtime_trust_config(trust: &TrustProjection) -> atman_runtime::tr
     }
 }
 
-fn message_projection(message: &atman_runtime::message::Message) -> MessageProjection {
+fn message_projection(
+    message: &atman_runtime::message::Message,
+    seq: u64,
+    checkpoint_index: Option<usize>,
+) -> MessageProjection {
     MessageProjection {
         role: match message.role {
             atman_runtime::message::MessageRole::User => MessageRole::User,
@@ -1452,7 +1540,12 @@ fn message_projection(message: &atman_runtime::message::Message) -> MessageProje
             atman_runtime::message::MessageOrigin::Internal => MessageOrigin::Internal,
         },
         turn_id: TurnId(message.turn_id.0),
-        parts: message.parts.iter().map(message_part).collect(),
+        parts: message
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(index, part)| message_part(part, message.part_id(seq, checkpoint_index, index)))
+            .collect(),
     }
 }
 
@@ -1600,7 +1693,10 @@ fn compact_review_projection(
     }
 }
 
-fn message_part(part: &atman_runtime::message::MessagePart) -> MessagePart {
+fn message_part(
+    part: &atman_runtime::message::MessagePart,
+    id: Option<atman_runtime::message::MessagePartId>,
+) -> MessagePart {
     match part {
         atman_runtime::message::MessagePart::ContextRecord(record) => MessagePart::ContextRecord {
             key: record.key().into(),
@@ -1642,6 +1738,7 @@ fn message_part(part: &atman_runtime::message::MessagePart) -> MessagePart {
                 ImageData::Artifact { id, name, .. } => (Some(id.clone()), name.clone()),
             };
             MessagePart::Image {
+                id: id.map(|id| atman_proto::MessagePartId(id.0)),
                 media_type: source.media_type.clone(),
                 artifact_id,
                 name,
@@ -2222,6 +2319,186 @@ mod tests {
         assert_eq!(projection.usage.cache_read_tokens, 20);
         let encoded = serde_json::to_string(&projection.transcript).unwrap();
         assert!(!encoded.contains("secret-binary"));
+    }
+
+    #[test]
+    fn attachment_updates_converge_across_scopes_checkpoints_and_snapshot_resume() {
+        use atman_runtime::event::{ContextId, EventSink};
+        use atman_runtime::message::{
+            AttachmentPatch, AttachmentTarget, ImageSource, MessagePartId,
+        };
+
+        for typed in [false, true] {
+            for checkpoint in [false, true] {
+                for stored_id in [None, Some(MessagePartId(uuid::Uuid::now_v7()))] {
+                    let sink = EventSink::new();
+                    let root_run = RuntimeRunId::now();
+                    let child_run = RuntimeRunId::now();
+                    let inline_run = RuntimeRunId::now();
+                    for (run_id, parent_run_id, spawned) in [
+                        (root_run.clone(), None, false),
+                        (child_run.clone(), Some(root_run), true),
+                        (inline_run.clone(), Some(child_run.clone()), false),
+                    ] {
+                        sink.emit(Event::FlowStart {
+                            turn_id: None,
+                            run_id,
+                            flow_name: "agent".into(),
+                            parent_run_id,
+                            parent_node_id: None,
+                            spawned,
+                        });
+                    }
+                    let root = if typed {
+                        sink.clone().with_context(ContextId::now())
+                    } else {
+                        sink.clone()
+                    };
+                    let child = if typed {
+                        sink.clone().with_context(ContextId::now())
+                    } else {
+                        sink.clone()
+                    };
+                    if typed {
+                        root.emit(Event::ContextCreated { base: None });
+                        child.emit(Event::ContextCreated { base: None });
+                    }
+                    let mut image = Message::user_text(RuntimeTurnId::now(), "caption");
+                    image
+                        .parts
+                        .push(atman_runtime::message::MessagePart::Image {
+                            id: stored_id,
+                            source: ImageSource {
+                                media_type: "image/png".into(),
+                                data: ImageData::Base64 {
+                                    data: "AA==".into(),
+                                },
+                                detail: Default::default(),
+                            },
+                        });
+                    let message = |owner| Event::UserMsg {
+                        turn_id: image.turn_id.clone(),
+                        flow_run_id: owner,
+                        message: image.clone(),
+                    };
+                    let root_seq = root.emit_returning_seq(message(None));
+                    let mut child_seq = child.emit_returning_seq(message(Some(child_run.clone())));
+                    if checkpoint {
+                        child_seq = child.emit_returning_seq(Event::Checkpoint {
+                            session_id: "session".into(),
+                            flow_run_id: Some(inline_run.clone()),
+                            messages: vec![image.clone(), image.clone()],
+                            window_tokens: 0,
+                        });
+                    }
+                    let session_id = SessionId(uuid::Uuid::now_v7());
+                    let meta = Some(atman_runtime::session_meta::SessionMeta::default());
+                    let mut projector = SessionProjector::from_events(
+                        session_id.clone(),
+                        meta.clone(),
+                        &sink.snapshot_envelopes(),
+                    );
+                    let mut restored: SessionProjector =
+                        serde_json::from_value(serde_json::to_value(&projector).unwrap()).unwrap();
+                    let apply = |projector: &mut SessionProjector,
+                                 restored: &mut SessionProjector,
+                                 event| {
+                        child.emit(event);
+                        let events = sink.snapshot_envelopes();
+                        let envelope = events.last().unwrap();
+                        let delta = projector.apply_envelope(envelope);
+                        assert_eq!(delta, restored.apply_envelope(envelope));
+                        assert_eq!(projector.projection(), restored.projection());
+                        assert_eq!(
+                            projector.projection(),
+                            SessionProjector::from_events(
+                                session_id.clone(),
+                                meta.clone(),
+                                &events
+                            )
+                            .projection()
+                        );
+                        delta
+                    };
+                    let patch = |target, reason: &str| Event::AttachmentDegraded {
+                        turn_id: None,
+                        flow_run_id: Some(inline_run.clone()),
+                        patch: AttachmentPatch {
+                            target,
+                            file_basename: "image.png".into(),
+                            reason: reason.into(),
+                        },
+                    };
+                    // Neither another owner's message nor a checkpoint event is a legacy message address.
+                    let wrong_seq = if checkpoint { child_seq } else { root_seq };
+                    assert!(
+                        apply(
+                            &mut projector,
+                            &mut restored,
+                            patch(
+                                AttachmentTarget::Legacy {
+                                    message_seq: wrong_seq,
+                                    part_index: 1
+                                },
+                                "wrong address"
+                            )
+                        )
+                        .is_none()
+                    );
+                    let id = image
+                        .part_id(child_seq, checkpoint.then_some(0), 1)
+                        .unwrap();
+                    let target = if !checkpoint && stored_id.is_none() {
+                        AttachmentTarget::Legacy {
+                            message_seq: child_seq,
+                            part_index: 1,
+                        }
+                    } else {
+                        AttachmentTarget::Part { part_id: id }
+                    };
+                    let delta =
+                        apply(&mut projector, &mut restored, patch(target, "unreadable")).unwrap();
+                    assert!(matches!(
+                        delta.changes.as_slice(),
+                        [ProjectionChange::TranscriptReplace { .. }]
+                    ));
+                    assert!(
+                        apply(&mut projector, &mut restored, patch(target, "duplicate")).is_none()
+                    );
+                    let messages = projector
+                        .projection()
+                        .transcript
+                        .iter()
+                        .filter_map(|item| match item {
+                            TranscriptItem::Message { message, .. } => Some(message),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(matches!(messages[0].parts[1], MessagePart::Image { .. }));
+                    assert!(
+                        matches!(&messages[1].parts[1], MessagePart::Text { text } if text.ends_with("image.png — unreadable]"))
+                    );
+                    if checkpoint {
+                        assert_eq!(
+                            matches!(messages[2].parts[1], MessagePart::Text { .. }),
+                            stored_id.is_some()
+                        );
+                    }
+                    for message in &messages {
+                        assert_eq!(
+                            message.parts[0],
+                            MessagePart::Text {
+                                text: "caption".into()
+                            }
+                        );
+                    }
+                    apply(&mut projector, &mut restored, message(Some(child_run)));
+                    assert!(
+                        matches!(projector.projection().transcript.last(), Some(TranscriptItem::Message { message, .. }) if matches!(message.parts[1], MessagePart::Image { .. }))
+                    );
+                }
+            }
+        }
     }
 
     #[test]

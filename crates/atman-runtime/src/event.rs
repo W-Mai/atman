@@ -435,10 +435,8 @@ pub enum Event {
     AttachmentDegraded {
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
-        message_seq: u64,
-        part_index: usize,
-        file_basename: String,
-        reason: String,
+        #[serde(flatten)]
+        patch: crate::message::AttachmentPatch,
     },
     ToolPendingApproval {
         run_id: FlowRunId,
@@ -947,10 +945,14 @@ mod tests {
         let ev = Event::AttachmentDegraded {
             turn_id: Some(turn.clone()),
             flow_run_id: Some(flow.clone()),
-            message_seq: 42,
-            part_index: 1,
-            file_basename: "photo.png".into(),
-            reason: "image_too_large".into(),
+            patch: crate::message::AttachmentPatch {
+                target: crate::message::AttachmentTarget::Legacy {
+                    message_seq: 42,
+                    part_index: 1,
+                },
+                file_basename: "photo.png".into(),
+                reason: "image_too_large".into(),
+            },
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "attachment_degraded");
@@ -963,15 +965,53 @@ mod tests {
     }
 
     #[test]
-    fn seq_and_set_seq_cover_attachment_degraded() {
-        let _ev = Event::AttachmentDegraded {
-            turn_id: None,
-            flow_run_id: None,
-            message_seq: 10,
-            part_index: 0,
-            file_basename: "x".into(),
-            reason: "y".into(),
-        };
+    fn attachment_target_addresses_are_exclusive_and_round_trip_in_envelopes() {
+        let id = uuid::Uuid::now_v7();
+        for (address, valid) in [
+            (serde_json::json!({"part_id": id}), true),
+            (serde_json::json!({"message_seq": 1, "part_index": 0}), true),
+            (
+                serde_json::json!({"part_id": id, "message_seq": 1, "part_index": 0}),
+                false,
+            ),
+            (serde_json::json!({"part_id": id, "message_seq": 1}), false),
+            (
+                serde_json::json!({"part_id": null, "message_seq": 1, "part_index": 0}),
+                false,
+            ),
+            (
+                serde_json::json!({"part_id": "invalid", "message_seq": 1, "part_index": 0}),
+                false,
+            ),
+            (serde_json::json!({"part_id": null}), false),
+            (serde_json::json!({"part_id": "invalid"}), false),
+            (serde_json::json!({"message_seq": 1}), false),
+            (serde_json::json!({"part_index": 0}), false),
+            (
+                serde_json::json!({"message_seq": -1, "part_index": 0}),
+                false,
+            ),
+            (
+                serde_json::json!({"message_seq": 1, "part_index": null}),
+                false,
+            ),
+            (serde_json::json!({}), false),
+        ] {
+            let mut value = serde_json::json!({
+                "type": "attachment_degraded", "seq": 9, "ts": chrono::Utc::now().to_rfc3339(),
+                "context_id": ContextId::now(), "turn_id": null, "flow_run_id": null,
+                "file_basename": "image.png", "reason": "unreadable",
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(address.as_object().unwrap().clone());
+            let decoded = serde_json::from_value::<EventEnvelope>(value.clone());
+            assert_eq!(decoded.is_ok(), valid, "{value}");
+            if let Ok(envelope) = decoded {
+                assert_eq!(serde_json::to_value(envelope).unwrap(), value);
+            }
+        }
     }
 
     #[test]

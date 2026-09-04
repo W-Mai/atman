@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::projection::{RestoredProjection, SessionProjector};
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 const SNAPSHOT_DIR: &str = ".projection-snapshots";
 const SNAPSHOT_PREFIX: &str = "projection-";
 const SNAPSHOT_SUFFIX: &str = ".json";
@@ -235,10 +235,7 @@ fn load_candidate(
     let document: ProjectionSnapshotDocument =
         serde_json::from_reader(BufReader::new(File::open(path)?))
             .context("decode projection snapshot")?;
-    anyhow::ensure!(matches!(
-        document.schema_version,
-        1 | SNAPSHOT_SCHEMA_VERSION
-    ));
+    anyhow::ensure!(document.schema_version == SNAPSHOT_SCHEMA_VERSION);
     anyhow::ensure!(&document.session_id == expected_session_id);
     anyhow::ensure!(
         document.coverage
@@ -467,9 +464,11 @@ mod tests {
     #[test]
     fn persisted_projection_is_redacted_without_changing_coverage_identity() {
         let session_dir = tempfile::tempdir().unwrap();
-        let session_id = SessionId(uuid::Uuid::now_v7());
+        let session_id =
+            SessionId(uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap());
         let events_path = session_dir.path().join("events.jsonl");
-        let turn_id = TurnId::now();
+        let turn_id =
+            TurnId(uuid::Uuid::parse_str("00000000-0000-7000-8000-000000000002").unwrap());
         let secret = "sk-abcdefghijklmnop1234567890";
         let event = EventEnvelope::new(
             1,
@@ -491,13 +490,15 @@ mod tests {
         )
         .unwrap();
 
-        let (_, _, snapshot_path) = snapshot_candidates(&session_dir.path().join(SNAPSHOT_DIR))
-            .unwrap()
-            .pop()
-            .unwrap();
-        let persisted = fs::read_to_string(snapshot_path).unwrap();
+        let (seq, offset, snapshot_path) =
+            snapshot_candidates(&session_dir.path().join(SNAPSHOT_DIR))
+                .unwrap()
+                .pop()
+                .unwrap();
+        let persisted = fs::read_to_string(&snapshot_path).unwrap();
         assert!(!persisted.contains(secret));
         assert!(persisted.contains("REDACTED"));
+        load_candidate(&snapshot_path, &session_id, &events_path, seq, offset).unwrap();
         assert_eq!(
             load(&session_id, session_dir.path())
                 .unwrap()
@@ -509,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_defaults_event_cursor_to_projection_revision() {
+    fn snapshots_without_attachment_identity_state_require_event_replay() {
         let session_dir = tempfile::tempdir().unwrap();
         let session_id = SessionId(uuid::Uuid::now_v7());
         let events_path = session_dir.path().join("events.jsonl");
@@ -536,15 +537,11 @@ mod tests {
             .unwrap();
         let mut document: serde_json::Value =
             serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
-        document["schema_version"] = serde_json::json!(1);
-        document.as_object_mut().unwrap().remove("event_cursor");
-        fs::write(&snapshot_path, serde_json::to_vec(&document).unwrap()).unwrap();
-
-        let loaded = load(&session_id, session_dir.path()).unwrap().unwrap();
-        assert_eq!(
-            loaded.event_cursor,
-            EventCursor(loaded.projector.projection().revision.0)
-        );
+        for version in [1, 2, SNAPSHOT_SCHEMA_VERSION + 1] {
+            document["schema_version"] = serde_json::json!(version);
+            fs::write(&snapshot_path, serde_json::to_vec(&document).unwrap()).unwrap();
+            assert!(load(&session_id, session_dir.path()).unwrap().is_none());
+        }
     }
 
     #[test]

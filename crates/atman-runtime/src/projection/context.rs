@@ -453,71 +453,123 @@ mod tests {
     #[test]
     fn captured_steering_and_attachment_patches_stay_in_the_selected_branch() {
         use crate::message::{ImageData, ImageSource, MessagePart};
-        let sink = EventSink::new();
-        let (parent_id, parent) = create(&sink, None);
-        let mut image = Message::user_text(TurnId::now(), "image");
-        image.parts.push(MessagePart::Image {
-            id: None,
-            source: ImageSource {
-                media_type: "image/png".into(),
-                data: ImageData::Base64 {
-                    data: "AA==".into(),
+        for stable_id in [false, true] {
+            let sink = EventSink::new();
+            let (parent_id, parent) = create(&sink, None);
+            let mut image = Message::user_text(TurnId::now(), "image");
+            image.parts.push(MessagePart::Image {
+                id: None,
+                source: ImageSource {
+                    media_type: "image/png".into(),
+                    data: ImageData::Base64 {
+                        data: "AA==".into(),
+                    },
+                    detail: Default::default(),
                 },
-                detail: Default::default(),
-            },
-        });
-        let image_seq = parent.emit_returning_seq(Event::UserMsg {
-            turn_id: image.turn_id.clone(),
-            flow_run_id: None,
-            message: image.clone(),
-        });
-        let (child_id, child) = create(&sink, Some(target(&parent_id, image_seq)));
-        let patch = |sink: &EventSink, reason: &str| {
-            sink.emit(Event::AttachmentDegraded {
-                turn_id: Some(image.turn_id.clone()),
+            });
+            let image_seq = parent.emit_returning_seq(Event::UserMsg {
+                turn_id: image.turn_id.clone(),
                 flow_run_id: None,
-                message_seq: image_seq,
-                part_index: 1,
-                file_basename: "image.png".into(),
-                reason: reason.into(),
-            })
-        };
-        patch(&parent, "parent only");
-        let mut injection =
-            crate::injection::Injection::new_pending(image.turn_id.clone(), "source");
-        child.emit(Event::UserInject {
-            turn_id: image.turn_id.clone(),
-            injection: injection.clone(),
-            context_message: None,
-        });
-        injection.state = crate::injection::InjectionState::Injected;
-        let captured = Message::user_text(image.turn_id.clone(), "captured steering");
-        child.emit(Event::UserInject {
-            turn_id: image.turn_id.clone(),
-            injection,
-            context_message: Some(captured.clone()),
-        });
-        let before = replay_context(
-            &sink.snapshot_envelopes(),
-            &target(&child_id, sink.published_seq()),
-        )
-        .unwrap();
-        assert_eq!(
-            before
+                message: image.clone(),
+            });
+            let (child_id, child) = create(&sink, Some(target(&parent_id, image_seq)));
+            let child_stream = crate::message_stream::MessageStream::from_context(
+                sink.events_handle(),
+                child_id.clone(),
+            )
+            .unwrap();
+            let parent_stream = crate::message_stream::MessageStream::from_context(
+                sink.events_handle(),
+                parent_id.clone(),
+            )
+            .unwrap();
+            let patch = |sink: &EventSink, reason: &str| {
+                sink.emit(Event::AttachmentDegraded {
+                    turn_id: Some(image.turn_id.clone()),
+                    flow_run_id: None,
+                    patch: crate::message::AttachmentPatch {
+                        target: if stable_id {
+                            crate::message::AttachmentTarget::Part {
+                                part_id: image.part_id(image_seq, None, 1).unwrap(),
+                            }
+                        } else {
+                            crate::message::AttachmentTarget::Legacy {
+                                message_seq: image_seq,
+                                part_index: 1,
+                            }
+                        },
+                        file_basename: "image.png".into(),
+                        reason: reason.into(),
+                    },
+                })
+            };
+            patch(&parent, "parent only");
+            let mut injection =
+                crate::injection::Injection::new_pending(image.turn_id.clone(), "source");
+            child.emit(Event::UserInject {
+                turn_id: image.turn_id.clone(),
+                injection: injection.clone(),
+                context_message: None,
+            });
+            injection.state = crate::injection::InjectionState::Injected;
+            let captured = Message::user_text(image.turn_id.clone(), "captured steering");
+            child.emit(Event::UserInject {
+                turn_id: image.turn_id.clone(),
+                injection,
+                context_message: Some(captured.clone()),
+            });
+            let before = replay_context(
+                &sink.snapshot_envelopes(),
+                &target(&child_id, sink.published_seq()),
+            )
+            .unwrap();
+            assert_eq!(
+                before
+                    .window()
+                    .iter()
+                    .map(|(_, message)| message)
+                    .collect::<Vec<_>>(),
+                [&image.replayed(image_seq, None), &captured]
+            );
+            if stable_id {
+                child.emit(Event::Checkpoint {
+                    session_id: "session".into(),
+                    flow_run_id: None,
+                    messages: vec![image.replayed(image_seq, None), captured.clone()],
+                    window_tokens: 0,
+                });
+            }
+            patch(&child, "child only");
+            patch(&child, "must not overwrite the marker");
+            let events = sink.snapshot_envelopes();
+            let after = replay_context(&events, &target(&child_id, sink.published_seq())).unwrap();
+            assert!(after.window()[0].1.text_concat().contains("child only"));
+            let window = after
                 .window()
                 .iter()
-                .map(|(_, message)| message)
-                .collect::<Vec<_>>(),
-            [&image.replayed(image_seq, None), &captured]
-        );
-        patch(&child, "child only");
-        let events = sink.snapshot_envelopes();
-        let after = replay_context(&events, &target(&child_id, sink.published_seq())).unwrap();
-        assert!(after.window()[0].1.text_concat().contains("child only"));
-        assert_eq!(after.raw, after.window());
-        let parent = replay_context(&events, &target(&parent_id, sink.published_seq())).unwrap();
-        assert_eq!(parent.window().len(), 1);
-        assert!(parent.window()[0].1.text_concat().contains("parent only"));
+                .map(|(_, message)| message.clone())
+                .collect::<Vec<_>>();
+            let raw = after
+                .raw
+                .iter()
+                .map(|(_, message)| message.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(raw, window);
+            assert_eq!(child_stream.window().to_vec(), window);
+            assert_eq!(*child_stream.full_messages(), raw);
+            let parent =
+                replay_context(&events, &target(&parent_id, sink.published_seq())).unwrap();
+            assert_eq!(parent.window().len(), 1);
+            assert!(parent.window()[0].1.text_concat().contains("parent only"));
+            assert_eq!(
+                parent_stream.window().to_vec(),
+                parent
+                    .window()
+                    .iter()
+                    .map(|(_, message)| message.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

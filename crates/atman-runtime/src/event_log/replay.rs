@@ -92,21 +92,11 @@ impl SessionReplay {
                 ));
             }
             if let Event::AttachmentDegraded {
-                message_seq,
-                part_index,
-                file_basename,
-                reason,
-                ..
+                flow_run_id, patch, ..
             } = &record.envelope.event
+                && message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned)
             {
-                apply_attachment_degradation(
-                    &mut all_messages,
-                    &all_positions,
-                    *message_seq,
-                    *part_index,
-                    file_basename,
-                    reason,
-                );
+                apply_attachment_degradation(&mut all_messages, &all_positions, patch);
             }
         }
         let context = context_snapshot_from_records(&records);

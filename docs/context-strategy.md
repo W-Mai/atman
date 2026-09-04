@@ -286,6 +286,10 @@ Provider attachment errors require an HTTP 400/413 response with explicit image 
 
 Local image encoding errors carry the failing `MessagePartId` when the caller supplied one. Import failures and remote errors without a concrete image location leave `part_id` unset. The identity is diagnostic metadata, not part of the provider request or the displayed error text.
 
+Persisted attachment patches address either a stable image part ID or a legacy message sequence and part index, never both. Only matching image parts are replaced; text and existing replacement markers remain unchanged. Selected context replay applies patches within its ancestry boundary. Legacy spawned and inline runs share their context owner's patch scope, separate from the root history.
+
+Daemon transcript projections retain context and image identities and the source index of checkpoint messages. Attachment updates produce a transcript replacement delta, so attached clients and snapshot recovery receive the same updated content. Older private projection snapshots without this identity state are rebuilt from the event log. A checkpoint event sequence is not a legacy message address.
+
 ## Implementation references
 
 - `crates/atman-runtime/src/context_state.rs` — message views, compaction locks, checkpoint epochs, usage, and prefix observations

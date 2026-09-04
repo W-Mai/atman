@@ -1958,10 +1958,14 @@ impl Session {
         self.sink.emit(Event::AttachmentDegraded {
             turn_id: None,
             flow_run_id: None,
-            message_seq,
-            part_index,
-            file_basename,
-            reason,
+            patch: crate::message::AttachmentPatch {
+                target: crate::message::AttachmentTarget::Legacy {
+                    message_seq,
+                    part_index,
+                },
+                file_basename,
+                reason,
+            },
         });
     }
 
@@ -1974,10 +1978,14 @@ impl Session {
             self.sink.emit(Event::AttachmentDegraded {
                 turn_id: Some(entry.message_turn_id.clone()),
                 flow_run_id: None,
-                message_seq: entry.message_seq,
-                part_index: *part_index,
-                file_basename: basename.clone(),
-                reason: reason.into(),
+                patch: crate::message::AttachmentPatch {
+                    target: crate::message::AttachmentTarget::Legacy {
+                        message_seq: entry.message_seq,
+                        part_index: *part_index,
+                    },
+                    file_basename: basename.clone(),
+                    reason: reason.into(),
+                },
             });
         }
         if let Ok(mut messages) = self.context.messages.lock()

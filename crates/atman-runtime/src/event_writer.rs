@@ -739,11 +739,9 @@ pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
     match event {
         Event::WatchWarn { message, .. } => Some(message.clone()),
         Event::CompactionSummary { summary, .. } => Some(summary.clone()),
-        Event::AttachmentDegraded {
-            file_basename,
-            reason,
-            ..
-        } => Some(format!("{file_basename} {reason}")),
+        Event::AttachmentDegraded { patch, .. } => {
+            Some(format!("{} {}", patch.file_basename, patch.reason))
+        }
         _ => None,
     }
 }

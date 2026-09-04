@@ -390,10 +390,14 @@ mod tests {
         child.emit(Event::AttachmentDegraded {
             turn_id: None,
             flow_run_id: None,
-            message_seq: final_seq,
-            part_index: 0,
-            file_basename: "image.png".into(),
-            reason: "missing".into(),
+            patch: crate::message::AttachmentPatch {
+                target: crate::message::AttachmentTarget::Legacy {
+                    message_seq: final_seq,
+                    part_index: 0,
+                },
+                file_basename: "image.png".into(),
+                reason: "missing".into(),
+            },
         });
         verify();
         assert_eq!(
@@ -644,7 +648,17 @@ mod tests {
 
     #[test]
     fn attachment_degradation_updates_both_message_views() {
-        let message = user("attachment");
+        let mut message = user("attachment");
+        message.parts.push(MessagePart::Image {
+            id: None,
+            source: crate::message::ImageSource {
+                media_type: "image/png".into(),
+                data: crate::message::ImageData::Base64 {
+                    data: "AA==".into(),
+                },
+                detail: Default::default(),
+            },
+        });
         let events = Arc::new(Mutex::new(Vec::new()));
         let stream = MessageStream::with_initial(
             Arc::clone(&events),
@@ -658,10 +672,14 @@ mod tests {
             Event::AttachmentDegraded {
                 turn_id: None,
                 flow_run_id: None,
-                message_seq: 5,
-                part_index: 0,
-                file_basename: "image.png".into(),
-                reason: "unreadable".into(),
+                patch: crate::message::AttachmentPatch {
+                    target: crate::message::AttachmentTarget::Legacy {
+                        message_seq: 5,
+                        part_index: 1,
+                    },
+                    file_basename: "image.png".into(),
+                    reason: "unreadable".into(),
+                },
             },
         ));
 
@@ -675,6 +693,12 @@ mod tests {
         ));
         assert_eq!(full_after[0].text_concat(), window_after[0].text_concat());
         assert!(full_after[0].text_concat().contains("image.png"));
+        assert_eq!(
+            full_after[0].parts[0],
+            MessagePart::Text {
+                text: "attachment".into()
+            }
+        );
     }
 
     #[test]

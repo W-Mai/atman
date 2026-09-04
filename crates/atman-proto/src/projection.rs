@@ -18,6 +18,16 @@ pub const PROJECTION_EVENT_SCHEMA_VERSION: u32 = 1;
 #[schema(value_type = String, format = Uuid)]
 pub struct TurnId(pub Uuid);
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
+pub struct ContextId(pub Uuid);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
+pub struct MessagePartId(pub Uuid);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
 pub struct ResourceId(pub String);
@@ -143,6 +153,10 @@ pub enum TranscriptItem {
         ts: DateTime<Utc>,
         #[serde(default)]
         run_id: Option<FlowRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_id: Option<ContextId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_index: Option<usize>,
         message: MessageProjection,
     },
     Diff {
@@ -276,6 +290,8 @@ pub enum MessagePart {
         thinking: String,
     },
     Image {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<MessagePartId>,
         media_type: String,
         #[serde(default)]
         artifact_id: Option<String>,

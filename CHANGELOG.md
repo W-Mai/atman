@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Attachment patch addresses** — `Event::AttachmentDegraded` carries a shared `AttachmentPatch` with an exclusive stable-ID or legacy-position target. Existing JSONL position addresses remain readable; mixed and incomplete addresses are rejected. Message projections expose optional context, checkpoint, and image identities.
 - **Attachment error identities** — `RuntimeError::AttachmentError` includes an optional `part_id`, and `attachment_store::image_base64` accepts the current image part identity. Local encoding failures retain that identity; unlocated remote and import errors leave it unset.
 - **Image part identities** — `MessagePart::Image` includes an optional `MessagePartId`. Context insertion assigns missing identities; persisted legacy images remain readable.
 - **Isolated compaction commits** — `maybe_auto_compact_handle_locked` requires a synchronous commit callback, invoked after snapshot validation while the message lock is held.
@@ -39,6 +40,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Projection identity redaction** — UUID-only values are not classified as card numbers. Projection snapshots retain valid identities while card numbers and explicitly configured credential patterns remain redacted.
 - **Attachment error classification** — generic parameter errors and request-size failures without image evidence no longer trigger attachment degradation. Authentication, rate-limit, and server failures retain their original error paths across providers and call modes.
 - **Cross-transport session access** — authenticated HTTP and owner-only Unix-socket clients share the daemon operator identity. Session ownership checks and session-scoped event tickets remain enforced.
 - **Attachment reference stability** — image identities survive message copies, part filtering, checkpoints, and replay. Legacy references are derived from event coordinates; storage identities are excluded from model input, cache prefixes, and checkpoint epochs.

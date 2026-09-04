@@ -9,6 +9,78 @@ use crate::event::TurnId;
 #[serde(transparent)]
 pub struct MessagePartId(pub uuid::Uuid);
 
+/// An attachment address uses either a stable identity or a legacy event position.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum AttachmentTarget {
+    Part { part_id: MessagePartId },
+    Legacy { message_seq: u64, part_index: usize },
+}
+
+impl<'de> Deserialize<'de> for AttachmentTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let part_id = fields.remove("part_id");
+        let message_seq = fields.remove("message_seq");
+        let part_index = fields.remove("part_index");
+        match (part_id, message_seq, part_index) {
+            (Some(id), None, None) => Ok(Self::Part {
+                part_id: serde_json::from_value(id).map_err(serde::de::Error::custom)?,
+            }),
+            (None, Some(seq), Some(index)) => Ok(Self::Legacy {
+                message_seq: serde_json::from_value(seq).map_err(serde::de::Error::custom)?,
+                part_index: serde_json::from_value(index).map_err(serde::de::Error::custom)?,
+            }),
+            _ => Err(serde::de::Error::custom(
+                "attachment target requires exactly one complete address",
+            )),
+        }
+    }
+}
+
+impl AttachmentTarget {
+    pub fn matches(self, id: Option<MessagePartId>, message_seq: u64, part_index: usize) -> bool {
+        match self {
+            Self::Part { part_id } => id == Some(part_id),
+            Self::Legacy {
+                message_seq: seq,
+                part_index: index,
+            } => seq == message_seq && index == part_index,
+        }
+    }
+}
+
+/// An image-only replacement applied inside one already-selected context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentPatch {
+    #[serde(flatten)]
+    pub target: AttachmentTarget,
+    pub file_basename: String,
+    pub reason: String,
+}
+
+impl AttachmentPatch {
+    pub fn text(&self) -> String {
+        format!(
+            "[attachment unavailable: {} — {}]",
+            self.file_basename, self.reason
+        )
+    }
+
+    pub fn apply(&self, message_seq: u64, message: &mut Message) -> bool {
+        let mut changed = false;
+        for (index, part) in message.parts.iter_mut().enumerate() {
+            if let MessagePart::Image { id, .. } = part
+                && self.target.matches(*id, message_seq, index)
+            {
+                *part = MessagePart::Text { text: self.text() };
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 pub const TOOL_CALL_INTENT_FIELD: &str = "_atman_intent";
 pub const TOOL_CALL_INTENT_MAX_CHARS: usize = 120;
 
@@ -193,24 +265,37 @@ impl Message {
         let mut message = self.clone();
         for (index, part) in message.parts.iter_mut().enumerate() {
             if let MessagePart::Image { id, .. } = part {
-                id.get_or_insert_with(|| {
-                    let mut hash = blake3::Hasher::new();
-                    hash.update(b"atman.message-part.v1");
-                    hash.update(message.turn_id.0.as_bytes());
-                    hash.update(&seq.to_le_bytes());
-                    hash.update(
-                        &checkpoint_index
-                            .map_or(u64::MAX, |i| i as u64)
-                            .to_le_bytes(),
-                    );
-                    hash.update(&(index as u64).to_le_bytes());
-                    let mut bytes = [0; 16];
-                    bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
-                    MessagePartId(uuid::Uuid::from_bytes(bytes))
-                });
+                *id = self.part_id(seq, checkpoint_index, index);
             }
         }
         message
+    }
+
+    /// Returns the stored image identity or derives its legacy replay identity without copying image data.
+    pub fn part_id(
+        &self,
+        seq: u64,
+        checkpoint_index: Option<usize>,
+        index: usize,
+    ) -> Option<MessagePartId> {
+        let MessagePart::Image { id, .. } = self.parts.get(index)? else {
+            return None;
+        };
+        Some(id.unwrap_or_else(|| {
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"atman.message-part.v1");
+            hash.update(self.turn_id.0.as_bytes());
+            hash.update(&seq.to_le_bytes());
+            hash.update(
+                &checkpoint_index
+                    .map_or(u64::MAX, |i| i as u64)
+                    .to_le_bytes(),
+            );
+            hash.update(&(index as u64).to_le_bytes());
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+            MessagePartId(uuid::Uuid::from_bytes(bytes))
+        }))
     }
 
     /// Borrows model-facing content without storage-only part identities.
@@ -544,6 +629,74 @@ pub(crate) fn parse_legacy_compact_summary_text(text: &str) -> Option<(String, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_patches_only_replace_matching_images_and_are_idempotent() {
+        let id = MessagePartId(uuid::Uuid::now_v7());
+        let image = MessagePart::Image {
+            id: Some(id),
+            source: ImageSource {
+                media_type: "image/png".into(),
+                data: ImageData::Base64 {
+                    data: "AA==".into(),
+                },
+                detail: Default::default(),
+            },
+        };
+        let mut original = Message::user_text(TurnId::now(), "keep text");
+        original.parts.extend([image.clone(), image]);
+        for (target, affected) in [
+            (AttachmentTarget::Part { part_id: id }, 2),
+            (
+                AttachmentTarget::Legacy {
+                    message_seq: 5,
+                    part_index: 1,
+                },
+                1,
+            ),
+            (
+                AttachmentTarget::Legacy {
+                    message_seq: 5,
+                    part_index: 0,
+                },
+                0,
+            ),
+            (
+                AttachmentTarget::Legacy {
+                    message_seq: 6,
+                    part_index: 1,
+                },
+                0,
+            ),
+            (
+                AttachmentTarget::Part {
+                    part_id: MessagePartId(uuid::Uuid::now_v7()),
+                },
+                0,
+            ),
+        ] {
+            let mut message = original.clone();
+            let mut patch = AttachmentPatch {
+                target,
+                file_basename: "image.png".into(),
+                reason: "missing".into(),
+            };
+            assert_eq!(patch.apply(5, &mut message), affected > 0);
+            assert_eq!(message.parts[0], original.parts[0]);
+            assert_eq!(
+                message
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part, MessagePart::Image { .. }))
+                    .count(),
+                2 - affected
+            );
+            let applied = message.clone();
+            patch.reason = "a later error".into();
+            assert!(!patch.apply(5, &mut message));
+            assert_eq!(message, applied);
+        }
+    }
 
     #[test]
     fn image_part_identity_survives_copy_reordering_and_replay() {

@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 
+const CREDIT_CARD_PATTERN: &str = r"\b(?:\d[ -]*?){13,16}\b";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RedactMode {
     #[default]
@@ -73,6 +75,12 @@ impl Redactor {
         for &idx in self.set.matches(text).iter().collect::<Vec<_>>().iter() {
             let regex = &self.regexes[idx];
             let kind = &self.kinds[idx];
+            if kind == "credit_card"
+                && regex.as_str() == CREDIT_CARD_PATTERN
+                && uuid::Uuid::parse_str(text).is_ok()
+            {
+                continue;
+            }
             for m in regex.find_iter(text) {
                 if self.allowlist.contains(m.as_str()) {
                     continue;
@@ -193,7 +201,7 @@ pub const BUILTIN_PATTERNS: &[(&str, &str)] = &[
         "email",
         r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
     ),
-    ("credit_card", r"\b(?:\d[ -]*?){13,16}\b"),
+    ("credit_card", CREDIT_CARD_PATTERN),
 ];
 
 #[cfg(test)]
@@ -264,6 +272,21 @@ mod tests {
         let (out, hits) = r.redact("foo123bar tail");
         assert_eq!(hits.len(), 1, "overlapping match should collapse: {hits:?}");
         assert!(out.starts_with("<REDACTED:"), "out: {out}");
+    }
+
+    #[test]
+    fn uuid_values_are_not_card_numbers_and_other_redaction_rules_still_apply() {
+        let id = "00000000-0000-7000-8000-000000000001";
+        let redactor = Redactor::builtin();
+        let mut value = serde_json::json!({ "id": id, "card": "4111 1111 1111 1111" });
+        let hits = redactor.redact_json(&mut value);
+        assert_eq!(value["id"], id);
+        assert_eq!(value["card"], "<REDACTED:credit_card>");
+        assert_eq!(hits.len(), 1);
+        for kind in ["credential", "credit_card"] {
+            let explicit = Redactor::from_pairs(&[(kind, id)], RedactMode::Full);
+            assert_eq!(explicit.redact(id).0, format!("<REDACTED:{kind}>"));
+        }
     }
 
     #[test]

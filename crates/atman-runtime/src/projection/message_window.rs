@@ -5,16 +5,19 @@ use crate::event::{self, Event, FlowRunId};
 #[cfg(test)]
 use crate::event_log::reader::parse_json_lines;
 use crate::event_log::reader::read_event_envelopes;
-use crate::message::{Message, MessagePart};
+use crate::message::{AttachmentPatch, AttachmentTarget, Message, MessagePart};
 use crate::nodegraph;
 use crate::provider;
 use crate::session::SessionOpenError;
 
-#[derive(Debug, Default)]
-pub(crate) struct FlowOwnership {
-    pub known: HashSet<FlowRunId>,
-    pub spawned: HashSet<FlowRunId>,
+/// Maps inline runs to the nearest spawned context boundary.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct FlowOwnership {
+    pub(crate) known: HashSet<FlowRunId>,
+    pub(crate) spawned: HashSet<FlowRunId>,
     children: HashMap<FlowRunId, HashSet<FlowRunId>>,
+    parents: HashMap<FlowRunId, FlowRunId>,
+    boundaries: HashSet<FlowRunId>,
 }
 
 impl FlowOwnership {
@@ -26,7 +29,7 @@ impl FlowOwnership {
         ownership
     }
 
-    pub(crate) fn observe(&mut self, event: &Event) {
+    pub fn observe(&mut self, event: &Event) {
         let Event::FlowStart {
             run_id,
             parent_run_id,
@@ -37,7 +40,11 @@ impl FlowOwnership {
             return;
         };
         self.known.insert(run_id.clone());
+        if *spawned {
+            self.boundaries.insert(run_id.clone());
+        }
         if let Some(parent) = parent_run_id {
+            self.parents.insert(run_id.clone(), parent.clone());
             self.children
                 .entry(parent.clone())
                 .or_default()
@@ -59,6 +66,22 @@ impl FlowOwnership {
                 queue.extend(children.iter().cloned());
             }
         }
+    }
+
+    /// `None` identifies the legacy root context; inline descendants share their owner's identity.
+    pub fn context_run(&self, run_id: Option<&FlowRunId>) -> Option<FlowRunId> {
+        let mut current = run_id?;
+        for _ in 0..=self.parents.len() {
+            if !self.known.contains(current) {
+                return Some(current.clone());
+            }
+            if self.boundaries.contains(current) {
+                return Some(current.clone());
+            }
+            current = self.parents.get(current)?;
+        }
+        // Malformed cyclic ancestry must not grant access to the root context.
+        run_id.cloned()
     }
 }
 
@@ -203,31 +226,14 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
             messages.push((env.seq, message.replayed(env.seq, None)));
         }
         if let crate::event::Event::AttachmentDegraded {
-            message_seq,
-            part_index,
-            file_basename,
-            reason,
-            ..
+            flow_run_id, patch, ..
         } = &env.event
+            && message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids)
         {
-            apply_attachment_degradation(
-                &mut messages,
-                &positions,
-                *message_seq,
-                *part_index,
-                file_basename,
-                reason,
-            );
+            apply_attachment_degradation(&mut messages, &positions, patch);
         }
     }
     Ok(messages)
-}
-
-#[derive(Debug, Clone)]
-pub struct AttachmentPatch {
-    part_index: usize,
-    file_basename: String,
-    reason: String,
 }
 
 #[cfg(test)]
@@ -393,7 +399,10 @@ pub fn collect_attachment_patches(
             let file_basename = v["file_basename"].as_str().unwrap_or("").to_string();
             let reason = v["reason"].as_str().unwrap_or("degraded").to_string();
             map.entry(msg_seq).or_default().push(AttachmentPatch {
-                part_index: part_index as usize,
+                target: AttachmentTarget::Legacy {
+                    message_seq: msg_seq,
+                    part_index: part_index as usize,
+                },
                 file_basename,
                 reason,
             });
@@ -402,16 +411,10 @@ pub fn collect_attachment_patches(
     map
 }
 
-pub fn apply_attachment_patches(msg: &mut Message, patches: &[AttachmentPatch]) {
+#[cfg(test)]
+pub fn apply_attachment_patches(msg: &mut Message, seq: u64, patches: &[AttachmentPatch]) {
     for p in patches {
-        if let Some(part) = msg.parts.get_mut(p.part_index) {
-            *part = MessagePart::Text {
-                text: format!(
-                    "[attachment unavailable: {} — {}]",
-                    p.file_basename, p.reason
-                ),
-            };
-        }
+        p.apply(seq, msg);
     }
 }
 
@@ -586,7 +589,7 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     msg = msg.replayed(seq, None);
                     let belongs_to_root = raw_event_belongs_to_root(v, &spawned_flow_ids);
                     if let Some(ps) = patches.get(&seq) {
-                        apply_attachment_patches(&mut msg, ps);
+                        apply_attachment_patches(&mut msg, seq, ps);
                     }
                     let flow_run_id = v["flow_run_id"].as_str().and_then(|raw| {
                         let run_id = uuid::Uuid::parse_str(raw).ok()?;
@@ -1063,25 +1066,27 @@ pub(crate) fn project_transcript_records(
     records: &[crate::event_log::reader::ReplayRecord],
     ownership: &FlowOwnership,
 ) -> Vec<TranscriptEntry> {
-    let mut patches: HashMap<u64, Vec<AttachmentPatch>> = HashMap::new();
+    let mut patches = HashMap::<_, Vec<(usize, &AttachmentPatch)>>::new();
     let mut tool_started_at = HashMap::new();
-    for record in records {
+    for (record_index, record) in records.iter().enumerate() {
         if let crate::event::Event::AttachmentDegraded {
-            message_seq,
-            part_index,
-            file_basename,
-            reason,
-            ..
+            flow_run_id, patch, ..
         } = &record.envelope.event
         {
+            let context_run = record
+                .envelope
+                .context_id
+                .is_none()
+                .then(|| ownership.context_run(flow_run_id.as_ref()))
+                .flatten();
             patches
-                .entry(*message_seq)
+                .entry((
+                    record.envelope.context_id.clone(),
+                    context_run,
+                    patch.target,
+                ))
                 .or_default()
-                .push(AttachmentPatch {
-                    part_index: *part_index,
-                    file_basename: file_basename.clone(),
-                    reason: reason.clone(),
-                });
+                .push((record_index, patch));
         }
         if let crate::event::Event::AssistantMsg { message, .. } = &record.envelope.event
             && let Some(ts) = record.persisted_ts
@@ -1107,7 +1112,7 @@ pub(crate) fn project_transcript_records(
     let mut canonical_permissions = std::collections::HashSet::new();
     let mut session_activity = crate::activity::ActivityAccumulator::default();
     let mut turn_activity = crate::activity::ActivityAccumulator::default();
-    for record in records {
+    for (record_index, record) in records.iter().enumerate() {
         let seq = record.envelope.seq;
         let ts = record.persisted_ts;
         if matches!(
@@ -1122,8 +1127,40 @@ pub(crate) fn project_transcript_records(
         if let Some((message, flow_run_id)) = record.envelope.event.context_message() {
             let mut message = message.replayed(seq, None);
             let belongs_to_root = message_belongs_to_root(flow_run_id, &ownership.spawned);
-            if let Some(patches) = patches.get(&seq) {
-                apply_attachment_patches(&mut message, patches);
+            let context_run = record
+                .envelope
+                .context_id
+                .is_none()
+                .then(|| ownership.context_run(flow_run_id))
+                .flatten();
+            for (part_index, part) in message.parts.iter_mut().enumerate() {
+                let MessagePart::Image { id, .. } = part else {
+                    continue;
+                };
+                let targets = [
+                    id.map(|part_id| AttachmentTarget::Part { part_id }),
+                    Some(AttachmentTarget::Legacy {
+                        message_seq: seq,
+                        part_index,
+                    }),
+                ];
+                let patch = targets
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|target| {
+                        patches
+                            .get(&(
+                                record.envelope.context_id.clone(),
+                                context_run.clone(),
+                                target,
+                            ))?
+                            .iter()
+                            .find(|(at, _)| *at > record_index)
+                    })
+                    .min_by_key(|(at, _)| *at);
+                if let Some((_, patch)) = patch {
+                    *part = MessagePart::Text { text: patch.text() };
+                }
             }
             let flow_run_id = flow_run_id.and_then(|run_id| {
                 if ownership.known.contains(run_id) && !ownership.spawned.contains(run_id) {
@@ -1608,28 +1645,21 @@ fn rebuild_message_positions(acc: &[(u64, Message)], positions: &mut HashMap<u64
 pub(crate) fn apply_attachment_degradation(
     acc: &mut [(u64, Message)],
     positions: &HashMap<u64, usize>,
-    message_seq: u64,
-    part_index: usize,
-    file_basename: &str,
-    reason: &str,
+    patch: &AttachmentPatch,
 ) -> bool {
-    let Some(message_index) = positions.get(&message_seq).copied() else {
-        return false;
-    };
-    let Some(part) = acc
-        .get_mut(message_index)
-        .and_then(|(_, message)| message.parts.get_mut(part_index))
-    else {
-        return false;
-    };
-    let replacement = MessagePart::Text {
-        text: format!("[attachment unavailable: {} — {}]", file_basename, reason),
-    };
-    if *part == replacement {
-        return false;
+    match patch.target {
+        AttachmentTarget::Legacy { message_seq, .. } => positions
+            .get(&message_seq)
+            .and_then(|index| acc.get_mut(*index))
+            .is_some_and(|(seq, message)| patch.apply(*seq, message)),
+        AttachmentTarget::Part { .. } => {
+            let mut changed = false;
+            for (seq, message) in acc {
+                changed |= patch.apply(*seq, message);
+            }
+            changed
+        }
     }
-    *part = replacement;
-    true
 }
 
 pub(crate) fn message_belongs_to_root(
@@ -1730,19 +1760,10 @@ pub(crate) fn apply_envelope_to_messages(
             }
         }
         crate::event::Event::AttachmentDegraded {
-            message_seq,
-            part_index,
-            file_basename,
-            reason,
-            ..
-        } => apply_attachment_degradation(
-            acc,
-            positions,
-            *message_seq,
-            *part_index,
-            file_basename,
-            reason,
-        ),
+            flow_run_id, patch, ..
+        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
+            apply_attachment_degradation(acc, positions, patch)
+        }
         _ => false,
     }
 }
@@ -1822,6 +1843,18 @@ mod tests {
                     ownership.spawned,
                     super::HashSet::from([child.clone(), nested.clone()])
                 );
+                for (run, expected) in [
+                    (&root, None),
+                    (&inline, None),
+                    (&child, Some(child.clone())),
+                    (&nested, Some(child.clone())),
+                    (&unknown, Some(unknown.clone())),
+                ] {
+                    assert_eq!(ownership.context_run(Some(run)), expected);
+                    let restored: FlowOwnership =
+                        serde_json::from_value(serde_json::to_value(&ownership).unwrap()).unwrap();
+                    assert_eq!(restored.context_run(Some(run)), expected);
+                }
                 for (owner, text) in [
                     (Some(root.clone()), "root"),
                     (Some(inline.clone()), "inline"),
@@ -2162,10 +2195,14 @@ mod tests {
                 Event::AttachmentDegraded {
                     turn_id: None,
                     flow_run_id: None,
-                    message_seq: 1,
-                    part_index: 0,
-                    file_basename: "missing.png".into(),
-                    reason: "unreadable".into(),
+                    patch: crate::message::AttachmentPatch {
+                        target: crate::message::AttachmentTarget::Legacy {
+                            message_seq: 1,
+                            part_index: 0,
+                        },
+                        file_basename: "missing.png".into(),
+                        reason: "unreadable".into(),
+                    },
                 },
             ),
         ];
@@ -2197,6 +2234,143 @@ mod tests {
             super::TranscriptEntry::Message { message, .. }
                 if message.text_concat().contains("missing.png")
         ));
+    }
+
+    #[test]
+    fn attachment_patches_preserve_legacy_owners_and_event_order() {
+        use super::MessageProjection;
+        use crate::event::EventSink;
+        use crate::message::{
+            AttachmentPatch, AttachmentTarget, ImageData, ImageSource, MessagePartId,
+        };
+
+        let root = FlowRunId::now();
+        let child = FlowRunId::now();
+        let inline = FlowRunId::now();
+        let sink = EventSink::new();
+        let stream = crate::message_stream::MessageStream::new(sink.events_handle());
+        let id = MessagePartId(Uuid::now_v7());
+        let mut image = Message::user_text(TurnId::now(), "caption");
+        image.parts.push(MessagePart::Image {
+            id: Some(id),
+            source: ImageSource {
+                media_type: "image/png".into(),
+                data: ImageData::Base64 {
+                    data: "AA==".into(),
+                },
+                detail: Default::default(),
+            },
+        });
+        let push = |event| {
+            let seq = sink.emit_returning_seq(event);
+            assert_eq!(
+                stream.window().to_vec(),
+                sink.snapshot_envelopes().as_slice().to_messages()
+            );
+            seq
+        };
+        push(flow_start(root.clone(), None, false));
+        push(flow_start(child.clone(), Some(root.clone()), true));
+        push(flow_start(inline.clone(), Some(child.clone()), false));
+        let message = |owner| Event::UserMsg {
+            turn_id: image.turn_id.clone(),
+            flow_run_id: owner,
+            message: image.clone(),
+        };
+        let root_seq = push(message(None));
+        push(message(Some(child.clone())));
+        let patch = |owner, target, reason: &str| Event::AttachmentDegraded {
+            turn_id: None,
+            flow_run_id: owner,
+            patch: AttachmentPatch {
+                target,
+                file_basename: "image.png".into(),
+                reason: reason.into(),
+            },
+        };
+        push(patch(
+            Some(inline.clone()),
+            AttachmentTarget::Legacy {
+                message_seq: root_seq,
+                part_index: 1,
+            },
+            "wrong owner",
+        ));
+        assert!(matches!(
+            stream.window()[0].parts[1],
+            MessagePart::Image { .. }
+        ));
+        push(patch(
+            Some(inline.clone()),
+            AttachmentTarget::Part { part_id: id },
+            "child",
+        ));
+        assert!(matches!(
+            stream.window()[0].parts[1],
+            MessagePart::Image { .. }
+        ));
+        push(patch(
+            Some(inline),
+            AttachmentTarget::Part { part_id: id },
+            "duplicate",
+        ));
+        push(patch(
+            Some(root),
+            AttachmentTarget::Part { part_id: id },
+            "root",
+        ));
+        push(patch(
+            None,
+            AttachmentTarget::Legacy {
+                message_seq: root_seq,
+                part_index: 0,
+            },
+            "not an image",
+        ));
+        push(message(Some(child)));
+        push(message(None));
+
+        let events = sink.snapshot_envelopes();
+        let transcript = crate::event_log::replay::transcript_from_envelopes(&events);
+        let messages = transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                super::TranscriptEntry::Message { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 4);
+        assert!(messages[0].text_concat().ends_with("image.png — root]"));
+        assert!(messages[1].text_concat().ends_with("image.png — child]"));
+        for message in &messages[2..] {
+            assert!(matches!(message.parts[1], MessagePart::Image { .. }));
+        }
+        for message in &messages {
+            assert_eq!(message.parts[0], image.parts[0]);
+        }
+        let jsonl = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let replay =
+            crate::event_log::replay::SessionReplay::from_reader(jsonl.as_bytes(), None).unwrap();
+        assert_eq!(replay.all_messages, replay.compacted_messages);
+        assert_eq!(
+            *stream.full_messages(),
+            replay
+                .all_messages
+                .iter()
+                .map(|(_, message)| message.clone())
+                .collect::<Vec<_>>()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, jsonl).unwrap();
+        assert_eq!(
+            super::replay_all_messages_with_seq(&path).unwrap(),
+            replay.all_messages
+        );
     }
 
     #[test]
