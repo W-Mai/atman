@@ -401,7 +401,7 @@ async fn maybe_auto_compact_locked(
     }
     let Some(range) = find_compact_range(&msgs, target) else {
         let (replacement, rewritten_count) =
-            build_budgeted_turn_rewrite(&msgs, target, model, providers).await;
+            build_budgeted_turn_rewrite(msgs.to_vec(), target, model, providers).await;
         let after_tokens = estimate_tokens_for_messages(&replacement);
         if rewritten_count == 0 || after_tokens >= window_tokens || after_tokens > target {
             session.emit_compact_warning(
@@ -739,12 +739,11 @@ async fn generate_llm_summary_with_delta(
 }
 
 async fn build_budgeted_turn_rewrite(
-    messages: &[Message],
+    mut replacement: Vec<Message>,
     history_budget: u64,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
 ) -> (Vec<Message>, usize) {
-    let mut replacement = messages.to_vec();
     let mut group_index = 0;
     let mut rewritten_count = 0;
     while estimate_tokens_for_messages(&replacement) > history_budget {
@@ -772,7 +771,7 @@ async fn build_budgeted_turn_rewrite(
             );
         }
         rewritten_count += output.len();
-        replacement.splice(start + 1..end, [summary_message]);
+        replace_turn_output(&mut replacement, start, end, summary_message);
         group_index += 1;
     }
     filter_orphan_tool_messages(&mut replacement);
@@ -798,50 +797,19 @@ async fn build_budgeted_replacement(
         return replacement;
     }
 
-    let mut group_index = 0;
-    loop {
-        let groups = user_turn_ranges(&replacement);
-        if group_index >= groups.len()
-            || estimate_tokens_for_messages(&replacement) <= history_budget
-        {
-            break;
-        }
-        let (start, end) = groups[group_index];
-        let output: Vec<Message> = replacement[start + 1..end].to_vec();
-        if output.is_empty() {
-            group_index += 1;
-            continue;
-        }
-        let output_tokens = estimate_tokens_for_messages(&output);
-        let summary = generate_llm_summary(None, &output, model, providers)
-            .await
-            .unwrap_or_else(|_| deterministic_turn_omission(&output));
-        let mut summary_message = Message::assistant_text(
-            replacement[start].turn_id.clone(),
-            format!("[atman: compacted turn output]\n{summary}\n[/atman: compacted turn output]"),
-        );
-        if estimate_tokens_for_message(&summary_message) >= output_tokens {
-            summary_message = Message::assistant_text(
-                replacement[start].turn_id.clone(),
-                deterministic_turn_omission(&output),
-            );
-        }
-        replacement.splice(start + 1..end, [summary_message]);
-        group_index += 1;
-    }
+    (replacement, _) =
+        build_budgeted_turn_rewrite(replacement, history_budget, model, providers).await;
 
     if estimate_tokens_for_messages(&replacement) > history_budget {
         let groups = user_turn_ranges(&replacement);
         for (start, end) in groups.into_iter().rev() {
             let output = replacement[start + 1..end].to_vec();
             if !output.is_empty() {
-                replacement.splice(
-                    start + 1..end,
-                    [Message::assistant_text(
-                        replacement[start].turn_id.clone(),
-                        deterministic_turn_omission(&output),
-                    )],
+                let summary = Message::assistant_text(
+                    replacement[start].turn_id.clone(),
+                    deterministic_turn_omission(&output),
                 );
+                replace_turn_output(&mut replacement, start, end, summary);
             }
         }
     }
@@ -852,6 +820,12 @@ async fn build_budgeted_replacement(
 
     filter_orphan_tool_messages(&mut replacement);
     replacement
+}
+
+fn replace_turn_output(messages: &mut Vec<Message>, start: usize, end: usize, summary: Message) {
+    let mut replacement = latest_context_records_before(&messages[start + 1..], end - start - 1);
+    replacement.push(summary);
+    messages.splice(start + 1..end, replacement);
 }
 
 fn user_turn_ranges(messages: &[Message]) -> Vec<(usize, usize)> {
@@ -1124,7 +1098,7 @@ pub async fn maybe_auto_compact_handle_locked(
             )
         } else {
             let (replacement, rewritten_count) =
-                build_budgeted_turn_rewrite(&snapshot, target, model, providers).await;
+                build_budgeted_turn_rewrite(snapshot.clone(), target, model, providers).await;
             if rewritten_count == 0 {
                 return None;
             }
@@ -1454,6 +1428,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_turn_rewrites_preserve_record_state_across_summary_and_budget_policies() {
+        use crate::context_plan::{
+            ContextRecord, ContextRecordAuthority, ContextRecordBody, ContextRecordRetention,
+        };
+
+        let records = |messages: &[Message]| {
+            messages
+                .iter()
+                .flat_map(|message| &message.parts)
+                .filter_map(|part| match part {
+                    MessagePart::ContextRecord(record)
+                        if record.retention() == ContextRecordRetention::Latest =>
+                    {
+                        Some((record.key().to_string(), record.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let messages = vec![
+            context_record("session.workspace", 1, "superseded workspace"),
+            user("old user"),
+            assistant(&"old output ".repeat(2_000)),
+            user("first retained user"),
+            context_record("session.goal", 1, "superseded goal"),
+            context_tombstone("session.workspace", 2),
+            Message::context_record(
+                TurnId::now(),
+                ContextRecord::new(
+                    "audit.timeline",
+                    1,
+                    ContextRecordAuthority::Runtime,
+                    ContextRecordRetention::Timeline,
+                    ContextRecordBody::text("historical observation"),
+                ),
+            ),
+            assistant(&"first retained output ".repeat(4_000)),
+            user("second retained user"),
+            context_record("session.goal", 2, "current goal"),
+            assistant(&"second retained output ".repeat(4_000)),
+        ];
+        let expected = records(&messages);
+        for provider_output in [
+            None,
+            Some("short summary".to_string()),
+            Some("verbose ".repeat(750)),
+        ] {
+            let providers = crate::provider::ProviderRegistry::new();
+            if let Some(output) = provider_output {
+                providers.register(std::sync::Arc::new(
+                    crate::providers::mock::MockProvider::new("summary-policy")
+                        .with_fallback(crate::value::Value::Str(output)),
+                ));
+            }
+            for budget in [1_500, 1] {
+                let (rewritten, count) = build_budgeted_turn_rewrite(
+                    messages.clone(),
+                    budget,
+                    "summary-policy",
+                    &providers,
+                )
+                .await;
+                assert!(count > 0);
+                let compacted = build_budgeted_replacement(
+                    &messages,
+                    &CompactRange {
+                        start: 0,
+                        end: 3,
+                        tokens_saved_estimate: 1,
+                    },
+                    "anchor",
+                    budget,
+                    "summary-policy",
+                    &providers,
+                )
+                .await;
+                for (replacement, users) in [
+                    (
+                        &rewritten,
+                        vec!["old user", "first retained user", "second retained user"],
+                    ),
+                    (
+                        &compacted,
+                        vec!["first retained user", "second retained user"],
+                    ),
+                ] {
+                    assert_eq!(records(replacement), expected);
+                    assert!(!replacement.iter().flat_map(|message| &message.parts).any(|part| matches!(part, MessagePart::ContextRecord(record) if record.retention() == ContextRecordRetention::Timeline)));
+                    assert_eq!(
+                        replacement
+                            .iter()
+                            .filter(|message| message.role == MessageRole::User)
+                            .map(Message::text_concat)
+                            .collect::<Vec<_>>(),
+                        users
+                    );
+                }
+                if budget == 1 {
+                    assert!(
+                        !compacted
+                            .iter()
+                            .any(|message| message.role == MessageRole::Assistant)
+                    );
+                } else {
+                    assert!(estimate_tokens_for_messages(&compacted) <= budget);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn turn_rewrite_compacts_oversized_tool_output_without_dropping_recent_users() {
         let first = TurnId::now();
         let current = TurnId::now();
@@ -1470,7 +1555,7 @@ mod tests {
 
         assert!(find_compact_range(&messages, 500).is_none());
         let (replacement, rewritten_count) = build_budgeted_turn_rewrite(
-            &messages,
+            messages,
             500,
             "missing-provider",
             &crate::provider::ProviderRegistry::default(),
