@@ -94,6 +94,8 @@ child requests.
 
 ## Message selection
 
+`projection::context::replay_context` accepts an explicit `ContextBase` and reconstructs one bounded ancestry from event envelopes. `ContextCreated` without a base starts empty; a `legacy_root` base selects unscoped root history, while a `context` base requires an existing context identity and an earlier cutoff. Descendants inherit the source's active window at that cutoff, not later parent output. Scoped checkpoints and compaction affect only the selected ancestry; raw messages remain available independently. Creation records contain references, not repeated copies of complete history. This replay API does not change the session's default execution or enable concurrent root admission.
+
 The flow chooses one message source:
 
 | Form | Messages sent |

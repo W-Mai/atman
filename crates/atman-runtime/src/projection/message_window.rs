@@ -1682,7 +1682,7 @@ pub(crate) fn apply_envelope_to_messages(
                 (
                     *rep_seq,
                     Message::system_compact_summary(
-                        crate::event::TurnId::now(),
+                        acc[rep_idx].1.turn_id.clone(),
                         summary.clone(),
                         range_start as u64,
                         range_end as u64,

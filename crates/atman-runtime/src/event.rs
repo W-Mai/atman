@@ -55,6 +55,34 @@ impl std::fmt::Display for ContextId {
     }
 }
 
+/// A fixed event-log boundary in an explicitly selected message context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextBase {
+    LegacyRoot {
+        through_seq: u64,
+    },
+    Context {
+        context_id: ContextId,
+        through_seq: u64,
+    },
+}
+
+impl ContextBase {
+    pub fn context_id(&self) -> Option<&ContextId> {
+        match self {
+            Self::LegacyRoot { .. } => None,
+            Self::Context { context_id, .. } => Some(context_id),
+        }
+    }
+
+    pub fn through_seq(&self) -> u64 {
+        match self {
+            Self::LegacyRoot { through_seq } | Self::Context { through_seq, .. } => *through_seq,
+        }
+    }
+}
+
 /// An event with sequence, timestamp, and optional message-context identity.
 /// Unscoped events retain the legacy flat JSONL representation.
 #[derive(Debug, Clone)]
@@ -126,6 +154,10 @@ impl<'de> serde::Deserialize<'de> for EventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    /// The envelope identifies the new context; no base means empty history.
+    ContextCreated {
+        base: Option<ContextBase>,
+    },
     FlowStart {
         run_id: FlowRunId,
         #[serde(default, skip_serializing_if = "Option::is_none")]

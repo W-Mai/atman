@@ -451,7 +451,8 @@ async fn write_event(
 }
 
 fn serialize_event(envelope: &EventEnvelope, redactor: Option<&Redactor>) -> String {
-    let Some(r) = redactor else {
+    let Some(r) = redactor.filter(|_| !matches!(envelope.event, Event::ContextCreated { .. }))
+    else {
         return serde_json::to_string(envelope).unwrap_or_else(|e| {
             format!(
                 "{{\"type\":\"encode_error\",\"error\":{:?}}}",
@@ -518,6 +519,7 @@ pub(crate) fn extract_ts(envelope: &EventEnvelope) -> String {
 
 pub(crate) fn event_kind(event: &Event) -> &'static str {
     match event {
+        Event::ContextCreated { .. } => "context_created",
         Event::FlowStart { .. } => "flow_start",
         Event::FlowEnd { .. } => "flow_end",
         Event::RunCancelRequested { .. } => "run_cancel_requested",
@@ -725,7 +727,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         | Event::CompactReviewResolved { .. }
         | Event::TerminalFinalState { .. }
         | Event::MermaidDiagram { .. }
-        | Event::TaskReaped { .. } => (None, None),
+        | Event::TaskReaped { .. }
+        | Event::ContextCreated { .. } => (None, None),
     }
 }
 

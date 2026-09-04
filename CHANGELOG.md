@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Context creation events** — `Event::ContextCreated` records an optional typed `ContextBase`, distinguishing empty history, legacy root history, and a bounded source context.
 - **Event context identity** — `EventEnvelope` includes an optional typed `ContextId`. `EventSink::with_context` labels emitted envelopes while sharing sequence assignment and delivery with sibling sinks. Unscoped JSONL records retain their existing representation.
 - **Run inbox API** — flow entries expose checked `interject` and read-only `pending_injections` methods instead of a mutable queue and notifier. Entry registration requires a live execution identity and returns a result. Course correction is an internal streaming outcome, not a `RuntimeError` variant.
 - **Flow entry registration** — `FlowRegistry::create_entry` accepts `FlowEntryOptions` for display labels, workspace bindings, and execution cancellation; separate workspace-specific registration methods are removed.
@@ -20,6 +21,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Selective context replay** — `projection::context::replay_context` reconstructs one ancestry at fixed event boundaries, isolates sibling checkpoints and compaction, and retains raw history separately. Invalid lineage is rejected instead of falling back to unrelated history.
 - **Remote terminal resizing** — daemon clients can resize live terminal resources through session-scoped resource identities, with idempotent commands and projected dimensions for every attached client.
 - **Remote manual compaction** — session clients can request background compaction through an idempotent actor command; concurrent requests report the running operation instead of queuing duplicate summaries.
 - **Remote session trust control** — daemon clients can update the complete session trust policy through an idempotent actor command that persists the session policy and the default for new sessions before publishing the committed projection cursor.
@@ -31,6 +33,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction replay identity** — reconstructed summaries retain their persisted replacement-message turn identity instead of generating a new identity on each replay.
 - **Child context persistence** — spawned workspace, handoff, and retrieved records share a versioned append path that persists each change with its child owner. Repeated content remains a no-op, and replay retains the records used by corrected requests.
 - **Canonical course corrections** — session and handle-based interjections share the root inbox and canonical context; spawned flows retain separate inboxes. Nudges remain pending until another agent call. Course corrections preserve partial assistant output and rebuild requests without duplicating the user prompt or imposing a three-correction limit. Terminal runs reject late input and cancel only their own pending messages.
 - **Flow control ownership** — root handles cancel their actual invocation token. Synchronous spawned flows own separate output, message, compaction, and cancellation state; normal root and child completion publishes one terminal entry state. Cancellation is classified consistently in flow events, task status, and entry status.
