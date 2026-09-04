@@ -87,6 +87,111 @@ impl Provider for RecordingProvider {
 }
 
 #[tokio::test]
+async fn consumed_steering_is_persistent_and_respects_request_context_selection() {
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "prov", "prov", 8_192, None,
+        )]))
+        .await;
+    for selection in [
+        "context: \"session\"",
+        "context: \"session_recent(1)\"",
+        "prompt: \"explicit\"",
+        "messages: [user_msg(\"explicit\")]",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Arc::new(Session::open(tmp.path()).unwrap());
+        let sid = session.id().to_string();
+        let turn_id = session.begin_turn(Message::user_text(TurnId::now(), "task"));
+        let ids = [
+            session.enqueue_injection("same steering").unwrap(),
+            session.enqueue_injection("same steering").unwrap(),
+        ];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let executor = Executor::with_events(session.sink().clone());
+        executor.providers.register(Arc::new(RecordingProvider {
+            name: "prov".into(),
+            calls: calls.clone(),
+            inject_before_call: None,
+        }));
+        let invalid =
+            parse_file(r#"flow invalid() -> string { return llm.call(model: "prov") }"#).unwrap();
+        let result = executor
+            .run_in_turn(
+                &invalid,
+                "invalid",
+                vec![],
+                Some(turn_id.clone()),
+                Some(session.clone()),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::MissingArg(_))
+                | Ok(atman_runtime::Value::Err(RuntimeError::MissingArg(_)))
+        ));
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(session.list_pending_injections().len(), ids.len());
+        let file = parse_file(&format!(
+            r#"flow ask() -> string {{
+    llm.call(model: "prov", {selection})
+    llm.call(model: "prov", {selection})
+    return "done"
+}}
+"#
+        ))
+        .unwrap();
+        executor
+            .run_in_turn(
+                &file,
+                "ask",
+                vec![],
+                Some(turn_id.clone()),
+                Some(session.clone()),
+            )
+            .await
+            .unwrap();
+        session.end_turn(&turn_id);
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        for id in &ids {
+            assert_eq!(
+                calls[0]
+                    .iter()
+                    .filter(|message| message.text_concat().contains(&id.to_string()))
+                    .count(),
+                1,
+                "{selection}"
+            );
+        }
+        if selection == "context: \"session\"" {
+            assert_eq!(calls[0], calls[1][..calls[0].len()]);
+        } else if selection.starts_with("prompt:") || selection.starts_with("messages:") {
+            assert!(
+                !calls[1]
+                    .iter()
+                    .any(|message| message.text_concat().contains("same steering"))
+            );
+        }
+        let expected = session.messages().to_vec();
+        for id in &ids {
+            assert_eq!(
+                expected
+                    .iter()
+                    .filter(|message| message.text_concat().contains(&id.to_string()))
+                    .count(),
+                1
+            );
+        }
+        session.shutdown().await;
+        let restored = Session::open_existing(tmp.path(), &sid).unwrap();
+        assert_eq!(restored.messages().to_vec(), expected);
+        assert!(restored.list_pending_injections().is_empty());
+        restored.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn pending_injection_appears_in_next_llm_request_messages() {
     let _registry =
         common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(

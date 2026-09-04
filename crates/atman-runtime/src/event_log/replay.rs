@@ -116,47 +116,28 @@ impl SessionReplay {
                 &mut compacted_messages,
                 &mut compacted_positions,
             );
-            match &record.envelope.event {
-                Event::UserMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                }
-                | Event::AssistantMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                }
-                | Event::ToolResultMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                }
-                | Event::SystemMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                } if message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned) => {
-                    all_positions.insert(record.envelope.seq, all_messages.len());
-                    all_messages.push((record.envelope.seq, message.clone()));
-                }
-                Event::AttachmentDegraded {
-                    message_seq,
-                    part_index,
+            if let Some((message, flow_run_id)) = record.envelope.event.context_message()
+                && message_belongs_to_root(flow_run_id, &ownership.spawned)
+            {
+                all_positions.insert(record.envelope.seq, all_messages.len());
+                all_messages.push((record.envelope.seq, message.clone()));
+            }
+            if let Event::AttachmentDegraded {
+                message_seq,
+                part_index,
+                file_basename,
+                reason,
+                ..
+            } = &record.envelope.event
+            {
+                apply_attachment_degradation(
+                    &mut all_messages,
+                    &all_positions,
+                    *message_seq,
+                    *part_index,
                     file_basename,
                     reason,
-                    ..
-                } => {
-                    apply_attachment_degradation(
-                        &mut all_messages,
-                        &all_positions,
-                        *message_seq,
-                        *part_index,
-                        file_basename,
-                        reason,
-                    );
-                }
-                _ => {}
+                );
             }
         }
         let context = context_snapshot_from_records(&records);

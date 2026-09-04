@@ -89,27 +89,6 @@ pub(super) fn is_context_overflow_error(err: &RuntimeError) -> bool {
         || msg.contains("too many tokens")
 }
 
-pub(super) fn rebuild_session_llm_messages(
-    session: &crate::session::Session,
-    context_mode: ContextMode,
-    turn_id: &crate::event::TurnId,
-    prompt: Option<&str>,
-    extra_messages: &[crate::message::Message],
-) -> Vec<crate::message::Message> {
-    let session_messages = session.messages();
-    let mut messages = llm_context::project_session_messages(&session_messages, context_mode);
-    if let Some(prompt) = prompt
-        && !prompt.is_empty()
-    {
-        messages.push(crate::message::Message::user_text(
-            turn_id.clone(),
-            prompt.to_string(),
-        ));
-    }
-    messages.extend_from_slice(extra_messages);
-    messages
-}
-
 pub(super) async fn session_context_record_specs(
     session: &crate::session::Session,
 ) -> Vec<crate::context_plan::ContextRecordSpec> {
@@ -1953,50 +1932,6 @@ async fn eval_message_node<'a>(
         turn_id,
         origin: MessageOrigin::User,
     })
-}
-
-pub(super) fn render_injections(injections: &[crate::injection::Injection]) -> String {
-    use crate::injection::{InjectionLevel, InjectionSource};
-    let has_user = injections
-        .iter()
-        .any(|i| matches!(i.source, InjectionSource::User));
-    let has_watcher = injections
-        .iter()
-        .any(|i| matches!(i.source, InjectionSource::Watcher { .. }));
-    let mut out = String::new();
-    if has_user {
-        out.push_str(
-            "The user sent the following steering message(s) while you were working. \
-             Apply them to your next step if still relevant.\n\n",
-        );
-    }
-    if has_watcher {
-        out.push_str("A background watcher detected the following event(s):\n\n");
-    }
-    for inj in injections {
-        let (tag, source_attr) = match &inj.source {
-            InjectionSource::User => match inj.level {
-                InjectionLevel::L2CourseCorrect => ("user_correction", "user".to_string()),
-                _ => ("user_nudge", "user".to_string()),
-            },
-            InjectionSource::Watcher {
-                watcher_id,
-                kind,
-                handle,
-            } => (
-                "watcher_event",
-                format!("{kind} '{handle}' watcher {watcher_id}"),
-            ),
-        };
-        out.push_str(&format!(
-            "<{tag} id=\"{}\" ts=\"{}\" source=\"{}\">\n{}\n</{tag}>\n",
-            inj.id.0,
-            inj.created_at.to_rfc3339(),
-            source_attr,
-            inj.text
-        ));
-    }
-    out
 }
 
 fn guess_image_mime(path: &std::path::Path) -> Option<String> {

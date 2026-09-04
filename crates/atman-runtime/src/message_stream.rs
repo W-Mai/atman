@@ -180,44 +180,23 @@ impl MessageStream {
                 &mut acc.compacted,
                 &mut acc.compacted_positions,
             );
-            match &ev.event {
-                crate::event::Event::UserMsg {
-                    message,
+            if let Some((message, flow_run_id)) = ev.event.context_message()
+                && crate::projection::message_window::message_belongs_to_root(
                     flow_run_id,
-                    ..
-                }
-                | crate::event::Event::AssistantMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                }
-                | crate::event::Event::ToolResultMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                }
-                | crate::event::Event::SystemMsg {
-                    message,
-                    flow_run_id,
-                    ..
-                } if crate::projection::message_window::message_belongs_to_root(
-                    flow_run_id.as_ref(),
                     &acc.ownership.spawned,
-                ) =>
-                {
-                    acc.full_positions.insert(ev.seq, acc.full_raw.len());
-                    acc.full_raw.push((ev.seq, message.clone()));
-                    full_changed = true;
-                }
-                crate::event::Event::AttachmentDegraded { .. } => {
-                    full_changed |= crate::projection::message_window::apply_envelope_to_messages(
-                        ev,
-                        &acc.ownership.spawned,
-                        &mut acc.full_raw,
-                        &mut acc.full_positions,
-                    );
-                }
-                _ => {}
+                )
+            {
+                acc.full_positions.insert(ev.seq, acc.full_raw.len());
+                acc.full_raw.push((ev.seq, message.clone()));
+                full_changed = true;
+            }
+            if matches!(ev.event, crate::event::Event::AttachmentDegraded { .. }) {
+                full_changed |= crate::projection::message_window::apply_envelope_to_messages(
+                    ev,
+                    &acc.ownership.spawned,
+                    &mut acc.full_raw,
+                    &mut acc.full_positions,
+                );
             }
         }
         acc.replayed = events.len();

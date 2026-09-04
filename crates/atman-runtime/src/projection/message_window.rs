@@ -143,50 +143,28 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
     let mut messages = Vec::new();
     let mut positions = HashMap::new();
     for env in &envelopes {
-        match &env.event {
-            crate::event::Event::UserMsg {
-                message,
-                flow_run_id,
-                ..
-            }
-            | crate::event::Event::AssistantMsg {
-                message,
-                flow_run_id,
-                ..
-            }
-            | crate::event::Event::ToolResultMsg {
-                message,
-                flow_run_id,
-                ..
-            } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
-                positions.insert(env.seq, messages.len());
-                messages.push((env.seq, message.clone()));
-            }
-            crate::event::Event::SystemMsg {
-                message,
-                flow_run_id,
-                ..
-            } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
-                positions.insert(env.seq, messages.len());
-                messages.push((env.seq, message.clone()));
-            }
-            crate::event::Event::AttachmentDegraded {
-                message_seq,
-                part_index,
+        if let Some((message, flow_run_id)) = env.event.context_message()
+            && message_belongs_to_root(flow_run_id, &spawned_flow_ids)
+        {
+            positions.insert(env.seq, messages.len());
+            messages.push((env.seq, message.clone()));
+        }
+        if let crate::event::Event::AttachmentDegraded {
+            message_seq,
+            part_index,
+            file_basename,
+            reason,
+            ..
+        } = &env.event
+        {
+            apply_attachment_degradation(
+                &mut messages,
+                &positions,
+                *message_seq,
+                *part_index,
                 file_basename,
                 reason,
-                ..
-            } => {
-                apply_attachment_degradation(
-                    &mut messages,
-                    &positions,
-                    *message_seq,
-                    *part_index,
-                    file_basename,
-                    reason,
-                );
-            }
-            _ => {}
+            );
         }
     }
     Ok(messages)
@@ -609,6 +587,30 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     }
                 }
             }
+            "user_inject" => {
+                if let Ok(event) = serde_json::from_value::<crate::event::Event>(v.clone())
+                    && let Some((message, owner)) = event.context_message()
+                {
+                    let entry = TranscriptEntry::Message {
+                        message: message.clone(),
+                        flow_run_id: owner.and_then(|run_id| {
+                            (!known_flow_ids.contains(run_id) || spawned_flow_ids.contains(run_id))
+                                .then(|| run_id.to_string())
+                        }),
+                    };
+                    if message_belongs_to_root(owner, &spawned_flow_ids) {
+                        push_transcript_message(
+                            &mut out,
+                            &mut messages,
+                            &mut message_positions,
+                            v["seq"].as_u64().unwrap_or(0),
+                            entry,
+                        );
+                    } else {
+                        out.push(entry);
+                    }
+                }
+            }
             "turn_start" => {}
             "turn_end" => out.push(TranscriptEntry::ActivitySummary {
                 turn: turn_activity.summary(),
@@ -996,6 +998,10 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 }
             }),
     );
+    out.retain(|entry| {
+        !matches!(entry, TranscriptEntry::Message { message, .. }
+        if message.origin == crate::message::MessageOrigin::Interjection)
+    });
     Ok(out)
 }
 
@@ -1059,74 +1065,55 @@ pub(crate) fn project_transcript_records(
             session_activity.observe(&record.envelope.event);
             turn_activity.observe(&record.envelope.event);
         }
-        match &record.envelope.event {
-            crate::event::Event::UserMsg {
-                message,
-                flow_run_id,
-                ..
+        if let Some((message, flow_run_id)) = record.envelope.event.context_message() {
+            let mut message = message.clone();
+            let belongs_to_root = message_belongs_to_root(flow_run_id, &ownership.spawned);
+            if let Some(patches) = patches.get(&seq) {
+                apply_attachment_patches(&mut message, patches);
             }
-            | crate::event::Event::AssistantMsg {
-                message,
-                flow_run_id,
-                ..
-            }
-            | crate::event::Event::ToolResultMsg {
-                message,
-                flow_run_id,
-                ..
-            }
-            | crate::event::Event::SystemMsg {
-                message,
-                flow_run_id,
-                ..
-            } => {
-                let mut message = message.clone();
-                let belongs_to_root =
-                    message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned);
-                if let Some(patches) = patches.get(&seq) {
-                    apply_attachment_patches(&mut message, patches);
-                }
-                let flow_run_id = flow_run_id.as_ref().and_then(|run_id| {
-                    if ownership.known.contains(run_id) && !ownership.spawned.contains(run_id) {
-                        None
-                    } else {
-                        Some(run_id.0.to_string())
-                    }
-                });
-                let entry = TranscriptEntry::Message {
-                    message,
-                    flow_run_id,
-                };
-                if belongs_to_root {
-                    push_transcript_message(
-                        &mut out,
-                        &mut messages,
-                        &mut message_positions,
-                        seq,
-                        entry,
-                    );
+            let flow_run_id = flow_run_id.and_then(|run_id| {
+                if ownership.known.contains(run_id) && !ownership.spawned.contains(run_id) {
+                    None
                 } else {
-                    out.push(entry);
+                    Some(run_id.0.to_string())
                 }
-                if let crate::event::Event::ToolResultMsg { message, .. } = &record.envelope.event
-                    && let Some(finished_at) = ts
-                {
-                    for part in &message.parts {
-                        if let MessagePart::ToolResult { tool_use_id, .. } = part
-                            && let Some(started_at) = tool_started_at.get(tool_use_id)
-                        {
-                            let elapsed_ms = finished_at
-                                .signed_duration_since(*started_at)
-                                .num_milliseconds()
-                                .max(0) as u64;
-                            out.push(TranscriptEntry::ToolTiming {
-                                tool_use_id: tool_use_id.clone(),
-                                elapsed_ms,
-                            });
-                        }
+            });
+            let entry = TranscriptEntry::Message {
+                message,
+                flow_run_id,
+            };
+            if belongs_to_root {
+                push_transcript_message(
+                    &mut out,
+                    &mut messages,
+                    &mut message_positions,
+                    seq,
+                    entry,
+                );
+            } else {
+                out.push(entry);
+            }
+            if let crate::event::Event::ToolResultMsg { message, .. } = &record.envelope.event
+                && let Some(finished_at) = ts
+            {
+                for part in &message.parts {
+                    if let MessagePart::ToolResult { tool_use_id, .. } = part
+                        && let Some(started_at) = tool_started_at.get(tool_use_id)
+                    {
+                        let elapsed_ms = finished_at
+                            .signed_duration_since(*started_at)
+                            .num_milliseconds()
+                            .max(0) as u64;
+                        out.push(TranscriptEntry::ToolTiming {
+                            tool_use_id: tool_use_id.clone(),
+                            elapsed_ms,
+                        });
                     }
                 }
             }
+            continue;
+        }
+        match &record.envelope.event {
             crate::event::Event::TurnStart { .. } => {}
             crate::event::Event::TurnEnd { .. } => {
                 out.push(TranscriptEntry::ActivitySummary {
@@ -1516,6 +1503,10 @@ pub(crate) fn project_transcript_records(
                 }
             }),
     );
+    out.retain(|entry| {
+        !matches!(entry, TranscriptEntry::Message { message, .. }
+        if message.origin == crate::message::MessageOrigin::Interjection)
+    });
     out
 }
 
@@ -1637,35 +1628,15 @@ pub(crate) fn apply_envelope_to_messages(
     acc: &mut Vec<(u64, Message)>,
     positions: &mut HashMap<u64, usize>,
 ) -> bool {
+    if let Some((message, flow_run_id)) = env.event.context_message() {
+        if !message_belongs_to_root(flow_run_id, spawned_flow_ids) {
+            return false;
+        }
+        positions.insert(env.seq, acc.len());
+        acc.push((env.seq, message.clone()));
+        return true;
+    }
     match &env.event {
-        crate::event::Event::UserMsg {
-            message,
-            flow_run_id,
-            ..
-        }
-        | crate::event::Event::AssistantMsg {
-            message,
-            flow_run_id,
-            ..
-        }
-        | crate::event::Event::ToolResultMsg {
-            message,
-            flow_run_id,
-            ..
-        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
-            positions.insert(env.seq, acc.len());
-            acc.push((env.seq, message.clone()));
-            true
-        }
-        crate::event::Event::SystemMsg {
-            message,
-            flow_run_id,
-            ..
-        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
-            positions.insert(env.seq, acc.len());
-            acc.push((env.seq, message.clone()));
-            true
-        }
         crate::event::Event::ContextCompact {
             flow_run_id,
             compacted_range_start,
@@ -1921,6 +1892,11 @@ mod tests {
     #[test]
     fn transcript_compaction_preserves_interleaved_non_message_entries() {
         let spawned = FlowRunId::now();
+        let mut steering = crate::injection::Injection::new_pending(TurnId::now(), "old steering");
+        steering.state = crate::injection::InjectionState::Injected;
+        let mut retained =
+            crate::injection::Injection::new_pending(TurnId::now(), "retained steering");
+        retained.state = crate::injection::InjectionState::Injected;
         let events = [
             EventEnvelope::new(
                 1,
@@ -1941,6 +1917,14 @@ mod tests {
             ),
             EventEnvelope::new(
                 4,
+                Event::UserInject {
+                    turn_id: steering.turn_id.clone(),
+                    context_message: Some(steering.context_message()),
+                    injection: steering,
+                },
+            ),
+            EventEnvelope::new(
+                5,
                 Event::AssistantMsg {
                     turn_id: TurnId::now(),
                     flow_run_id: None,
@@ -1948,24 +1932,32 @@ mod tests {
                 },
             ),
             EventEnvelope::new(
-                5,
+                6,
                 Event::SystemMsg {
                     turn_id: TurnId::now(),
                     flow_run_id: None,
-                    message: Message::system_compact_summary(TurnId::now(), "summary", 0, 1, 2),
+                    message: Message::system_compact_summary(TurnId::now(), "summary", 0, 2, 3),
                 },
             ),
             EventEnvelope::new(
-                6,
+                7,
                 Event::ContextCompact {
                     session_id: "session".into(),
                     flow_run_id: None,
                     before_tokens: 100,
                     after_tokens: 10,
                     compacted_range_start: 0,
-                    compacted_range_end: 1,
+                    compacted_range_end: 2,
                     summary_text: Some("summary".into()),
-                    replacement_msg_seq: Some(5),
+                    replacement_msg_seq: Some(6),
+                },
+            ),
+            EventEnvelope::new(
+                8,
+                Event::UserInject {
+                    turn_id: retained.turn_id.clone(),
+                    context_message: Some(retained.context_message()),
+                    injection: retained,
                 },
             ),
         ];
@@ -1985,6 +1977,10 @@ mod tests {
         let raw_entries = super::replay_transcript_from_raw(&path).unwrap();
         let entries = super::replay_transcript_from(&path).unwrap();
         assert_eq!(format!("{raw_entries:#?}"), format!("{entries:#?}"));
+        let messages = super::replay_messages_from(&path).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text_concat(), "summary");
+        assert!(messages[1].text_concat().contains("retained steering"));
         assert_eq!(entries.len(), 3);
         assert!(matches!(
             &entries[0],

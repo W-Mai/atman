@@ -55,11 +55,19 @@ async fn checkpoint_event_written_after_compaction() {
 async fn checkpoint_skips_dead_history_on_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let sid;
+    let steering_id;
+    let expected;
     {
         let session = Session::open(tmp.path()).unwrap();
         sid = session.id().to_string();
         session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
         build_long_history(&session, 20);
+        let turn_id = session.begin_turn(Message::user_text(
+            atman_runtime::event::TurnId::now(),
+            "current task",
+        ));
+        steering_id = session.enqueue_injection("keep this correction").unwrap();
+        session.drain_injections(&turn_id).await;
         session
             .compact_messages_auto("compacted summary".into())
             .unwrap();
@@ -70,11 +78,38 @@ async fn checkpoint_skips_dead_history_on_reopen() {
             ),
             None,
         );
+        session.end_turn(&turn_id);
+        expected = session.messages().to_vec();
         session.shutdown().await;
     }
 
     let session = Session::open_existing(tmp.path(), &sid).unwrap();
     let msgs = session.messages();
+    assert_eq!(msgs.to_vec(), expected);
+    assert_eq!(
+        msgs.iter()
+            .filter(|message| message.text_concat().contains(&steering_id.to_string()))
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .messages_full()
+            .iter()
+            .filter(|message| message.text_concat().contains(&steering_id.to_string()))
+            .count(),
+        1
+    );
+    let raw = atman_runtime::projection::message_window::replay_all_messages_with_seq(
+        &tmp.path().join("sessions").join(&sid).join("events.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        raw.iter()
+            .filter(|(_, message)| message.text_concat().contains(&steering_id.to_string()))
+            .count(),
+        1
+    );
 
     assert!(!msgs.is_empty(), "reopened session should have messages");
     let has_summary = msgs

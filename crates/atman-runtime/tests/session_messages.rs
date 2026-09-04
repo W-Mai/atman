@@ -191,21 +191,29 @@ fn enqueue_injection_requires_active_turn() {
     assert!(format!("{err}").contains("no active turn"));
 }
 
-#[test]
-fn drain_injections_marks_pending_as_injected_and_returns_in_order() {
+#[tokio::test]
+async fn drain_injections_persists_each_identity_once_and_preserves_controls() {
     let session = Session::open_ephemeral();
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
-    let id1 = session.enqueue_injection("first").unwrap();
-    let id2 = session.enqueue_injection("second").unwrap();
+    let id1 = session.enqueue_injection("same steering").unwrap();
+    let id2 = session.enqueue_injection("same steering").unwrap();
+    for level in [
+        atman_runtime::injection::InjectionLevel::L3Redirect,
+        atman_runtime::injection::InjectionLevel::L4HardStop,
+    ] {
+        session
+            .enqueue_injection_with_level("control", level, Some("target".into()))
+            .unwrap();
+    }
 
-    let drained = session.drain_injections(&turn_id);
+    let drained = session.drain_injections(&turn_id).await;
     assert_eq!(drained.len(), 2);
     assert_eq!(drained[0].id, id1);
     assert_eq!(drained[1].id, id2);
-    assert_eq!(drained[0].text, "first");
-    assert_eq!(drained[1].text, "second");
+    assert_eq!(drained[0].text, "same steering");
+    assert_eq!(drained[1].text, "same steering");
     assert_eq!(drained[0].state, atman_runtime::InjectionState::Injected);
 
     let first_states = session
@@ -227,8 +235,30 @@ fn drain_injections_marks_pending_as_injected_and_returns_in_order() {
         ]
     );
 
-    let second_drain = session.drain_injections(&turn_id);
+    let second_drain = session.drain_injections(&turn_id).await;
     assert!(second_drain.is_empty(), "drain twice should be empty");
+    assert_eq!(session.list_pending_injections().len(), 2);
+    let messages = session.messages();
+    assert_eq!(messages.len(), 3);
+    assert!(messages[1].text_concat().contains(&id1.to_string()));
+    assert!(messages[2].text_concat().contains(&id2.to_string()));
+    assert_eq!(
+        *session.messages_handle().lock().unwrap(),
+        messages.to_vec()
+    );
+    let applied = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            atman_runtime::Event::UserInject {
+                context_message: Some(message),
+                ..
+            } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(applied, messages[1..]);
 }
 
 #[test]

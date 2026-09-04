@@ -105,6 +105,8 @@ At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_chars: 1200
 
 Pending nudges and course corrections are reserved for general agent calls. Classification, extraction, branch generation, compaction, and interjection classification do not consume these messages, including through the streaming monitor. Streaming helper calls still accept redirect and hard-stop controls and retain their normal output routing. The managed flow decides whether to continue after checking pending input.
 
+Session steering consumption records the rendered message and consumed state in one event under the compaction lock. The canonical context retains that message for later calls and resume without creating a transcript turn boundary. Current-call steering is included in addition to the requested historical slice for `session_recent(n)`. Bare `prompt:` and explicit `messages:` requests include newly consumed steering only for that call; they do not implicitly read conversational history. Overflow retries use the same context builder and do not append a second steering suffix. Older queue-only events without captured messages are not re-rendered during replay.
+
 ## Session history and active window
 
 The durable event stream is the source of session history. The runtime derives the

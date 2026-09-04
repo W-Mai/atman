@@ -6,8 +6,8 @@ use crate::value::Value;
 
 use super::ContextMode;
 use super::{
-    StreamCallCtx, is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages,
-    render_injections, session_context_record_specs, tool_context_working_directory_context,
+    StreamCallCtx, is_context_overflow_error, parse_context_mode, session_context_record_specs,
+    tool_context_working_directory_context,
 };
 use super::{append_system_context, call_and_maybe_stream};
 
@@ -37,15 +37,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     };
     let tool_specs = args.tool_specs.clone();
     let stall_timeout_secs = args.stall_timeout_secs;
-    if args.messages_override.is_some() && args.prompt.is_some() {
-        return Value::Err(RuntimeError::ToolFailed(
-            "llm: cannot specify both `messages:` and `prompt:` (pick one)".into(),
-        ));
-    }
-    if !matches!(context_mode, ContextMode::None) && args.messages_override.is_some() {
-        return Value::Err(RuntimeError::ToolFailed(
-            "llm: cannot specify both `messages:` and `context:` (pick one)".into(),
-        ));
+    if let Err(error) = llm_context::validate_context(&args, context_mode) {
+        return Value::Err(error);
     }
     let providers_reg = ctx
         .providers
@@ -106,6 +99,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
         }
     }
+    let injections = if args.call_purpose.accepts_steering_messages()
+        && let Some(session) = ctx.session_runtime.as_ref()
+    {
+        session.drain_injections(&turn_id).await
+    } else {
+        Vec::new()
+    };
+    let context_mode = match context_mode {
+        ContextMode::SessionRecent(count) => {
+            ContextMode::SessionRecent(count.saturating_add(injections.len()))
+        }
+        mode => mode,
+    };
     let compaction_budget = crate::compaction::CompactionBudgetContext {
         fixed_input_tokens: Some(crate::context_plan::estimate_fixed_input_tokens(
             &system,
@@ -171,7 +177,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     };
     let mut final_messages = llm_context.messages;
     let prompt_for_budget = llm_context.budget_text;
-    let session_messages_len = llm_context.session_messages_len;
+    if !uses_managed_context {
+        final_messages.extend(
+            injections
+                .iter()
+                .map(crate::injection::Injection::context_message),
+        );
+    }
     if let Some(session) = ctx.session_runtime.as_ref()
         && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
         && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
@@ -179,28 +191,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         session.mark_injection_consumed(&l3_or_l2.id);
         return Value::Err(RuntimeError::Redirect(target.clone()));
-    }
-    if args.call_purpose.accepts_steering_messages()
-        && let Some(session) = ctx.session_runtime.as_ref()
-    {
-        let injections = session.drain_injections(&turn_id);
-        let renderable: Vec<crate::injection::Injection> = injections
-            .into_iter()
-            .filter(|i| {
-                matches!(
-                    i.level,
-                    crate::injection::InjectionLevel::L1Nudge
-                        | crate::injection::InjectionLevel::L2CourseCorrect
-                )
-            })
-            .collect();
-        if !renderable.is_empty() {
-            let rendered = render_injections(&renderable);
-            final_messages.push(crate::message::Message::user_text(
-                turn_id.clone(),
-                rendered,
-            ));
-        }
     }
     let prompt = prompt_for_budget;
     let mut rewrite_used = false;
@@ -243,7 +233,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             )));
         }
     }
-    let retry_base_messages = final_messages.clone();
     let can_rebuild_from_managed_context = uses_managed_context
         && (ctx.session_runtime.is_some() || (uses_spawned_context && compact_guard.is_some()));
     let mut compact_after_overflow_used = false;
@@ -588,13 +577,19 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 compaction_budget,
                             )
                             .await;
-                            final_messages = rebuild_session_llm_messages(
-                                session,
+                            compact_guard = Some(session.acquire_compact_lock().await);
+                            match llm_context::build_llm_context(
+                                &args,
                                 context_mode,
+                                Some(session),
+                                ctx.session_messages_handle.as_ref(),
                                 &turn_id,
-                                Some(prompt.as_str()),
-                                &retry_base_messages[session_messages_len..],
-                            );
+                                ctx.events.as_ref(),
+                                ctx.flow_run_id.as_ref(),
+                            ) {
+                                Ok(context) => final_messages = context.messages,
+                                Err(value) => return value,
+                            }
                             last_err = Some(e);
                             continue 'llm_attempts;
                         }

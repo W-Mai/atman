@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Steering consumption API** — `Session::drain_injections` is asynchronous and consumes only nudges and corrections under the compaction lock. `Event::UserInject` includes an optional captured context message; older serialized events remain readable.
 - **Explicit turn lifecycle** — `Session::end_turn`, `mark_streamed`, `take_streamed_flag`, and `flow_cancel_token` require a `TurnId`; cancellation lookup returns `None` for an inactive turn. Active turn state is private, and `current_turn` returns a value only when one turn is active.
 - **Daemon run anchors** — `LiveRun` includes its turn identity, and `Session::enqueue_injection_for_run` accepts a paired turn/run target.
 - **Run turn identity** — `Event::FlowStart` and `RunProjection` include an optional `turn_id`; older serialized events and snapshots remain readable.
@@ -25,6 +26,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Interjection history** — consumed session steering retains its rendered text through later requests, compaction retries, and resume without adding transcript turn boundaries or duplicate retry suffixes.
 - **Interjection consumption** — auxiliary LLM calls leave pending nudges and course corrections for the agent, including during streaming; helper output and stream-level stop controls remain connected.
 - **Event publication races** — daemon snapshots and live signals synchronize against published events, not reserved sequence numbers; compaction references the actual emitted summary event.
 - **Turn state isolation** — cancellation and streaming state belong to individual turns; late completion and output cannot reset another turn, and interjection enqueue is serialized with turn completion.

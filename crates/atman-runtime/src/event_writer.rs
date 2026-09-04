@@ -579,7 +579,15 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         Event::TurnStart { turn_id, .. } | Event::TurnEnd { turn_id, .. } => {
             (Some(turn_id.0.to_string()), None)
         }
-        Event::UserInject { turn_id, .. } => (Some(turn_id.0.to_string()), None),
+        Event::UserInject {
+            turn_id, injection, ..
+        } => (
+            Some(turn_id.0.to_string()),
+            injection
+                .flow_run_id
+                .as_ref()
+                .map(|run_id| run_id.0.to_string()),
+        ),
         Event::UserMsg {
             turn_id,
             flow_run_id,

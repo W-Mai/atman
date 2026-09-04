@@ -2453,7 +2453,7 @@ impl Session {
             }
             drop(q);
             for injection in cancelled {
-                self.publish_injection_update(injection);
+                self.publish_injection_update(injection, None);
             }
             self.sink.emit(Event::TurnEnd {
                 turn_id: turn_id.clone(),
@@ -2522,6 +2522,7 @@ impl Session {
         let envelope = self.sink.emit_returning_envelope(Event::UserInject {
             turn_id,
             injection: inj.clone(),
+            context_message: None,
         });
         self.injection_queue.lock().unwrap().push(inj.clone());
         let _ = self.injection_tx.send(inj);
@@ -2543,7 +2544,7 @@ impl Session {
         });
         drop(q);
         if let Some(injection) = updated {
-            self.publish_injection_update(injection);
+            self.publish_injection_update(injection, None);
         }
     }
 
@@ -2558,29 +2559,41 @@ impl Session {
             .cloned()
     }
 
-    /// Drain all Pending injections for `turn_id`. Marks them Injected.
-    /// Returns them in creation order.
-    pub fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
+    /// Consume pending nudges and corrections in creation order, preserving controls.
+    /// Persists each rendered context message with its consumption state under the compaction lock.
+    pub async fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
+        let _compact_guard = self.acquire_compact_lock().await;
         let mut q = self.injection_queue.lock().unwrap();
         let mut out = Vec::new();
         for inj in q.iter_mut() {
-            if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
+            if inj.state == InjectionState::Pending
+                && inj.turn_id == *turn_id
+                && matches!(
+                    inj.level,
+                    crate::injection::InjectionLevel::L1Nudge
+                        | crate::injection::InjectionLevel::L2CourseCorrect
+                )
+            {
                 inj.state = InjectionState::Injected;
+                self.publish_injection_update(inj.clone(), Some(inj.context_message()));
                 out.push(inj.clone());
             }
-        }
-        drop(q);
-        for injection in &out {
-            self.publish_injection_update(injection.clone());
         }
         out
     }
 
-    fn publish_injection_update(&self, injection: Injection) {
+    fn publish_injection_update(&self, injection: Injection, context_message: Option<Message>) {
+        let mut messages = context_message
+            .as_ref()
+            .map(|_| self.messages.lock().unwrap());
         self.sink.emit(Event::UserInject {
             turn_id: injection.turn_id.clone(),
             injection: injection.clone(),
+            context_message: context_message.clone(),
         });
+        if let (Some(messages), Some(message)) = (messages.as_mut(), context_message) {
+            messages.push(message);
+        }
         let _ = self.injection_tx.send(injection);
     }
 

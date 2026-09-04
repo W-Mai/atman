@@ -80,6 +80,40 @@ fn default_level() -> InjectionLevel {
 }
 
 impl Injection {
+    pub(crate) fn context_message(&self) -> crate::message::Message {
+        let (intro, tag, source) = match &self.source {
+            InjectionSource::User => (
+                "The user sent the following steering message(s) while you were working. Apply them to your next step if still relevant.\n\n",
+                if self.level == InjectionLevel::L2CourseCorrect {
+                    "user_correction"
+                } else {
+                    "user_nudge"
+                },
+                "user".to_string(),
+            ),
+            InjectionSource::Watcher {
+                watcher_id,
+                kind,
+                handle,
+            } => (
+                "A background watcher detected the following event(s):\n\n",
+                "watcher_event",
+                format!("{kind} '{handle}' watcher {watcher_id}"),
+            ),
+        };
+        let mut message = crate::message::Message::user_text(
+            self.turn_id.clone(),
+            format!(
+                "{intro}<{tag} id=\"{}\" ts=\"{}\" source=\"{source}\">\n{}\n</{tag}>\n",
+                self.id,
+                self.created_at.to_rfc3339(),
+                self.text,
+            ),
+        );
+        message.origin = crate::message::MessageOrigin::Interjection;
+        message
+    }
+
     pub fn new_pending(turn_id: TurnId, text: impl Into<String>) -> Self {
         Self::with_level(turn_id, text, InjectionLevel::L1Nudge, None)
     }

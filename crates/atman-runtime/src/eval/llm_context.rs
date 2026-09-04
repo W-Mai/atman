@@ -6,7 +6,28 @@ use crate::value::Value;
 pub struct LlmContext {
     pub messages: Vec<crate::message::Message>,
     pub budget_text: String,
-    pub session_messages_len: usize,
+}
+
+pub fn validate_context(args: &LlmNodeArgs, context_mode: ContextMode) -> Result<(), RuntimeError> {
+    if args.messages_override.is_some() && args.prompt.is_some() {
+        return Err(RuntimeError::ToolFailed(
+            "llm: cannot specify both `messages:` and `prompt:` (pick one)".into(),
+        ));
+    }
+    if !matches!(context_mode, ContextMode::None) && args.messages_override.is_some() {
+        return Err(RuntimeError::ToolFailed(
+            "llm: cannot specify both `messages:` and `context:` (pick one)".into(),
+        ));
+    }
+    if matches!(context_mode, ContextMode::None)
+        && args.messages_override.is_none()
+        && args.prompt.is_none()
+    {
+        return Err(RuntimeError::MissingArg(
+            "llm node: either `prompt:` or `messages:` required".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn build_llm_context(
@@ -20,6 +41,7 @@ pub fn build_llm_context(
     events: Option<&crate::event::EventSink>,
     flow_run_id: Option<&crate::event::FlowRunId>,
 ) -> Result<LlmContext, Value> {
+    validate_context(args, context_mode).map_err(Value::Err)?;
     let session_snapshot = if let Some(session) = session {
         Some(session.messages().to_vec())
     } else {
@@ -47,11 +69,7 @@ pub fn build_llm_context(
         }
         (history, budget_text)
     } else {
-        let Some(mut prompt_text) = args.prompt.clone() else {
-            return Err(Value::Err(RuntimeError::MissingArg(
-                "llm node: either `prompt:` or `messages:` required".into(),
-            )));
-        };
+        let mut prompt_text = args.prompt.clone().expect("validated prompt input");
         if let Some(budget) = args.context_budget {
             let (truncated, stat) = super::truncate_prompt_to_budget_tracked(prompt_text, budget);
             prompt_text = truncated;
@@ -71,12 +89,9 @@ pub fn build_llm_context(
         messages.push(user_msg);
         (messages, prompt_text)
     };
-    let session_messages_len = final_messages.len();
-
     Ok(LlmContext {
         messages: final_messages,
         budget_text: prompt_for_budget,
-        session_messages_len,
     })
 }
 

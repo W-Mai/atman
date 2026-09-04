@@ -247,6 +247,9 @@ pub enum Event {
     UserInject {
         turn_id: TurnId,
         injection: crate::injection::Injection,
+        /// Rendered steering admitted to context with this consumption update.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_message: Option<crate::message::Message>,
     },
     ContentFilterHit {
         turn_id: Option<TurnId>,
@@ -432,6 +435,41 @@ pub enum Event {
     MermaidDiagram {
         source: String,
     },
+}
+
+impl Event {
+    pub(crate) fn context_message(&self) -> Option<(&crate::message::Message, Option<&FlowRunId>)> {
+        match self {
+            Self::UserMsg {
+                message,
+                flow_run_id,
+                ..
+            }
+            | Self::AssistantMsg {
+                message,
+                flow_run_id,
+                ..
+            }
+            | Self::ToolResultMsg {
+                message,
+                flow_run_id,
+                ..
+            }
+            | Self::SystemMsg {
+                message,
+                flow_run_id,
+                ..
+            } => Some((message, flow_run_id.as_ref())),
+            Self::UserInject {
+                injection,
+                context_message: Some(message),
+                ..
+            } if injection.state == crate::injection::InjectionState::Injected => {
+                Some((message, injection.flow_run_id.as_ref()))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -668,6 +706,32 @@ impl EventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consumed_steering_replays_captured_text_without_reinterpreting_legacy_updates() {
+        let run_id = FlowRunId::now();
+        let mut injection = crate::injection::Injection::with_level_for_run(
+            TurnId::now(),
+            "source text",
+            crate::injection::InjectionLevel::L1Nudge,
+            None,
+            Some(run_id.clone()),
+        );
+        injection.state = crate::injection::InjectionState::Injected;
+        let message =
+            crate::message::Message::user_text(injection.turn_id.clone(), "captured rendering");
+        let event = Event::UserInject {
+            turn_id: injection.turn_id.clone(),
+            injection,
+            context_message: Some(message.clone()),
+        };
+        let mut value = serde_json::to_value(&event).unwrap();
+        let restored: Event = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored.context_message(), Some((&message, Some(&run_id))));
+        value.as_object_mut().unwrap().remove("context_message");
+        let legacy: Event = serde_json::from_value(value).unwrap();
+        assert!(legacy.context_message().is_none());
+    }
 
     #[test]
     fn flow_start_serializes_parent_linkage() {

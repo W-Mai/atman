@@ -17,6 +17,7 @@ struct ScriptedProvider {
     outcomes: Vec<Result<String, RuntimeError>>,
     calls: AtomicUsize,
     request_tokens: std::sync::Mutex<Vec<u64>>,
+    requests: std::sync::Mutex<Vec<Vec<Message>>>,
 }
 
 impl ScriptedProvider {
@@ -26,6 +27,7 @@ impl ScriptedProvider {
             outcomes,
             calls: AtomicUsize::new(0),
             request_tokens: std::sync::Mutex::new(Vec::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -42,6 +44,7 @@ impl Provider for ScriptedProvider {
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         Box::pin(async move {
             let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(req.messages.clone());
             self.request_tokens.lock().unwrap().push(
                 atman_runtime::compaction::estimate_tokens_for_messages(&req.messages),
             );
@@ -76,6 +79,7 @@ impl Provider for ScriptedProvider {
         let (tx, events) = broadcast::channel(16);
         let cancel = CancellationToken::new();
         let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(req.messages.clone());
         self.request_tokens.lock().unwrap().push(
             atman_runtime::compaction::estimate_tokens_for_messages(&req.messages),
         );
@@ -193,6 +197,7 @@ fn retry_classified_gives_up_immediately_on_kind_not_in_list() {
 
 #[test]
 fn retry_without_classified_retries_any_error() {
+    let _registry = common::SyncModelRegistryGuard::mock("m");
     let provider = Arc::new(ScriptedProvider::new(
         "m",
         vec![
@@ -205,17 +210,55 @@ fn retry_without_classified_retries_any_error() {
     let src = r#"flow t() -> string {
     return llm.call(
         model: "m",
+        context: "session",
         prompt: "hi",
         retry: 3,
     )
 }
 "#;
-    let (value, calls) = run_with(provider, src);
+    let session = Arc::new(Session::open_ephemeral());
+    let turn_id = session.begin_turn(Message::user_text(
+        atman_runtime::event::TurnId::now(),
+        "task",
+    ));
+    let steering_id = session.enqueue_injection("retry constraint").unwrap();
+    let executor = Executor::with_events(session.sink().clone());
+    executor.providers.register(provider.clone());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let value = runtime.block_on(executor.run_in_turn(
+        &parse_file(src).unwrap(),
+        "t",
+        vec![],
+        Some(turn_id.clone()),
+        Some(session.clone()),
+    ));
+    session.end_turn(&turn_id);
     match value.unwrap() {
-        Value::Str(s) => assert!(s.contains("still tried again")),
-        other => panic!("expected str got {other:?}"),
+        Value::Message(message) => assert!(message.text_concat().contains("still tried again")),
+        other => panic!("expected message got {other:?}"),
     }
-    assert_eq!(calls, 2, "without retry_classified, any err retries");
+    assert_eq!(
+        provider.call_count(),
+        2,
+        "without retry_classified, any err retries"
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(
+        requests[0]
+            .iter()
+            .filter(|message| message.text_concat().contains(&steering_id.to_string()))
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .messages()
+            .iter()
+            .filter(|message| message.text_concat().contains(&steering_id.to_string()))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -385,6 +428,9 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let turn_id = atman_runtime::event::TurnId::now();
     session.begin_turn(Message::user_text(turn_id.clone(), "run"));
+    let steering_id = session
+        .enqueue_injection("preserve the current constraint")
+        .unwrap();
     let result = rt.block_on(ex.run_in_turn(
         &file,
         "t",
@@ -420,6 +466,14 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     let requests = provider.requests.lock().unwrap().clone();
     assert!(requests.len() >= 2);
     for request in &requests {
+        assert_eq!(
+            request
+                .iter()
+                .filter(|message| message.text_concat().contains(&steering_id.to_string()))
+                .count(),
+            1,
+            "steering must survive overflow without a duplicate retry suffix"
+        );
         assert_eq!(
             request
                 .iter()
