@@ -1384,10 +1384,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::form::FormAnswer::Confirmed { value: true }
                 ));
             }
-            let Some(session) = ctx.tool_ctx.session_runtime() else {
+            let Some(forms) = ctx.tool_ctx.forms.as_ref() else {
                 return Value::Bool(true);
             };
-            let forms = session.forms();
             if forms.subscriber_count() == 0 {
                 return Value::Bool(true);
             }
@@ -2588,6 +2587,70 @@ mod tests {
                 eval_expr(value, &Env::new(), &ctx).await,
                 Value::Bool(true)
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn user_confirm_uses_bound_forms_for_session_and_detached_contexts() {
+        for detached in [false, true] {
+            for answer in [None, Some(true), Some(false)] {
+                let session = Arc::new(crate::session::Session::open_ephemeral());
+                let forms = session.forms();
+                let subscriber = forms.subscribe();
+                let mut tool_ctx = ToolCtx::new().with_session_runtime(session.clone());
+                if detached {
+                    tool_ctx = tool_ctx.with_context(Arc::new(
+                        session
+                            .context()
+                            .fork(crate::event::ContextInheritance::Full)
+                            .unwrap(),
+                    ));
+                    assert!(tool_ctx.session_runtime().is_none());
+                }
+                let providers = crate::provider::ProviderRegistry::new();
+                let tools = ToolRegistry::new();
+                let flows = std::collections::HashMap::new();
+                let run_id = crate::event::FlowRunId::now();
+                let ctx = EvalCtx {
+                    tools: &tools,
+                    tool_ctx: &tool_ctx,
+                    providers: &providers,
+                    flows: &flows,
+                    contract: None,
+                    events: None,
+                    turn_id: None,
+                    flow_run_id: Some(run_id.clone()),
+                    safety: None,
+                    current_node_id: Some("confirm-node".into()),
+                    source_dir: None,
+                };
+                let file = parse_file(r#"flow t() { return user_confirm("proceed?") }"#).unwrap();
+                let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] else {
+                    panic!("return expression");
+                };
+                let env = Env::new();
+                let mut response = eval_expr(value, &env, &ctx);
+                assert!(futures::poll!(&mut response).is_pending());
+                let pending = forms.list_pending().pop().unwrap();
+                assert_eq!(pending.run_id, run_id);
+                assert_eq!(pending.tool_use_id, "confirm-node");
+                if let Some(value) = answer {
+                    assert!(forms.submit(
+                        &pending.form_id,
+                        crate::form::FormSubmission::Submitted {
+                            answers: vec![crate::form::FormAnswer::Confirmed { value }],
+                        }
+                    ));
+                    assert!(matches!(response.await, Value::Bool(result) if result == value));
+                } else {
+                    drop(response);
+                }
+                assert!(subscriber.borrow().is_empty());
+                assert!(forms.list_pending().is_empty());
+                assert!(matches!(session.sink().snapshot().last(),
+                    Some(crate::event::Event::FormResolved { abandoned, .. })
+                        if *abandoned == answer.is_none()));
+            }
         }
     }
 

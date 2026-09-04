@@ -106,36 +106,22 @@ impl Tool for FormAsk {
             let run_id = ctx.flow_run_id.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("form.ask: no flow_run_id in ctx".into())
             })?;
-            let form_id = uuid::Uuid::now_v7().to_string();
             let pending = PendingForm {
-                form_id: form_id.clone(),
+                form_id: uuid::Uuid::now_v7().to_string(),
                 run_id,
                 tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
                 form,
                 kind,
                 emitted_at: chrono::Utc::now(),
             };
-            let rx = forms.request(pending);
             let submission =
-                await_local_submission(forms, form_id, rx, std::time::Duration::from_secs(300))
-                    .await;
+                tokio::time::timeout(std::time::Duration::from_secs(300), forms.request(pending))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(crate::form::FormSubmission::Rejected);
             Ok(submission_to_value(&submission, composite))
         })
-    }
-}
-
-async fn await_local_submission(
-    forms: &crate::session::FormRegistry,
-    form_id: String,
-    rx: tokio::sync::oneshot::Receiver<crate::form::FormSubmission>,
-    timeout: std::time::Duration,
-) -> crate::form::FormSubmission {
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(submission)) => submission,
-        Ok(Err(_)) | Err(_) => {
-            forms.cancel(&form_id);
-            crate::form::FormSubmission::Rejected
-        }
     }
 }
 
@@ -379,31 +365,59 @@ mod tests {
         (name.into(), v)
     }
 
-    #[tokio::test]
-    async fn local_form_timeout_cancels_pending_entry() {
-        let forms = crate::session::FormRegistry::new();
-        let _subscriber = forms.subscribe();
-        let form_id = "timed-out".to_string();
-        let form = crate::form::CompositeForm {
-            questions: vec![crate::form::FormQuestion {
-                id: "question".into(),
-                kind: FormKind::Confirm { prompt: "?".into() },
-            }],
+    #[tokio::test(start_paused = true)]
+    async fn local_form_wait_cancellation_and_timeout_clear_pending_requests() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let forms = session.forms();
+        let subscriber = forms.subscribe();
+        let mut ctx = ToolCtx::new().with_session_runtime(session.clone());
+        ctx.flow_run_id = Some(crate::event::FlowRunId::now());
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                named("kind", Value::Str("confirm".into())),
+                named("prompt", Value::Str("Continue?".into())),
+            ],
         };
-        let pending = PendingForm {
-            form_id: form_id.clone(),
-            run_id: crate::event::FlowRunId::now(),
-            tool_use_id: "tool".into(),
-            form,
-            kind: FormKind::Confirm { prompt: "?".into() },
-            emitted_at: chrono::Utc::now(),
-        };
-        let rx = forms.request(pending);
-        assert_eq!(
-            await_local_submission(&forms, form_id, rx, std::time::Duration::ZERO).await,
-            crate::form::FormSubmission::Rejected
-        );
-        assert!(forms.list_pending().is_empty());
+        let mut first = FormAsk.call(args.clone(), &ctx);
+        let mut second = FormAsk.call(args.clone(), &ctx);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(subscriber.borrow().len(), 2);
+        drop(first);
+        let second_id = forms.list_pending()[0].form_id.clone();
+        assert_eq!(forms.list_pending().len(), 1);
+        assert!(forms.submit(
+            &second_id,
+            crate::form::FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            }
+        ));
+        assert!(matches!(
+            second.await.unwrap().field("kind"),
+            Some(Value::Str(kind)) if kind == "confirmed"
+        ));
+        let timed_out = FormAsk.call(args, &ctx).await.unwrap();
+        assert!(matches!(
+            timed_out.field("kind"),
+            Some(Value::Str(kind)) if kind == "cancelled"
+        ));
+        assert!(subscriber.borrow().is_empty());
+        let abandoned = session
+            .sink()
+            .snapshot()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::event::Event::FormResolved {
+                        abandoned: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(abandoned, 2);
     }
 
     #[test]

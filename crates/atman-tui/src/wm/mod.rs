@@ -651,29 +651,7 @@ impl WindowManager {
                 }
             }
             PaletteEntryId::MoveSession => {
-                if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
-                    let form = atman_runtime::form::PendingForm {
-                        form_id: "session_move_path".to_string(),
-                        run_id: atman_runtime::event::FlowRunId::now(),
-                        tool_use_id: "session_move_path".to_string(),
-                        kind: atman_runtime::form::FormKind::Text {
-                            prompt: "New working directory:".to_string(),
-                            placeholder: Some("/path/to/project".to_string()),
-                            multiline: false,
-                        },
-                        form: atman_runtime::form::CompositeForm {
-                            questions: vec![atman_runtime::form::FormQuestion {
-                                id: "question".into(),
-                                kind: atman_runtime::form::FormKind::Text {
-                                    prompt: "New working directory:".to_string(),
-                                    placeholder: Some("/path/to/project".to_string()),
-                                    multiline: false,
-                                },
-                            }],
-                        },
-                        emitted_at: chrono::Utc::now(),
-                    };
-                    session.forms().request(form);
+                if let Some(tx) = control_tx {
                     let _ = tx.send(crate::TuiControl::MoveSession);
                 }
             }

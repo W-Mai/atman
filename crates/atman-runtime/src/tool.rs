@@ -313,6 +313,7 @@ impl ToolCtx {
         mut self,
         session: std::sync::Arc<crate::session::Session>,
     ) -> Self {
+        self.forms = Some(session.forms());
         self.watch_hub = Some(std::sync::Arc::clone(&session.watch_hub));
         self.flow_registry = Some(std::sync::Arc::clone(&session.flow_registry));
         self.context_owner = Some(ContextOwner::Session {

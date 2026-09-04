@@ -30,13 +30,17 @@ fn pending_form(form_id: &str, run_id: &FlowRunId) -> atman_runtime::form::Pendi
 }
 
 async fn wait_for_form(state: &DaemonState, session_id: &SessionId) {
-    loop {
-        let snapshot = state.session_snapshot(session_id, "alice").await.unwrap();
-        if !snapshot.projection.interactions.forms.is_empty() {
-            return;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let snapshot = state.session_snapshot(session_id, "alice").await.unwrap();
+            if !snapshot.projection.interactions.forms.is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("form was not projected");
 }
 
 async fn submit(
@@ -131,4 +135,65 @@ async fn form_submission_is_validated_scoped_idempotent_and_convergent() {
     let competing: SubmitFormResponse = serde_json::from_value(competing.result.unwrap()).unwrap();
     assert!(!competing.resolved);
     assert_eq!(competing.status, FormResolutionStatus::AlreadyResolved);
+}
+
+#[tokio::test]
+async fn dropped_form_wait_is_abandoned_without_removing_another_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open_ephemeral());
+    let session_id = SessionId(session.id().0);
+    state
+        .register_session(session_id.clone(), session.clone(), "alice")
+        .await
+        .unwrap();
+    let before = state.session_snapshot(&session_id, "alice").await.unwrap();
+    let run_id = FlowRunId(Uuid::now_v7());
+    let first = session.forms().request(pending_form("first", &run_id));
+    let _second = session.forms().request(pending_form("second", &run_id));
+    drop(first);
+    let response = submit(
+        state.clone(),
+        "alice",
+        1,
+        &SubmitFormRequest {
+            request_id: Some(RequestId::now()),
+            session_id: session_id.clone(),
+            form_id: "first".into(),
+            submission: FormSubmission::Rejected,
+        },
+    )
+    .await;
+    let response: SubmitFormResponse = serde_json::from_value(response.result.unwrap()).unwrap();
+    assert!(!response.resolved);
+    assert_eq!(response.status, FormResolutionStatus::Abandoned);
+    let snapshot = state.session_snapshot(&session_id, "alice").await.unwrap();
+    assert_eq!(snapshot.projection.interactions.forms.len(), 1);
+    assert_eq!(snapshot.projection.interactions.forms[0].id, "second");
+    let updates = state
+        .session_updates(&session_id, "alice", before.cursor, None)
+        .await
+        .unwrap();
+    let pending_states = updates
+        .events
+        .iter()
+        .flat_map(|event| match &event.event {
+            atman_proto::ServerEvent::ProjectionDelta { delta } => delta.changes.as_slice(),
+            _ => &[],
+        })
+        .filter_map(|change| match change {
+            atman_proto::ProjectionChange::InteractionsSet { interactions } => Some(
+                interactions
+                    .forms
+                    .iter()
+                    .map(|form| form.id.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pending_states,
+        [vec!["first"], vec!["first", "second"], vec!["second"]]
+    );
 }

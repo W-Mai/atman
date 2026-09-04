@@ -35,6 +35,8 @@ Form and approval registries retain the current pending queue even without subsc
 
 Daemon form and compaction-review projections are reduced from canonical request and resolution events. Registry watch subscriptions keep the interaction services attached but do not separately overwrite those projections. Live updates, replay, and snapshot recovery therefore share one ordering source for these interactions.
 
+A form response future owns its pending request. Dropping it, timing out, or cancelling a resolver records abandonment and removes that request without disturbing others. Explicit user rejection remains a normal resolution. Session context binding also binds the shared form service; detached child contexts retain it, so local `user_confirm` does not depend on a root Session pointer. Existing no-client behavior remains unchanged. TUI attachment reads the pending queue immediately and preserves an active draft until its request is resolved or abandoned.
+
 ## Trust modes
 
 `TrustMode` selects the baseline Tier policy:

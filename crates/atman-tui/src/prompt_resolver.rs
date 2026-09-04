@@ -25,7 +25,7 @@ impl PromptResolver for TuiPromptResolver {
 
     fn drop_pending(&self, id: &PromptId) {
         let form_id = format!("prompt_{}", id);
-        self.forms.submit(&form_id, FormSubmission::Rejected);
+        self.forms.cancel(&form_id);
     }
 
     fn register_with_payload(
@@ -155,5 +155,38 @@ fn answer_to_value(
             serde_json::json!({ "hunks": all_ids.into_iter().map(serde_json::Value::from).collect::<Vec<_>>() })
         }
         _ => serde_json::json!({ "hunks": [] }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_prompt_wait_removes_the_form_and_records_abandonment() {
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let forms = session.forms();
+        let subscriber = forms.subscribe();
+        let resolver: Arc<dyn PromptResolver> = Arc::new(TuiPromptResolver::new(forms.clone()));
+        let id = PromptId::now();
+        let mut response = Box::pin(atman_runtime::rendezvous::await_prompt_with_payload(
+            &resolver,
+            id,
+            "form_ask",
+            serde_json::json!({"kind": "confirm", "prompt": "Continue?"}),
+            std::time::Duration::from_secs(60),
+        ));
+        assert!(futures::poll!(&mut response).is_pending());
+        assert_eq!(subscriber.borrow().len(), 1);
+        drop(response);
+        assert!(subscriber.borrow().is_empty());
+        assert!(forms.list_pending().is_empty());
+        assert!(matches!(
+            session.sink().snapshot().last(),
+            Some(atman_runtime::event::Event::FormResolved {
+                abandoned: true,
+                ..
+            })
+        ));
     }
 }

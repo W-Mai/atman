@@ -75,6 +75,9 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.plans_rx.as_ref() {
         app.app.plans = rx.borrow().clone();
     }
+    if let Some(rx) = handle.form_rx.as_ref() {
+        app.wm.modals.form_modal.reconcile(&rx.borrow());
+    }
     if let Some(rx) = handle.compact_review_rx.as_ref() {
         crate::compact_review_modal::CompactReviewModal::reconcile(
             &mut app.wm.modals.compact_review,
@@ -1390,12 +1393,8 @@ pub(crate) async fn run_frames(
             }
             _ = wait_form_change(handle.form_rx.as_mut()) => {
                 if let Some(rx) = handle.form_rx.as_mut() {
-                    let latest = rx.borrow().clone();
-                    if let Some(target) = latest.first().cloned()
-                        && app.wm.modals.form_modal.active_form_id()
-                            != Some(target.form_id.as_str())
-                    {
-                        app.wm.modals.form_modal.attach(target);
+                    if app.wm.modals.form_modal.reconcile(&rx.borrow()) {
+                        app.app.mark_visual_dirty();
                     }
                 }
             }

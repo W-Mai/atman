@@ -39,6 +39,24 @@ pub struct FormModal {
 }
 
 impl FormModal {
+    pub fn reconcile(&mut self, pending: &[PendingForm]) -> bool {
+        if self
+            .active_form_id()
+            .is_some_and(|id| pending.iter().any(|form| form.form_id == id))
+        {
+            return false;
+        }
+        if let Some(form) = pending.first() {
+            self.attach(form.clone());
+            true
+        } else if self.pending.is_some() || self.open {
+            self.close();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn attach(&mut self, form: PendingForm) {
         let questions = questions(&form);
         self.pending = Some(form);
@@ -596,6 +614,44 @@ mod tests {
             emitted_at: chrono::Utc::now(),
         }
     }
+    #[test]
+    fn pending_queue_reconciliation_preserves_drafts_and_clears_resolved_forms() {
+        let first = mk_questions(vec![FormKind::Text {
+            prompt: "Text?".into(),
+            placeholder: None,
+            multiline: true,
+        }]);
+        let mut second = first.clone();
+        second.form_id = "second".into();
+        let mut modal = FormModal::default();
+        assert!(modal.reconcile(std::slice::from_ref(&first)));
+        modal.text_editor.insert_str("draft");
+        modal.draft_answers[0] = Some(FormAnswer::TextEntered {
+            text: "saved draft".into(),
+        });
+        modal.phase = FormPhase::FinalConfirm;
+        modal.scroll = 3;
+        assert!(!modal.reconcile(&[second.clone(), first]));
+        assert_eq!(modal.active_form_id(), Some("f"));
+        assert_eq!(modal.text_editor.buf(), "draft");
+        assert_eq!(
+            modal.draft_answers[0],
+            Some(FormAnswer::TextEntered {
+                text: "saved draft".into()
+            })
+        );
+        assert_eq!(modal.phase, FormPhase::FinalConfirm);
+        assert_eq!(modal.scroll, 3);
+        assert!(modal.reconcile(std::slice::from_ref(&second)));
+        assert_eq!(modal.active_form_id(), Some("second"));
+        assert_eq!(modal.phase, FormPhase::Editing);
+        assert_eq!(modal.scroll, 0);
+        assert!(modal.reconcile(&[]));
+        assert!(!modal.open);
+        assert!(modal.active_form_id().is_none());
+        assert!(!modal.reconcile(&[]));
+    }
+
     #[test]
     fn attach_preserves_composite_questions() {
         let mut m = FormModal::default();

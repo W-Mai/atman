@@ -1674,6 +1674,8 @@ async fn cmd_repl_once(
         let reporter_for_ctrl = reporter.clone();
         let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
+            let mut session_moves =
+                tokio::task::JoinSet::<atman_runtime::form::FormSubmission>::new();
             let mut provider_mutations = tokio::task::JoinSet::new();
             let mut provider_catalog_refreshes = tokio::task::JoinSet::new();
             let mut trust_update_error: Option<String> = None;
@@ -1701,6 +1703,25 @@ async fn cmd_repl_once(
                             break;
                         };
                         message
+                    }
+                    completed = session_moves.join_next(), if !session_moves.is_empty() => {
+                        match completed {
+                            Some(Ok(atman_runtime::form::FormSubmission::Submitted { answers })) => {
+                                if let Some(atman_runtime::form::FormAnswer::TextEntered { text }) = answers.first() {
+                                    let cwd = std::path::PathBuf::from(text);
+                                    let mut meta = atman_runtime::session_meta::SessionMeta::load(
+                                        session_for_ctrl.dir(),
+                                    ).unwrap_or_default();
+                                    meta.rebase(&cwd);
+                                    if let Err(error) = meta.save(session_for_ctrl.dir()) {
+                                        reporter_for_ctrl.error(format!("move session failed: {error}"));
+                                    }
+                                }
+                            }
+                            Some(Err(error)) => reporter_for_ctrl.error(format!("move session failed: {error}")),
+                            _ => {}
+                        }
+                        continue;
                     }
                     completed = provider_mutations.join_next(), if !provider_mutations.is_empty() => {
                         match completed {
@@ -1947,7 +1968,35 @@ async fn cmd_repl_once(
                         }
                         break;
                     }
-                    atman_tui::TuiControl::MoveSession => {}
+                    atman_tui::TuiControl::MoveSession => {
+                        if session_moves.is_empty() {
+                            let kind = atman_runtime::form::FormKind::Text {
+                                prompt: "New working directory:".into(),
+                                placeholder: Some("/path/to/project".into()),
+                                multiline: false,
+                            };
+                            let response = session_for_ctrl.forms().request(
+                                atman_runtime::form::PendingForm {
+                                    form_id: uuid::Uuid::now_v7().to_string(),
+                                    run_id: atman_runtime::event::FlowRunId::now(),
+                                    tool_use_id: "session_move_path".into(),
+                                    kind: kind.clone(),
+                                    form: atman_runtime::form::CompositeForm {
+                                        questions: vec![atman_runtime::form::FormQuestion {
+                                            id: "question".into(),
+                                            kind,
+                                        }],
+                                    },
+                                    emitted_at: chrono::Utc::now(),
+                                },
+                            );
+                            session_moves.spawn(async move {
+                                response
+                                    .await
+                                    .unwrap_or(atman_runtime::form::FormSubmission::Rejected)
+                            });
+                        }
+                    }
                     atman_tui::TuiControl::DeleteSession(sid) => {
                         delete_session_dir(&data_root_for_ctrl, &sid);
                         if let Some(idx) = session_for_ctrl.project_index() {
@@ -1977,20 +2026,6 @@ async fn cmd_repl_once(
                         form_id,
                         submission,
                     } => {
-                        if form_id == "session_move_path"
-                            && let atman_runtime::form::FormSubmission::Submitted { answers } =
-                                &submission
-                            && let Some(atman_runtime::form::FormAnswer::TextEntered { text }) =
-                                answers.first()
-                        {
-                            let cwd = std::path::PathBuf::from(text);
-                            let mut meta = atman_runtime::session_meta::SessionMeta::load(
-                                session_for_ctrl.dir(),
-                            )
-                            .unwrap_or_default();
-                            meta.rebase(&cwd);
-                            let _ = meta.save(session_for_ctrl.dir());
-                        }
                         let _ = session_for_ctrl.forms().submit(&form_id, submission);
                     }
                     atman_tui::TuiControl::MutateProvider(request) => {
@@ -2238,6 +2273,7 @@ async fn cmd_repl_once(
                     }
                 }
             }
+            session_moves.shutdown().await;
             provider_mutations.shutdown().await;
             provider_catalog_refreshes.shutdown().await;
         });
@@ -4073,7 +4109,7 @@ async fn handle_suggest(
     // Accept/reject: use form modal in TUI, CLI prompt otherwise.
     let choice = if reporter.is_tui() {
         let form = atman_runtime::form::PendingForm {
-            form_id: "suggest_confirm".to_string(),
+            form_id: uuid::Uuid::now_v7().to_string(),
             run_id: atman_runtime::event::FlowRunId::now(),
             tool_use_id: "suggest_confirm".to_string(),
             form: atman_runtime::form::CompositeForm {
@@ -5169,7 +5205,7 @@ async fn preview_scene_form(session: std::sync::Arc<Session>, kind: atman_runtim
         kind,
         emitted_at: chrono::Utc::now(),
     });
-    std::mem::forget(_rx);
+    let _ = _rx.await;
 }
 
 async fn preview_scene_form_sequence(session: std::sync::Arc<Session>) {

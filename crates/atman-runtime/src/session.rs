@@ -333,6 +333,17 @@ struct FormEntry {
     responder: tokio::sync::oneshot::Sender<crate::form::FormSubmission>,
 }
 
+struct FormGuard {
+    registry: std::sync::Arc<FormRegistry>,
+    form_id: String,
+}
+
+impl Drop for FormGuard {
+    fn drop(&mut self) {
+        self.registry.cancel(&self.form_id);
+    }
+}
+
 pub struct FormResolutionCommit {
     pub event: Option<crate::event::EventEnvelope>,
 }
@@ -376,29 +387,37 @@ impl FormRegistry {
         self.watch_tx.receiver_count()
     }
 
-    // No TUI attached → auto-cancel so flows don't hang forever. Otherwise
-    // enqueue and hand a receiver back to the caller.
+    /// Registers immediately. Dropping the returned future abandons the request.
+    /// Without an attached subscriber the response is rejected immediately.
     pub fn request(
-        &self,
+        self: &std::sync::Arc<Self>,
         pending: crate::form::PendingForm,
-    ) -> tokio::sync::oneshot::Receiver<crate::form::FormSubmission> {
+    ) -> impl std::future::Future<
+        Output = Result<crate::form::FormSubmission, tokio::sync::oneshot::error::RecvError>,
+    > + use<> {
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let guard = FormGuard {
+            registry: self.clone(),
+            form_id: pending.form_id.clone(),
+        };
         if self.watch_tx.receiver_count() == 0 {
             let _ = tx.send(crate::form::FormSubmission::Rejected);
-            return rx;
-        }
-        let mut entries = self.entries.lock().unwrap();
-        entries.push(FormEntry {
-            pending: pending.clone(),
-            responder: tx,
-        });
-        if let Some(sink) = &self.event_sink {
-            sink.emit(crate::event::Event::FormRequested {
-                form: pending.clone(),
+        } else {
+            let mut entries = self.entries.lock().unwrap();
+            entries.push(FormEntry {
+                pending: pending.clone(),
+                responder: tx,
             });
+            if let Some(sink) = &self.event_sink {
+                sink.emit(crate::event::Event::FormRequested { form: pending });
+            }
+            self.broadcast_snapshot(&entries);
         }
-        self.broadcast_snapshot(&entries);
-        rx
+        async move {
+            let submission = rx.await;
+            drop(guard);
+            submission
+        }
     }
 
     pub fn submit(&self, form_id: &str, submission: crate::form::FormSubmission) -> bool {
@@ -440,7 +459,10 @@ impl FormRegistry {
     }
 
     pub fn cancel(&self, form_id: &str) -> bool {
-        self.submit(form_id, crate::form::FormSubmission::Rejected)
+        matches!(
+            self.resolve(form_id, crate::form::FormSubmission::Rejected, true),
+            Ok(Some(_))
+        )
     }
 
     pub fn cancel_all(&self) {
@@ -4117,12 +4139,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn interaction_snapshots_survive_disconnected_resolution() {
+    #[tokio::test]
+    async fn interaction_snapshots_survive_disconnected_resolution() {
         for resolution in ["one", "cancel", "all"] {
-            let forms = FormRegistry::new();
+            let forms = std::sync::Arc::new(FormRegistry::new());
             let subscriber = forms.subscribe();
-            let mut response = forms.request(mk_form("pending", "Continue?"));
+            let response = forms.request(mk_form("pending", "Continue?"));
             assert_eq!(subscriber.borrow().len(), 1);
             drop(subscriber);
             match resolution {
@@ -4131,7 +4153,7 @@ mod tests {
                 _ => forms.cancel_all(),
             }
             assert_eq!(
-                response.try_recv().unwrap(),
+                response.await.unwrap(),
                 crate::form::FormSubmission::Rejected
             );
             assert!(forms.subscribe().borrow().is_empty());
@@ -4167,17 +4189,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn form_registry_auto_cancels_without_subscriber() {
-        let reg = FormRegistry::new();
+    #[tokio::test]
+    async fn form_registry_auto_cancels_without_subscriber() {
+        let reg = std::sync::Arc::new(FormRegistry::new());
         let rx = reg.request(mk_form("f1", "sure?"));
-        let got = rx.blocking_recv().unwrap();
+        let got = rx.await.unwrap();
         assert_eq!(got, crate::form::FormSubmission::Rejected);
         assert!(reg.list_pending().is_empty());
     }
 
-    #[test]
-    fn form_registry_delivers_answer_by_form_id() {
+    #[tokio::test]
+    async fn form_registry_delivers_answer_by_form_id() {
         let reg = std::sync::Arc::new(FormRegistry::new());
         let _sub = reg.subscribe();
         let rx = reg.request(mk_form("fA", "?"));
@@ -4189,7 +4211,7 @@ mod tests {
             },
         );
         assert!(ok);
-        let got = rx.blocking_recv().unwrap();
+        let got = rx.await.unwrap();
         assert_eq!(
             got,
             crate::form::FormSubmission::Submitted {
@@ -4199,8 +4221,8 @@ mod tests {
         assert!(reg.list_pending().is_empty());
     }
 
-    #[test]
-    fn session_form_registry_emits_ordered_durable_events() {
+    #[tokio::test]
+    async fn session_form_registry_emits_ordered_durable_events() {
         let session = Session::open_ephemeral();
         let _sub = session.forms().subscribe();
         let pending = mk_form("durable", "Continue?");
@@ -4219,7 +4241,7 @@ mod tests {
 
         assert_eq!(commit.event.unwrap().seq, 2);
         assert!(matches!(
-            response.blocking_recv().unwrap(),
+            response.await.unwrap(),
             crate::form::FormSubmission::Submitted { .. }
         ));
         let events = session.sink().snapshot_envelopes();
@@ -4248,35 +4270,69 @@ mod tests {
         assert_eq!(reg.list_pending().len(), 1);
     }
 
-    #[test]
-    fn form_registry_cancel_removes_one_pending_form() {
+    #[tokio::test]
+    async fn form_registry_cancel_removes_one_pending_form() {
         let reg = std::sync::Arc::new(FormRegistry::new());
         let _sub = reg.subscribe();
         let rx = reg.request(mk_form("cancel", "?"));
         assert!(reg.cancel("cancel"));
-        assert_eq!(
-            rx.blocking_recv().unwrap(),
-            crate::form::FormSubmission::Rejected
-        );
+        assert_eq!(rx.await.unwrap(), crate::form::FormSubmission::Rejected);
         assert!(reg.list_pending().is_empty());
     }
 
-    #[test]
-    fn form_registry_cancel_all_flushes_pending() {
+    #[tokio::test]
+    async fn form_registry_cancel_all_flushes_pending() {
         let reg = std::sync::Arc::new(FormRegistry::new());
         let _sub = reg.subscribe();
         let rx_a = reg.request(mk_form("a", "?"));
         let rx_b = reg.request(mk_form("b", "?"));
         reg.cancel_all();
-        assert_eq!(
-            rx_a.blocking_recv().unwrap(),
-            crate::form::FormSubmission::Rejected
-        );
-        assert_eq!(
-            rx_b.blocking_recv().unwrap(),
-            crate::form::FormSubmission::Rejected
-        );
+        assert_eq!(rx_a.await.unwrap(), crate::form::FormSubmission::Rejected);
+        assert_eq!(rx_b.await.unwrap(), crate::form::FormSubmission::Rejected);
         assert!(reg.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropped_form_waits_abandon_only_their_request() {
+        let session = Session::open_ephemeral();
+        let forms = session.forms();
+        let subscriber = forms.subscribe();
+        let first = forms.request(mk_form("first", "First?"));
+        let second = forms.request(mk_form("second", "Second?"));
+        assert_eq!(subscriber.borrow().len(), 2);
+        drop(first);
+        assert_eq!(forms.list_pending()[0].form_id, "second");
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, second)
+                .await
+                .is_err()
+        );
+        assert!(subscriber.borrow().is_empty());
+
+        let third = forms.request(mk_form("third", "Third?"));
+        assert!(forms.submit("third", crate::form::FormSubmission::Rejected));
+        assert_eq!(third.await.unwrap(), crate::form::FormSubmission::Rejected);
+        drop(subscriber);
+        assert!(forms.subscribe().borrow().is_empty());
+        let terminals = session
+            .sink()
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::FormResolved {
+                    form_id, abandoned, ..
+                } => Some((form_id, abandoned)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminals,
+            [
+                ("first".into(), true),
+                ("second".into(), true),
+                ("third".into(), false),
+            ]
+        );
     }
 
     #[test]
