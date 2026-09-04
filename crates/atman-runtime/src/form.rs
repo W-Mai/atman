@@ -153,6 +153,7 @@ fn validate_option(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum FormSubmission {
     Submitted { answers: Vec<FormAnswer> },
     Rejected,

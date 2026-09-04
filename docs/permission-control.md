@@ -37,6 +37,8 @@ Daemon form and compaction-review projections are reduced from canonical request
 
 A form response future owns its pending request. Dropping it, timing out, or cancelling a resolver records abandonment and removes that request without disturbing others. Explicit user rejection remains a normal resolution. Session context binding also binds the shared form service; detached child contexts retain it, so local `user_confirm` does not depend on a root Session pointer. Existing no-client behavior remains unchanged. TUI attachment reads the pending queue immediately and preserves an active draft until its request is resolved or abandoned.
 
+Structured questions use `CompositeForm` requests and `FormSubmission` responses tagged by `status` across local form services and external `form_ask` resolvers. Single-question DSL calls still return their original answer object, composite calls return an answer list, and `user_confirm` returns a boolean. Attached form subscribers take precedence over generic prompt resolvers so root, inline, and spawned runs publish the same canonical form events with their own run/node identity. Without an attached subscriber, an explicitly configured resolver remains available. Resolver responses are decoded and validated against the requested question types; malformed data is an execution error, not a user rejection. Local confirmation without a client retains its existing auto-approve behavior.
+
 ## Trust modes
 
 `TrustMode` selects the baseline Tier policy:

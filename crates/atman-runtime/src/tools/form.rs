@@ -34,7 +34,8 @@ impl Tool for FormAsk {
              do not make multiple calls expecting the UI to merge them.
              \
              Returns a struct { kind, ... } where kind is one of \
-             confirmed | selected | multi_selected | text_entered | cancelled.",
+             confirmed | selected | multi_selected | text_entered | cancelled. \
+             Composite calls return { kind: \"submitted\", answers: [...] } or { kind: \"cancelled\" }.",
         )
     }
 
@@ -77,52 +78,73 @@ impl Tool for FormAsk {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (form, kind, composite) = parse_form_request(&args)?;
-            // Daemon clients drive the modal over RPC via the prompt
-            // resolver; the in-process TUI subscribes to FormRegistry.
-            // Pick whichever the runtime host wired up, prefer the
-            // resolver so daemon overrides an accidental fallback.
-            if let Some(resolver) = ctx.prompt_resolver.clone() {
-                let id = crate::rendezvous::PromptId::now();
-                let payload = if composite {
-                    serde_json::to_value(&form).unwrap_or(serde_json::Value::Null)
-                } else {
-                    serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null)
-                };
-                let timeout = std::time::Duration::from_secs(300);
-                let answer_json = crate::rendezvous::await_prompt_with_payload(
-                    &resolver, id, "form_ask", payload, timeout,
-                )
-                .await?;
-                let submission = serde_json::from_value::<crate::form::FormSubmission>(answer_json)
-                    .unwrap_or(crate::form::FormSubmission::Rejected);
-                return Ok(submission_to_value(&submission, composite));
-            }
-            let forms = ctx.forms.as_ref().ok_or_else(|| {
-                RuntimeError::ToolFailed(
-                    "form.ask: no FormRegistry or PromptResolver attached".into(),
-                )
-            })?;
-            let run_id = ctx.flow_run_id.clone().ok_or_else(|| {
-                RuntimeError::ToolFailed("form.ask: no flow_run_id in ctx".into())
-            })?;
-            let pending = PendingForm {
-                form_id: uuid::Uuid::now_v7().to_string(),
-                run_id,
-                tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
-                form,
-                kind,
-                emitted_at: chrono::Utc::now(),
-            };
+            let (form, composite) = parse_form_request(&args)?;
             let submission =
-                tokio::time::timeout(std::time::Duration::from_secs(300), forms.request(pending))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or(crate::form::FormSubmission::Rejected);
+                request_form(form, ctx, Some(std::time::Duration::from_secs(300))).await?;
             Ok(submission_to_value(&submission, composite))
         })
     }
+}
+
+pub(crate) async fn request_form(
+    form: CompositeForm,
+    ctx: &ToolCtx,
+    local_timeout: Option<std::time::Duration>,
+) -> Result<crate::form::FormSubmission, RuntimeError> {
+    let submission = if let Some(forms) = ctx
+        .forms
+        .as_ref()
+        .filter(|forms| forms.subscriber_count() > 0 || ctx.prompt_resolver.is_none())
+    {
+        let kind = form
+            .questions
+            .first()
+            .ok_or_else(|| RuntimeError::ToolFailed("form.ask: empty form".into()))?
+            .kind
+            .clone();
+        let run_id = ctx
+            .flow_run_id
+            .clone()
+            .ok_or_else(|| RuntimeError::ToolFailed("form.ask: no flow_run_id in ctx".into()))?;
+        let response = forms.request(PendingForm {
+            form_id: uuid::Uuid::now_v7().to_string(),
+            run_id,
+            tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
+            form: form.clone(),
+            kind,
+            emitted_at: chrono::Utc::now(),
+        });
+        match local_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, response)
+                .await
+                .ok()
+                .and_then(Result::ok),
+            None => response.await.ok(),
+        }
+        .unwrap_or(crate::form::FormSubmission::Rejected)
+    } else {
+        let resolver = ctx.prompt_resolver.as_ref().ok_or_else(|| {
+            RuntimeError::ToolFailed("form.ask: no FormRegistry or PromptResolver attached".into())
+        })?;
+        let payload = serde_json::to_value(&form).map_err(|error| {
+            RuntimeError::ToolFailed(format!("form.ask: cannot encode request: {error}"))
+        })?;
+        let answer = crate::rendezvous::await_prompt_with_payload(
+            resolver,
+            crate::rendezvous::PromptId::now(),
+            "form_ask",
+            payload,
+            std::time::Duration::from_secs(300),
+        )
+        .await?;
+        serde_json::from_value::<crate::form::FormSubmission>(answer).map_err(|error| {
+            RuntimeError::ToolFailed(format!("form.ask: invalid submission: {error}"))
+        })?
+    };
+    form.validate_submission(&submission).map_err(|error| {
+        RuntimeError::ToolFailed(format!("form.ask: invalid submission: {error}"))
+    })?;
+    Ok(submission)
 }
 
 fn submission_to_value(submission: &crate::form::FormSubmission, composite: bool) -> Value {
@@ -145,7 +167,7 @@ fn submission_to_value(submission: &crate::form::FormSubmission, composite: bool
     }
 }
 
-fn parse_form_request(args: &ToolArgs) -> Result<(CompositeForm, FormKind, bool), RuntimeError> {
+fn parse_form_request(args: &ToolArgs) -> Result<(CompositeForm, bool), RuntimeError> {
     match (args.named("questions"), args.named("kind")) {
         (Some(Value::List(items)), None) => {
             if items.is_empty() {
@@ -192,8 +214,7 @@ fn parse_form_request(args: &ToolArgs) -> Result<(CompositeForm, FormKind, bool)
                 let kind = parse_form_kind(&named)?;
                 questions.push(FormQuestion { id, kind });
             }
-            let first = questions[0].kind.clone();
-            Ok((CompositeForm { questions }, first, true))
+            Ok((CompositeForm { questions }, true))
         }
         (Some(value), _) => Err(RuntimeError::TypeMismatch {
             expected: "list<struct>".into(),
@@ -205,10 +226,9 @@ fn parse_form_request(args: &ToolArgs) -> Result<(CompositeForm, FormKind, bool)
                 CompositeForm {
                     questions: vec![FormQuestion {
                         id: "question".into(),
-                        kind: kind.clone(),
+                        kind,
                     }],
                 },
-                kind,
                 false,
             ))
         }
@@ -436,12 +456,12 @@ mod tests {
                 Value::List(vec![question("name", "Name?"), question("team", "Team?")]),
             )],
         };
-        let (form, first, composite) = parse_form_request(&args).unwrap();
+        let (form, composite) = parse_form_request(&args).unwrap();
         assert!(composite);
         assert_eq!(form.questions.len(), 2);
         assert_eq!(form.questions[0].id, "name");
         assert_eq!(form.questions[1].id, "team");
-        assert!(matches!(first, FormKind::Text { .. }));
+        assert!(matches!(form.questions[0].kind, FormKind::Text { .. }));
     }
 
     #[test]
@@ -566,5 +586,124 @@ mod tests {
         let v = answer_to_value(&FormAnswer::Cancelled);
         assert!(matches!(v.field("kind"), Some(Value::Str(s)) if s == "cancelled"));
         assert!(v.field("value").is_none());
+    }
+    #[tokio::test]
+    async fn session_form_calls_keep_run_identity_and_do_not_use_fallback_resolvers() {
+        for entry in ["ask", "parent"] {
+            for expression in [
+                r#"user_confirm("Continue?")"#,
+                r#"form.ask(kind: "confirm", prompt: "Continue?")"#,
+                r#"form.ask(questions: [{id: "confirm", kind: "confirm", prompt: "Continue?"}])"#,
+            ] {
+                for accepted in [false, true] {
+                    let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+                    let forms = session.forms();
+                    let subscriber = forms.subscribe();
+                    let mut executor = crate::Executor::with_events(session.sink().clone());
+                    executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
+                        crate::rendezvous::AutoResolveResolver {
+                            default: serde_json::Value::Null,
+                        },
+                    ));
+                    let file = atman_dsl::parse::parse_file(&format!(
+                        "flow ask() {{ return {expression} }}\nflow parent() {{ return subflow(ask) }}"
+                    )).unwrap();
+                    let mut run = Box::pin(executor.run_in_turn(
+                        &file,
+                        entry,
+                        vec![],
+                        None,
+                        Some(session.clone()),
+                    ));
+                    assert!(futures::poll!(&mut run).is_pending());
+                    let pending = forms.list_pending().pop().unwrap();
+                    let started = session
+                        .sink()
+                        .snapshot()
+                        .into_iter()
+                        .find_map(|event| match event {
+                            crate::event::Event::FlowStart {
+                                run_id, flow_name, ..
+                            } if flow_name == "ask" => Some(run_id),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(pending.run_id, started);
+                    assert!(!pending.tool_use_id.is_empty());
+                    assert!(forms.submit(
+                        &pending.form_id,
+                        crate::form::FormSubmission::Submitted {
+                            answers: vec![FormAnswer::Confirmed { value: accepted }],
+                        }
+                    ));
+                    let value = run.await.unwrap().to_json();
+                    if expression.starts_with("user_confirm") {
+                        assert_eq!(value, accepted);
+                    } else if expression.contains("questions:") {
+                        assert_eq!(value["kind"], "submitted");
+                        assert_eq!(value["answers"][0]["value"], accepted);
+                    } else {
+                        assert_eq!(value["kind"], "confirmed");
+                        assert_eq!(value["value"], accepted);
+                    }
+                    assert!(subscriber.borrow().is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_answers_are_validated_without_coercing_invalid_data_to_rejection() {
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                named("kind", Value::Str("confirm".into())),
+                named("prompt", Value::Str("Continue?".into())),
+            ],
+        };
+        for answer in [
+            serde_json::json!(true),
+            serde_json::json!({"kind": "confirmed", "value": true}),
+            serde_json::json!({"status": "submitted", "answers": [{"kind": "text_entered", "text": "wrong kind"}]}),
+            serde_json::json!({"status": "submitted", "answers": []}),
+        ] {
+            let mut ctx = ToolCtx::new();
+            ctx.prompt_resolver = Some(std::sync::Arc::new(
+                crate::rendezvous::AutoResolveResolver { default: answer },
+            ));
+            let error = FormAsk.call(args.clone(), &ctx).await.unwrap_err();
+            assert!(error.to_string().contains("invalid submission"));
+        }
+    }
+
+    #[tokio::test]
+    async fn user_confirm_resolver_receives_the_same_submission_contract_without_form_subscribers()
+    {
+        for attached in [false, true] {
+            for answer in [false, true] {
+                let session =
+                    attached.then(|| std::sync::Arc::new(crate::Session::open_ephemeral()));
+                let mut executor = crate::Executor::new();
+                executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
+                    crate::rendezvous::AutoResolveResolver {
+                        default: serde_json::to_value(crate::form::FormSubmission::Submitted {
+                            answers: vec![FormAnswer::Confirmed { value: answer }],
+                        })
+                        .unwrap(),
+                    },
+                ));
+                let file = atman_dsl::parse::parse_file(
+                    r#"flow confirm() { return user_confirm("Continue?") }"#,
+                )
+                .unwrap();
+                assert!(matches!(
+                    executor.run_in_turn(&file, "confirm", vec![], None, session.clone()).await.unwrap(),
+                    Value::Bool(value) if value == answer
+                ));
+                if let Some(session) = session {
+                    assert!(session.forms().list_pending().is_empty());
+                }
+            }
+        }
     }
 }

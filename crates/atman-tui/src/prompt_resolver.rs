@@ -36,22 +36,22 @@ impl PromptResolver for TuiPromptResolver {
     ) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
         let form_id = format!("prompt_{}", id);
-        let form = composite_pending_form(&form_id, &id, kind, &payload);
+        let Some(form) = composite_pending_form(&form_id, &id, kind, &payload) else {
+            return rx;
+        };
         let answer_rx = self.forms.request(form);
         let payload_clone = payload;
         let kind_str = kind.to_string();
         tokio::spawn(async move {
             let submission = answer_rx.await.unwrap_or(FormSubmission::Rejected);
-            let value = if kind_str == "form_ask"
-                && serde_json::from_value::<CompositeForm>(payload_clone.clone()).is_ok()
-            {
-                serde_json::to_value(&submission).unwrap_or(serde_json::json!({"kind":"rejected"}))
+            let value = if kind_str == "form_ask" {
+                serde_json::to_value(&submission).expect("form submissions serialize")
             } else {
                 let answer = match submission {
                     FormSubmission::Submitted { mut answers } => answers.pop(),
                     FormSubmission::Rejected => Some(FormAnswer::Cancelled),
                 };
-                answer_to_value(answer, &kind_str, &payload_clone)
+                answer_to_value(answer, &payload_clone)
             };
             let _ = tx.send(value);
         });
@@ -64,47 +64,30 @@ fn composite_pending_form(
     id: &PromptId,
     kind: &str,
     payload: &serde_json::Value,
-) -> PendingForm {
-    let questions = serde_json::from_value::<CompositeForm>(payload.clone())
-        .map(|form| form.questions)
-        .unwrap_or_else(|_| {
-            vec![FormQuestion {
+) -> Option<PendingForm> {
+    let form = if kind == "form_ask" {
+        serde_json::from_value::<CompositeForm>(payload.clone()).ok()?
+    } else {
+        CompositeForm {
+            questions: vec![FormQuestion {
                 id: "question".into(),
                 kind: build_form_kind(kind, payload),
-            }]
-        });
-    let first_kind = questions
-        .first()
-        .map(|question| question.kind.clone())
-        .unwrap_or(FormKind::Confirm {
-            prompt: "Approve form_ask?".into(),
-        });
-    PendingForm {
+            }],
+        }
+    };
+    let first_kind = form.questions.first()?.kind.clone();
+    Some(PendingForm {
         form_id: form_id.into(),
         run_id: FlowRunId::now(),
         tool_use_id: format!("prompt_{id}"),
-        form: CompositeForm { questions },
+        form,
         kind: first_kind,
         emitted_at: chrono::Utc::now(),
-    }
+    })
 }
 
 fn build_form_kind(kind: &str, payload: &serde_json::Value) -> FormKind {
     match kind {
-        "form_ask" => {
-            if let Ok(form) = serde_json::from_value::<CompositeForm>(payload.clone()) {
-                form.questions
-                    .first()
-                    .map(|question| question.kind.clone())
-                    .unwrap_or(FormKind::Confirm {
-                        prompt: "Approve form_ask?".into(),
-                    })
-            } else {
-                serde_json::from_value::<FormKind>(payload.clone()).unwrap_or(FormKind::Confirm {
-                    prompt: "Approve form_ask?".into(),
-                })
-            }
-        }
         "hunk_selection" => {
             let hunks = payload["hunks"].as_array().cloned().unwrap_or_default();
             let options: Vec<String> = hunks
@@ -129,17 +112,7 @@ fn build_form_kind(kind: &str, payload: &serde_json::Value) -> FormKind {
     }
 }
 
-fn answer_to_value(
-    answer: Option<FormAnswer>,
-    kind: &str,
-    payload: &serde_json::Value,
-) -> serde_json::Value {
-    if kind == "form_ask" {
-        return match answer {
-            Some(a) => serde_json::to_value(&a).unwrap_or(serde_json::json!({})),
-            None => serde_json::to_value(&FormAnswer::Cancelled).unwrap_or(serde_json::json!({})),
-        };
-    }
+fn answer_to_value(answer: Option<FormAnswer>, payload: &serde_json::Value) -> serde_json::Value {
     let hunks = payload["hunks"].as_array().cloned().unwrap_or_default();
     let all_ids: Vec<u64> = hunks.iter().filter_map(|h| h["id"].as_u64()).collect();
     match answer {
@@ -173,7 +146,7 @@ mod tests {
             &resolver,
             id,
             "form_ask",
-            serde_json::json!({"kind": "confirm", "prompt": "Continue?"}),
+            serde_json::json!({"questions": [{"id": "confirm", "kind": "confirm", "prompt": "Continue?"}]}),
             std::time::Duration::from_secs(60),
         ));
         assert!(futures::poll!(&mut response).is_pending());
@@ -188,5 +161,74 @@ mod tests {
                 ..
             })
         ));
+    }
+    #[tokio::test]
+    async fn form_tool_uses_one_submission_contract_for_single_and_composite_forms() {
+        use atman_runtime::Value;
+        use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+
+        for composite in [false, true] {
+            let session = Arc::new(atman_runtime::Session::open_ephemeral());
+            let forms = session.forms();
+            let _subscriber = forms.subscribe();
+            let mut ctx = ToolCtx::new();
+            ctx.prompt_resolver = Some(Arc::new(TuiPromptResolver::new(forms.clone())));
+            let question = serde_json::json!({
+                "id": "confirm", "kind": "confirm", "prompt": "Continue?"
+            });
+            let args = if composite {
+                serde_json::json!({"questions": [question.clone(), {
+                    "id": "name", "kind": "text", "prompt": "Name?"
+                }]})
+            } else {
+                question
+            };
+            let Value::Struct(named) = Value::from_json(args) else {
+                unreachable!()
+            };
+            let mut response = atman_runtime::tools::form::FormAsk.call(
+                ToolArgs {
+                    positional: vec![],
+                    named,
+                },
+                &ctx,
+            );
+            assert!(futures::poll!(&mut response).is_pending());
+            let pending = forms.list_pending().pop().unwrap();
+            assert_eq!(pending.form.questions.len(), if composite { 2 } else { 1 });
+            let mut answers = vec![FormAnswer::Confirmed { value: true }];
+            if composite {
+                answers.push(FormAnswer::TextEntered {
+                    text: "answer".into(),
+                });
+            }
+            assert!(forms.submit(&pending.form_id, FormSubmission::Submitted { answers }));
+            let result = response.await.unwrap().to_json();
+            if composite {
+                assert_eq!(result["kind"], "submitted");
+                assert_eq!(result["answers"][0]["value"], true);
+                assert_eq!(result["answers"][1]["text"], "answer");
+            } else {
+                assert_eq!(result["kind"], "confirmed");
+                assert_eq!(result["value"], true);
+            }
+            assert!(forms.list_pending().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_form_payload_does_not_open_a_confirmation() {
+        let forms = Arc::new(FormRegistry::new());
+        let _subscriber = forms.subscribe();
+        let resolver = TuiPromptResolver::new(forms.clone());
+        for payload in [serde_json::json!({}), serde_json::json!({"questions": []})] {
+            assert!(
+                resolver
+                    .register_with_payload(PromptId::now(), "form_ask", payload)
+                    .await
+                    .is_err()
+            );
+            assert!(forms.list_pending().is_empty());
+        }
     }
 }

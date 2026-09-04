@@ -1924,7 +1924,6 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
     let mut c = parent.clone();
     c.clear_context();
     c.history_segment = crate::tool::HistorySegment::Spawned;
-    c.forms = None;
     c.on_memory_recent = None;
     c
 }
@@ -2801,5 +2800,126 @@ flow plain(user_prompt: string) -> string {
             .collect::<Vec<_>>();
         assert_eq!(handoff_events.len(), 3);
         assert!(handoff_events.iter().all(Option::is_some));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawned_confirmations_keep_the_session_form_service_and_child_identity() {
+        for is_async in [false, true] {
+            for accepted in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("child.at");
+                std::fs::write(
+                    &path,
+                    r#"flow child() -> string {
+    when user_confirm("Continue?") { return "accepted" }
+    return "rejected"
+}"#,
+                )
+                .unwrap();
+                let session = Arc::new(crate::Session::open_ephemeral());
+                let registry = session.flow_registry.clone();
+                let root_run = crate::event::FlowRunId::now();
+                let identity = registry
+                    .register_root(
+                        session.id().to_string(),
+                        root_run.clone(),
+                        crate::flow_authority::EffectiveAuthority::root(
+                            &Default::default(),
+                            false,
+                            None,
+                        ),
+                    )
+                    .unwrap();
+                let executor = crate::Executor::new();
+                let mut ctx = ToolCtx::new()
+                    .with_session_runtime(session.clone())
+                    .with_events(session.sink().clone())
+                    .with_registry(Arc::new(executor.tools))
+                    .with_providers(Arc::new(ProviderRegistry::new()));
+                ctx.flow_identity = Some(identity);
+                ctx.flow_run_id = Some(root_run);
+                ctx.prompt_resolver = Some(Arc::new(crate::rendezvous::AutoResolveResolver {
+                    default: serde_json::Value::Null,
+                }));
+                let forms = session.forms();
+                let mut subscriber = forms.subscribe();
+                let events = session.sink().clone();
+                let responder = tokio::spawn(async move {
+                    let pending = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        loop {
+                            if let Some(form) = subscriber.borrow().first().cloned() {
+                                break form;
+                            }
+                            subscriber.changed().await.unwrap();
+                        }
+                    })
+                    .await
+                    .expect("spawned confirmation did not reach the session");
+                    let child_run = events
+                        .snapshot()
+                        .into_iter()
+                        .find_map(|event| match event {
+                            crate::event::Event::FlowStart {
+                                run_id,
+                                spawned: true,
+                                ..
+                            } => Some(run_id),
+                            _ => None,
+                        })
+                        .expect("child run");
+                    assert_eq!(pending.run_id, child_run);
+                    assert!(!pending.tool_use_id.is_empty());
+                    assert!(forms.submit(
+                        &pending.form_id,
+                        crate::form::FormSubmission::Submitted {
+                            answers: vec![crate::form::FormAnswer::Confirmed { value: accepted }],
+                        }
+                    ));
+                });
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    AgentSpawn.call(
+                        ToolArgs {
+                            positional: vec![],
+                            named: vec![
+                                (
+                                    "flow".into(),
+                                    Value::Str(format!("{}@child", path.display())),
+                                ),
+                                ("async".into(), Value::Bool(is_async)),
+                            ],
+                        },
+                        &ctx,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let expected = if accepted { "accepted" } else { "rejected" };
+                if is_async {
+                    let Some(Value::Str(handle)) = result.field("handle") else {
+                        panic!("async handle")
+                    };
+                    let entry = registry.lookup(handle).unwrap();
+                    let state = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            let state = entry.status.lock().unwrap().clone();
+                            if !state.is_running() {
+                                break state;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(
+                        matches!(state, FlowRunStatus::Ok { final_text, .. } if final_text == expected)
+                    );
+                } else {
+                    assert!(matches!(result, Value::Str(text) if text == expected));
+                }
+                responder.await.unwrap();
+                assert!(session.forms().list_pending().is_empty());
+            }
+        }
     }
 }

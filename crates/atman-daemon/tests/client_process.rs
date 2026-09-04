@@ -7,7 +7,7 @@ use std::os::unix::fs::FileTypeExt;
 use atman_client::{
     Client, ClientError, ClientIdentity, HttpTransport, SessionClientError, UnixTransport,
 };
-use atman_proto::{FlowRunId, PromptId, RunLifecycle, StartRunResponse};
+use atman_proto::{FlowRunId, FormAnswer, FormSubmission, RunLifecycle, StartRunResponse};
 use futures::StreamExt;
 
 const AUTH_TOKEN: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -54,18 +54,20 @@ async fn connect(base_url: &str) -> Client {
     .expect("daemon did not accept HTTP connections")
 }
 
-async fn wait_for_prompt(session: &atman_client::SessionClient) -> PromptId {
+async fn wait_for_form(
+    session: &atman_client::SessionClient,
+) -> atman_proto::PendingFormProjection {
     tokio::time::timeout(WAIT_TIMEOUT, async {
         loop {
             session.refresh_until_current().await.unwrap();
-            if let Some(prompt) = session.current().projection().interactions.prompts.first() {
-                return prompt.id.clone();
+            if let Some(form) = session.current().projection().interactions.forms.first() {
+                return form.clone();
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("prompt did not enter the public session projection")
+    .expect("form did not enter the public session projection")
 }
 
 async fn wait_for_terminal_run(
@@ -99,24 +101,18 @@ async fn wait_for_terminal_run(
     .expect("run did not reach a terminal projection state")
 }
 
-async fn wait_for_no_prompts(session: &atman_client::SessionClient) {
+async fn wait_for_no_forms(session: &atman_client::SessionClient) {
     tokio::time::timeout(WAIT_TIMEOUT, async {
         loop {
             session.refresh_until_current().await.unwrap();
-            if session
-                .current()
-                .projection()
-                .interactions
-                .prompts
-                .is_empty()
-            {
+            if session.current().projection().interactions.forms.is_empty() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("resolved prompts did not leave the public session projection");
+    .expect("resolved forms did not leave the public session projection");
 }
 
 async fn start_when_idle(
@@ -175,7 +171,7 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
     let wait_flow = commands_dir.join("wait.at");
     std::fs::write(
         &wait_flow,
-        "flow wait() -> bool {\n    answer = user_confirm(\"Proceed?\")\n    return answer\n}\n",
+        "flow wait() -> bool {\n    answer = user_confirm(\"Proceed?\")\n    session.push(message.assistant(to_json_string(answer)))\n    return answer\n}\n",
     )
     .unwrap();
 
@@ -238,7 +234,8 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
     );
 
     let prompted = start_when_idle(&session, &wait_flow).await;
-    let prompt_id = wait_for_prompt(&session).await;
+    let form = wait_for_form(&session).await;
+    assert_eq!(form.run_id, prompted.run_id);
     let unix_client = Client::connect(
         UnixTransport::new(&socket_path),
         ClientIdentity::new("local-process-test", "1"),
@@ -249,9 +246,14 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
         .attach_session(session_id.clone())
         .await
         .unwrap();
-    assert_eq!(wait_for_prompt(&unix_session).await, prompt_id);
+    assert_eq!(wait_for_form(&unix_session).await, form);
     let resolved = unix_session
-        .resolve_prompt(prompt_id, serde_json::json!(true))
+        .submit_form(
+            form.id,
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            },
+        )
         .await
         .unwrap();
     assert!(resolved.resolved);
@@ -260,8 +262,25 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
         RunLifecycle::Succeeded
     );
 
+    assert!(
+        session
+            .current()
+            .projection()
+            .transcript
+            .iter()
+            .any(|item| {
+                matches!(item, atman_proto::TranscriptItem::Message {
+                    run_id: Some(run_id), message, ..
+                } if run_id == &prompted.run_id
+                    && message.role == atman_proto::MessageRole::Assistant
+                    && message.parts.iter().any(|part| {
+                        matches!(part, atman_proto::MessagePart::Text { text } if text == "true")
+                    }))
+            })
+    );
+
     let cancellable = start_when_idle(&session, &wait_flow).await;
-    wait_for_prompt(&session).await;
+    wait_for_form(&session).await;
     let cancelled = session
         .cancel_run(cancellable.run_id.clone())
         .await
@@ -271,7 +290,7 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
         wait_for_terminal_run(&session, &cancellable.run_id).await,
         RunLifecycle::Cancelled
     );
-    wait_for_no_prompts(&session).await;
+    wait_for_no_forms(&session).await;
     unix_session.refresh_until_current().await.unwrap();
     session.refresh_until_current().await.unwrap();
     assert_eq!(

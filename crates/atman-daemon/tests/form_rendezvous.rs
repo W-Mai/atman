@@ -197,3 +197,37 @@ async fn dropped_form_wait_is_abandoned_without_removing_another_request() {
         [vec!["first"], vec!["first", "second"], vec!["second"]]
     );
 }
+
+#[test]
+fn runtime_and_rpc_form_submissions_share_one_wire_contract() {
+    use atman_runtime::form::{FormAnswer as RuntimeAnswer, FormSubmission as RuntimeSubmission};
+    for submission in [
+        RuntimeSubmission::Rejected,
+        RuntimeSubmission::Submitted {
+            answers: vec![
+                RuntimeAnswer::Confirmed { value: true },
+                RuntimeAnswer::Selected {
+                    index: 0,
+                    label: "first".into(),
+                },
+                RuntimeAnswer::MultiSelected {
+                    indices: vec![0],
+                    labels: vec!["first".into()],
+                },
+                RuntimeAnswer::TextEntered {
+                    text: "answer".into(),
+                },
+                RuntimeAnswer::Cancelled,
+            ],
+        },
+    ] {
+        let runtime_json = serde_json::to_value(&submission).unwrap();
+        let rpc: FormSubmission = serde_json::from_value(runtime_json.clone()).unwrap();
+        let rpc_json = serde_json::to_value(rpc).unwrap();
+        assert_eq!(runtime_json, rpc_json);
+        assert_eq!(
+            serde_json::from_value::<RuntimeSubmission>(rpc_json).unwrap(),
+            submission,
+        );
+    }
+}

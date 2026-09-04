@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Form resolver contract** — `form_ask` resolver payloads use `CompositeForm` for both single and multiple questions, and responses use `FormSubmission` with the same `status` tag as the RPC protocol. Attached Session form subscribers take precedence over generic prompt resolvers.
+
 - **Form wait ownership** — `FormRegistry::request` registers through an `Arc` and returns a future that abandons its request when dropped. Programmatic cancellation records abandonment; explicit user rejection remains a resolved submission.
 - **Compaction cooldown ownership** — `ContextState::compaction_cooldown_elapsed` replaces the session and event-sink cooldown methods. Committed context changes own their cooldown state.
 - **Compaction review collections** — interaction snapshots and TUI handles expose a list of pending reviews. `CompactReviewRegistry::request` registers through an `Arc` and returns a future that abandons its request when dropped. Review payloads carry their context identity.
@@ -48,6 +50,8 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Consistent form answers** — single-question forms, composite forms, and `user_confirm` use the same validated submission contract. Root, inline, and spawned calls publish Session forms with their actual run and node identity; external resolvers remain available without a form subscriber. Invalid resolver answers produce an error instead of silently cancelling a valid response.
 
 - **Form lifecycle consistency** — local form cancellation and timeouts remove only the matching request. Session-bound contexts retain the form service when creating child contexts, and local `user_confirm` uses that service. TUI attachment restores pending forms, queue updates preserve the active draft, and resolved forms close promptly. Session moves consume validated answers instead of acting on form IDs before validation.
 - **Independent compaction cooldowns** — compacting one context does not delay an existing sibling. New forks capture the source cooldown, and failed commits or standalone message-list transformations do not restart it. Elapsed time uses a monotonic clock.

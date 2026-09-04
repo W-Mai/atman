@@ -1357,57 +1357,30 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 Value::Str(s) => s.clone(),
                 other => other.kind_name().to_string(),
             };
-            let confirm_kind = crate::form::FormKind::Confirm {
-                prompt: prompt.clone(),
-            };
-            // Daemon clients drive the confirm through the prompt resolver
-            // over RPC; in-process TUI subscribes to FormRegistry. Boot /
-            // headless / unit tests without either wired keep the historical
-            // auto-approve so they don't deadlock.
-            if let Some(resolver) = ctx.tool_ctx.prompt_resolver.clone() {
-                let id = crate::rendezvous::PromptId::now();
-                let payload =
-                    serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
-                let timeout = std::time::Duration::from_secs(300);
-                let result = crate::rendezvous::await_prompt_with_payload(
-                    &resolver, id, "form_ask", payload, timeout,
-                )
-                .await;
-                let answer: crate::form::FormAnswer = match result {
-                    Ok(v) => {
-                        serde_json::from_value(v).unwrap_or(crate::form::FormAnswer::Cancelled)
-                    }
-                    Err(_) => crate::form::FormAnswer::Cancelled,
-                };
-                return Value::Bool(matches!(
-                    answer,
-                    crate::form::FormAnswer::Confirmed { value: true }
-                ));
-            }
-            let Some(forms) = ctx.tool_ctx.forms.as_ref() else {
-                return Value::Bool(true);
-            };
-            if forms.subscriber_count() == 0 {
+            let has_local_form = ctx
+                .tool_ctx
+                .forms
+                .as_ref()
+                .is_some_and(|forms| forms.subscriber_count() > 0)
+                && ctx.flow_run_id.is_some();
+            if !has_local_form && ctx.tool_ctx.prompt_resolver.is_none() {
                 return Value::Bool(true);
             }
-            let Some(run_id) = ctx.flow_run_id.clone() else {
-                return Value::Bool(true);
+            let form = crate::form::CompositeForm {
+                questions: vec![crate::form::FormQuestion {
+                    id: "question".into(),
+                    kind: crate::form::FormKind::Confirm { prompt },
+                }],
             };
-            let pending = crate::form::PendingForm {
-                form_id: uuid::Uuid::now_v7().to_string(),
-                run_id,
-                tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
-                form: crate::form::CompositeForm {
-                    questions: vec![crate::form::FormQuestion {
-                        id: "question".into(),
-                        kind: confirm_kind.clone(),
-                    }],
-                },
-                kind: confirm_kind,
-                emitted_at: chrono::Utc::now(),
+            let form_ctx = ctx
+                .tool_ctx
+                .clone()
+                .with_anchors(ctx.turn_id.clone(), ctx.flow_run_id.clone(), None)
+                .with_current_node(ctx.current_node_id.clone());
+            let submission = match crate::tools::form::request_form(form, &form_ctx, None).await {
+                Ok(submission) => submission,
+                Err(error) => return Value::Err(error),
             };
-            let rx = forms.request(pending);
-            let submission = rx.await.unwrap_or(crate::form::FormSubmission::Rejected);
             Value::Bool(matches!(
                 submission,
                 crate::form::FormSubmission::Submitted { answers }
