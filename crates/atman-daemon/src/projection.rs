@@ -234,6 +234,23 @@ impl SessionProjector {
         self.ownership.observe(&envelope.event);
         let mut changes = Vec::new();
 
+        if let Some((message, run_id)) = envelope.event.context_message() {
+            self.append_transcript(
+                TranscriptItem::Message {
+                    seq: envelope.seq,
+                    ts: envelope.ts,
+                    run_id: run_id.map(|id| FlowRunId(id.0)),
+                    context_id: envelope
+                        .context_id
+                        .as_ref()
+                        .map(|id| atman_proto::ContextId(id.0)),
+                    checkpoint_index: None,
+                    message: message_projection(message, envelope.seq, None),
+                },
+                &mut changes,
+            );
+        }
+
         match &envelope.event {
             Event::TurnStart { turn_id } => self.current_turn = Some(turn_id.clone()),
             Event::TurnEnd { turn_id } => {
@@ -347,39 +364,6 @@ impl SessionProjector {
                     changes.push(ProjectionChange::RunUpsert { run: run.clone() });
                 }
             }
-            Event::UserMsg {
-                flow_run_id,
-                message,
-                ..
-            }
-            | Event::AssistantMsg {
-                flow_run_id,
-                message,
-                ..
-            }
-            | Event::ToolResultMsg {
-                flow_run_id,
-                message,
-                ..
-            }
-            | Event::SystemMsg {
-                flow_run_id,
-                message,
-                ..
-            } => self.append_transcript(
-                TranscriptItem::Message {
-                    seq: envelope.seq,
-                    ts: envelope.ts,
-                    run_id: flow_run_id.as_ref().map(|id| FlowRunId(id.0)),
-                    context_id: envelope
-                        .context_id
-                        .as_ref()
-                        .map(|id| atman_proto::ContextId(id.0)),
-                    checkpoint_index: None,
-                    message: message_projection(message, envelope.seq, None),
-                },
-                &mut changes,
-            ),
             Event::DiffPreview {
                 flow_run_id,
                 tool_use_id,
@@ -3015,6 +2999,215 @@ mod tests {
             projector.projection().transcript[1],
             TranscriptItem::Mermaid { .. }
         ));
+    }
+
+    #[test]
+    fn captured_steering_preserves_slots_across_compaction_replay_and_client_deltas() {
+        use atman_runtime::injection::{Injection, InjectionState};
+        for owner_kind in ["root", "legacy-child", "typed-child"] {
+            let scoped = owner_kind == "typed-child";
+            for checkpoint in [false, true] {
+                let session = atman_runtime::Session::open_ephemeral();
+                let sid = SessionId(uuid::Uuid::now_v7());
+                let turn = RuntimeTurnId::now();
+                let root = RuntimeRunId::now();
+                let child = RuntimeRunId::now();
+                let inline = RuntimeRunId::now();
+                let sink = session.sink().clone();
+                for (run, parent, spawned) in [
+                    (&root, None, false),
+                    (&child, Some(root.clone()), true),
+                    (&inline, Some(child.clone()), false),
+                ] {
+                    sink.emit(Event::FlowStart {
+                        run_id: run.clone(),
+                        turn_id: Some(turn.clone()),
+                        flow_name: "test".into(),
+                        parent_run_id: parent,
+                        parent_node_id: None,
+                        spawned,
+                    });
+                }
+                let run = if owner_kind == "root" { &root } else { &inline };
+                let other_run = if owner_kind == "root" { &child } else { &root };
+                let context_id = atman_runtime::event::ContextId::now();
+                let owner = if scoped {
+                    sink.clone().with_context(context_id.clone())
+                } else {
+                    sink.clone()
+                };
+                if scoped {
+                    owner.emit(Event::ContextCreated { base: None });
+                }
+                let user = Message::user_text(turn.clone(), "old user");
+                owner.emit(Event::UserMsg {
+                    turn_id: turn.clone(),
+                    flow_run_id: Some(run.clone()),
+                    message: user.clone(),
+                });
+                sink.emit(Event::UserMsg {
+                    turn_id: turn.clone(),
+                    flow_run_id: Some(other_run.clone()),
+                    message: Message::user_text(turn.clone(), "other run"),
+                });
+                let mut steering = Message::user_text(turn.clone(), "captured steering");
+                steering.origin = atman_runtime::message::MessageOrigin::Interjection;
+                for (state, captured) in [
+                    (InjectionState::Pending, true),
+                    (InjectionState::Cancelled, true),
+                    (InjectionState::Injected, false),
+                    (InjectionState::Injected, true),
+                ] {
+                    let mut injection = Injection::new_pending(turn.clone(), "steering");
+                    injection.flow_run_id = Some(run.clone());
+                    injection.state = state;
+                    owner.emit(Event::UserInject {
+                        turn_id: turn.clone(),
+                        injection,
+                        context_message: captured.then(|| steering.clone()),
+                    });
+                }
+                let assistant = Message::assistant_text(turn.clone(), "after steering");
+                owner.emit(Event::AssistantMsg {
+                    turn_id: turn.clone(),
+                    flow_run_id: Some(run.clone()),
+                    message: assistant.clone(),
+                });
+                if checkpoint {
+                    owner.emit(Event::Checkpoint {
+                        session_id: sid.to_string(),
+                        flow_run_id: Some(run.clone()),
+                        messages: vec![user, steering, assistant],
+                        window_tokens: 10,
+                    });
+                }
+                let replacement = owner.emit_returning_seq(Event::SystemMsg {
+                    turn_id: turn.clone(),
+                    flow_run_id: Some(run.clone()),
+                    message: Message::system_text(turn.clone(), "summary"),
+                });
+                owner.emit(Event::ContextCompact {
+                    session_id: sid.to_string(),
+                    flow_run_id: Some(run.clone()),
+                    before_tokens: 100,
+                    after_tokens: 20,
+                    compacted_range_start: 0,
+                    compacted_range_end: 1,
+                    summary_text: Some("summary".into()),
+                    replacement_msg_seq: Some(replacement),
+                });
+                let mut projector = SessionProjector::new(sid.clone(), None);
+                let mut restored: SessionProjector =
+                    serde_json::from_value(serde_json::to_value(&projector).unwrap()).unwrap();
+                let generation = atman_proto::DaemonGeneration("test-generation".into());
+                let mut client = atman_client::SessionState::new(
+                    atman_proto::SessionSnapshot {
+                        schema_version: atman_proto::SNAPSHOT_SCHEMA_VERSION,
+                        daemon_generation: generation.clone(),
+                        cursor: EventCursor(0),
+                        projection: projector.snapshot(),
+                    },
+                    &generation,
+                )
+                .unwrap();
+                let events = sink.snapshot_envelopes();
+                for (index, event) in events.iter().enumerate() {
+                    let delta = projector.apply_envelope(event);
+                    assert_eq!(delta, restored.apply_envelope(event));
+                    if let Some(delta) = delta {
+                        if matches!(event.event, Event::UserInject { .. }) {
+                            let expected = usize::from(event.event.context_message().is_some());
+                            let items: Vec<_> = delta
+                                .changes
+                                .iter()
+                                .flat_map(|change| match change {
+                                    ProjectionChange::TranscriptAppend { items } => {
+                                        items.as_slice()
+                                    }
+                                    _ => &[],
+                                })
+                                .collect();
+                            assert_eq!(items.len(), expected);
+                            assert!(items.iter().all(|item| matches!(item, TranscriptItem::Message { message, .. } if message.origin == MessageOrigin::Interjection)));
+                            assert!(delta.changes.iter().any(|change| matches!(
+                                change,
+                                ProjectionChange::InteractionsSet { .. }
+                            )));
+                        }
+                        let cursor = EventCursor(client.cursor().0 + 1);
+                        client
+                            .apply_updates(&atman_proto::GetSessionUpdatesResponse {
+                                daemon_generation: generation.clone(),
+                                events: vec![atman_proto::ProjectionEventEnvelope {
+                                    schema_version: atman_proto::PROJECTION_EVENT_SCHEMA_VERSION,
+                                    daemon_generation: generation.clone(),
+                                    session_id: sid.clone(),
+                                    cursor,
+                                    ts: event.ts,
+                                    event: atman_proto::ServerEvent::ProjectionDelta { delta },
+                                }],
+                                next_cursor: cursor,
+                                has_more: false,
+                                resync_required: None,
+                            })
+                            .unwrap();
+                    }
+                    assert_eq!(client.projection(), projector.projection());
+                    assert_eq!(
+                        SessionProjector::from_events(sid.clone(), None, &events[..=index])
+                            .projection(),
+                        projector.projection()
+                    );
+                    restored =
+                        serde_json::from_value(serde_json::to_value(&projector).unwrap()).unwrap();
+                }
+                let target_texts = projector
+                    .projection()
+                    .transcript
+                    .iter()
+                    .filter_map(|item| match item {
+                        TranscriptItem::Message {
+                            run_id: Some(id), ..
+                        } if id.0 == run.0 => transcript_text(item),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(target_texts, ["summary", "after steering"]);
+                assert_eq!(
+                    projector
+                        .projection()
+                        .transcript
+                        .iter()
+                        .filter_map(transcript_text)
+                        .filter(|text| *text == "other run")
+                        .count(),
+                    1
+                );
+                if owner_kind == "legacy-child" {
+                    continue;
+                }
+                let base = if scoped {
+                    atman_runtime::event::ContextBase::Context {
+                        context_id,
+                        through_seq: sink.published_seq(),
+                    }
+                } else {
+                    atman_runtime::event::ContextBase::LegacyRoot {
+                        through_seq: sink.published_seq(),
+                    }
+                };
+                let context =
+                    atman_runtime::projection::context::replay_context(&events, &base).unwrap();
+                assert_eq!(
+                    context
+                        .window()
+                        .iter()
+                        .map(|(_, m)| m.text_concat())
+                        .collect::<Vec<_>>(),
+                    target_texts
+                );
+            }
+        }
     }
 
     fn transcript_text(item: &TranscriptItem) -> Option<&str> {

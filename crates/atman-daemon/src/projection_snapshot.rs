@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::projection::{RestoredProjection, SessionProjector};
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 const SNAPSHOT_DIR: &str = ".projection-snapshots";
 const SNAPSHOT_PREFIX: &str = "projection-";
 const SNAPSHOT_SUFFIX: &str = ".json";
@@ -29,8 +29,7 @@ struct ProjectionSnapshotDocument {
     schema_version: u32,
     session_id: SessionId,
     coverage: EventLogCoverage,
-    #[serde(default)]
-    event_cursor: Option<EventCursor>,
+    event_cursor: EventCursor,
     boundary_digest: String,
     projector_digest: String,
     projector: serde_json::Value,
@@ -78,7 +77,7 @@ pub(crate) fn save(
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         session_id: session_id.clone(),
         coverage,
-        event_cursor: Some(event_cursor),
+        event_cursor,
         boundary_digest,
         projector_digest,
         projector: projector_value,
@@ -247,9 +246,7 @@ fn load_candidate(
     anyhow::ensure!(document.projector_digest == value_digest(&document.projector)?);
     let projector: SessionProjector =
         serde_json::from_value(document.projector).context("decode projection snapshot state")?;
-    let event_cursor = document
-        .event_cursor
-        .unwrap_or(EventCursor(projector.projection().revision.0));
+    let event_cursor = document.event_cursor;
     anyhow::ensure!(event_cursor.0 >= projector.projection().revision.0);
     anyhow::ensure!(projector.last_runtime_seq() == document.coverage.seq);
     anyhow::ensure!(
@@ -510,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_without_attachment_identity_state_require_event_replay() {
+    fn invalid_projection_caches_are_not_loaded() {
         let session_dir = tempfile::tempdir().unwrap();
         let session_id = SessionId(uuid::Uuid::now_v7());
         let events_path = session_dir.path().join("events.jsonl");
@@ -535,12 +532,27 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
-        let mut document: serde_json::Value =
+        let document: serde_json::Value =
             serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
-        for version in [1, 2, SNAPSHOT_SCHEMA_VERSION + 1] {
-            document["schema_version"] = serde_json::json!(version);
-            fs::write(&snapshot_path, serde_json::to_vec(&document).unwrap()).unwrap();
-            assert!(load(&session_id, session_dir.path()).unwrap().is_none());
+        for (field, value) in [
+            (
+                "schema_version",
+                Some(serde_json::json!(SNAPSHOT_SCHEMA_VERSION + 1)),
+            ),
+            ("event_cursor", None),
+        ] {
+            let mut invalid = document.clone();
+            match value {
+                Some(value) => invalid[field] = value,
+                None => {
+                    invalid.as_object_mut().unwrap().remove(field);
+                }
+            }
+            fs::write(&snapshot_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                load(&session_id, session_dir.path()).unwrap().is_none(),
+                "{field}"
+            );
         }
     }
 

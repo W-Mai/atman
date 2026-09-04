@@ -507,7 +507,8 @@ pub enum Event {
 }
 
 impl Event {
-    pub(crate) fn context_message(&self) -> Option<(&crate::message::Message, Option<&FlowRunId>)> {
+    /// Returns the persisted message and its run owner, including consumed steering.
+    pub fn context_message(&self) -> Option<(&crate::message::Message, Option<&FlowRunId>)> {
         match self {
             Self::UserMsg {
                 message,

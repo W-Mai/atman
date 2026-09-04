@@ -4,10 +4,12 @@ import { SessionReconcileError } from './errors'
 import { EVENT_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION } from './generated/methods.generated'
 import type {
   GetSessionUpdatesResponse,
+  InterjectionProjection,
   ProjectionChange,
   ProjectionEventEnvelope,
   ServerEvent,
   SessionSnapshot,
+  TranscriptItem,
 } from './generated/types.generated'
 import { SessionStore } from './session-store'
 
@@ -68,6 +70,50 @@ function page(
 }
 
 describe('SessionStore', () => {
+  test('reconciles captured steering and consumption atomically across snapshot resume', () => {
+    const store = new SessionStore(snapshot())
+    const message: TranscriptItem = {
+      type: 'message',
+      seq: 5,
+      ts: '2026-09-04T00:00:00Z',
+      run_id: 'run-1',
+      message: {
+        role: 'user',
+        origin: 'interjection',
+        turn_id: 'turn-1',
+        parts: [{ type: 'text', text: 'captured steering' }],
+      },
+    }
+    const interjection: InterjectionProjection = {
+      id: 'interjection-1',
+      turn_id: 'turn-1',
+      run_id: 'run-1',
+      text: 'steering',
+      state: 'injected',
+      level: 'nudge',
+      created_at: '2026-09-04T00:00:00Z',
+      source: { type: 'user' },
+    }
+    const observations: unknown[] = []
+    store.subscribe((current) => observations.push({
+      messages: current.projection.transcript?.length,
+      state: current.projection.interactions?.interjections?.[0]?.state,
+    }))
+    store.applyUpdates(page([event(1, delta(1, [
+      { type: 'transcript_append', items: [message] },
+      { type: 'interactions_set', interactions: { interjections: [interjection] } },
+    ]))]))
+    expect(observations).toEqual([{ messages: 1, state: 'injected' }])
+    expect(store.current.projection.transcript).toEqual([message])
+
+    const resumed = new SessionStore(store.current)
+    const compacted = page([event(2, delta(2, [{ type: 'transcript_replace', items: [] }]))])
+    store.applyUpdates(compacted)
+    resumed.applyUpdates(compacted)
+    expect(resumed.current).toEqual(store.current)
+    expect(store.current.projection.interactions?.interjections).toEqual([interjection])
+  })
+
   test('applies ordered deltas and publishes one immutable view', () => {
     const store = new SessionStore(snapshot())
     const views: number[] = []
