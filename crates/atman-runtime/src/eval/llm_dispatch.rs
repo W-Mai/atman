@@ -134,6 +134,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             model.clone(),
             providers_reg.clone(),
             compaction_budget,
+            ctx.flow_run_id.clone(),
         )
         .await;
     }
@@ -597,6 +598,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 model.clone(),
                                 providers_reg.clone(),
                                 compaction_budget,
+                                ctx.flow_run_id.clone(),
                             )
                             .await;
                         }
@@ -687,6 +689,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 &model,
                                 &providers_reg,
                                 compaction_budget,
+                                ctx.flow_run_id.clone(),
                             )
                             .await;
                             compact_guard = Some(context.compact_lock().lock().await);
@@ -873,6 +876,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             model.clone(),
             providers_reg,
             compaction_budget,
+            ctx.flow_run_id.clone(),
         )
         .await;
     }
@@ -965,6 +969,7 @@ fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::ContextC
         replacement_msg_seq: None,
     });
     batch.emit(crate::event::Event::CompactionSummary {
+        operation_id: Some(result.operation_id.clone()),
         session_id: session_id.clone(),
         flow_run_id: Some(flow_run_id.clone()),
         range_start: result.compacted_start as u64,
@@ -1145,6 +1150,7 @@ mod tests {
                 crate::context_state::ContextState::new(Vec::new(), Some(sink.clone())),
             ));
         let result = crate::compaction::ContextCompactResult {
+            operation_id: crate::event::CompactionOperationId::now(),
             before_tokens: 100,
             after_tokens: 10,
             compacted_start: 0,

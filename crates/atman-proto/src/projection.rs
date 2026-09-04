@@ -6,8 +6,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    DaemonGeneration, EventCursor, FlowRunId, InterjectionLevel, InterjectionState, NameSource,
-    Revision, SessionId,
+    CompactionOperationId, DaemonGeneration, EventCursor, FlowRunId, InterjectionLevel,
+    InterjectionState, NameSource, Revision, SessionId,
 };
 
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
@@ -63,6 +63,8 @@ pub struct SessionProjection {
     pub transcript: Vec<TranscriptItem>,
     #[serde(default)]
     pub workflows: Vec<WorkflowProjection>,
+    #[serde(default)]
+    pub compactions: Vec<CompactionProjection>,
     #[serde(default)]
     pub goal: Option<String>,
     #[serde(default)]
@@ -192,6 +194,14 @@ pub enum TranscriptItem {
     Compaction {
         seq: u64,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<CompactionOperationId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_id: Option<ContextId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<FlowRunId>,
+        #[serde(default)]
+        outcome: CompactionOutcome,
         range_start: u64,
         range_end: u64,
         before_tokens: u64,
@@ -216,6 +226,32 @@ pub enum TranscriptItem {
         #[schema(value_type = Object)]
         payload: serde_json::Value,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionOutcome {
+    #[default]
+    Finished,
+    Failed,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct CompactionProjection {
+    pub id: CompactionOperationId,
+    pub started_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<ContextId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<FlowRunId>,
+    pub range_start: u64,
+    pub range_end: u64,
+    pub before_tokens: u64,
+    pub compacted_count: u64,
+    #[serde(default)]
+    pub summary: String,
+    pub started_at: DateTime<Utc>,
 }
 
 impl TranscriptItem {
@@ -784,22 +820,57 @@ pub struct ProjectionDelta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProjectionChange {
-    MetadataSet { metadata: SessionMetadataProjection },
-    LifecycleSet { lifecycle: SessionLifecycle },
-    RunUpsert { run: RunProjection },
-    RunRemove { run_id: FlowRunId },
-    TranscriptAppend { items: Vec<TranscriptItem> },
-    TranscriptReplace { items: Vec<TranscriptItem> },
-    WorkflowsReplace { workflows: Vec<WorkflowProjection> },
-    GoalSet { goal: Option<String> },
-    TodosReplace { todos: Vec<TodoProjection> },
-    PlansReplace { plans: Vec<PlanProjection> },
-    ContextSet { context: ContextProjection },
-    TrustSet { trust: TrustProjection },
-    InteractionsSet { interactions: InteractionProjection },
-    ResourceUpsert { resource: ResourceProjection },
-    ResourceRemove { resource_id: ResourceId },
-    UsageSet { usage: UsageProjection },
+    MetadataSet {
+        metadata: SessionMetadataProjection,
+    },
+    LifecycleSet {
+        lifecycle: SessionLifecycle,
+    },
+    RunUpsert {
+        run: RunProjection,
+    },
+    RunRemove {
+        run_id: FlowRunId,
+    },
+    TranscriptAppend {
+        items: Vec<TranscriptItem>,
+    },
+    TranscriptReplace {
+        items: Vec<TranscriptItem>,
+    },
+    WorkflowsReplace {
+        workflows: Vec<WorkflowProjection>,
+    },
+    CompactionsReplace {
+        compactions: Vec<CompactionProjection>,
+    },
+    GoalSet {
+        goal: Option<String>,
+    },
+    TodosReplace {
+        todos: Vec<TodoProjection>,
+    },
+    PlansReplace {
+        plans: Vec<PlanProjection>,
+    },
+    ContextSet {
+        context: ContextProjection,
+    },
+    TrustSet {
+        trust: TrustProjection,
+    },
+    InteractionsSet {
+        interactions: InteractionProjection,
+    },
+    ResourceUpsert {
+        resource: ResourceProjection,
+    },
+    ResourceRemove {
+        resource_id: ResourceId,
+    },
+    UsageSet {
+        usage: UsageProjection,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
@@ -838,22 +909,6 @@ pub enum SessionSignal {
     },
     Notification {
         notification: SessionNotification,
-    },
-    CompactionStarted {
-        range_start: u64,
-        range_end: u64,
-        before_tokens: u64,
-        compacted_count: u64,
-    },
-    CompactionText {
-        range_start: u64,
-        range_end: u64,
-        text: String,
-    },
-    CompactionFailed {
-        range_start: u64,
-        range_end: u64,
-        reason: String,
     },
     TerminalBytes {
         resource_id: ResourceId,
@@ -971,6 +1026,7 @@ mod tests {
             lifecycle: SessionLifecycle::Active,
             runs: Vec::new(),
             transcript: Vec::new(),
+            compactions: Vec::new(),
             workflows: Vec::new(),
             goal: Some("Keep every client convergent".into()),
             todos: Vec::new(),

@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Compaction progress protocol** — compaction stream frames carry an operation identity and optional context and run anchors. Daemon clients receive active compactions through `SessionProjection` and `compactions_replace` deltas instead of ephemeral compaction signals; terminal transcript entries include their outcome.
+
 - **Compaction execution options** — context compaction accepts `CompactionOptions` for its budget, forced mode, review service, and progress channel. Compaction diagnostics no longer require a Session warning method.
 
 - **Form resolver contract** — `form_ask` resolver payloads use `CompositeForm` for both single and multiple questions, and responses use `FormSubmission` with the same `status` tag as the RPC protocol. Attached Session form subscribers take precedence over generic prompt resolvers.
@@ -52,6 +54,8 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Compaction progress reconciliation** — simultaneous compactions with the same message range update by operation identity, late attachments recover in-flight summary text from the session snapshot, and interrupted operations restore as abandoned transcript entries instead of remaining active forever.
 
 - **Shared compaction policy** — root and spawned flows use the same budget, summary, review, retained-output rewrite, and source-validation path. Child flows inherit their parent's review policy and retain the Session review service without writing through the parent context.
 

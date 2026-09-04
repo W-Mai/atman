@@ -320,6 +320,7 @@ async fn compact_session_starts_once_without_blocking_the_session_actor() {
         busy.status,
         atman_proto::CompactionRequestStatus::AlreadyRunning
     );
+    assert!(busy.operation_id.is_none());
     drop(held);
 
     let accepted = dispatch(
@@ -340,6 +341,7 @@ async fn compact_session_starts_once_without_blocking_the_session_actor() {
         accepted.status,
         atman_proto::CompactionRequestStatus::Accepted
     );
+    assert!(accepted.operation_id.is_some());
     let completed = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         session.acquire_compact_lock_owned(),

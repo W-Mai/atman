@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { SessionReconcileError } from './errors'
 import { EVENT_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION } from './generated/methods.generated'
 import type {
+  CompactionProjection,
   GetSessionUpdatesResponse,
   InterjectionProjection,
   ProjectionChange,
@@ -70,6 +71,55 @@ function page(
 }
 
 describe('SessionStore', () => {
+  test('reconciles active compaction progress by operation identity', () => {
+    const store = new SessionStore(snapshot())
+    const active: CompactionProjection = {
+      id: '00000000-0000-0000-0000-000000000010',
+      started_seq: 4,
+      context_id: '00000000-0000-0000-0000-000000000011',
+      run_id: '00000000-0000-0000-0000-000000000012',
+      range_start: 2,
+      range_end: 8,
+      before_tokens: 10_000,
+      compacted_count: 7,
+      summary: 'partial',
+      started_at: '2026-09-03T00:00:00Z',
+    }
+    store.applyUpdates(page([event(1, delta(1, [
+      { type: 'compactions_replace', compactions: [active] },
+    ]))]))
+    active.summary = 'mutated outside the store'
+    expect(store.current.projection.compactions).toHaveLength(1)
+    expect(store.current.projection.compactions?.[0]?.summary).toBe('partial')
+
+    store.applyUpdates(page([event(2, delta(2, [
+      { type: 'compactions_replace', compactions: [] },
+      {
+        type: 'transcript_append',
+        items: [{
+          type: 'compaction',
+          seq: 5,
+          ts: '2026-09-03T00:00:01Z',
+          operation_id: active.id,
+          context_id: '00000000-0000-0000-0000-000000000011',
+          run_id: '00000000-0000-0000-0000-000000000012',
+          outcome: 'finished',
+          range_start: 2,
+          range_end: 8,
+          before_tokens: 10_000,
+          after_tokens: 2_000,
+          summary: 'complete',
+        }],
+      },
+    ]))]))
+    expect(store.current.projection.compactions).toEqual([])
+    expect(store.current.projection.transcript?.at(-1)).toMatchObject({
+      type: 'compaction',
+      operation_id: active.id,
+      outcome: 'finished',
+    })
+  })
+
   test('reconciles captured steering and consumption atomically across snapshot resume', () => {
     const store = new SessionStore(snapshot())
     const message: TranscriptItem = {

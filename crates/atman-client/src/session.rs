@@ -987,6 +987,9 @@ fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
         ProjectionChange::WorkflowsReplace { workflows } => {
             projection.workflows.clone_from(workflows)
         }
+        ProjectionChange::CompactionsReplace { compactions } => {
+            projection.compactions.clone_from(compactions)
+        }
         ProjectionChange::GoalSet { goal } => projection.goal.clone_from(goal),
         ProjectionChange::TodosReplace { todos } => projection.todos.clone_from(todos),
         ProjectionChange::PlansReplace { plans } => projection.plans.clone_from(plans),
@@ -1057,6 +1060,7 @@ mod tests {
             lifecycle: atman_proto::SessionLifecycle::Idle,
             runs: Vec::new(),
             transcript: Vec::new(),
+            compactions: Vec::new(),
             workflows: Vec::new(),
             goal: None,
             todos: Vec::new(),
@@ -1883,6 +1887,9 @@ mod tests {
                         serde_json::to_value(atman_proto::CompactSessionResponse {
                             session_id: self.session_id.clone(),
                             status: atman_proto::CompactionRequestStatus::Accepted,
+                            operation_id: Some(atman_proto::CompactionOperationId(
+                                uuid::Uuid::now_v7(),
+                            )),
                             revision: Revision(2),
                             cursor: EventCursor(2),
                         })?

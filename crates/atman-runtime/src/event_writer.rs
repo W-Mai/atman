@@ -540,7 +540,9 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::ToolResultMetrics { .. } => "tool_result_metrics",
         Event::DiffPreview { .. } => "diff_preview",
         Event::FileEditApplied { .. } => "file_edit_applied",
+        Event::CompactionStarted { .. } => "compaction_started",
         Event::CompactionSummary { .. } => "compaction_summary",
+        Event::CompactionFailed { .. } => "compaction_failed",
         Event::SystemMsg { .. } => "system_msg",
         Event::UserInject { .. } => "user_inject",
         Event::ContentFilterHit { .. } => "content_filter_hit",
@@ -717,7 +719,9 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             turn_id.as_ref().map(|t| t.0.to_string()),
             flow_run_id.as_ref().map(|r| r.0.to_string()),
         ),
-        Event::CompactionSummary { flow_run_id, .. }
+        Event::CompactionStarted { flow_run_id, .. }
+        | Event::CompactionSummary { flow_run_id, .. }
+        | Event::CompactionFailed { flow_run_id, .. }
         | Event::ContextCompact { flow_run_id, .. }
         | Event::Checkpoint { flow_run_id, .. } => (
             None,
@@ -744,6 +748,7 @@ pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
     match event {
         Event::WatchWarn { message, .. } => Some(message.clone()),
         Event::CompactionSummary { summary, .. } => Some(summary.clone()),
+        Event::CompactionFailed { reason, .. } => Some(reason.clone()),
         Event::AttachmentDegraded { patch, .. } => {
             Some(format!("{} {}", patch.file_basename, patch.reason))
         }
@@ -801,7 +806,16 @@ mod tests {
     fn every_owned_compaction_event_keeps_its_flow_anchor() {
         let flow_run_id = FlowRunId::now();
         for event in [
+            Event::CompactionStarted {
+                operation_id: crate::event::CompactionOperationId::now(),
+                flow_run_id: Some(flow_run_id.clone()),
+                range_start: 0,
+                range_end: 1,
+                compacted_count: 2,
+                before_tokens: 100,
+            },
             Event::CompactionSummary {
+                operation_id: Some(crate::event::CompactionOperationId::now()),
                 session_id: "session".into(),
                 flow_run_id: Some(flow_run_id.clone()),
                 range_start: 0,
@@ -810,6 +824,15 @@ mod tests {
                 before_tokens: 100,
                 after_tokens: 10,
                 summary: "summary".into(),
+            },
+            Event::CompactionFailed {
+                operation_id: crate::event::CompactionOperationId::now(),
+                flow_run_id: Some(flow_run_id.clone()),
+                range_start: 0,
+                range_end: 1,
+                compacted_count: 2,
+                before_tokens: 100,
+                reason: "cancelled".into(),
             },
             Event::ContextCompact {
                 session_id: "session".into(),

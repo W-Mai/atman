@@ -942,6 +942,7 @@ pub async fn dispatch_as(
                         Ok(CompactSessionResponse {
                             session_id: operation_params.session_id,
                             status: commit.status,
+                            operation_id: commit.operation_id,
                             revision: commit.revision,
                             cursor: commit.cursor,
                         })

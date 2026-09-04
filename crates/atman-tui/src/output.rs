@@ -1964,6 +1964,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             after_tokens,
             compacted_count,
             disclosure,
+            ..
         } => render_compaction_summary(CompactionSummaryRender {
             phase: *phase,
             range_start: *range_start,

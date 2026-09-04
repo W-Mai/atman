@@ -2,15 +2,16 @@ use std::collections::HashMap;
 
 use atman_proto::{
     ApprovalGroupProjection, ApprovalRequestProjection, ApprovalState, ApprovalTarget,
-    ContextProjection, EventCursor, FlowRunId, ImageDetail, InteractionProjection,
-    InterjectionProjection, InterjectionSource, LlmUsageProjection, McpServerProjection,
-    MessageOrigin, MessagePart, MessageProjection, MessageRole, NameSource, NoticeLevel,
-    PlanProjection, PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId,
-    ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
-    SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
-    TodoState, TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
-    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection, WorkflowNodeKind,
-    WorkflowNodeProjection, WorkflowNodeState, WorkflowProjection,
+    CompactionOperationId, CompactionOutcome, CompactionProjection, ContextProjection, EventCursor,
+    FlowRunId, ImageDetail, InteractionProjection, InterjectionProjection, InterjectionSource,
+    LlmUsageProjection, McpServerProjection, MessageOrigin, MessagePart, MessageProjection,
+    MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange,
+    ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState, Revision,
+    RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
+    SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
+    TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
+    UsageProjection, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
+    WorkflowProjection,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -53,6 +54,7 @@ impl SessionProjector {
                 runs: Vec::new(),
                 transcript: Vec::new(),
                 workflows: Vec::new(),
+                compactions: Vec::new(),
                 goal: None,
                 todos: Vec::new(),
                 plans: Vec::new(),
@@ -156,6 +158,30 @@ impl SessionProjector {
                 });
             }
         }
+        if !self.projection.compactions.is_empty() {
+            for compaction in self.projection.compactions.drain(..) {
+                self.projection.transcript.push(TranscriptItem::Compaction {
+                    seq: compaction.started_seq,
+                    ts: compaction.started_at,
+                    operation_id: Some(compaction.id),
+                    context_id: compaction.context_id,
+                    run_id: compaction.run_id,
+                    outcome: CompactionOutcome::Abandoned,
+                    range_start: compaction.range_start,
+                    range_end: compaction.range_end,
+                    before_tokens: compaction.before_tokens,
+                    after_tokens: compaction.before_tokens,
+                    summary: "compaction interrupted before completion".into(),
+                });
+            }
+            self.projection.transcript.sort_by_key(TranscriptItem::seq);
+            changes.push(ProjectionChange::TranscriptReplace {
+                items: self.projection.transcript.clone(),
+            });
+            changes.push(ProjectionChange::CompactionsReplace {
+                compactions: Vec::new(),
+            });
+        }
 
         let previous_interactions = self.projection.interactions.clone();
         self.projection.interactions.prompts.clear();
@@ -224,6 +250,25 @@ impl SessionProjector {
             ]);
         }
         self.commit(vec![ProjectionChange::RunUpsert { run }])
+    }
+
+    pub(crate) fn append_compaction_text(
+        &mut self,
+        operation_id: &atman_runtime::event::CompactionOperationId,
+        text: &str,
+    ) -> Option<ProjectionDelta> {
+        if text.is_empty() {
+            return None;
+        }
+        let compaction = self
+            .projection
+            .compactions
+            .iter_mut()
+            .find(|compaction| compaction.id.0 == operation_id.0)?;
+        compaction.summary.push_str(text);
+        self.commit(vec![ProjectionChange::CompactionsReplace {
+            compactions: self.projection.compactions.clone(),
+        }])
     }
 
     pub(crate) fn apply_envelope(&mut self, envelope: &EventEnvelope) -> Option<ProjectionDelta> {
@@ -407,25 +452,116 @@ impl SessionProjector {
                 },
                 &mut changes,
             ),
+            Event::CompactionStarted {
+                operation_id,
+                flow_run_id,
+                range_start,
+                range_end,
+                compacted_count,
+                before_tokens,
+            } => {
+                let compaction = CompactionProjection {
+                    id: CompactionOperationId(operation_id.0),
+                    started_seq: envelope.seq,
+                    context_id: envelope
+                        .context_id
+                        .as_ref()
+                        .map(|id| atman_proto::ContextId(id.0)),
+                    run_id: flow_run_id.as_ref().map(|id| FlowRunId(id.0)),
+                    range_start: *range_start,
+                    range_end: *range_end,
+                    before_tokens: *before_tokens,
+                    compacted_count: *compacted_count as u64,
+                    summary: String::new(),
+                    started_at: envelope.ts,
+                };
+                self.projection
+                    .compactions
+                    .retain(|existing| existing.id != compaction.id);
+                self.projection.compactions.push(compaction);
+                self.projection
+                    .compactions
+                    .sort_by_key(|compaction| compaction.started_seq);
+                changes.push(ProjectionChange::CompactionsReplace {
+                    compactions: self.projection.compactions.clone(),
+                });
+            }
             Event::CompactionSummary {
+                operation_id,
+                flow_run_id,
                 range_start,
                 range_end,
                 before_tokens,
                 after_tokens,
                 summary,
                 ..
-            } => self.append_transcript(
-                TranscriptItem::Compaction {
-                    seq: envelope.seq,
-                    ts: envelope.ts,
-                    range_start: *range_start,
-                    range_end: *range_end,
-                    before_tokens: *before_tokens,
-                    after_tokens: *after_tokens,
-                    summary: summary.clone(),
-                },
-                &mut changes,
-            ),
+            } => {
+                if let Some(operation_id) = operation_id {
+                    let before = self.projection.compactions.len();
+                    self.projection
+                        .compactions
+                        .retain(|compaction| compaction.id.0 != operation_id.0);
+                    if self.projection.compactions.len() != before {
+                        changes.push(ProjectionChange::CompactionsReplace {
+                            compactions: self.projection.compactions.clone(),
+                        });
+                    }
+                }
+                self.append_transcript(
+                    TranscriptItem::Compaction {
+                        seq: envelope.seq,
+                        ts: envelope.ts,
+                        operation_id: operation_id.as_ref().map(|id| CompactionOperationId(id.0)),
+                        context_id: envelope
+                            .context_id
+                            .as_ref()
+                            .map(|id| atman_proto::ContextId(id.0)),
+                        run_id: flow_run_id.as_ref().map(|id| FlowRunId(id.0)),
+                        outcome: CompactionOutcome::Finished,
+                        range_start: *range_start,
+                        range_end: *range_end,
+                        before_tokens: *before_tokens,
+                        after_tokens: *after_tokens,
+                        summary: summary.clone(),
+                    },
+                    &mut changes,
+                );
+            }
+            Event::CompactionFailed {
+                operation_id,
+                flow_run_id,
+                range_start,
+                range_end,
+                compacted_count: _,
+                before_tokens,
+                reason,
+            } => {
+                self.projection
+                    .compactions
+                    .retain(|compaction| compaction.id.0 != operation_id.0);
+                changes.push(ProjectionChange::CompactionsReplace {
+                    compactions: self.projection.compactions.clone(),
+                });
+                self.append_transcript(
+                    TranscriptItem::Compaction {
+                        seq: envelope.seq,
+                        ts: envelope.ts,
+                        operation_id: Some(CompactionOperationId(operation_id.0)),
+                        context_id: envelope
+                            .context_id
+                            .as_ref()
+                            .map(|id| atman_proto::ContextId(id.0)),
+                        run_id: flow_run_id.as_ref().map(|id| FlowRunId(id.0)),
+                        outcome: CompactionOutcome::Failed,
+                        range_start: *range_start,
+                        range_end: *range_end,
+                        before_tokens: *before_tokens,
+                        after_tokens: *before_tokens,
+                        summary: reason.clone(),
+                    },
+                    &mut changes,
+                );
+            }
             Event::ContextCompact {
                 flow_run_id,
                 compacted_range_start,
@@ -2628,6 +2764,103 @@ mod tests {
         let resource = &projector.projection().resources[0];
         assert_eq!(resource.details["rows"], "50");
         assert_eq!(resource.details["cols"], "140");
+    }
+
+    #[test]
+    fn compaction_operations_remain_distinct_and_reconcile_after_disconnect() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let mut projector = SessionProjector::new(session_id, None);
+        let first = atman_runtime::event::CompactionOperationId::now();
+        let second = atman_runtime::event::CompactionOperationId::now();
+        let first_context = atman_runtime::event::ContextId::now();
+        let second_context = atman_runtime::event::ContextId::now();
+        let run_id = RuntimeRunId::now();
+        let at = chrono::Utc::now();
+        for (seq, operation_id, context_id) in [
+            (1, first.clone(), first_context.clone()),
+            (2, second.clone(), second_context.clone()),
+        ] {
+            projector.apply_envelope(&EventEnvelope {
+                seq,
+                ts: at,
+                context_id: Some(context_id),
+                event: Event::CompactionStarted {
+                    operation_id,
+                    flow_run_id: Some(run_id.clone()),
+                    range_start: 3,
+                    range_end: 9,
+                    compacted_count: 7,
+                    before_tokens: 10_000,
+                },
+            });
+        }
+        projector.append_compaction_text(&second, "second");
+        projector.append_compaction_text(&first, "first");
+
+        assert_eq!(projector.projection().compactions.len(), 2);
+        assert_eq!(projector.projection().compactions[0].summary, "first");
+        assert_eq!(projector.projection().compactions[1].summary, "second");
+        projector.apply_envelope(&EventEnvelope {
+            seq: 3,
+            ts: at,
+            context_id: Some(first_context),
+            event: Event::CompactionSummary {
+                operation_id: Some(first.clone()),
+                session_id: "session".into(),
+                flow_run_id: Some(run_id),
+                range_start: 3,
+                range_end: 9,
+                compacted_count: 7,
+                before_tokens: 10_000,
+                after_tokens: 2_000,
+                summary: "first complete".into(),
+            },
+        });
+
+        assert_eq!(projector.projection().compactions.len(), 1);
+        assert_eq!(projector.projection().compactions[0].id.0, second.0);
+        let snapshot = projector.snapshot();
+        let restored: SessionProjection =
+            serde_json::from_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored, snapshot);
+
+        let delta = projector.reconcile_disconnected().unwrap();
+        assert!(projector.projection().compactions.is_empty());
+        assert!(matches!(
+            delta.changes.as_slice(),
+            [
+                ProjectionChange::TranscriptReplace { .. },
+                ProjectionChange::CompactionsReplace { compactions }
+            ] if compactions.is_empty()
+        ));
+        assert!(
+            projector
+                .projection()
+                .transcript
+                .iter()
+                .any(|item| matches!(
+                    item,
+                    TranscriptItem::Compaction {
+                        operation_id: Some(operation_id),
+                        outcome: CompactionOutcome::Finished,
+                        ..
+                    } if operation_id.0 == first.0
+                ))
+        );
+        assert!(
+            projector
+                .projection()
+                .transcript
+                .iter()
+                .any(|item| matches!(
+                    item,
+                    TranscriptItem::Compaction {
+                        operation_id: Some(operation_id),
+                        outcome: CompactionOutcome::Abandoned,
+                        ..
+                    } if operation_id.0 == second.0
+                ))
+        );
     }
 
     #[test]

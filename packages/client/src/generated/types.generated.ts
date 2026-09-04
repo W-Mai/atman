@@ -70,6 +70,8 @@ export type DaemonGeneration = string
 export type RpcKind = 'command' | 'query'
 export type RequestId = string
 export type EventCursor = number
+export type ContextId = string
+export type CompactionOperationId = string
 export type FlowRunId = string
 export type ApprovalState = 'evaluating' | 'pending' | 'approved' | 'denied' | 'cancelled'
 export type ApprovalTarget =
@@ -82,7 +84,6 @@ export type ApprovalTarget =
       type: 'user'
       [k: string]: unknown
     }
-export type ContextId = string
 export type FormQuestionKind = 'confirm' | 'single_select' | 'multi_select' | 'text'
 export type InterjectionLevel = 'nudge' | 'course_correct' | 'redirect' | 'hard_stop'
 export type InterjectionSource =
@@ -168,8 +169,12 @@ export type TranscriptItem =
   | {
       after_tokens: number
       before_tokens: number
+      context_id?: null | ContextId
+      operation_id?: null | CompactionOperationId
+      outcome?: CompactionOutcome
       range_end: number
       range_start: number
+      run_id?: null | FlowRunId
       seq: number
       summary: string
       ts: string
@@ -258,6 +263,7 @@ export type MessagePart =
 export type ImageDetail = 'low' | 'high' | 'original' | 'auto'
 export type MessagePartId = string
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool'
+export type CompactionOutcome = 'finished' | 'failed' | 'abandoned'
 export type NoticeLevel = 'debug' | 'info' | 'success' | 'warning' | 'error'
 export type TrustPolicyAction = 'auto' | 'ask' | 'deny'
 export type TrustEscalation = 'deny' | 'ask' | 'allow'
@@ -385,6 +391,11 @@ export type ProjectionChange =
       [k: string]: unknown
     }
   | {
+      compactions: CompactionProjection[]
+      type: 'compactions_replace'
+      [k: string]: unknown
+    }
+  | {
       goal?: string | null
       type: 'goal_set'
       [k: string]: unknown
@@ -465,28 +476,6 @@ export type SessionSignal =
   | {
       notification: SessionNotification
       type: 'notification'
-      [k: string]: unknown
-    }
-  | {
-      before_tokens: number
-      compacted_count: number
-      range_end: number
-      range_start: number
-      type: 'compaction_started'
-      [k: string]: unknown
-    }
-  | {
-      range_end: number
-      range_start: number
-      text: string
-      type: 'compaction_text'
-      [k: string]: unknown
-    }
-  | {
-      range_end: number
-      range_start: number
-      reason: string
-      type: 'compaction_failed'
       [k: string]: unknown
     }
   | {
@@ -698,6 +687,7 @@ export interface SessionSnapshot {
   [k: string]: unknown
 }
 export interface SessionProjection {
+  compactions?: CompactionProjection[]
   context?: ContextProjection
   goal?: string | null
   interactions?: InteractionProjection
@@ -712,6 +702,19 @@ export interface SessionProjection {
   trust?: TrustProjection
   usage?: UsageProjection
   workflows?: WorkflowProjection[]
+  [k: string]: unknown
+}
+export interface CompactionProjection {
+  before_tokens: number
+  compacted_count: number
+  context_id?: null | ContextId
+  id: CompactionOperationId
+  range_end: number
+  range_start: number
+  run_id?: null | FlowRunId
+  started_at: string
+  started_seq: number
+  summary?: string
   [k: string]: unknown
 }
 export interface ContextProjection {
@@ -1220,6 +1223,7 @@ export interface CompactSessionRequest {
 }
 export interface CompactSessionResponse {
   cursor: EventCursor
+  operation_id?: null | CompactionOperationId
   revision: Revision
   session_id: SessionId
   status: CompactionRequestStatus

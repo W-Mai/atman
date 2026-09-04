@@ -2082,6 +2082,7 @@ impl Session {
             context,
             expected,
             crate::compaction::ContextCompactResult {
+                operation_id: crate::event::CompactionOperationId::now(),
                 before_tokens,
                 after_tokens: crate::compaction::estimate_tokens_for_messages(&replacement),
                 compacted_start: 0,
@@ -2112,6 +2113,7 @@ impl Session {
             context,
             expected,
             crate::compaction::ContextCompactResult {
+                operation_id: crate::event::CompactionOperationId::now(),
                 before_tokens,
                 after_tokens: crate::compaction::estimate_tokens_for_messages(&replacement),
                 compacted_start: range.start,
@@ -2142,6 +2144,7 @@ impl Session {
             self.context(),
             &msgs,
             crate::compaction::ContextCompactResult {
+                operation_id: crate::event::CompactionOperationId::now(),
                 before_tokens,
                 after_tokens: estimate_tokens_for_messages(&replacement),
                 compacted_start: range.start,
@@ -2184,6 +2187,7 @@ impl Session {
             replacement_msg_seq,
         });
         batch.emit(Event::CompactionSummary {
+            operation_id: Some(result.operation_id.clone()),
             session_id: self.id.to_string(),
             flow_run_id: None,
             range_start: result.compacted_start as u64,
@@ -2216,16 +2220,77 @@ impl Session {
             ));
             return None;
         }
-        if !context.commit_compaction(expected, &result, || {
-            self.record_compaction(context, &result, summary_message);
-        }) {
-            return None;
+        let selected = std::ptr::eq(context, self.context.as_ref());
+        let range_end = result.compacted_end.saturating_sub(1);
+        if let Some(sink) = context.sink() {
+            sink.emit(Event::CompactionStarted {
+                operation_id: result.operation_id.clone(),
+                flow_run_id: None,
+                range_start: result.compacted_start as u64,
+                range_end: range_end as u64,
+                compacted_count: result.compacted_count,
+                before_tokens: result.before_tokens,
+            });
         }
-        if std::ptr::eq(context, self.context.as_ref()) {
+        if selected {
             let _ = self
                 .watch
                 .stream_tx
                 .send(crate::stream::StreamFrame::CompactionSummary {
+                    operation_id: result.operation_id.clone(),
+                    context_id: context.context_id().map(ToString::to_string),
+                    run_id: None,
+                    phase: crate::stream::CompactionPhase::Running,
+                    range_start: result.compacted_start,
+                    range_end,
+                    summary: String::new(),
+                    before_tokens: result.before_tokens,
+                    after_tokens: 0,
+                    compacted_count: result.compacted_count,
+                });
+        }
+        if !context.commit_compaction(expected, &result, || {
+            self.record_compaction(context, &result, summary_message);
+        }) {
+            let reason = "message window changed before compaction committed";
+            if let Some(sink) = context.sink() {
+                sink.emit(Event::CompactionFailed {
+                    operation_id: result.operation_id.clone(),
+                    flow_run_id: None,
+                    range_start: result.compacted_start as u64,
+                    range_end: range_end as u64,
+                    compacted_count: result.compacted_count,
+                    before_tokens: result.before_tokens,
+                    reason: reason.into(),
+                });
+            }
+            if selected {
+                let _ = self
+                    .watch
+                    .stream_tx
+                    .send(crate::stream::StreamFrame::CompactionSummary {
+                        operation_id: result.operation_id.clone(),
+                        context_id: context.context_id().map(ToString::to_string),
+                        run_id: None,
+                        phase: crate::stream::CompactionPhase::Failed,
+                        range_start: result.compacted_start,
+                        range_end,
+                        summary: reason.into(),
+                        before_tokens: result.before_tokens,
+                        after_tokens: result.before_tokens,
+                        compacted_count: result.compacted_count,
+                    });
+            }
+            return None;
+        }
+        if selected {
+            let _ = self
+                .watch
+                .stream_tx
+                .send(crate::stream::StreamFrame::CompactionSummary {
+                    operation_id: result.operation_id.clone(),
+                    context_id: context.context_id().map(ToString::to_string),
+                    run_id: None,
                     phase: crate::stream::CompactionPhase::Finished,
                     range_start: result.compacted_start,
                     range_end: result.compacted_end.saturating_sub(1),
@@ -3727,6 +3792,14 @@ mod tests {
                         &original,
                     )
                 };
+                let started_operation = match frames.try_recv().unwrap() {
+                    crate::stream::StreamFrame::CompactionSummary {
+                        operation_id,
+                        phase: crate::stream::CompactionPhase::Running,
+                        ..
+                    } => operation_id,
+                    frame => panic!("expected running compaction frame, got {frame:?}"),
+                };
                 if mutation == "none" {
                     let result = committed.expect("unchanged source commits");
                     assert_eq!(result.compacted_end, if rewrite { 0 } else { 2 });
@@ -3742,9 +3815,10 @@ mod tests {
                     assert!(matches!(
                         frames.try_recv().unwrap(),
                         crate::stream::StreamFrame::CompactionSummary {
+                            operation_id,
                             phase: crate::stream::CompactionPhase::Finished,
                             ..
-                        }
+                        } if operation_id == started_operation
                     ));
                 } else {
                     assert!(committed.is_none(), "{rewrite}/{mutation}");
@@ -3752,10 +3826,18 @@ mod tests {
                     assert_eq!(*session.messages_handle().lock().unwrap(), before);
                     assert_eq!(session.context_epoch(), epoch);
                     assert_eq!(session.last_input_tokens(), window_tokens);
-                    assert_eq!(session.sink().published_seq(), seq);
+                    assert_eq!(session.sink().published_seq(), seq + 2);
                     assert_eq!(!session.context().compaction_cooldown_elapsed(), compacted);
-                    assert!(frames.try_recv().is_err());
+                    assert!(matches!(
+                        frames.try_recv().unwrap(),
+                        crate::stream::StreamFrame::CompactionSummary {
+                            operation_id,
+                            phase: crate::stream::CompactionPhase::Failed,
+                            ..
+                        } if operation_id == started_operation
+                    ));
                 }
+                assert!(frames.try_recv().is_err());
                 assert_eq!(*session.messages_full(), *raw);
             }
         }

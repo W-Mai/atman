@@ -700,6 +700,16 @@
         "cursor": {
           "$ref": "#/$defs/EventCursor"
         },
+        "operation_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/CompactionOperationId"
+            }
+          ]
+        },
         "revision": {
           "$ref": "#/$defs/Revision"
         },
@@ -708,6 +718,87 @@
         },
         "status": {
           "$ref": "#/$defs/CompactionRequestStatus"
+        }
+      }
+    },
+    "CompactionOperationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "CompactionOutcome": {
+      "type": "string",
+      "enum": [
+        "finished",
+        "failed",
+        "abandoned"
+      ]
+    },
+    "CompactionProjection": {
+      "type": "object",
+      "required": [
+        "id",
+        "started_seq",
+        "range_start",
+        "range_end",
+        "before_tokens",
+        "compacted_count",
+        "started_at"
+      ],
+      "properties": {
+        "before_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "compacted_count": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "context_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ContextId"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/CompactionOperationId"
+        },
+        "range_end": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "range_start": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "run_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FlowRunId"
+            }
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "started_seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "summary": {
+          "type": "string"
         }
       }
     },
@@ -2851,6 +2942,27 @@
         {
           "type": "object",
           "required": [
+            "compactions",
+            "type"
+          ],
+          "properties": {
+            "compactions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CompactionProjection"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compactions_replace"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
             "type"
           ],
           "properties": {
@@ -4065,6 +4177,12 @@
         "lifecycle"
       ],
       "properties": {
+        "compactions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactionProjection"
+          }
+        },
         "context": {
           "$ref": "#/$defs/ContextProjection"
         },
@@ -4267,104 +4385,6 @@
               "type": "string",
               "enum": [
                 "notification"
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": [
-            "range_start",
-            "range_end",
-            "before_tokens",
-            "compacted_count",
-            "type"
-          ],
-          "properties": {
-            "before_tokens": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "compacted_count": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "range_end": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "range_start": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "type": {
-              "type": "string",
-              "enum": [
-                "compaction_started"
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": [
-            "range_start",
-            "range_end",
-            "text",
-            "type"
-          ],
-          "properties": {
-            "range_end": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "range_start": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "text": {
-              "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "enum": [
-                "compaction_text"
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": [
-            "range_start",
-            "range_end",
-            "reason",
-            "type"
-          ],
-          "properties": {
-            "range_end": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "range_start": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            },
-            "reason": {
-              "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "enum": [
-                "compaction_failed"
               ]
             }
           }
@@ -4970,6 +4990,29 @@
               "format": "int64",
               "minimum": 0
             },
+            "context_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/ContextId"
+                }
+              ]
+            },
+            "operation_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/CompactionOperationId"
+                }
+              ]
+            },
+            "outcome": {
+              "$ref": "#/$defs/CompactionOutcome"
+            },
             "range_end": {
               "type": "integer",
               "format": "int64",
@@ -4979,6 +5022,16 @@
               "type": "integer",
               "format": "int64",
               "minimum": 0
+            },
+            "run_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/FlowRunId"
+                }
+              ]
             },
             "seq": {
               "type": "integer",

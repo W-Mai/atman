@@ -102,6 +102,10 @@ pub enum TranscriptEntry {
         session_files: Vec<String>,
     },
     CompactionSummary {
+        operation_id: Option<String>,
+        context_id: Option<String>,
+        flow_run_id: Option<String>,
+        phase: crate::stream::CompactionPhase,
         range_start: usize,
         range_end: usize,
         compacted_count: usize,
@@ -699,12 +703,34 @@ fn replay_transcript_from_raw(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     continue;
                 }
                 out.push(TranscriptEntry::CompactionSummary {
+                    operation_id: v["operation_id"].as_str().map(String::from),
+                    context_id: v["context_id"].as_str().map(String::from),
+                    flow_run_id: v["flow_run_id"].as_str().map(String::from),
+                    phase: crate::stream::CompactionPhase::Finished,
                     range_start: v["range_start"].as_u64().unwrap_or(0) as usize,
                     range_end: v["range_end"].as_u64().unwrap_or(0) as usize,
                     compacted_count: v["compacted_count"].as_u64().unwrap_or(0) as usize,
                     before_tokens: v["before_tokens"].as_u64().unwrap_or(0),
                     after_tokens: v["after_tokens"].as_u64().unwrap_or(0),
                     summary: v["summary"].as_str().unwrap_or("").to_string(),
+                    ts: parse_ts(v),
+                });
+            }
+            "compaction_failed" => {
+                if !raw_event_belongs_to_root(v, &spawned_flow_ids) {
+                    continue;
+                }
+                out.push(TranscriptEntry::CompactionSummary {
+                    operation_id: v["operation_id"].as_str().map(String::from),
+                    context_id: v["context_id"].as_str().map(String::from),
+                    flow_run_id: v["flow_run_id"].as_str().map(String::from),
+                    phase: crate::stream::CompactionPhase::Failed,
+                    range_start: v["range_start"].as_u64().unwrap_or(0) as usize,
+                    range_end: v["range_end"].as_u64().unwrap_or(0) as usize,
+                    compacted_count: v["compacted_count"].as_u64().unwrap_or(0) as usize,
+                    before_tokens: v["before_tokens"].as_u64().unwrap_or(0),
+                    after_tokens: v["before_tokens"].as_u64().unwrap_or(0),
+                    summary: v["reason"].as_str().unwrap_or("").to_string(),
                     ts: parse_ts(v),
                 });
             }
@@ -1239,6 +1265,7 @@ pub(crate) fn project_transcript_records(
                 );
             }
             crate::event::Event::CompactionSummary {
+                operation_id,
                 flow_run_id,
                 range_start,
                 range_end,
@@ -1252,12 +1279,42 @@ pub(crate) fn project_transcript_records(
                     continue;
                 }
                 out.push(TranscriptEntry::CompactionSummary {
+                    operation_id: operation_id.as_ref().map(ToString::to_string),
+                    context_id: record.envelope.context_id.as_ref().map(ToString::to_string),
+                    flow_run_id: flow_run_id.as_ref().map(ToString::to_string),
+                    phase: crate::stream::CompactionPhase::Finished,
                     range_start: *range_start as usize,
                     range_end: *range_end as usize,
                     compacted_count: *compacted_count,
                     before_tokens: *before_tokens,
                     after_tokens: *after_tokens,
                     summary: summary.clone(),
+                    ts,
+                });
+            }
+            crate::event::Event::CompactionFailed {
+                operation_id,
+                flow_run_id,
+                range_start,
+                range_end,
+                compacted_count,
+                before_tokens,
+                reason,
+            } => {
+                if !message_belongs_to_root(flow_run_id.as_ref(), &ownership.spawned) {
+                    continue;
+                }
+                out.push(TranscriptEntry::CompactionSummary {
+                    operation_id: Some(operation_id.to_string()),
+                    context_id: record.envelope.context_id.as_ref().map(ToString::to_string),
+                    flow_run_id: flow_run_id.as_ref().map(ToString::to_string),
+                    phase: crate::stream::CompactionPhase::Failed,
+                    range_start: *range_start as usize,
+                    range_end: *range_end as usize,
+                    compacted_count: *compacted_count,
+                    before_tokens: *before_tokens,
+                    after_tokens: *before_tokens,
+                    summary: reason.clone(),
                     ts,
                 });
             }
@@ -2015,6 +2072,7 @@ mod tests {
             EventEnvelope::new(
                 5,
                 Event::CompactionSummary {
+                    operation_id: Some(crate::event::CompactionOperationId::now()),
                     session_id: "session".into(),
                     flow_run_id: Some(child),
                     range_start: 0,

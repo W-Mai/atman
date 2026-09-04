@@ -276,6 +276,7 @@ pub async fn maybe_auto_compact(
         model,
         providers,
         CompactionBudgetContext::default(),
+        None,
     )
     .await;
 }
@@ -286,9 +287,19 @@ pub async fn maybe_auto_compact_with_budget(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
+    flow_run_id: Option<crate::event::FlowRunId>,
 ) {
     let _compact_guard = context.compact_lock().lock().await;
-    maybe_auto_compact_locked(session, context, model, providers, budget_context).await;
+    maybe_auto_compact_locked(
+        session,
+        context,
+        model,
+        providers,
+        budget_context,
+        flow_run_id,
+        None,
+    )
+    .await;
 }
 
 pub fn spawn_auto_compact(
@@ -312,6 +323,7 @@ pub fn spawn_auto_compact(
                 &model,
                 &providers,
                 CompactionBudgetContext::default(),
+                None,
             )
             .await;
         });
@@ -330,6 +342,7 @@ pub async fn start_auto_compact(
         model,
         providers,
         CompactionBudgetContext::default(),
+        None,
     )
     .await;
 }
@@ -340,6 +353,7 @@ pub async fn start_auto_compact_with_budget(
     model: String,
     providers: crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
+    flow_run_id: Option<crate::event::FlowRunId>,
 ) {
     let compact_guard = context.compact_lock().clone().lock_owned().await;
     spawn_locked_compact(
@@ -347,7 +361,11 @@ pub async fn start_auto_compact_with_budget(
         context,
         model,
         providers,
-        budget_context,
+        CompactionSchedule {
+            budget: budget_context,
+            flow_run_id,
+            operation_id: None,
+        },
         compact_guard,
     );
 }
@@ -357,23 +375,34 @@ pub fn start_manual_compact(
     context: std::sync::Arc<crate::context_state::ContextState>,
     mut model: String,
     providers: crate::provider::ProviderRegistry,
-) -> bool {
+) -> Option<crate::event::CompactionOperationId> {
     let Ok(compact_guard) = context.compact_lock().clone().try_lock_owned() else {
-        return false;
+        return None;
     };
     if model.is_empty() {
         model = "smart".into();
     }
+    let operation_id = crate::event::CompactionOperationId::now();
     context.request_manual_compact();
     spawn_locked_compact(
         session,
         context,
         model,
         providers,
-        CompactionBudgetContext::default(),
+        CompactionSchedule {
+            budget: CompactionBudgetContext::default(),
+            flow_run_id: None,
+            operation_id: Some(operation_id.clone()),
+        },
         compact_guard,
     );
-    true
+    Some(operation_id)
+}
+
+struct CompactionSchedule {
+    budget: CompactionBudgetContext,
+    flow_run_id: Option<crate::event::FlowRunId>,
+    operation_id: Option<crate::event::CompactionOperationId>,
 }
 
 fn spawn_locked_compact(
@@ -381,7 +410,7 @@ fn spawn_locked_compact(
     context: std::sync::Arc<crate::context_state::ContextState>,
     model: String,
     providers: crate::provider::ProviderRegistry,
-    budget_context: CompactionBudgetContext,
+    schedule: CompactionSchedule,
     compact_guard: tokio::sync::OwnedMutexGuard<()>,
 ) {
     tokio::task::spawn_blocking(move || {
@@ -394,7 +423,16 @@ fn spawn_locked_compact(
             return;
         };
         rt.block_on(async move {
-            maybe_auto_compact_locked(&session, &context, &model, &providers, budget_context).await;
+            maybe_auto_compact_locked(
+                &session,
+                &context,
+                &model,
+                &providers,
+                schedule.budget,
+                schedule.flow_run_id,
+                schedule.operation_id,
+            )
+            .await;
             drop(compact_guard);
         });
     });
@@ -406,6 +444,8 @@ async fn maybe_auto_compact_locked(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
+    flow_run_id: Option<crate::event::FlowRunId>,
+    operation_id: Option<crate::event::CompactionOperationId>,
 ) {
     let selected = std::ptr::eq(context, session.context().as_ref());
     let options = CompactionOptions {
@@ -413,7 +453,8 @@ async fn maybe_auto_compact_locked(
         forced: context.take_manual_compact_request(),
         reviews: Some(session.compact_reviews()),
         stream_tx: selected.then(|| session.stream_tx()),
-        flow_run_id: None,
+        flow_run_id,
+        operation_id,
     };
     if let Some(result) =
         maybe_auto_compact_context_locked(context, model, providers, options, |result| {
@@ -923,6 +964,7 @@ pub struct HandleCompactResult {
 /// retained-output rewrites use an empty range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextCompactResult {
+    pub operation_id: crate::event::CompactionOperationId,
     pub before_tokens: u64,
     pub after_tokens: u64,
     pub compacted_start: usize,
@@ -935,6 +977,7 @@ pub struct ContextCompactResult {
 /// Execution policy and interaction services for one context compaction.
 #[derive(Default)]
 pub struct CompactionOptions {
+    pub operation_id: Option<crate::event::CompactionOperationId>,
     pub budget: CompactionBudgetContext,
     pub forced: bool,
     pub reviews: Option<std::sync::Arc<crate::session::CompactReviewRegistry>>,
@@ -965,6 +1008,12 @@ pub async fn maybe_auto_compact_context_locked(
     if !options.forced && (current <= trigger || !context.compaction_cooldown_elapsed()) {
         return None;
     }
+    let operation_id = options
+        .operation_id
+        .clone()
+        .unwrap_or_else(crate::event::CompactionOperationId::now);
+    let context_id = context.context_id().map(ToString::to_string);
+    let run_id = options.flow_run_id.as_ref().map(ToString::to_string);
     let warn = |reason: &str| {
         if let Some(sink) = context.sink() {
             sink.emit(crate::event::Event::WatchWarn {
@@ -985,37 +1034,75 @@ pub async fn maybe_auto_compact_context_locked(
         }
     };
     let range = find_compact_range(&snapshot, target);
-    let send_failed = |reason: &str| {
-        if let (Some(tx), Some(range)) = (&options.stream_tx, &range) {
+    let range_start = range.as_ref().map_or(0, |range| range.start);
+    let range_end = range
+        .as_ref()
+        .map_or(0, |range| range.end.saturating_sub(1));
+    let initial_count = range.as_ref().map_or(0, |range| range.end - range.start);
+    if let Some(sink) = context.sink() {
+        sink.emit(crate::event::Event::CompactionStarted {
+            operation_id: operation_id.clone(),
+            flow_run_id: options.flow_run_id.clone(),
+            range_start: range_start as u64,
+            range_end: range_end as u64,
+            compacted_count: initial_count,
+            before_tokens: current,
+        });
+    }
+    if let Some(tx) = &options.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
+            operation_id: operation_id.clone(),
+            context_id: context_id.clone(),
+            run_id: run_id.clone(),
+            phase: crate::stream::CompactionPhase::Running,
+            range_start,
+            range_end,
+            summary: String::new(),
+            before_tokens: current,
+            after_tokens: 0,
+            compacted_count: initial_count,
+        });
+    }
+    let send_failed = |reason: &str, compacted_count: usize| {
+        if let Some(sink) = context.sink() {
+            sink.emit(crate::event::Event::CompactionFailed {
+                operation_id: operation_id.clone(),
+                flow_run_id: options.flow_run_id.clone(),
+                range_start: range_start as u64,
+                range_end: range_end as u64,
+                compacted_count,
+                before_tokens: current,
+                reason: reason.to_string(),
+            });
+        }
+        if let Some(tx) = &options.stream_tx {
             let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
+                operation_id: operation_id.clone(),
+                context_id: context_id.clone(),
+                run_id: run_id.clone(),
                 phase: crate::stream::CompactionPhase::Failed,
-                range_start: range.start,
-                range_end: range.end.saturating_sub(1),
+                range_start,
+                range_end,
                 summary: reason.to_string(),
                 before_tokens: current,
                 after_tokens: current,
-                compacted_count: range.end - range.start,
+                compacted_count,
             });
         }
     };
     let (replacement, summary, compacted_start, compacted_end, compacted_count, must_fit_target) =
         if let Some(range) = &range {
-            if let Some(tx) = &options.stream_tx {
-                let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
-                    phase: crate::stream::CompactionPhase::Running,
-                    range_start: range.start,
-                    range_end: range.end.saturating_sub(1),
-                    summary: String::new(),
-                    before_tokens: current,
-                    after_tokens: 0,
-                    compacted_count: range.end - range.start,
-                });
-            }
             let on_delta = options.stream_tx.clone().map(|tx| {
                 let range_start = range.start;
                 let range_end = range.end.saturating_sub(1);
+                let operation_id = operation_id.clone();
+                let context_id = context_id.clone();
+                let run_id = run_id.clone();
                 std::sync::Arc::new(move |text| {
                     let _ = tx.send(crate::stream::StreamFrame::CompactionDelta {
+                        operation_id: operation_id.clone(),
+                        context_id: context_id.clone(),
+                        run_id: run_id.clone(),
                         range_start,
                         range_end,
                         text,
@@ -1059,7 +1146,7 @@ pub async fn maybe_auto_compact_context_locked(
                 ReviewOutcome::Commit(summary) => summary,
                 ReviewOutcome::Rejected => {
                     let reason = "compaction rejected by user; keeping full transcript";
-                    send_failed(reason);
+                    send_failed(reason, range.end - range.start);
                     warn(reason);
                     return None;
                 }
@@ -1079,7 +1166,10 @@ pub async fn maybe_auto_compact_context_locked(
             let (replacement, rewritten_count) =
                 build_budgeted_turn_rewrite(snapshot.clone(), target, model, providers).await;
             if rewritten_count == 0 {
-                warn("no compactible span — retained user content cannot fit the history budget");
+                let reason =
+                    "no compactible span — retained user content cannot fit the history budget";
+                send_failed(reason, 0);
+                warn(reason);
                 return None;
             }
             (
@@ -1102,11 +1192,12 @@ pub async fn maybe_auto_compact_context_locked(
                 "replacement would not shrink transcript ({after_tokens} >= {before_tokens} tokens)"
             )
         };
-        send_failed(&reason);
+        send_failed(&reason, compacted_count);
         warn(&reason);
         return None;
     }
     let result = ContextCompactResult {
+        operation_id: operation_id.clone(),
         before_tokens,
         after_tokens,
         compacted_start,
@@ -1117,12 +1208,15 @@ pub async fn maybe_auto_compact_context_locked(
     };
     if !context.commit_compaction(&snapshot, &result, || commit(&result)) {
         let reason = "message window changed before compaction committed";
-        send_failed(reason);
+        send_failed(reason, compacted_count);
         warn(reason);
         return None;
     }
     if let Some(tx) = &options.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
+            operation_id,
+            context_id,
+            run_id,
             phase: crate::stream::CompactionPhase::Finished,
             range_start: result.compacted_start,
             range_end: result.compacted_end.saturating_sub(1),
@@ -1349,21 +1443,27 @@ mod tests {
     async fn manual_compaction_starts_only_when_the_compaction_lock_is_available() {
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         let held = session.acquire_compact_lock_owned().await;
-        assert!(!start_manual_compact(
-            session.clone(),
-            session.context().clone(),
-            "test".into(),
-            crate::provider::ProviderRegistry::new(),
-        ));
+        assert!(
+            start_manual_compact(
+                session.clone(),
+                session.context().clone(),
+                "test".into(),
+                crate::provider::ProviderRegistry::new(),
+            )
+            .is_none()
+        );
         assert!(!session.context().take_manual_compact_request());
         drop(held);
 
-        assert!(start_manual_compact(
-            session.clone(),
-            session.context().clone(),
-            "test".into(),
-            crate::provider::ProviderRegistry::new(),
-        ));
+        assert!(
+            start_manual_compact(
+                session.clone(),
+                session.context().clone(),
+                "test".into(),
+                crate::provider::ProviderRegistry::new(),
+            )
+            .is_some()
+        );
         let completed = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             session.acquire_compact_lock_owned(),
@@ -1481,25 +1581,32 @@ mod tests {
                                             "context-compact-probe".into(),
                                             providers,
                                             budget,
+                                            None,
                                         )
                                         .await
                                     }
                                     "manual" => {
                                         let held = context.compact_lock().lock().await;
-                                        assert!(!start_manual_compact(
-                                            session.clone(),
-                                            context.clone(),
-                                            "context-compact-probe".into(),
-                                            providers.clone()
-                                        ));
+                                        assert!(
+                                            start_manual_compact(
+                                                session.clone(),
+                                                context.clone(),
+                                                "context-compact-probe".into(),
+                                                providers.clone()
+                                            )
+                                            .is_none()
+                                        );
                                         assert!(!context.take_manual_compact_request());
                                         drop(held);
-                                        assert!(start_manual_compact(
-                                            session.clone(),
-                                            context.clone(),
-                                            "context-compact-probe".into(),
-                                            providers
-                                        ));
+                                        assert!(
+                                            start_manual_compact(
+                                                session.clone(),
+                                                context.clone(),
+                                                "context-compact-probe".into(),
+                                                providers
+                                            )
+                                            .is_some()
+                                        );
                                     }
                                     "overflow" => {
                                         context.request_manual_compact();
@@ -1509,6 +1616,7 @@ mod tests {
                                             "context-compact-probe",
                                             &providers,
                                             budget,
+                                            None,
                                         )
                                         .await;
                                     }
@@ -1539,11 +1647,29 @@ mod tests {
                                 estimate_tokens_for_messages(&after)
                             );
                             let envelopes = session.sink().snapshot_envelopes();
+                            let started = envelopes.iter().find_map(|envelope| {
+                                let Event::CompactionStarted { operation_id, .. } = &envelope.event
+                                else {
+                                    return None;
+                                };
+                                Some(operation_id)
+                            });
+                            let finished = envelopes.iter().find_map(|envelope| {
+                                let Event::CompactionSummary { operation_id, .. } = &envelope.event
+                                else {
+                                    return None;
+                                };
+                                operation_id.as_ref()
+                            });
+                            assert_eq!(started, finished);
+                            assert!(started.is_some());
                             for event in &envelopes {
                                 if matches!(
                                     event.event,
-                                    Event::ContextCompact { .. }
+                                    Event::CompactionStarted { .. }
+                                        | Event::ContextCompact { .. }
                                         | Event::CompactionSummary { .. }
+                                        | Event::CompactionFailed { .. }
                                         | Event::Checkpoint { .. }
                                 ) {
                                     assert_eq!(event.context_id, id);

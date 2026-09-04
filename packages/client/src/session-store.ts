@@ -288,6 +288,9 @@ function applyChange(projection: SessionProjection, change: ProjectionChange): v
     case 'workflows_replace':
       projection.workflows = structuredClone(change.workflows)
       break
+    case 'compactions_replace':
+      projection.compactions = structuredClone(change.compactions)
+      break
     case 'goal_set':
       if (change.goal === undefined) {
         delete projection.goal

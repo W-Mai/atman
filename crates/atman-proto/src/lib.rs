@@ -40,6 +40,17 @@ impl std::fmt::Display for FlowRunId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
 #[schema(value_type = String, format = Uuid)]
+pub struct CompactionOperationId(pub Uuid);
+
+impl std::fmt::Display for CompactionOperationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
 pub struct PromptId(pub Uuid);
 
 impl std::fmt::Display for PromptId {
@@ -723,6 +734,8 @@ pub enum CompactionRequestStatus {
 pub struct CompactSessionResponse {
     pub session_id: SessionId,
     pub status: CompactionRequestStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<CompactionOperationId>,
     pub revision: Revision,
     pub cursor: EventCursor,
 }

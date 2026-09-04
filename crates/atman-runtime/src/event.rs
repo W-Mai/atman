@@ -55,6 +55,23 @@ impl std::fmt::Display for ContextId {
     }
 }
 
+/// Identity of one context compaction attempt from start through terminal state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct CompactionOperationId(pub Uuid);
+
+impl CompactionOperationId {
+    pub fn now() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for CompactionOperationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Selection applied to the inherited active window, without changing raw history.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -315,7 +332,18 @@ pub enum Event {
         path: String,
         metrics: crate::activity::EditMetrics,
     },
+    CompactionStarted {
+        operation_id: CompactionOperationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
+        range_start: u64,
+        range_end: u64,
+        compacted_count: usize,
+        before_tokens: u64,
+    },
     CompactionSummary {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<CompactionOperationId>,
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         flow_run_id: Option<FlowRunId>,
@@ -325,6 +353,16 @@ pub enum Event {
         before_tokens: u64,
         after_tokens: u64,
         summary: String,
+    },
+    CompactionFailed {
+        operation_id: CompactionOperationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flow_run_id: Option<FlowRunId>,
+        range_start: u64,
+        range_end: u64,
+        compacted_count: usize,
+        before_tokens: u64,
+        reason: String,
     },
     SystemMsg {
         turn_id: TurnId,
@@ -1071,6 +1109,7 @@ mod tests {
     #[test]
     fn compaction_summary_serializes_all_fields() {
         let ev = Event::CompactionSummary {
+            operation_id: Some(CompactionOperationId::now()),
             session_id: "sess".into(),
             flow_run_id: None,
             range_start: 2,
@@ -1094,6 +1133,7 @@ mod tests {
     #[test]
     fn seq_and_set_seq_cover_compaction_summary() {
         let _ev = Event::CompactionSummary {
+            operation_id: None,
             session_id: "sess".into(),
             flow_run_id: None,
             range_start: 0,

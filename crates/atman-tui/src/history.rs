@@ -428,6 +428,10 @@ fn flatten_transcript_impl(
             }
             TranscriptEntry::FileEditApplied { .. } => {}
             TranscriptEntry::CompactionSummary {
+                operation_id,
+                context_id,
+                flow_run_id,
+                phase,
                 range_start,
                 range_end,
                 compacted_count,
@@ -451,7 +455,10 @@ fn flatten_transcript_impl(
                     continue;
                 }
                 out.push(OutputItem::CompactionSummary {
-                    phase: atman_runtime::stream::CompactionPhase::Finished,
+                    operation_id: operation_id.clone(),
+                    context_id: context_id.clone(),
+                    run_id: flow_run_id.clone(),
+                    phase: *phase,
                     range_start: *range_start,
                     range_end: *range_end,
                     summary: summary.clone(),
@@ -1511,6 +1518,9 @@ fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
         .next()?;
     let body = msg.text_concat();
     Some(OutputItem::CompactionSummary {
+        operation_id: None,
+        context_id: None,
+        run_id: None,
         phase: atman_runtime::stream::CompactionPhase::Finished,
         range_start: footer.seq_start as usize,
         range_end: footer.seq_end as usize,

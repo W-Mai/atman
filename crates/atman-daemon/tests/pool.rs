@@ -855,7 +855,7 @@ async fn process_signal_follows_its_durable_resource_projection() {
 }
 
 #[tokio::test]
-async fn compaction_progress_is_session_scoped_and_ephemeral() {
+async fn compaction_progress_is_projected_by_operation_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let state = DaemonState::new(tmp.path().to_path_buf());
     let session = Arc::new(atman_runtime::Session::open_ephemeral());
@@ -867,7 +867,7 @@ async fn compaction_progress_is_session_scoped_and_ephemeral() {
             session.clone(),
             LiveRun {
                 turn_id: atman_runtime::event::TurnId::now(),
-                run_id,
+                run_id: run_id.clone(),
                 flow_name: "agent".into(),
                 cancel: CancellationToken::new(),
                 started_at: chrono::Utc::now(),
@@ -877,36 +877,52 @@ async fn compaction_progress_is_session_scoped_and_ephemeral() {
         .await
         .unwrap();
     let before = state.session_snapshot(&sid, "alice").await.unwrap();
-    let stream = session.stream_tx();
-    stream
-        .send(atman_runtime::stream::StreamFrame::CompactionSummary {
-            phase: atman_runtime::stream::CompactionPhase::Running,
+    let operation_id = atman_runtime::event::CompactionOperationId::now();
+    session
+        .sink()
+        .emit(atman_runtime::event::Event::CompactionStarted {
+            operation_id: operation_id.clone(),
+            flow_run_id: Some(atman_runtime::event::FlowRunId(run_id.0)),
             range_start: 2,
             range_end: 8,
-            summary: String::new(),
-            before_tokens: 10_000,
-            after_tokens: 0,
             compacted_count: 7,
-        })
-        .unwrap();
+            before_tokens: 10_000,
+        });
+    wait_for_runtime_event(&state, &sid, 1).await;
+    let stream = session.stream_tx();
     stream
         .send(atman_runtime::stream::StreamFrame::CompactionDelta {
+            operation_id: operation_id.clone(),
+            context_id: None,
+            run_id: Some(run_id.to_string()),
             range_start: 2,
             range_end: 8,
             text: "summary chunk".into(),
         })
         .unwrap();
-    stream
-        .send(atman_runtime::stream::StreamFrame::CompactionSummary {
-            phase: atman_runtime::stream::CompactionPhase::Failed,
+    loop {
+        let snapshot = state.session_snapshot(&sid, "alice").await.unwrap();
+        if snapshot
+            .projection
+            .compactions
+            .first()
+            .is_some_and(|compaction| compaction.summary == "summary chunk")
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    session
+        .sink()
+        .emit(atman_runtime::event::Event::CompactionFailed {
+            operation_id,
+            flow_run_id: Some(atman_runtime::event::FlowRunId(run_id.0)),
             range_start: 2,
             range_end: 8,
-            summary: "review rejected".into(),
-            before_tokens: 10_000,
-            after_tokens: 10_000,
             compacted_count: 7,
-        })
-        .unwrap();
+            before_tokens: 10_000,
+            reason: "review rejected".into(),
+        });
 
     let updates = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -914,7 +930,7 @@ async fn compaction_progress_is_session_scoped_and_ephemeral() {
                 .session_updates(&sid, "alice", before.cursor, None)
                 .await
                 .unwrap();
-            if updates.events.len() == 3 {
+            if updates.events.len() >= 3 {
                 break updates;
             }
             tokio::task::yield_now().await;
@@ -922,31 +938,21 @@ async fn compaction_progress_is_session_scoped_and_ephemeral() {
     })
     .await
     .unwrap();
-    assert!(matches!(
-        &updates.events[0].event,
-        atman_proto::ServerEvent::Signal {
-            signal: atman_proto::SessionSignal::CompactionStarted {
-                range_start: 2,
-                range_end: 8,
-                before_tokens: 10_000,
-                compacted_count: 7,
-            }
-        }
-    ));
-    assert!(matches!(
-        &updates.events[1].event,
-        atman_proto::ServerEvent::Signal {
-            signal: atman_proto::SessionSignal::CompactionText { text, .. }
-        } if text == "summary chunk"
-    ));
-    assert!(matches!(
-        &updates.events[2].event,
-        atman_proto::ServerEvent::Signal {
-            signal: atman_proto::SessionSignal::CompactionFailed { reason, .. }
-        } if reason == "review rejected"
-    ));
+    assert!(updates.events.iter().all(|event| matches!(
+        event.event,
+        atman_proto::ServerEvent::ProjectionDelta { .. }
+    )));
     let after = state.session_snapshot(&sid, "alice").await.unwrap();
-    assert_eq!(after.projection.revision, before.projection.revision);
+    assert!(after.projection.revision.0 >= before.projection.revision.0 + 3);
+    assert!(after.projection.compactions.is_empty());
+    assert!(matches!(
+        after.projection.transcript.last(),
+        Some(atman_proto::TranscriptItem::Compaction {
+            outcome: atman_proto::CompactionOutcome::Failed,
+            summary,
+            ..
+        }) if summary == "review rejected"
+    ));
     assert_eq!(after.cursor, updates.next_cursor);
 }
 

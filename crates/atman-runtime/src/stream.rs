@@ -290,6 +290,11 @@ pub enum StreamFrame {
         metrics: crate::activity::EditMetrics,
     },
     CompactionSummary {
+        operation_id: crate::event::CompactionOperationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         phase: CompactionPhase,
         range_start: usize,
         range_end: usize,
@@ -299,6 +304,11 @@ pub enum StreamFrame {
         compacted_count: usize,
     },
     CompactionDelta {
+        operation_id: crate::event::CompactionOperationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         range_start: usize,
         range_end: usize,
         text: String,
@@ -390,6 +400,12 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
             run_id: Some(rid), ..
         }
         | StreamFrame::FileEditApplied {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::CompactionSummary {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::CompactionDelta {
             run_id: Some(rid), ..
         }
         | StreamFrame::Notification(NotificationFrame {
@@ -618,7 +634,11 @@ mod tests {
 
     #[test]
     fn compaction_summary_round_trips() {
+        let expected_operation_id = crate::event::CompactionOperationId::now();
         let f = StreamFrame::CompactionSummary {
+            operation_id: expected_operation_id.clone(),
+            context_id: Some("context-1".into()),
+            run_id: Some("run-1".into()),
             phase: CompactionPhase::Running,
             range_start: 3,
             range_end: 11,
@@ -629,14 +649,17 @@ mod tests {
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(frame_run_id(&back), Some("run-1"));
         match back {
             StreamFrame::CompactionSummary {
                 phase,
                 range_start,
                 range_end,
                 compacted_count,
+                operation_id,
                 ..
             } => {
+                assert_eq!(operation_id, expected_operation_id);
                 assert_eq!(phase, CompactionPhase::Running);
                 assert_eq!(range_start, 3);
                 assert_eq!(range_end, 11);

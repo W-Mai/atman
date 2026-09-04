@@ -383,6 +383,9 @@ pub enum OutputItem {
         expanded: bool,
     },
     CompactionSummary {
+        operation_id: Option<String>,
+        context_id: Option<String>,
+        run_id: Option<String>,
         phase: CompactionPhase,
         range_start: usize,
         range_end: usize,
@@ -3587,6 +3590,9 @@ impl AppState {
                 });
             }
             StreamFrame::CompactionSummary {
+                operation_id,
+                context_id,
+                run_id,
                 phase,
                 range_start,
                 range_end,
@@ -3595,14 +3601,14 @@ impl AppState {
                 after_tokens,
                 compacted_count,
             } => {
-                let existing_index = self.items.len().checked_sub(1).filter(|index| {
+                let operation_id = operation_id.to_string();
+                let existing_index = self.items.iter().position(|item| {
                     matches!(
-                        &self.items[*index],
+                        item,
                         OutputItem::CompactionSummary {
-                            range_start: current_start,
-                            range_end: current_end,
+                            operation_id: Some(current_operation_id),
                             ..
-                        } if *current_start == range_start && *current_end == range_end
+                        } if current_operation_id == &operation_id
                     )
                 });
                 if let Some(index) = existing_index {
@@ -3636,6 +3642,9 @@ impl AppState {
                     });
                 } else {
                     self.push_item(OutputItem::CompactionSummary {
+                        operation_id: Some(operation_id),
+                        context_id,
+                        run_id,
                         phase,
                         range_start,
                         range_end,
@@ -3648,17 +3657,15 @@ impl AppState {
                 }
             }
             StreamFrame::CompactionDelta {
-                range_start,
-                range_end,
-                text,
+                operation_id, text, ..
             } => {
+                let operation_id = operation_id.to_string();
                 if let Some(index) = self.items.iter().rposition(|item| {
                     matches!(item, OutputItem::CompactionSummary {
+                        operation_id: Some(current_operation_id),
                         phase: CompactionPhase::Running,
-                        range_start: current_start,
-                        range_end: current_end,
                         ..
-                    } if *current_start == range_start && *current_end == range_end)
+                    } if current_operation_id == &operation_id)
                 }) {
                     self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
                         let OutputItem::CompactionSummary { summary, .. } = item else {
@@ -5148,7 +5155,11 @@ mod tests {
     #[test]
     fn compaction_summary_frames_mutate_same_item() {
         let mut app = AppState::new("s".into(), None);
+        let operation_id = atman_runtime::event::CompactionOperationId::now();
         app.apply_stream_frame(StreamFrame::CompactionSummary {
+            operation_id: operation_id.clone(),
+            context_id: Some("context".into()),
+            run_id: Some("run".into()),
             phase: CompactionPhase::Running,
             range_start: 2,
             range_end: 8,
@@ -5158,6 +5169,9 @@ mod tests {
             compacted_count: 7,
         });
         app.apply_stream_frame(StreamFrame::CompactionSummary {
+            operation_id,
+            context_id: Some("context".into()),
+            run_id: Some("run".into()),
             phase: CompactionPhase::Finished,
             range_start: 2,
             range_end: 8,
@@ -5189,6 +5203,81 @@ mod tests {
             }
             _ => panic!("expected compaction summary item"),
         }
+    }
+
+    #[test]
+    fn compaction_frames_match_operation_across_intervening_output() {
+        let mut app = AppState::new("s".into(), None);
+        let first = atman_runtime::event::CompactionOperationId::now();
+        let second = atman_runtime::event::CompactionOperationId::now();
+        for operation_id in [first.clone(), second.clone()] {
+            app.apply_stream_frame(StreamFrame::CompactionSummary {
+                operation_id,
+                context_id: Some("context".into()),
+                run_id: Some("run".into()),
+                phase: CompactionPhase::Running,
+                range_start: 2,
+                range_end: 8,
+                summary: String::new(),
+                before_tokens: 100,
+                after_tokens: 0,
+                compacted_count: 7,
+            });
+            if app.items.len() == 1 {
+                app.push_note("intervening output", NoteLevel::Info);
+            }
+        }
+        app.apply_stream_frame(StreamFrame::CompactionDelta {
+            operation_id: first.clone(),
+            context_id: Some("context".into()),
+            run_id: Some("run".into()),
+            range_start: 2,
+            range_end: 8,
+            text: "first summary".into(),
+        });
+        app.apply_stream_frame(StreamFrame::CompactionSummary {
+            operation_id: first.clone(),
+            context_id: Some("context".into()),
+            run_id: Some("run".into()),
+            phase: CompactionPhase::Finished,
+            range_start: 2,
+            range_end: 8,
+            summary: "first complete".into(),
+            before_tokens: 100,
+            after_tokens: 40,
+            compacted_count: 7,
+        });
+
+        let first_item = app.items.iter().find(|item| {
+            matches!(
+                item,
+                OutputItem::CompactionSummary {
+                    operation_id: Some(operation_id),
+                    ..
+                } if operation_id == &first.to_string()
+            )
+        });
+        assert!(matches!(
+            first_item,
+            Some(OutputItem::CompactionSummary {
+                phase: CompactionPhase::Finished,
+                summary,
+                ..
+            }) if summary == "first complete"
+        ));
+        assert!(app.items.iter().any(|item| matches!(
+            item,
+            OutputItem::CompactionSummary {
+                operation_id: Some(operation_id),
+                phase: CompactionPhase::Running,
+                summary,
+                ..
+            } if operation_id == &second.to_string() && summary.is_empty()
+        )));
+        assert!(app.items.iter().any(|item| matches!(
+            item,
+            OutputItem::SystemNote { text, .. } if text == "intervening output"
+        )));
     }
 
     #[test]

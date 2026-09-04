@@ -81,6 +81,7 @@ pub(crate) struct CompactReviewResolutionCommit {
 
 pub(crate) struct CompactionRequestCommit {
     pub status: CompactionRequestStatus,
+    pub operation_id: Option<atman_proto::CompactionOperationId>,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
 }
@@ -929,18 +930,20 @@ impl SessionActor {
                 let _ = reply.send(result);
             }
             Command::RequestCompaction { providers, reply } => {
-                let status = if atman_runtime::compaction::start_manual_compact(
+                let operation_id = atman_runtime::compaction::start_manual_compact(
                     self.session.clone(),
                     self.session.context().clone(),
                     self.session.last_model(),
                     providers,
-                ) {
+                );
+                let status = if operation_id.is_some() {
                     CompactionRequestStatus::Accepted
                 } else {
                     CompactionRequestStatus::AlreadyRunning
                 };
                 let _ = reply.send(Ok(CompactionRequestCommit {
                     status,
+                    operation_id: operation_id.map(|id| atman_proto::CompactionOperationId(id.0)),
                     revision: self.projection.projection().revision,
                     cursor: self.event_cursor,
                 }));
@@ -1566,39 +1569,15 @@ impl SessionActor {
                     message,
                 },
             }),
-            StreamFrame::CompactionSummary {
-                phase: atman_runtime::stream::CompactionPhase::Running,
-                range_start,
-                range_end,
-                before_tokens,
-                compacted_count,
-                ..
-            } => Some(SessionSignal::CompactionStarted {
-                range_start: range_start as u64,
-                range_end: range_end as u64,
-                before_tokens,
-                compacted_count: compacted_count as u64,
-            }),
+            StreamFrame::CompactionSummary { .. } => None,
             StreamFrame::CompactionDelta {
-                range_start,
-                range_end,
-                text,
-            } if !text.is_empty() => Some(SessionSignal::CompactionText {
-                range_start: range_start as u64,
-                range_end: range_end as u64,
-                text,
-            }),
-            StreamFrame::CompactionSummary {
-                phase: atman_runtime::stream::CompactionPhase::Failed,
-                range_start,
-                range_end,
-                summary,
-                ..
-            } => Some(SessionSignal::CompactionFailed {
-                range_start: range_start as u64,
-                range_end: range_end as u64,
-                reason: summary,
-            }),
+                operation_id, text, ..
+            } => {
+                if let Some(delta) = self.projection.append_compaction_text(&operation_id, &text) {
+                    self.publish_projection_delta(delta);
+                }
+                None
+            }
             StreamFrame::TerminalChunk { handle, bytes, .. } if !bytes.is_empty() => self
                 .resource_id_for_handle(&handle)
                 .map(|resource_id| SessionSignal::TerminalBytes { resource_id, bytes }),
