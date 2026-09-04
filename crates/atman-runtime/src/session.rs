@@ -115,7 +115,8 @@ pub struct Session {
     dir: PathBuf,
     writer: std::sync::Mutex<Option<EventWriter>>,
     sink: EventSink,
-    context: std::sync::Arc<ContextState>,
+    context: std::sync::Mutex<std::sync::Arc<ContextState>>,
+    admission: std::sync::Mutex<()>,
     turns: Mutex<HashMap<TurnId, TurnState>>,
     background: Mutex<SessionBackground>,
     pub watch: WatchHub,
@@ -983,11 +984,12 @@ impl Session {
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
             sink: sink.clone(),
-            context: std::sync::Arc::new(ContextState::from_stream(
+            context: std::sync::Mutex::new(std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::new(events_handle),
                 CompactionState::new(),
                 sink,
-            )),
+            ))),
+            admission: std::sync::Mutex::new(()),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
@@ -1250,7 +1252,7 @@ impl Session {
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
             sink: sink.clone(),
-            context: std::sync::Arc::new(ContextState::from_stream(
+            context: std::sync::Mutex::new(std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::with_initial(
                     events_handle,
                     view.selection.context_id,
@@ -1259,7 +1261,8 @@ impl Session {
                 ),
                 compaction,
                 context_sink,
-            )),
+            ))),
+            admission: std::sync::Mutex::new(()),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
@@ -1310,11 +1313,12 @@ impl Session {
             dir: PathBuf::new(),
             writer: std::sync::Mutex::new(None),
             sink: sink.clone(),
-            context: std::sync::Arc::new(ContextState::from_stream(
+            context: std::sync::Mutex::new(std::sync::Arc::new(ContextState::from_stream(
                 crate::message_stream::MessageStream::new(events_handle),
                 CompactionState::new(),
                 sink,
-            )),
+            ))),
+            admission: std::sync::Mutex::new(()),
             output_store: output_store.clone(),
             tool_output_budget: Mutex::new(Default::default()),
             turns: Mutex::new(HashMap::new()),
@@ -1401,11 +1405,11 @@ impl Session {
     }
 
     pub fn compact_review_mode(&self) -> CompactReviewMode {
-        *self.context.compaction.review_mode.lock().unwrap()
+        *self.context().compaction.review_mode.lock().unwrap()
     }
 
     pub fn set_compact_review_mode(&self, mode: CompactReviewMode) {
-        *self.context.compaction.review_mode.lock().unwrap() = mode;
+        *self.context().compaction.review_mode.lock().unwrap() = mode;
     }
 
     pub fn read_files(
@@ -1537,7 +1541,7 @@ impl Session {
     }
 
     pub fn request_manual_compact(&self) {
-        self.context.request_manual_compact();
+        self.context().request_manual_compact();
     }
 
     pub fn set_goal(&self, goal: Option<String>) {
@@ -1559,8 +1563,9 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
+        let context = self.context();
         if tokens_in > 0 {
-            self.context
+            context
                 .compaction
                 .model_window_tokens
                 .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
@@ -1636,8 +1641,7 @@ impl Session {
             bucket.cache_write = bucket.cache_write.saturating_add(usage.cache_write);
         });
 
-        let updates_model_window = context
-            .is_some_and(|context| std::ptr::eq(context, self.context.as_ref()))
+        let updates_model_window = context.is_some_and(|context| self.is_current_context(context))
             && matches!(
                 (call_identity.scope, call_purpose),
                 (
@@ -1662,12 +1666,12 @@ impl Session {
         &self,
         key: &crate::context_plan::ContextUsageKey,
     ) -> Option<crate::context_plan::ContextUsageRecord> {
-        self.context.last_usage(key)
+        self.context().last_usage(key)
     }
 
     #[cfg(test)]
     pub(crate) fn context_epoch(&self) -> Option<String> {
-        self.context.compaction.context_epoch()
+        self.context().compaction.context_epoch()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1703,27 +1707,28 @@ impl Session {
     }
 
     pub fn last_input_tokens(&self) -> u64 {
-        self.context
+        self.context()
             .compaction
             .model_window_tokens
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.context.compaction.lock.lock().await
+    pub async fn acquire_compact_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.context().compaction.lock.clone().lock_owned().await
     }
 
     pub async fn acquire_compact_lock_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.context.compaction.lock.clone().lock_owned().await
+        self.acquire_compact_lock().await
     }
 
     pub fn compact_lock_handle(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        self.context.compaction.lock.clone()
+        self.context().compaction.lock.clone()
     }
 
     pub fn refresh_window_snapshot(&self) {
+        let context = self.context();
         let provider_tokens = self.last_input_tokens();
-        let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
+        let estimated = crate::compaction::estimate_tokens_for_messages(&context.messages());
         let window = if provider_tokens > 0 {
             provider_tokens
         } else {
@@ -1739,7 +1744,7 @@ impl Session {
         });
         let snap = self.watch.context.borrow();
         PersistedContextState {
-            context_id: self.context.context_id().cloned(),
+            context_id: context.context_id().cloned(),
             through_seq: Some(self.sink.published_seq()),
             model,
             window_tokens: snap.window_tokens,
@@ -1763,6 +1768,7 @@ impl Session {
     }
 
     pub fn set_current_model(&self, model: impl Into<String>) {
+        let context = self.context();
         let model = model.into();
         let budget = crate::model_registry::model_info(&model).context_budget;
         self.watch.context.send_modify(|snap| {
@@ -1776,7 +1782,7 @@ impl Session {
         });
         let snap = self.watch.context.borrow();
         PersistedContextState {
-            context_id: self.context.context_id().cloned(),
+            context_id: context.context_id().cloned(),
             through_seq: Some(self.sink.published_seq()),
             model,
             window_tokens: snap.window_tokens,
@@ -2008,32 +2014,37 @@ impl Session {
         turn_id: TurnId,
         specs: impl IntoIterator<Item = crate::context_plan::ContextRecordSpec>,
     ) -> Vec<crate::context_plan::ContextRecord> {
-        let mut messages = self.context.messages.lock().unwrap();
+        let context = self.context();
+        let mut messages = context.messages.lock().unwrap();
         let records = crate::context_plan::compile_context_records(&messages, specs);
         for record in &records {
             AppendMessageCommand {
                 msg: Message::context_record(turn_id.clone(), record.clone()),
                 flow_run_id: None,
             }
-            .execute_with_messages(self, &mut messages);
+            .execute_with_messages(self, &context, &mut messages);
         }
         records
     }
 
     pub fn messages(&self) -> crate::message_stream::MessageWindow {
-        self.context.messages()
+        self.context().messages()
     }
 
     pub fn messages_full(&self) -> std::sync::Arc<Vec<Message>> {
-        self.context.messages_full()
+        self.context().messages_full()
     }
 
-    pub fn context(&self) -> &std::sync::Arc<ContextState> {
-        &self.context
+    pub fn context(&self) -> std::sync::Arc<ContextState> {
+        self.context.lock().unwrap().clone()
+    }
+
+    pub(crate) fn is_current_context(&self, context: &ContextState) -> bool {
+        std::ptr::eq(context, self.context.lock().unwrap().as_ref())
     }
 
     pub fn messages_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<Message>>> {
-        self.context.messages.clone()
+        self.context().messages.clone()
     }
 
     pub fn message_count(&self) -> usize {
@@ -2139,8 +2150,9 @@ impl Session {
         let turn_id = msgs[range.start].turn_id.clone();
         let replacement = replace_range_with_summary(&msgs, &range, summary.clone(), turn_id);
         let summary_message = replacement.first().cloned();
+        let context = self.context();
         self.commit_window(
-            self.context(),
+            &context,
             &msgs,
             crate::compaction::ContextCompactResult {
                 operation_id: crate::event::CompactionOperationId::now(),
@@ -2219,7 +2231,7 @@ impl Session {
             ));
             return None;
         }
-        let selected = std::ptr::eq(context, self.context.as_ref());
+        let selected = self.is_current_context(context);
         let range_end = result.compacted_end.saturating_sub(1);
         if let Some(sink) = context.sink() {
             sink.emit(Event::CompactionStarted {
@@ -2326,6 +2338,62 @@ impl Session {
             flow_cancel: Some(flow_cancel),
         }
         .execute(self)
+    }
+
+    /// Accepts a root turn onto a new journal-backed context head.
+    ///
+    /// The source boundary, user message, and selected head are committed while
+    /// admissions are serialized. Provider work starts only after this method
+    /// returns and never holds the admission lock.
+    pub fn admit_turn_with_cancel(
+        &self,
+        mut user_msg: Message,
+        flow_cancel: CancellationToken,
+    ) -> std::io::Result<std::sync::Arc<ContextState>> {
+        let _admission = self.admission.lock().unwrap();
+        let turn_id = user_msg.turn_id.clone();
+        let mut turns = self.turns.lock().unwrap();
+        assert!(
+            !turns.contains_key(&turn_id),
+            "turn {turn_id} is already active"
+        );
+        let source = self.context();
+        let context = std::sync::Arc::new(source.fork(crate::event::ContextInheritance::Full)?);
+        user_msg.ensure_part_ids();
+        let mut messages = context.messages.lock().unwrap();
+        let sink = context.sink().expect("forked context has a journal");
+        let mut batch = sink.batch();
+        batch.emit(Event::TurnStart {
+            turn_id: turn_id.clone(),
+        });
+        batch.emit(Event::UserMsg {
+            turn_id: turn_id.clone(),
+            flow_run_id: None,
+            message: user_msg.clone(),
+        });
+        batch.emit(Event::ContextHeadSelected {
+            turn_id: turn_id.clone(),
+        });
+        messages.push(user_msg);
+        drop(batch);
+        drop(messages);
+        turns.insert(
+            turn_id.clone(),
+            TurnState {
+                flow_cancel,
+                streamed: false,
+            },
+        );
+        *self.context.lock().unwrap() = context.clone();
+        drop(turns);
+        let _ = self
+            .stream_tx()
+            .send(crate::stream::StreamFrame::TurnStarted {
+                turn_id: turn_id.to_string(),
+            });
+        drop(_admission);
+        self.refresh_window_snapshot();
+        Ok(context)
     }
 
     pub fn mark_streamed(&self, turn_id: &TurnId) {
@@ -2479,13 +2547,14 @@ impl Session {
     /// Consume pending nudges and corrections in creation order, preserving controls.
     /// Persists each rendered context message with its consumption state under the compaction lock.
     pub async fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
-        let _compact_guard = self.acquire_compact_lock().await;
+        let context = self.context();
+        let _compact_guard = context.compact_lock().lock().await;
         let mut out = Vec::new();
         while let Some(claim) = self
             .injection_queue
             .claim_steering(|inj| inj.turn_id == *turn_id)
         {
-            if let Some(injection) = claim.commit(Some(&self.context), || {}) {
+            if let Some(injection) = claim.commit(Some(&context), || {}) {
                 out.push(injection);
             }
         }
@@ -2578,11 +2647,17 @@ pub struct AppendMessageCommand {
 
 impl AppendMessageCommand {
     pub fn execute(&self, session: &Session) -> u64 {
-        let mut messages = session.context.messages.lock().unwrap();
-        self.execute_with_messages(session, &mut messages)
+        let context = session.context();
+        let mut messages = context.messages.lock().unwrap();
+        self.execute_with_messages(session, &context, &mut messages)
     }
 
-    fn execute_with_messages(&self, session: &Session, messages: &mut Vec<Message>) -> u64 {
+    fn execute_with_messages(
+        &self,
+        session: &Session,
+        context: &ContextState,
+        messages: &mut Vec<Message>,
+    ) -> u64 {
         let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
         let mut msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
             &self.msg,
@@ -2613,10 +2688,7 @@ impl AppendMessageCommand {
                 message: msg.clone(),
             },
         };
-        let sink = session
-            .context
-            .sink()
-            .expect("session context has a journal");
+        let sink = context.sink().expect("session context has a journal");
         let seq = sink.emit_returning_seq(event);
         messages.push(msg.clone());
         if !is_internal {
@@ -2790,6 +2862,87 @@ mod tests {
     fn write_events(dir: &Path, lines: &[&str]) {
         let path = dir.join("events.jsonl");
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn admitted_turns_advance_a_replay_safe_context_head() {
+        let root = TempDir::new().unwrap();
+        let session = Session::open(root.path()).unwrap();
+        let session_id = session.id().to_string();
+        let first_turn = TurnId::now();
+        let first = session
+            .admit_turn_with_cancel(
+                Message::user_text(first_turn.clone(), "first"),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        session.append_message(Message::assistant_text(first_turn, "first reply"), None);
+        let first_window = first.messages().to_vec();
+
+        let second_turn = TurnId::now();
+        let second = session
+            .admit_turn_with_cancel(
+                Message::user_text(second_turn.clone(), "second"),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+        assert!(std::sync::Arc::ptr_eq(&second, &session.context()));
+        assert_eq!(&second.messages()[..first_window.len()], first_window);
+
+        AppendMessageCommand {
+            msg: Message::assistant_text(second_turn.clone(), "late branch output"),
+            flow_run_id: None,
+        }
+        .execute_with_messages(&session, &first, &mut first.messages.lock().unwrap());
+        session.append_message(
+            Message::assistant_text(second_turn, "selected output"),
+            None,
+        );
+        let selected = session.messages().to_vec();
+        let selected_text = selected
+            .iter()
+            .map(Message::text_concat)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_text,
+            ["first", "first reply", "second", "selected output"]
+        );
+
+        let events = session.sink().snapshot_envelopes();
+        let heads = events
+            .iter()
+            .filter_map(|envelope| {
+                matches!(envelope.event, Event::ContextHeadSelected { .. })
+                    .then_some(envelope.context_id.as_ref())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            heads,
+            [first.context_id().unwrap(), second.context_id().unwrap()]
+        );
+        let replay = crate::projection::context::replay_default_context(events.iter()).unwrap();
+        assert_eq!(
+            replay
+                .window()
+                .iter()
+                .map(|(_, message)| message.text_concat())
+                .collect::<Vec<_>>(),
+            selected_text
+        );
+
+        session.flush_writer().await.unwrap();
+        session.shutdown().await;
+        drop(session);
+        let reopened = Session::open_existing(root.path(), &session_id).unwrap();
+        assert_eq!(reopened.messages().to_vec(), selected);
+        assert_eq!(
+            reopened.context().context_id(),
+            second.context_id(),
+            "the last admitted head must survive restart"
+        );
+        reopened.shutdown().await;
     }
 
     #[tokio::test]
@@ -3560,7 +3713,7 @@ mod tests {
 
         session
             .commit_rewritten_window(
-                session.context(),
+                &session.context(),
                 replacement.clone(),
                 before_tokens,
                 &original,
@@ -3611,7 +3764,7 @@ mod tests {
             let original = session.messages();
             session
                 .commit_rewritten_window(
-                    session.context(),
+                    &session.context(),
                     checkpoint.clone(),
                     10_000,
                     &original,
@@ -3692,7 +3845,7 @@ mod tests {
 
         session
             .commit_compacted_window(
-                session.context(),
+                &session.context(),
                 "anchor".into(),
                 replacement.clone(),
                 range,
@@ -3770,7 +3923,7 @@ mod tests {
                         replacement[1] = Message::assistant_text(turn.clone(), "other rewrite");
                         session
                             .commit_rewritten_window(
-                                session.context(),
+                                &session.context(),
                                 replacement,
                                 tokens,
                                 &original,
@@ -3782,7 +3935,7 @@ mod tests {
                         let id = original[2].part_id(0, None, 1).unwrap();
                         assert!(
                             session
-                                .context
+                                .context()
                                 .degrade_attachment(id, "invalid_image", Some(turn.clone()), None)
                                 .is_some()
                         );
@@ -3798,7 +3951,7 @@ mod tests {
                 let mut frames = session.stream_subscribe();
                 let committed = if rewrite {
                     session.commit_rewritten_window(
-                        session.context(),
+                        &session.context(),
                         candidate.clone(),
                         tokens,
                         &original,
@@ -3806,7 +3959,7 @@ mod tests {
                     )
                 } else {
                     session.commit_compacted_window(
-                        session.context(),
+                        &session.context(),
                         "summary".into(),
                         candidate.clone(),
                         range,

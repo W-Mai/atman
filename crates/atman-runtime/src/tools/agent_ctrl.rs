@@ -2114,7 +2114,7 @@ mod tests {
                 super::FlowEntryOptions {
                     turn_id: Some(turn.clone()),
                     context: Some(super::FlowEntryContext {
-                        state: Arc::clone(session.context()),
+                        state: session.context(),
                         injections: session.injection_queue(),
                     }),
                     ..Default::default()

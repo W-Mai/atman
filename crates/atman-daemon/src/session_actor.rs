@@ -932,7 +932,7 @@ impl SessionActor {
             Command::RequestCompaction { providers, reply } => {
                 let operation_id = atman_runtime::compaction::start_manual_compact(
                     self.session.clone(),
-                    self.session.context().clone(),
+                    self.session.context(),
                     self.session.last_model(),
                     providers,
                 );

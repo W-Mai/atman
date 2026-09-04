@@ -270,9 +270,10 @@ pub async fn maybe_auto_compact(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
 ) {
+    let context = session.context();
     maybe_auto_compact_with_budget(
         session,
-        session.context(),
+        &context,
         model,
         providers,
         CompactionBudgetContext::default(),
@@ -310,7 +311,7 @@ pub fn spawn_auto_compact(
     model: String,
     providers: crate::provider::ProviderRegistry,
 ) {
-    let context = session.context().clone();
+    let context = session.context();
     let task_session = session.clone();
     session.spawn_background(move |cancellation| async move {
         let compact_guard = tokio::select! {
@@ -339,7 +340,7 @@ pub async fn start_auto_compact(
     model: String,
     providers: crate::provider::ProviderRegistry,
 ) {
-    let context = session.context().clone();
+    let context = session.context();
     start_auto_compact_with_budget(
         session,
         context,
@@ -450,7 +451,7 @@ async fn maybe_auto_compact_locked(
         flow_run_id,
         operation_id,
     } = schedule;
-    let selected = std::ptr::eq(context, session.context().as_ref());
+    let selected = session.is_current_context(context);
     let options = CompactionOptions {
         budget,
         forced: context.take_manual_compact_request(),
@@ -1397,7 +1398,7 @@ mod tests {
         for forced in [false, true] {
             assert!(matches!(
                 request_review_if_enabled(
-                    Some(&reviews), session.context(), forced, &slice, &range, 100, "root".into()
+                    Some(&reviews), &session.context(), forced, &slice, &range, 100, "root".into()
                 ).await,
                 ReviewOutcome::Commit(summary) if summary == "root"
             ));
@@ -1521,7 +1522,7 @@ mod tests {
         assert!(
             start_manual_compact(
                 session.clone(),
-                session.context().clone(),
+                session.context(),
                 "test".into(),
                 crate::provider::ProviderRegistry::new(),
             )
@@ -1533,7 +1534,7 @@ mod tests {
         assert!(
             start_manual_compact(
                 session.clone(),
-                session.context().clone(),
+                session.context(),
                 "test".into(),
                 crate::provider::ProviderRegistry::new(),
             )
@@ -1632,7 +1633,7 @@ mod tests {
                                 for message in &history {
                                     session.append_message(message.clone(), None);
                                 }
-                                session.context().clone()
+                                session.context()
                             };
                             let original_default = session.messages();
                             let mut snapshot = session.subscribe_context();

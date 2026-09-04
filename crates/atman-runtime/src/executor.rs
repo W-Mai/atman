@@ -16,6 +16,7 @@ use crate::value::Value;
 pub struct RootInvocation {
     pub turn_id: Option<TurnId>,
     pub session: Option<std::sync::Arc<Session>>,
+    pub context: Option<std::sync::Arc<crate::context_state::ContextState>>,
     pub first_run_id: Option<FlowRunId>,
     pub flow_cancel: Option<tokio_util::sync::CancellationToken>,
     pub env: InvocationEnv,
@@ -202,6 +203,10 @@ impl Executor {
         run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
         let session = invocation.session.clone();
+        let context = invocation
+            .context
+            .clone()
+            .or_else(|| session.as_ref().map(|session| session.context()));
         let turn_id = invocation
             .turn_id
             .clone()
@@ -332,8 +337,11 @@ impl Executor {
         tool_ctx.session_id = Some(session_id);
         let mut root_entry = None;
         if let Some(sess) = session.as_ref() {
+            let context = context
+                .clone()
+                .expect("session-backed invocation has a context");
             tool_ctx.stream_tx = Some(sess.stream_tx());
-            tool_ctx = tool_ctx.with_session_runtime(sess.clone());
+            tool_ctx = tool_ctx.with_session_context(sess.clone(), context.clone());
             // Root controls and context share the session's canonical storage.
             let entry = sess.flow_registry.create_entry(
                 "root".to_string(),
@@ -344,7 +352,7 @@ impl Executor {
                     cancel: flow_cancel.clone(),
                     turn_id: turn_id.clone(),
                     context: Some(crate::tools::agent_ctrl::FlowEntryContext {
-                        state: std::sync::Arc::clone(sess.context()),
+                        state: context,
                         injections: sess.injection_queue(),
                     }),
                     ..Default::default()

@@ -161,7 +161,7 @@ flow cached() -> string {
     let replacement = vec![Message::assistant_text(TurnId::now(), "persisted omission")];
     session
         .commit_rewritten_window(
-            session.context(),
+            &session.context(),
             replacement,
             before_tokens,
             &before,

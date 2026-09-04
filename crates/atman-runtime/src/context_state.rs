@@ -477,7 +477,7 @@ mod tests {
                     text: "retained user".into(),
                 };
                 session
-                    .commit_rewritten_window(session.context(), replacement, 10_000, &original, 1)
+                    .commit_rewritten_window(&session.context(), replacement, 10_000, &original, 1)
                     .unwrap();
                 if restored {
                     let id = session.id().to_string();
@@ -486,7 +486,7 @@ mod tests {
                     session = crate::Session::open_existing(dir.path(), &id).unwrap();
                     assert!(session.sink().snapshot_envelopes().is_empty());
                 }
-                let source = session.context().clone();
+                let source = session.context();
                 let identity = crate::context_plan::ContextCallIdentity::detached();
                 let purpose = crate::context_plan::ContextCallPurpose::General;
                 let usage_key = crate::context_plan::ContextUsageKey {
@@ -720,7 +720,7 @@ mod tests {
             let owner = if detached {
                 &context
             } else {
-                session.context()
+                &session.context()
             };
             let original = owner.messages_handle().lock().unwrap().clone();
             assert!(matches!(
@@ -742,7 +742,7 @@ mod tests {
                 assert!(
                     session
                         .commit_rewritten_window(
-                            session.context(),
+                            &session.context(),
                             replacement.clone(),
                             100_000,
                             &original,
@@ -798,7 +798,7 @@ mod tests {
         ] {
             let session = Arc::new(crate::session::Session::open_ephemeral());
             let context = if matches!(writer_kind, "root" | "root-record" | "fork") {
-                session.context().clone()
+                session.context()
             } else {
                 Arc::new(ContextState::new(Vec::new(), Some(session.sink().clone())))
             };
@@ -925,7 +925,7 @@ mod tests {
         let child_state = Arc::new(ContextState::new(Vec::new(), None));
         let child = root.clone().with_context(child_state.clone());
         let inline = child.clone();
-        assert!(Arc::ptr_eq(root.context().unwrap(), session.context()));
+        assert!(Arc::ptr_eq(root.context().unwrap(), &session.context()));
         assert!(Arc::ptr_eq(inline.context().unwrap(), &child_state));
         assert!(child.session_runtime().is_none());
         let _guard = child_state.compact_lock().lock().await;

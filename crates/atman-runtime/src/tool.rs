@@ -310,18 +310,26 @@ impl ToolCtx {
         self
     }
 
-    pub fn with_session_runtime(
+    pub fn with_session_runtime(self, session: std::sync::Arc<crate::session::Session>) -> Self {
+        let context = session.context();
+        self.with_session_context(session, context)
+    }
+
+    pub(crate) fn with_session_context(
         mut self,
         session: std::sync::Arc<crate::session::Session>,
+        context: std::sync::Arc<crate::context_state::ContextState>,
     ) -> Self {
+        let context_sink = context.sink().expect("session context must have a journal");
+        assert!(std::sync::Arc::ptr_eq(
+            &context_sink.events_handle(),
+            &session.sink().events_handle(),
+        ));
         self.forms = Some(session.forms());
         self.compact_reviews = Some(session.compact_reviews());
         self.watch_hub = Some(std::sync::Arc::clone(&session.watch_hub));
         self.flow_registry = Some(std::sync::Arc::clone(&session.flow_registry));
-        self.context_owner = Some(ContextOwner::Session {
-            context: std::sync::Arc::clone(session.context()),
-            session,
-        });
+        self.context_owner = Some(ContextOwner::Session { session, context });
         self
     }
 

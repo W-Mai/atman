@@ -47,7 +47,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
 
     let root_plan = ContextPlanId::now();
     session.record_context_plan_call(
-        Some(session.context()),
+        Some(&session.context()),
         "root-provider",
         "root-model",
         Some(root_plan.clone()),
@@ -63,7 +63,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         None,
     );
     session.record_context_plan_call(
-        Some(session.context()),
+        Some(&session.context()),
         "child-provider",
         "child-model",
         Some(ContextPlanId::now()),

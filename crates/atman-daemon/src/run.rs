@@ -851,6 +851,7 @@ async fn run_flow_inner(
             atman_runtime::RootInvocation {
                 turn_id: Some(turn_id.clone()),
                 session: Some(session.clone()),
+                context: None,
                 first_run_id: Some(run_id),
                 flow_cancel: Some(flow_cancel),
                 env: invocation_env,

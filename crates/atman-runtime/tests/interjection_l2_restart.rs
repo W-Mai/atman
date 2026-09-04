@@ -207,7 +207,7 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
                 }
             }
             let entry = session.flow_registry.lookup("root").unwrap();
-            assert!(Arc::ptr_eq(&entry.context, session.context()));
+            assert!(Arc::ptr_eq(&entry.context, &session.context()));
             assert!(Arc::ptr_eq(
                 entry.context.compact_lock(),
                 &session.compact_lock_handle()
@@ -402,7 +402,7 @@ async fn spawned_corrections_preserve_child_history_without_parent_or_output_lea
             ));
             assert_eq!(entry.turn_id, turn);
             assert_ne!(entry.child_run_id, parent_run);
-            assert!(!Arc::ptr_eq(&entry.context, session.context()));
+            assert!(!Arc::ptr_eq(&entry.context, &session.context()));
             assert!(!Arc::ptr_eq(
                 entry.context.compact_lock(),
                 &session.compact_lock_handle()
