@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Compaction targets** — budget-aware compaction, manual scheduling, and session compaction commits require the target `ContextState`. Manual request consumption is internal to that owner.
 - **Attachment rejection ownership** — the session-wide `Session::record_attachment_degrade` method is removed. Managed LLM calls apply image rejection patches through their bound message context.
 - **Attachment patch addresses** — `Event::AttachmentDegraded` carries a shared `AttachmentPatch` with an exclusive stable-ID or legacy-position target. Existing JSONL position addresses remain readable; mixed and incomplete addresses are rejected. Message projections expose optional context, checkpoint, and image identities.
 - **Attachment error identities** — `RuntimeError::AttachmentError` includes an optional `part_id`, and `attachment_store::image_base64` accepts the current image part identity. Local encoding failures retain that identity; unlocated remote and import errors leave it unset.
@@ -41,6 +42,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Compaction scheduling ownership** — automatic scheduling, manual requests, and overflow retries retain the selected message context through locking, summarization, and checkpoint publication. Default-window statistics and streaming panels are not replaced by another context's compaction.
 - **Message-view scope isolation** — unscoped session history no longer consumes messages, checkpoints, or attachment patches from typed contexts. Live and restored default windows preserve their own history while selected context replay retains inherited messages and branch-local changes.
 - **Canonical context journals** — context owners retain their history event sink independently of tool diagnostics. Captured steering and attachment patches publish through that owner, preserving context scope during live updates and replay even when the control queue or diagnostic sink uses another scope.
 - **Context usage ownership** — general LLM calls update the calling context's window usage. Calls belonging to another context retain their own usage records and contribute to session totals without replacing the default context's model, window, or latency statistics.

@@ -79,6 +79,18 @@ impl ContextState {
         &self.compaction.lock
     }
 
+    pub(crate) fn request_manual_compact(&self) {
+        self.compaction
+            .manual_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn take_manual_compact_request(&self) -> bool {
+        self.compaction
+            .manual_pending
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Publishes only against an unchanged source, while holding the message lock.
     pub(crate) fn commit_compaction(
         &self,
@@ -332,7 +344,13 @@ mod tests {
             } else {
                 assert!(
                     session
-                        .commit_rewritten_window(replacement.clone(), 100_000, &original, 1)
+                        .commit_rewritten_window(
+                            session.context(),
+                            replacement.clone(),
+                            100_000,
+                            &original,
+                            1
+                        )
                         .is_some()
                 );
             }

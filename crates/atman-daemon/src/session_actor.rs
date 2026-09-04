@@ -941,6 +941,7 @@ impl SessionActor {
             Command::RequestCompaction { providers, reply } => {
                 let status = if atman_runtime::compaction::start_manual_compact(
                     self.session.clone(),
+                    self.session.context().clone(),
                     self.session.last_model(),
                     providers,
                 ) {

@@ -272,6 +272,7 @@ pub async fn maybe_auto_compact(
 ) {
     maybe_auto_compact_with_budget(
         session,
+        session.context(),
         model,
         providers,
         CompactionBudgetContext::default(),
@@ -281,12 +282,13 @@ pub async fn maybe_auto_compact(
 
 pub async fn maybe_auto_compact_with_budget(
     session: &crate::session::Session,
+    context: &crate::context_state::ContextState,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
-    let _compact_guard = session.acquire_compact_lock().await;
-    maybe_auto_compact_locked(session, model, providers, budget_context).await;
+    let _compact_guard = context.compact_lock().lock().await;
+    maybe_auto_compact_locked(session, context, model, providers, budget_context).await;
 }
 
 pub fn spawn_auto_compact(
@@ -294,6 +296,7 @@ pub fn spawn_auto_compact(
     model: String,
     providers: crate::provider::ProviderRegistry,
 ) {
+    let context = session.context().clone();
     tokio::task::spawn_blocking(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -303,7 +306,14 @@ pub fn spawn_auto_compact(
             return;
         };
         rt.block_on(async move {
-            maybe_auto_compact(&session, &model, &providers).await;
+            maybe_auto_compact_with_budget(
+                &session,
+                &context,
+                &model,
+                &providers,
+                CompactionBudgetContext::default(),
+            )
+            .await;
         });
     });
 }
@@ -313,8 +323,10 @@ pub async fn start_auto_compact(
     model: String,
     providers: crate::provider::ProviderRegistry,
 ) {
+    let context = session.context().clone();
     start_auto_compact_with_budget(
         session,
+        context,
         model,
         providers,
         CompactionBudgetContext::default(),
@@ -324,28 +336,38 @@ pub async fn start_auto_compact(
 
 pub async fn start_auto_compact_with_budget(
     session: std::sync::Arc<crate::session::Session>,
+    context: std::sync::Arc<crate::context_state::ContextState>,
     model: String,
     providers: crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
-    let compact_guard = session.acquire_compact_lock_owned().await;
-    spawn_locked_compact(session, model, providers, budget_context, compact_guard);
+    let compact_guard = context.compact_lock().clone().lock_owned().await;
+    spawn_locked_compact(
+        session,
+        context,
+        model,
+        providers,
+        budget_context,
+        compact_guard,
+    );
 }
 
 pub fn start_manual_compact(
     session: std::sync::Arc<crate::session::Session>,
+    context: std::sync::Arc<crate::context_state::ContextState>,
     mut model: String,
     providers: crate::provider::ProviderRegistry,
 ) -> bool {
-    let Ok(compact_guard) = session.compact_lock_handle().try_lock_owned() else {
+    let Ok(compact_guard) = context.compact_lock().clone().try_lock_owned() else {
         return false;
     };
     if model.is_empty() {
         model = "smart".into();
     }
-    session.request_manual_compact();
+    context.request_manual_compact();
     spawn_locked_compact(
         session,
+        context,
         model,
         providers,
         CompactionBudgetContext::default(),
@@ -356,6 +378,7 @@ pub fn start_manual_compact(
 
 fn spawn_locked_compact(
     session: std::sync::Arc<crate::session::Session>,
+    context: std::sync::Arc<crate::context_state::ContextState>,
     model: String,
     providers: crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
@@ -371,7 +394,7 @@ fn spawn_locked_compact(
             return;
         };
         rt.block_on(async move {
-            maybe_auto_compact_locked(&session, &model, &providers, budget_context).await;
+            maybe_auto_compact_locked(&session, &context, &model, &providers, budget_context).await;
             drop(compact_guard);
         });
     });
@@ -379,18 +402,19 @@ fn spawn_locked_compact(
 
 async fn maybe_auto_compact_locked(
     session: &crate::session::Session,
+    context: &crate::context_state::ContextState,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
     budget_context: CompactionBudgetContext,
 ) {
-    let forced = session.take_manual_compact_request();
+    let forced = context.take_manual_compact_request();
     let info = crate::model_registry::model_info(model);
     let trigger = info.compaction_trigger_threshold();
     let target = budget_context
         .history_budget(&info)
         .map(|budget| budget.min(info.compaction_target_after()))
         .unwrap_or_else(|| info.compaction_target_after());
-    let msgs = session.messages();
+    let msgs = context.messages();
     let window_tokens = estimate_tokens_for_messages(&msgs);
     let current = budget_context.estimated_input_tokens(window_tokens);
     if !forced && current <= trigger {
@@ -405,6 +429,7 @@ async fn maybe_auto_compact_locked(
         let after_tokens = estimate_tokens_for_messages(&replacement);
         if rewritten_count == 0 || after_tokens >= window_tokens || after_tokens > target {
             session.emit_compact_warning(
+                context,
                 model,
                 current,
                 trigger,
@@ -413,10 +438,17 @@ async fn maybe_auto_compact_locked(
             );
             return;
         }
-        match session.commit_rewritten_window(replacement, window_tokens, &msgs, rewritten_count) {
+        match session.commit_rewritten_window(
+            context,
+            replacement,
+            window_tokens,
+            &msgs,
+            rewritten_count,
+        ) {
             Some(_) => {}
             None => {
                 session.emit_compact_warning(
+                    context,
                     model,
                     current,
                     trigger,
@@ -427,9 +459,9 @@ async fn maybe_auto_compact_locked(
         }
         return;
     };
-    let _ = session
-        .stream_tx()
-        .send(crate::stream::StreamFrame::CompactionSummary {
+    let stream_tx = std::ptr::eq(context, session.context().as_ref()).then(|| session.stream_tx());
+    if let Some(tx) = &stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
             phase: crate::stream::CompactionPhase::Running,
             range_start: range.start,
             range_end: range.end.saturating_sub(1),
@@ -438,10 +470,10 @@ async fn maybe_auto_compact_locked(
             after_tokens: 0,
             compacted_count: range.end - range.start,
         });
-    let send_failed = |session: &crate::session::Session, reason: &str| {
-        let _ = session
-            .stream_tx()
-            .send(crate::stream::StreamFrame::CompactionSummary {
+    }
+    let send_failed = |reason: &str| {
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::CompactionSummary {
                 phase: crate::stream::CompactionPhase::Failed,
                 range_start: range.start,
                 range_end: range.end.saturating_sub(1),
@@ -450,6 +482,7 @@ async fn maybe_auto_compact_locked(
                 after_tokens: current,
                 compacted_count: range.end - range.start,
             });
+        }
     };
     let mut filtered: Vec<Message> = msgs[range.start..range.end].to_vec();
     filter_orphan_tool_messages(&mut filtered);
@@ -458,26 +491,28 @@ async fn maybe_auto_compact_locked(
         .unwrap_or_else(|| (None, filtered.clone()));
     let range_start = range.start;
     let range_end = range.end.saturating_sub(1);
-    let stream_tx = session.stream_tx();
-    let on_delta: std::sync::Arc<dyn Fn(String) + Send + Sync> = std::sync::Arc::new(move |text| {
-        let _ = stream_tx.send(crate::stream::StreamFrame::CompactionDelta {
-            range_start,
-            range_end,
-            text,
-        });
+    let on_delta = stream_tx.clone().map(|tx| {
+        std::sync::Arc::new(move |text| {
+            let _ = tx.send(crate::stream::StreamFrame::CompactionDelta {
+                range_start,
+                range_end,
+                text,
+            });
+        }) as std::sync::Arc<dyn Fn(String) + Send + Sync>
     });
     let summary = match generate_llm_summary_with_delta(
         anchor.as_deref(),
         &new_messages,
         model,
         providers,
-        Some(on_delta),
+        on_delta,
     )
     .await
     {
         Ok(text) => text,
         Err(err) => {
             session.emit_compact_warning(
+                context,
                 model,
                 current,
                 trigger,
@@ -496,10 +531,7 @@ async fn maybe_auto_compact_locked(
         {
             ReviewOutcome::Commit(s) => s,
             ReviewOutcome::Rejected => {
-                send_failed(
-                    session,
-                    "compaction rejected by user; keeping full transcript",
-                );
+                send_failed("compaction rejected by user; keeping full transcript");
                 session.push_system_note(
                     "compaction rejected by user; keeping full transcript".into(),
                 );
@@ -510,13 +542,10 @@ async fn maybe_auto_compact_locked(
         build_budgeted_replacement(&msgs, &range, &final_summary, target, model, providers).await;
     let after_tokens = estimate_tokens_for_messages(&replacement);
     if after_tokens >= window_tokens {
-        send_failed(
-            session,
-            &format!(
-                "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
-                after_tokens, window_tokens
-            ),
-        );
+        send_failed(&format!(
+            "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
+            after_tokens, window_tokens
+        ));
         session.push_system_note(format!(
             "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
             after_tokens, window_tokens
@@ -524,6 +553,7 @@ async fn maybe_auto_compact_locked(
         return;
     }
     match session.commit_compacted_window(
+        context,
         final_summary,
         replacement,
         range.clone(),
@@ -540,11 +570,9 @@ async fn maybe_auto_compact_locked(
             ));
         }
         None => {
-            send_failed(
-                session,
-                "message window changed before compaction committed",
-            );
+            send_failed("message window changed before compaction committed");
             session.emit_compact_warning(
+                context,
                 model,
                 current,
                 trigger,
@@ -1292,14 +1320,16 @@ mod tests {
         let held = session.acquire_compact_lock_owned().await;
         assert!(!start_manual_compact(
             session.clone(),
+            session.context().clone(),
             "test".into(),
             crate::provider::ProviderRegistry::new(),
         ));
-        assert!(!session.take_manual_compact_request());
+        assert!(!session.context().take_manual_compact_request());
         drop(held);
 
         assert!(start_manual_compact(
             session.clone(),
+            session.context().clone(),
             "test".into(),
             crate::provider::ProviderRegistry::new(),
         ));
@@ -1310,7 +1340,237 @@ mod tests {
         .await
         .expect("manual compaction should release its lock");
         drop(completed);
-        assert!(!session.take_manual_compact_request());
+        assert!(!session.context().take_manual_compact_request());
+    }
+
+    #[test]
+    fn compaction_scheduling_preserves_the_selected_owner() {
+        use crate::context_state::{CompactionState, ContextState};
+        use crate::event::{ContextBase, ContextId, ContextInheritance, Event};
+        use crate::message_stream::MessageStream;
+        use std::sync::Arc;
+
+        let _registry = crate::model_registry::MODEL_CONFIG_LOCK.lock().unwrap();
+        crate::model_registry::register_model_entries(vec![(
+            "context-compact-probe".into(),
+            crate::model_registry::ModelEntry {
+                model: "context-compact-probe".into(),
+                context_budget: Some(40_000),
+                compact_threshold_ratio: Some(0.8),
+                ..Default::default()
+            },
+        )]);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for default_owner in [false, true] {
+                    for retained_rewrite in [false, true] {
+                        for mode in ["auto", "manual", "overflow"] {
+                            let session = Arc::new(crate::Session::open_ephemeral());
+                            let providers = crate::provider::ProviderRegistry::new();
+                            providers.register(Arc::new(
+                                crate::providers::mock::MockProvider::new("context-compact-probe")
+                                    .with_fallback(crate::value::Value::Str(
+                                        "scoped summary".into(),
+                                    )),
+                            ));
+                            let history = if retained_rewrite {
+                                vec![
+                                    user("request"),
+                                    assistant(&"x".repeat(100_000)),
+                                    user("next"),
+                                ]
+                            } else {
+                                (0..20)
+                                    .map(|i| {
+                                        if i % 2 == 0 {
+                                            user(&"x".repeat(4_000))
+                                        } else {
+                                            assistant(&"x".repeat(4_000))
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            };
+                            let id = (!default_owner).then(ContextId::now);
+                            let context = if let Some(id) = &id {
+                                session.append_message(user("unrelated default window"), None);
+                                let sink = session.sink().clone().with_context(id.clone());
+                                sink.emit(Event::ContextCreated {
+                                    base: None,
+                                    inheritance: ContextInheritance::Full,
+                                });
+                                for message in &history {
+                                    sink.emit(if message.role == MessageRole::User {
+                                        Event::UserMsg {
+                                            turn_id: message.turn_id.clone(),
+                                            flow_run_id: None,
+                                            message: message.clone(),
+                                        }
+                                    } else {
+                                        Event::AssistantMsg {
+                                            turn_id: message.turn_id.clone(),
+                                            flow_run_id: None,
+                                            message: message.clone(),
+                                        }
+                                    });
+                                }
+                                Arc::new(ContextState::from_stream(
+                                    MessageStream::from_context(sink.events_handle(), id.clone())
+                                        .unwrap(),
+                                    history.clone(),
+                                    CompactionState::new(),
+                                    sink,
+                                ))
+                            } else {
+                                for message in &history {
+                                    session.append_message(message.clone(), None);
+                                }
+                                session.context().clone()
+                            };
+                            let original_default = session.messages();
+                            let mut snapshot = session.subscribe_context();
+                            snapshot.borrow_and_update();
+                            let mut frames = session.stream_subscribe();
+                            let default_lock = if default_owner {
+                                None
+                            } else {
+                                session.request_manual_compact();
+                                Some(session.acquire_compact_lock().await)
+                            };
+                            let budget = CompactionBudgetContext {
+                                fixed_input_tokens: Some(20_000),
+                            };
+                            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                                match mode {
+                                    "auto" => {
+                                        start_auto_compact_with_budget(
+                                            session.clone(),
+                                            context.clone(),
+                                            "context-compact-probe".into(),
+                                            providers,
+                                            budget,
+                                        )
+                                        .await
+                                    }
+                                    "manual" => {
+                                        let held = context.compact_lock().lock().await;
+                                        assert!(!start_manual_compact(
+                                            session.clone(),
+                                            context.clone(),
+                                            "context-compact-probe".into(),
+                                            providers.clone()
+                                        ));
+                                        assert!(!context.take_manual_compact_request());
+                                        drop(held);
+                                        assert!(start_manual_compact(
+                                            session.clone(),
+                                            context.clone(),
+                                            "context-compact-probe".into(),
+                                            providers
+                                        ));
+                                    }
+                                    "overflow" => {
+                                        context.request_manual_compact();
+                                        maybe_auto_compact_with_budget(
+                                            &session,
+                                            &context,
+                                            "context-compact-probe",
+                                            &providers,
+                                            budget,
+                                        )
+                                        .await;
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                drop(context.compact_lock().lock().await);
+                            })
+                            .await
+                            .expect("compaction must use the selected lock and release it");
+                            assert!(!context.take_manual_compact_request());
+                            let after = context.messages();
+                            assert!(
+                                estimate_tokens_for_messages(&after)
+                                    < estimate_tokens_for_messages(&history),
+                                "{default_owner}/{retained_rewrite}/{mode}"
+                            );
+                            assert_eq!(*context.messages_handle().lock().unwrap(), after.to_vec());
+                            assert_eq!(*context.messages_full(), history);
+                            assert_eq!(
+                                context.epoch(),
+                                Some(crate::context_state::checkpoint_epoch_digest(&after))
+                            );
+                            assert_eq!(
+                                context
+                                    .compaction
+                                    .model_window_tokens
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                estimate_tokens_for_messages(&after)
+                            );
+                            let envelopes = session.sink().snapshot_envelopes();
+                            for event in &envelopes {
+                                if matches!(
+                                    event.event,
+                                    Event::ContextCompact { .. }
+                                        | Event::CompactionSummary { .. }
+                                        | Event::Checkpoint { .. }
+                                ) {
+                                    assert_eq!(event.context_id, id);
+                                }
+                            }
+                            let base = if let Some(id) = id {
+                                ContextBase::Context {
+                                    context_id: id,
+                                    through_seq: session.sink().published_seq(),
+                                }
+                            } else {
+                                ContextBase::LegacyRoot {
+                                    through_seq: session.sink().published_seq(),
+                                }
+                            };
+                            let replay =
+                                crate::projection::context::replay_context(&envelopes, &base)
+                                    .unwrap();
+                            assert_eq!(
+                                replay
+                                    .window()
+                                    .iter()
+                                    .map(|(_, message)| message.clone())
+                                    .collect::<Vec<_>>(),
+                                after.to_vec()
+                            );
+                            assert_eq!(
+                                replay
+                                    .raw
+                                    .iter()
+                                    .map(|(_, message)| message.clone())
+                                    .collect::<Vec<_>>(),
+                                history
+                            );
+                            if !default_owner {
+                                assert_eq!(session.messages().to_vec(), original_default.to_vec());
+                                assert_eq!(session.context_epoch(), None);
+                                assert!(!snapshot.has_changed().unwrap());
+                                assert!(session.context().take_manual_compact_request());
+                                while let Ok(frame) = frames.try_recv() {
+                                    assert!(!matches!(
+                                        frame,
+                                        crate::stream::StreamFrame::CompactionSummary { .. }
+                                            | crate::stream::StreamFrame::CompactionDelta { .. }
+                                    ));
+                                }
+                            } else {
+                                assert_eq!(
+                                    snapshot.borrow().window_tokens,
+                                    estimate_tokens_for_messages(&after)
+                                );
+                            }
+                            drop(default_lock);
+                        }
+                    }
+                }
+            });
     }
 
     #[tokio::test]

@@ -1458,17 +1458,7 @@ impl Session {
     }
 
     pub fn request_manual_compact(&self) {
-        self.context
-            .compaction
-            .manual_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn take_manual_compact_request(&self) -> bool {
-        self.context
-            .compaction
-            .manual_pending
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        self.context.request_manual_compact();
     }
 
     pub fn set_goal(&self, goal: Option<String>) {
@@ -2002,6 +1992,7 @@ impl Session {
 
     pub fn emit_compact_warning(
         &self,
+        context: &ContextState,
         model: &str,
         current_tokens: u64,
         threshold: u64,
@@ -2011,13 +2002,18 @@ impl Session {
         let message = format!(
             "context {current_tokens} > threshold {threshold} (budget {budget}, model {model}); skipping compaction: {reason}"
         );
-        self.sink.emit(Event::WatchWarn {
-            turn_id: self.current_turn(),
-            flow_run_id: None,
-            target: "context.compaction".into(),
-            trigger: "auto_compact".into(),
-            message,
-        });
+        if let Some(sink) = context.sink() {
+            sink.emit(Event::WatchWarn {
+                turn_id: context
+                    .messages()
+                    .last()
+                    .map(|message| message.turn_id.clone()),
+                flow_run_id: None,
+                target: "context.compaction".into(),
+                trigger: "auto_compact".into(),
+                message,
+            });
+        }
         self.push_system_note(format!("[warn] compaction skipped: {reason}"));
     }
 
@@ -2035,6 +2031,7 @@ impl Session {
 
     pub fn commit_rewritten_window(
         &self,
+        context: &ContextState,
         replacement: Vec<Message>,
         before_tokens: u64,
         expected: &[Message],
@@ -2044,6 +2041,7 @@ impl Session {
             return None;
         }
         self.commit_window(
+            context,
             expected,
             crate::compaction::ContextCompactResult {
                 before_tokens,
@@ -2062,6 +2060,7 @@ impl Session {
 
     pub fn commit_compacted_window(
         &self,
+        context: &ContextState,
         summary: String,
         replacement: Vec<Message>,
         range: crate::compaction::CompactRange,
@@ -2072,6 +2071,7 @@ impl Session {
             return None;
         }
         self.commit_window(
+            context,
             expected,
             crate::compaction::ContextCompactResult {
                 before_tokens,
@@ -2101,6 +2101,7 @@ impl Session {
         let replacement = replace_range_with_summary(&msgs, &range, summary.clone(), turn_id);
         let summary_message = replacement.first().cloned();
         self.commit_window(
+            self.context(),
             &msgs,
             crate::compaction::ContextCompactResult {
                 before_tokens,
@@ -2117,6 +2118,7 @@ impl Session {
 
     fn commit_window(
         &self,
+        context: &ContextState,
         expected: &[Message],
         result: crate::compaction::ContextCompactResult,
         summary_message: Option<Message>,
@@ -2129,9 +2131,12 @@ impl Session {
             ));
             return None;
         }
-        if !self.context.commit_compaction(expected, &result, || {
-            self.sink.mark_compacted();
-            let mut batch = self.sink.batch();
+        if !context.commit_compaction(expected, &result, || {
+            let Some(sink) = context.sink() else {
+                return;
+            };
+            sink.mark_compacted();
+            let mut batch = sink.batch();
             let replacement_msg_seq = summary_message.map(|message| {
                 batch
                     .emit(Event::SystemMsg {
@@ -2170,19 +2175,21 @@ impl Session {
         }) {
             return None;
         }
-        let _ = self
-            .watch
-            .stream_tx
-            .send(crate::stream::StreamFrame::CompactionSummary {
-                phase: crate::stream::CompactionPhase::Finished,
-                range_start: result.compacted_start,
-                range_end: result.compacted_end.saturating_sub(1),
-                summary: result.summary,
-                before_tokens: result.before_tokens,
-                after_tokens: result.after_tokens,
-                compacted_count: result.compacted_count,
-            });
-        self.refresh_window_snapshot();
+        if std::ptr::eq(context, self.context.as_ref()) {
+            let _ = self
+                .watch
+                .stream_tx
+                .send(crate::stream::StreamFrame::CompactionSummary {
+                    phase: crate::stream::CompactionPhase::Finished,
+                    range_start: result.compacted_start,
+                    range_end: result.compacted_end.saturating_sub(1),
+                    summary: result.summary,
+                    before_tokens: result.before_tokens,
+                    after_tokens: result.after_tokens,
+                    compacted_count: result.compacted_count,
+                });
+            self.refresh_window_snapshot();
+        }
         Some(CompactResult {
             before_tokens: result.before_tokens,
             after_tokens: result.after_tokens,
@@ -3140,7 +3147,13 @@ mod tests {
         let before_tokens = crate::compaction::estimate_tokens_for_messages(&original);
 
         session
-            .commit_rewritten_window(replacement.clone(), before_tokens, &original, 1)
+            .commit_rewritten_window(
+                session.context(),
+                replacement.clone(),
+                before_tokens,
+                &original,
+                1,
+            )
             .expect("rewrite commit");
 
         assert_eq!(
@@ -3185,7 +3198,13 @@ mod tests {
             session.append_message(Message::user_text(TurnId::now(), "x".repeat(40_000)), None);
             let original = session.messages();
             session
-                .commit_rewritten_window(checkpoint.clone(), 10_000, &original, 1)
+                .commit_rewritten_window(
+                    session.context(),
+                    checkpoint.clone(),
+                    10_000,
+                    &original,
+                    1,
+                )
                 .unwrap();
             let expected = Some(checkpoint_epoch_digest(&checkpoint));
             assert_eq!(session.context_epoch(), expected);
@@ -3261,6 +3280,7 @@ mod tests {
 
         session
             .commit_compacted_window(
+                session.context(),
                 "anchor".into(),
                 replacement.clone(),
                 range,
@@ -3337,7 +3357,13 @@ mod tests {
                         let mut replacement = original.clone();
                         replacement[1] = Message::assistant_text(turn.clone(), "other rewrite");
                         session
-                            .commit_rewritten_window(replacement, tokens, &original, 1)
+                            .commit_rewritten_window(
+                                session.context(),
+                                replacement,
+                                tokens,
+                                &original,
+                                1,
+                            )
                             .unwrap();
                     }
                     "attachment" => {
@@ -3359,9 +3385,16 @@ mod tests {
                 let compacted = session.sink().last_compact_ago_seconds().is_some();
                 let mut frames = session.stream_subscribe();
                 let committed = if rewrite {
-                    session.commit_rewritten_window(candidate.clone(), tokens, &original, 1)
+                    session.commit_rewritten_window(
+                        session.context(),
+                        candidate.clone(),
+                        tokens,
+                        &original,
+                        1,
+                    )
                 } else {
                     session.commit_compacted_window(
+                        session.context(),
                         "summary".into(),
                         candidate.clone(),
                         range,

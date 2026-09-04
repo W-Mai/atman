@@ -130,6 +130,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         crate::compaction::start_auto_compact_with_budget(
             session.clone(),
+            ctx.context().expect("session context").clone(),
             model.clone(),
             providers_reg.clone(),
             compaction_budget,
@@ -611,6 +612,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         if let Some(session) = ctx.session_runtime() {
                             crate::compaction::start_auto_compact_with_budget(
                                 session.clone(),
+                                ctx.context().expect("session context").clone(),
                                 model.clone(),
                                 providers_reg.clone(),
                                 compaction_budget,
@@ -695,16 +697,18 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             "context overflow — compacting and retrying".into(),
                         );
                         if let Some(session) = ctx.session_runtime() {
-                            session.request_manual_compact();
+                            let context = ctx.context().expect("session context");
+                            context.request_manual_compact();
                             drop(compact_guard.take());
                             crate::compaction::maybe_auto_compact_with_budget(
                                 session,
+                                context,
                                 &model,
                                 &providers_reg,
                                 compaction_budget,
                             )
                             .await;
-                            compact_guard = Some(session.acquire_compact_lock().await);
+                            compact_guard = Some(context.compact_lock().lock().await);
                             match llm_context::build_llm_context(
                                 &args,
                                 context_mode,
@@ -878,6 +882,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         crate::compaction::start_auto_compact_with_budget(
             session.clone(),
+            ctx.context().expect("session context").clone(),
             model.clone(),
             providers_reg,
             compaction_budget,

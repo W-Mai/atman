@@ -145,6 +145,7 @@ async fn recent_turns_reads_lossless_owner_history_after_checkpoint() {
     replacement[0] = Message::assistant_text(original[0].turn_id.clone(), "short");
     session
         .commit_rewritten_window(
+            session.context(),
             replacement,
             atman_runtime::compaction::estimate_tokens_for_messages(&original),
             &original,

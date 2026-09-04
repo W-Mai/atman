@@ -160,7 +160,13 @@ flow cached() -> string {
     let before_tokens = atman_runtime::compaction::estimate_tokens_for_messages(&before);
     let replacement = vec![Message::assistant_text(TurnId::now(), "persisted omission")];
     session
-        .commit_rewritten_window(replacement, before_tokens, &before, before.len())
+        .commit_rewritten_window(
+            session.context(),
+            replacement,
+            before_tokens,
+            &before,
+            before.len(),
+        )
         .expect("checkpoint rewrite");
 
     let second_turn = TurnId::now();

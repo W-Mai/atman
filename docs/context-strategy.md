@@ -18,6 +18,8 @@ An unscoped message view selects only unscoped history, not every context in the
 
 Usage records and measured general-call window sizes belong to the bound context. Session aggregation keeps provider/model/purpose/scope buckets and cumulative input, output, and cache usage; only a general root call belonging to the session's default context updates its model, window, and latency display. Auxiliary calls and results from another context do not replace those default-context statistics.
 
+Compaction scheduling carries its selected `ContextState` through the background worker, including its lock, pending manual request, source snapshot, usage, epoch, and canonical journal. Overflow retry releases and reacquires that same owner's lock. Session-level compaction commits accept the target explicitly and preserve the existing summary review and budget rules; only a commit to the default context refreshes its window statistics and unscoped streaming panel. Default-context convenience entry points capture their target before spawning background work.
+
 Every `llm.call` is assembled from four independent inputs:
 
 ```text
