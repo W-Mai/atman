@@ -295,7 +295,7 @@ atman logs tail [session] [--follow]
 atman session list | show | search | sanitize
 atman cost [session] [--all]
 atman upgrade [--yes] [--verbose] [--no-modify-path]
-atman monitor [--port 65098]       # web UI
+atman monitor [--port 65098]       # live daemon projection UI
 atman daemon start | stop | status | run [--reasoning <level>] [--image <path>]...
 atman flow snapshot | versions | diff | rollback | lint | test
 atman sync init | push | pull      # git-based cross-machine memory sync

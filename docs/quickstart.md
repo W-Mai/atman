@@ -244,7 +244,7 @@ Session listings default to the current project. Use `atman session list --all` 
 
 ## 9. Where to go from here
 
-- **`atman monitor`** starts an HTTP UI at `http://localhost:65098/` showing every session's event stream with FTS5 search.
+- **`atman monitor`** starts an HTTP UI at `http://localhost:65098/` showing live session projections from the local daemon.
 - **`atman logs stream <session>`** tails a running daemon's SSE feed in the terminal.
 - **`atman sync init <url>`** turns `<project>/.atman/` into a git repo so your memory travels across machines.
 - **`atman migrate list --from opencode`** imports opencode / kiro session transcripts into a fresh atman session.

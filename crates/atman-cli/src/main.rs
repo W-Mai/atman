@@ -10,6 +10,7 @@ mod daemon_tui;
 mod init;
 mod mcp_templates;
 mod migrate_source;
+mod monitor;
 mod oauth_login;
 mod repl_completer;
 mod suggest;
@@ -430,7 +431,7 @@ async fn async_main() -> Result<()> {
         Some(Cmd::Init { sandbox }) => cmd_init(sandbox).await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::TuiPreview { scene }) => cmd_tui_preview(scene).await,
-        Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
+        Some(Cmd::Monitor { port }) => monitor::run(port).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Start,
         }) => cmd_daemon_start().await,
@@ -4487,172 +4488,6 @@ fn print_cost_summary(header: &str, summary: &CostSummary) {
             model, m.calls, m.input, m.cached, m.output, m.wall_ms
         );
     }
-}
-
-const MONITOR_HTML: &str = r##"<!doctype html>
-<html><head><meta charset="utf-8"><title>atman monitor</title>
-<style>
-body{font:14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:16px;background:#0e1116;color:#e6edf3}
-h1{margin:0 0 16px;font-size:16px;color:#7ee787}
-.row{display:flex;gap:16px}
-.pane{flex:1;background:#151b23;border:1px solid #30363d;border-radius:6px;padding:12px;overflow:auto;max-height:80vh}
-.sess{padding:6px 8px;border-radius:4px;cursor:pointer;font-family:monospace;font-size:12px;color:#7d8590}
-.sess:hover{background:#1f2530}
-.sess.active{background:#1f2f4a;color:#79c0ff}
-pre{white-space:pre-wrap;word-break:break-all;margin:0;font-family:'SF Mono',Menlo,monospace;font-size:11px}
-.event{padding:6px 8px;margin-bottom:4px;border-radius:4px;background:#1c2430;border-left:3px solid #30363d}
-.event.flow_start{border-left-color:#7ee787}
-.event.flow_end{border-left-color:#79c0ff}
-.event.llm_call{border-left-color:#f0883e}
-.event.user_msg{border-left-color:#d2a8ff}
-.event.assistant_msg{border-left-color:#7ee787}
-.event.error{border-left-color:#f85149}
-.type{color:#79c0ff;font-weight:600}
-.ts{color:#6e7681;font-size:10px}
-.pill{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;vertical-align:middle}
-.pill.hidden{display:none}
-.pill.connecting{background:#5a4a1a;color:#f0c674}
-.pill.connected{background:#1a4a2a;color:#7ee787}
-.pill.disconnected{background:#4a1a1a;color:#f85149}
-</style></head><body>
-<h1>atman monitor · <span id="hint">select a session</span> <small id="mode" style="color:#6e7681;font-weight:400;font-size:12px"></small><span id="ssePill" class="pill hidden"></span></h1>
-<div class="row">
-  <div class="pane" style="flex:0 0 260px" id="sessions"><em>loading sessions…</em></div>
-  <div class="pane" id="events"><em>← pick a session on the left</em></div>
-</div>
-<script>
-const params = new URLSearchParams(location.search);
-const daemonBase = params.get('daemon') || '';
-const daemonToken = params.get('token') || '';
-const useSse = daemonBase.length > 0;
-document.getElementById('mode').textContent = useSse ? '· sse mode via ' + daemonBase : '· file-tail mode (poll 5s)';
-let activeSse = null;
-
-async function fetchJson(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.json();}
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-function eventBlock(e){return `<div class="event ${esc(e.type||'')}"><span class="type">${esc(e.type||'?')}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`;}
-function setSseState(state){
-  const pill=document.getElementById('ssePill');
-  if(!state){pill.className='pill hidden';pill.textContent='';return;}
-  const label={connecting:'SSE: connecting…',connected:'SSE: live',disconnected:'SSE: reconnecting…'}[state]||state;
-  pill.className='pill '+state;pill.textContent=label;
-}
-
-async function loadSessions(){
-  const list=await fetchJson('/api/sessions');
-  const el=document.getElementById('sessions');
-  if(!list.length){el.innerHTML='<em>no sessions</em>';return;}
-  el.innerHTML=list.map(s=>`<div class="sess" data-id="${esc(s.id)}">${esc(s.id)}<br><span class="ts">${s.event_count} events · ${esc(s.first_ts||'?')}</span></div>`).join('');
-  el.querySelectorAll('.sess').forEach(node=>node.onclick=()=>loadEvents(node.dataset.id));
-}
-async function loadEvents(sid){
-  document.getElementById('hint').textContent=sid;
-  document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.id===sid));
-  const box=document.getElementById('events');
-  if(activeSse){activeSse.close();activeSse=null;}
-  if(useSse){
-    const url = daemonBase + '/events?session_id=' + encodeURIComponent(sid) + (daemonToken?'&token='+encodeURIComponent(daemonToken):'');
-    box.innerHTML='<em>connecting sse…</em>';
-    setSseState('connecting');
-    const es = new EventSource(url);
-    activeSse = es;
-    let first = true;
-    es.onopen = () => { setSseState('connected'); };
-    es.addEventListener('event', ev => {
-      try {
-        const e = JSON.parse(ev.data);
-        if(first){box.innerHTML='';first=false;}
-        box.insertAdjacentHTML('beforeend', eventBlock(e));
-        box.scrollTop = box.scrollHeight;
-      }catch(_){}
-    });
-    es.onerror = () => { setSseState('disconnected'); };
-  } else {
-    setSseState(null);
-    const ev = await fetchJson('/api/sessions/'+encodeURIComponent(sid)+'/events');
-    if(!ev.length){box.innerHTML='<em>empty session</em>';return;}
-    box.innerHTML=ev.map(eventBlock).join('');
-  }
-}
-loadSessions();
-setInterval(loadSessions,5000);
-</script></body></html>
-"##;
-
-async fn cmd_monitor(port: u16) -> Result<()> {
-    use axum::Router;
-    use axum::extract::Path;
-    use axum::response::{Html, IntoResponse, Json};
-    use axum::routing::get;
-    use std::net::SocketAddr;
-
-    let data = data_dir()?;
-    let sessions_dir = data.join("sessions");
-    let state = Arc::new(sessions_dir);
-
-    let app = Router::new()
-        .route("/", get(|| async { Html(MONITOR_HTML) }))
-        .route(
-            "/api/sessions",
-            get({
-                let state = state.clone();
-                move || {
-                    let state = state.clone();
-                    async move { Json(list_sessions_summary(&state).await) }
-                }
-            }),
-        )
-        .route(
-            "/api/sessions/{sid}/events",
-            get({
-                let state = state.clone();
-                move |Path(sid): Path<String>| {
-                    let state = state.clone();
-                    async move { Json(read_session_events(&state, &sid).await).into_response() }
-                }
-            }),
-        )
-        .with_state(());
-
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    println!("[atman] monitor listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
-async fn list_sessions_summary(sessions_dir: &std::path::Path) -> Vec<serde_json::Value> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
-    for entry in entries.flatten() {
-        let id = entry.file_name().to_string_lossy().to_string();
-        let stats = atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
-            .unwrap_or_default();
-        out.push((
-            id.clone(),
-            serde_json::json!({
-                "id": id,
-                "event_count": stats.event_count,
-                "first_ts": stats.first_ts,
-            }),
-        ));
-    }
-    out.sort_by(|a, b| b.0.cmp(&a.0));
-    out.into_iter().map(|(_, v)| v).collect()
-}
-
-async fn read_session_events(sessions_dir: &std::path::Path, sid: &str) -> Vec<serde_json::Value> {
-    let path = sessions_dir.join(sid).join("events.jsonl");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    contents
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .collect()
 }
 
 async fn cmd_rebuild_index() -> Result<()> {
