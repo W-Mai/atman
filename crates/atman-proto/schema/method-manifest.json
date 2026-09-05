@@ -225,6 +225,57 @@
       }
     },
     {
+      "name": "mcp.list",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "EmptyParams",
+        "schema": {
+          "$ref": "#/$defs/EmptyParams"
+        }
+      },
+      "result": {
+        "rust_type": "ListMcpServersResponse",
+        "schema": {
+          "$ref": "#/$defs/ListMcpServersResponse"
+        }
+      }
+    },
+    {
+      "name": "mcp.mutate",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "MutateMcpServerRequest",
+        "schema": {
+          "$ref": "#/$defs/MutateMcpServerRequest"
+        }
+      },
+      "result": {
+        "rust_type": "MutateMcpServerResponse",
+        "schema": {
+          "$ref": "#/$defs/MutateMcpServerResponse"
+        }
+      }
+    },
+    {
+      "name": "mcp.tools",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "McpServerRequest",
+        "schema": {
+          "$ref": "#/$defs/McpServerRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ListMcpToolsResponse",
+        "schema": {
+          "$ref": "#/$defs/ListMcpToolsResponse"
+        }
+      }
+    },
+    {
       "name": "mcp.resources",
       "kind": "query",
       "revision": 1,

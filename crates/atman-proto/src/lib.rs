@@ -328,6 +328,9 @@ pub mod methods {
     pub const SWITCH_DEFAULT_MODEL: &str = "config.model.switch_default";
     pub const PROBE_PROVIDER: &str = "config.provider.probe";
     pub const PROBE_MCP: &str = "mcp.probe";
+    pub const LIST_MCP_SERVERS: &str = "mcp.list";
+    pub const MUTATE_MCP_SERVER: &str = "mcp.mutate";
+    pub const LIST_MCP_TOOLS: &str = "mcp.tools";
     pub const LIST_MCP_RESOURCES: &str = "mcp.resources";
     pub const LIST_MCP_PROMPTS: &str = "mcp.prompts";
     pub const SEND_MESSAGE: &str = "session.send_message";
@@ -375,6 +378,9 @@ pub mod methods {
         super::method_descriptor::<super::rpc::SwitchDefaultModel>(),
         super::method_descriptor::<super::rpc::ProbeProvider>(),
         super::method_descriptor::<super::rpc::ProbeMcp>(),
+        super::method_descriptor::<super::rpc::ListMcpServers>(),
+        super::method_descriptor::<super::rpc::MutateMcpServer>(),
+        super::method_descriptor::<super::rpc::ListMcpTools>(),
         super::method_descriptor::<super::rpc::ListMcpResources>(),
         super::method_descriptor::<super::rpc::ListMcpPrompts>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
@@ -775,6 +781,86 @@ pub struct ProbeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct McpServerRequest {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpKeyValue {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpServerInput {
+    pub name: String,
+    pub transport: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<McpKeyValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<McpKeyValue>,
+    pub tier: u8,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpServerSummary {
+    pub name: String,
+    pub transport: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub header_count: usize,
+    pub tier: u8,
+    pub timeout_ms: u64,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ListMcpServersResponse {
+    pub servers: Vec<McpServerSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum McpServerMutation {
+    Upsert { server: McpServerInput },
+    Remove { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MutateMcpServerRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub mutation: McpServerMutation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct MutateMcpServerResponse {
+    pub name: String,
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ListMcpToolsResponse {
+    pub tools: Vec<McpTool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -1662,6 +1748,27 @@ pub mod rpc {
         Query,
         McpServerRequest,
         ProbeResponse
+    );
+    method!(
+        ListMcpServers,
+        methods::LIST_MCP_SERVERS,
+        Query,
+        EmptyParams,
+        ListMcpServersResponse
+    );
+    method!(
+        MutateMcpServer,
+        methods::MUTATE_MCP_SERVER,
+        Command,
+        MutateMcpServerRequest,
+        MutateMcpServerResponse
+    );
+    method!(
+        ListMcpTools,
+        methods::LIST_MCP_TOOLS,
+        Query,
+        McpServerRequest,
+        ListMcpToolsResponse
     );
     method!(
         ListMcpResources,

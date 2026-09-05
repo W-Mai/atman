@@ -34,6 +34,8 @@ import type {
   InterjectSessionResponse,
   ListMcpPromptsResponse,
   ListMcpResourcesResponse,
+  ListMcpServersResponse,
+  ListMcpToolsResponse,
   ListPermissionRequestsRequest,
   ListPermissionRequestsResponse,
   ListProjectsRequest,
@@ -45,6 +47,8 @@ import type {
   McpServerRequest,
   MoveSessionRequest,
   MoveSessionResponse,
+  MutateMcpServerRequest,
+  MutateMcpServerResponse,
   MutateProviderRequest,
   PingResponse,
   ProbeProviderRequest,
@@ -175,6 +179,24 @@ export interface RpcMethodMap {
     revision: 1
     params: McpServerRequest
     result: ProbeResponse
+  }
+  'mcp.list': {
+    kind: 'query'
+    revision: 1
+    params: EmptyParams
+    result: ListMcpServersResponse
+  }
+  'mcp.mutate': {
+    kind: 'command'
+    revision: 1
+    params: MutateMcpServerRequest
+    result: MutateMcpServerResponse
+  }
+  'mcp.tools': {
+    kind: 'query'
+    revision: 1
+    params: McpServerRequest
+    result: ListMcpToolsResponse
   }
   'mcp.resources': {
     kind: 'query'
@@ -400,6 +422,9 @@ export const RPC_METHODS = {
   'config.model.switch_default': { kind: 'command', revision: 1 },
   'config.provider.probe': { kind: 'query', revision: 1 },
   'mcp.probe': { kind: 'query', revision: 1 },
+  'mcp.list': { kind: 'query', revision: 1 },
+  'mcp.mutate': { kind: 'command', revision: 1 },
+  'mcp.tools': { kind: 'query', revision: 1 },
   'mcp.resources': { kind: 'query', revision: 1 },
   'mcp.prompts': { kind: 'query', revision: 1 },
   'session.send_message': { kind: 'command', revision: 1 },

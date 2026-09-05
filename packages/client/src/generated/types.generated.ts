@@ -26,6 +26,10 @@ export type AtmanDaemonProtocolPayloads =
   | ProbeProviderRequest
   | ProbeResponse
   | McpServerRequest
+  | ListMcpServersResponse
+  | MutateMcpServerRequest
+  | MutateMcpServerResponse
+  | ListMcpToolsResponse
   | ListMcpResourcesResponse
   | ListMcpPromptsResponse
   | SendMessageRequest
@@ -580,6 +584,17 @@ export type ProviderMutationResult =
       created: boolean
       name: string
       type: 'config_saved'
+      [k: string]: unknown
+    }
+export type McpServerMutation =
+  | {
+      action: 'upsert'
+      server: McpServerInput
+      [k: string]: unknown
+    }
+  | {
+      action: 'remove'
+      name: string
       [k: string]: unknown
     }
 export type SessionStatus = 'running' | 'finished' | 'pending'
@@ -1450,6 +1465,61 @@ export interface ProbeResponse {
   [k: string]: unknown
 }
 export interface McpServerRequest {
+  name: string
+  [k: string]: unknown
+}
+export interface ListMcpServersResponse {
+  servers: McpServerSummary[]
+  [k: string]: unknown
+}
+export interface McpServerSummary {
+  args: string[]
+  command: string
+  disabled: boolean
+  env_count: number
+  header_count: number
+  name: string
+  tier: number
+  timeout_ms: number
+  transport: string
+  url?: string | null
+  [k: string]: unknown
+}
+export interface MutateMcpServerRequest {
+  mutation: McpServerMutation
+  request_id?: null | RequestId
+  [k: string]: unknown
+}
+export interface McpServerInput {
+  args?: string[]
+  auth_token?: string | null
+  command?: string
+  disabled?: boolean
+  env?: McpKeyValue[]
+  headers?: McpKeyValue[]
+  name: string
+  tier: number
+  timeout_ms: number
+  transport: string
+  url?: string | null
+  [k: string]: unknown
+}
+export interface McpKeyValue {
+  name: string
+  value: string
+  [k: string]: unknown
+}
+export interface MutateMcpServerResponse {
+  name: string
+  removed: boolean
+  [k: string]: unknown
+}
+export interface ListMcpToolsResponse {
+  tools: McpTool[]
+  [k: string]: unknown
+}
+export interface McpTool {
+  description?: string | null
   name: string
   [k: string]: unknown
 }

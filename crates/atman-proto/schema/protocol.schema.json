@@ -79,6 +79,18 @@
       "$ref": "#/$defs/McpServerRequest"
     },
     {
+      "$ref": "#/$defs/ListMcpServersResponse"
+    },
+    {
+      "$ref": "#/$defs/MutateMcpServerRequest"
+    },
+    {
+      "$ref": "#/$defs/MutateMcpServerResponse"
+    },
+    {
+      "$ref": "#/$defs/ListMcpToolsResponse"
+    },
+    {
       "$ref": "#/$defs/ListMcpResourcesResponse"
     },
     {
@@ -2676,6 +2688,34 @@
         }
       }
     },
+    "ListMcpServersResponse": {
+      "type": "object",
+      "required": [
+        "servers"
+      ],
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpServerSummary"
+          }
+        }
+      }
+    },
+    "ListMcpToolsResponse": {
+      "type": "object",
+      "required": [
+        "tools"
+      ],
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpTool"
+          }
+        }
+      }
+    },
     "ListPermissionRequestsRequest": {
       "type": "object",
       "required": [
@@ -2948,6 +2988,21 @@
         }
       }
     },
+    "McpKeyValue": {
+      "type": "object",
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
     "McpPrompt": {
       "type": "object",
       "required": [
@@ -3019,6 +3074,109 @@
           "type": "string"
         }
       }
+    },
+    "McpServerInput": {
+      "type": "object",
+      "required": [
+        "name",
+        "transport",
+        "tier",
+        "timeout_ms"
+      ],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "auth_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpKeyValue"
+          }
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpKeyValue"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "transport": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "McpServerMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "server",
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "upsert"
+              ]
+            },
+            "server": {
+              "$ref": "#/$defs/McpServerInput"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "remove"
+              ]
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        }
+      ]
     },
     "McpServerProjection": {
       "type": "object",
@@ -3169,6 +3327,81 @@
           }
         }
       ]
+    },
+    "McpServerSummary": {
+      "type": "object",
+      "required": [
+        "name",
+        "transport",
+        "command",
+        "args",
+        "env_count",
+        "header_count",
+        "tier",
+        "timeout_ms",
+        "disabled"
+      ],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "env_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "header_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "transport": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "McpTool": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      }
     },
     "McpToolProjection": {
       "type": "object",
@@ -3513,6 +3746,42 @@
         },
         "session": {
           "$ref": "#/$defs/SessionSummary"
+        }
+      }
+    },
+    "MutateMcpServerRequest": {
+      "type": "object",
+      "required": [
+        "mutation"
+      ],
+      "properties": {
+        "mutation": {
+          "$ref": "#/$defs/McpServerMutation"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        }
+      }
+    },
+    "MutateMcpServerResponse": {
+      "type": "object",
+      "required": [
+        "name",
+        "removed"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "removed": {
+          "type": "boolean"
         }
       }
     },

@@ -170,6 +170,9 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::SwitchDefaultModel>(),
     method_descriptor::<rpc::ProbeProvider>(),
     method_descriptor::<rpc::ProbeMcp>(),
+    method_descriptor::<rpc::ListMcpServers>(),
+    method_descriptor::<rpc::MutateMcpServer>(),
+    method_descriptor::<rpc::ListMcpTools>(),
     method_descriptor::<rpc::ListMcpResources>(),
     method_descriptor::<rpc::ListMcpPrompts>(),
     method_descriptor::<rpc::SendMessage>(),
@@ -592,6 +595,63 @@ async fn dispatch_as_inner(
                         JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                     }
                 },
+                None => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                ),
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::LIST_MCP_SERVERS => match parse_params::<rpc::ListMcpServers>(req.params) {
+            Ok(_) => match state.launcher() {
+                Some(launcher) => match crate::mcp_management::list_servers(&launcher) {
+                    Ok(response) => method_response::<rpc::ListMcpServers>(id, response),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                None => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                ),
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::MUTATE_MCP_SERVER => match parse_params::<rpc::MutateMcpServer>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_params = params.clone();
+                match execute_command::<rpc::MutateMcpServer, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let launcher = operation_state.launcher().ok_or_else(|| {
+                            JsonRpcError::application("daemon started without a run launcher")
+                        })?;
+                        crate::mcp_management::mutate(&launcher, operation_params.mutation)
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::MutateMcpServer>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::LIST_MCP_TOOLS => match parse_params::<rpc::ListMcpTools>(req.params) {
+            Ok(params) => match state.launcher() {
+                Some(launcher) => {
+                    match crate::mcp_management::list_tools(&launcher, &params.name).await {
+                        Ok(response) => method_response::<rpc::ListMcpTools>(id, response),
+                        Err(error) => {
+                            JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                        }
+                    }
+                }
                 None => JsonRpcResponse::err(
                     id,
                     JsonRpcError::application("daemon started without a run launcher"),

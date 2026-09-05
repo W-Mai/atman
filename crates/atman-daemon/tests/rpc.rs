@@ -273,6 +273,67 @@ async fn config_initialization_is_committed_once_by_the_daemon() {
 }
 
 #[tokio::test]
+async fn mcp_configuration_is_owned_and_redacted_by_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root, Some(config_dir), None).unwrap(),
+    ));
+    let request = atman_proto::MutateMcpServerRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        mutation: atman_proto::McpServerMutation::Upsert {
+            server: atman_proto::McpServerInput {
+                name: "files".into(),
+                transport: "stdio".into(),
+                command: "server".into(),
+                args: vec!["--root".into(), "/tmp".into()],
+                env: vec![atman_proto::McpKeyValue {
+                    name: "TOKEN".into(),
+                    value: "secret".into(),
+                }],
+                url: None,
+                auth_token: None,
+                headers: Vec::new(),
+                tier: 3,
+                timeout_ms: 30_000,
+                disabled: false,
+            },
+        },
+    };
+
+    for id in [1, 2] {
+        let response = dispatch(
+            state.clone(),
+            JsonRpcRequest::for_method::<atman_proto::rpc::MutateMcpServer>(id, &request).unwrap(),
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::MutateMcpServer>()
+        .unwrap();
+        assert_eq!(response.name, "files");
+        assert!(!response.removed);
+    }
+
+    let listed = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::ListMcpServers>(
+            3,
+            &atman_proto::EmptyParams {},
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::ListMcpServers>()
+    .unwrap();
+    assert_eq!(listed.servers.len(), 1);
+    assert_eq!(listed.servers[0].name, "files");
+    assert_eq!(listed.servers[0].env_count, 1);
+}
+
+#[tokio::test]
 async fn provider_and_model_settings_are_committed_by_the_daemon() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");

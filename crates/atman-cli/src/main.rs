@@ -3622,9 +3622,10 @@ fn parse_args(raw: &[String]) -> Result<Vec<(String, Value)>> {
 
 async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
     use std::io::Write as _;
+    let client = daemon_tui::connect_local_daemon().await?;
     match action {
         McpAction::List => {
-            let configs = load_mcp_configs();
+            let configs = client.list_mcp_servers().await?.servers;
             if configs.is_empty() {
                 println!("  (no MCP servers configured)");
                 println!();
@@ -3639,33 +3640,21 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
             );
             println!("  {}", "─".repeat(70));
             for cfg in &configs {
-                let transport = match cfg.transport {
-                    atman_runtime::mcp::TransportKind::Stdio => "stdio",
-                    atman_runtime::mcp::TransportKind::Http => "http",
-                    atman_runtime::mcp::TransportKind::Sse => "sse",
-                };
                 let source = if cfg.command.is_empty() {
                     cfg.url.as_deref().unwrap_or("<missing url>").to_string()
                 } else {
                     let mut s = format!("{} {}", cfg.command, cfg.args.join(" "));
-                    if !cfg.env.is_empty() {
-                        s.push_str(&format!(" (env: {} keys)", cfg.env.len()));
+                    if cfg.env_count != 0 {
+                        s.push_str(&format!(" (env: {} keys)", cfg.env_count));
                     }
                     s
-                };
-                let tier = match cfg.tier {
-                    atman_runtime::Tier::Zero => 0,
-                    atman_runtime::Tier::One => 1,
-                    atman_runtime::Tier::Two => 2,
-                    atman_runtime::Tier::Three => 3,
-                    atman_runtime::Tier::Four => 4,
                 };
                 println!(
                     "  {:<20} {:<8} {:<30} {}{}",
                     cfg.name,
-                    transport,
+                    cfg.transport,
                     source.chars().take(30).collect::<String>(),
-                    tier,
+                    cfg.tier,
                     if cfg.disabled { " (disabled)" } else { "" }
                 );
             }
@@ -3716,105 +3705,79 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                     30_000,
                 );
                 config.env = env;
-                atman_runtime::config_hub::ConfigHub::global()?.upsert_mcp(config)?;
+                client.upsert_mcp_server(mcp_server_input(config)).await?;
                 println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
             } else {
-                cmd_mcp_add_interactive()?;
+                let server = prompt_mcp_server()?;
+                let name = server.name.clone();
+                client.upsert_mcp_server(mcp_server_input(server)).await?;
+                println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
+                println!("  Reload MCP in active sessions to apply.");
             }
         }
         McpAction::Remove { name } => {
-            atman_runtime::config_hub::ConfigHub::global()?.remove_mcp(&name)?;
+            client.remove_mcp_server(name.clone()).await?;
             println!("✓ Removed MCP server \"{}\"", name);
         }
         McpAction::Test { name } => {
-            let configs = load_mcp_configs();
-            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
-                anyhow::bail!("MCP server \"{}\" not found", name);
-            };
             print!("Connecting to {}... ", name);
             std::io::stdout().flush()?;
-            let probe_registry = atman_runtime::ToolRegistry::new();
-            let statuses = atman_runtime::mcp::register_from_configs(
-                &probe_registry,
-                std::slice::from_ref(cfg),
-            )
-            .await;
-            match &statuses[0] {
-                Ok(s) => {
-                    println!("✓ {} tools discovered", s.tool_count);
-                    let names = probe_registry.names();
-                    for name in &names {
-                        println!("  - {}", name);
+            let result = client.probe_mcp(name.clone()).await?;
+            if result.ok {
+                println!("✓ {}", result.message);
+                if let Ok(response) = client.list_mcp_tools(name).await {
+                    for tool in response.tools {
+                        println!("  - {}", tool.name);
                     }
                 }
-                Err(e) => {
-                    println!("✗ {}", e.error);
-                }
+            } else {
+                println!("✗ {}", result.message);
             }
         }
         McpAction::Tools { name } => {
-            let configs = load_mcp_configs();
-            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
-                anyhow::bail!("MCP server \"{}\" not found", name);
-            };
-            let client = connect_mcp_client(cfg).await?;
-            let snapshot = client.tool_snapshot();
-            println!("Tools from {} ({}):", name, snapshot.tools.len());
-            for t in snapshot.tools.iter() {
+            let tools = client.list_mcp_tools(name.clone()).await?.tools;
+            println!("Tools from {} ({}):", name, tools.len());
+            for tool in tools {
                 println!(
                     "  - {} — {}",
-                    t.name,
-                    t.description.as_deref().unwrap_or("(no description)")
+                    tool.name,
+                    tool.description.as_deref().unwrap_or("(no description)")
                 );
             }
         }
-        McpAction::Resources { name } => {
-            let configs = load_mcp_configs();
-            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
-                anyhow::bail!("MCP server \"{}\" not found", name);
-            };
-            let client = connect_mcp_client(cfg).await?;
-            match client.list_resources().await {
-                Ok(resources) => {
-                    println!("Resources from {} ({}):", name, resources.len());
-                    for r in &resources {
-                        println!("  - {} ({})", r.uri, r.name);
-                        if let Some(desc) = &r.description {
-                            println!("      {}", desc);
-                        }
+        McpAction::Resources { name } => match client.list_mcp_resources(name.clone()).await {
+            Ok(resources) => {
+                println!("Resources from {} ({}):", name, resources.resources.len());
+                for r in &resources.resources {
+                    println!("  - {} ({})", r.uri, r.name);
+                    if let Some(desc) = &r.description {
+                        println!("      {}", desc);
                     }
                 }
-                Err(e) => println!("  (resources not supported: {e})"),
             }
-        }
-        McpAction::Prompts { name } => {
-            let configs = load_mcp_configs();
-            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
-                anyhow::bail!("MCP server \"{}\" not found", name);
-            };
-            let client = connect_mcp_client(cfg).await?;
-            match client.list_prompts().await {
-                Ok(prompts) => {
-                    println!("Prompts from {} ({}):", name, prompts.len());
-                    for p in &prompts {
+            Err(e) => println!("  (resources not supported: {e})"),
+        },
+        McpAction::Prompts { name } => match client.list_mcp_prompts(name.clone()).await {
+            Ok(prompts) => {
+                println!("Prompts from {} ({}):", name, prompts.prompts.len());
+                for p in &prompts.prompts {
+                    println!(
+                        "  - {} — {}",
+                        p.name,
+                        p.description.as_deref().unwrap_or("(no description)")
+                    );
+                    for arg in &p.arguments {
                         println!(
-                            "  - {} — {}",
-                            p.name,
-                            p.description.as_deref().unwrap_or("(no description)")
+                            "      arg: {}{} — {}",
+                            arg.name,
+                            if arg.required { " (required)" } else { "" },
+                            arg.description.as_deref().unwrap_or("")
                         );
-                        for arg in &p.arguments {
-                            println!(
-                                "      arg: {}{} — {}",
-                                arg.name,
-                                if arg.required { " (required)" } else { "" },
-                                arg.description.as_deref().unwrap_or("")
-                            );
-                        }
                     }
                 }
-                Err(e) => println!("  (prompts not supported: {e})"),
             }
-        }
+            Err(e) => println!("  (prompts not supported: {e})"),
+        },
         McpAction::Import { file } => {
             let text = std::fs::read_to_string(&file)
                 .map_err(|e| anyhow::anyhow!("read {}: {e}", file.display()))?;
@@ -3824,10 +3787,9 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                 return Ok(());
             }
             let imported = servers.len();
-            let hub = atman_runtime::config_hub::ConfigHub::global()?;
             for server in servers {
                 println!("✓ Imported \"{}\"", server.name);
-                hub.upsert_mcp(server)?;
+                client.upsert_mcp_server(mcp_server_input(server)).await?;
             }
             println!("Imported {imported} servers");
         }
@@ -3835,40 +3797,7 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn connect_mcp_client(
-    cfg: &atman_runtime::mcp::McpServerConfig,
-) -> anyhow::Result<std::sync::Arc<atman_runtime::mcp::McpClient>> {
-    let client = match cfg.transport {
-        atman_runtime::mcp::TransportKind::Stdio => {
-            atman_runtime::mcp::McpClient::connect_stdio(
-                &cfg.name,
-                &cfg.command,
-                &cfg.args,
-                &cfg.env,
-                cfg.timeout_ms,
-            )
-            .await
-        }
-        atman_runtime::mcp::TransportKind::Http | atman_runtime::mcp::TransportKind::Sse => {
-            let url = cfg
-                .url
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("missing url"))?;
-            atman_runtime::mcp::McpClient::connect_http(
-                &cfg.name,
-                url,
-                cfg.auth_token.clone(),
-                cfg.timeout_ms,
-            )
-            .await
-        }
-    };
-    client
-        .map(std::sync::Arc::new)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
+fn prompt_mcp_server() -> anyhow::Result<atman_runtime::mcp::McpServerConfig> {
     use std::io::Write;
     print!("Server name: ");
     std::io::stdout().flush()?;
@@ -3961,10 +3890,41 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
         other => anyhow::bail!("unknown transport '{other}'; use stdio/http/sse"),
     };
 
-    atman_runtime::config_hub::ConfigHub::global()?.upsert_mcp(server)?;
-    println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
-    println!("  Restart atman to apply.");
-    Ok(())
+    Ok(server)
+}
+
+fn mcp_server_input(config: atman_runtime::mcp::McpServerConfig) -> atman_proto::McpServerInput {
+    let transport = match config.transport {
+        atman_runtime::mcp::TransportKind::Stdio => "stdio",
+        atman_runtime::mcp::TransportKind::Http => "http",
+        atman_runtime::mcp::TransportKind::Sse => "sse",
+    };
+    let tier = match config.tier {
+        atman_runtime::Tier::Zero => 0,
+        atman_runtime::Tier::One => 1,
+        atman_runtime::Tier::Two => 2,
+        atman_runtime::Tier::Three => 3,
+        atman_runtime::Tier::Four => 4,
+    };
+    let key_values = |values: Vec<(String, String)>| {
+        values
+            .into_iter()
+            .map(|(name, value)| atman_proto::McpKeyValue { name, value })
+            .collect()
+    };
+    atman_proto::McpServerInput {
+        name: config.name,
+        transport: transport.into(),
+        command: config.command,
+        args: config.args,
+        env: key_values(config.env),
+        url: config.url,
+        auth_token: config.auth_token,
+        headers: key_values(config.headers),
+        tier,
+        timeout_ms: config.timeout_ms,
+        disabled: config.disabled,
+    }
 }
 
 #[cfg(test)]

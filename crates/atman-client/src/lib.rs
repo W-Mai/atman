@@ -16,12 +16,14 @@ use atman_proto::{
     GetEventsRequest, GetEventsResponse, ImportSessionMessagesRequest,
     ImportSessionMessagesResponse, ImportedMessage, InitializeConfigRequest,
     InitializeConfigResponse, JsonRpcRequest, JsonRpcResponse, ListMcpPromptsResponse,
-    ListMcpResourcesResponse, ListProjectsRequest, ListProjectsResponse, ListSessionsRequest,
-    McpServerRequest, MutateProviderRequest, PROTOCOL_VERSION, ProbeProviderRequest, ProbeResponse,
-    ProjectionEventEnvelope, ProviderMutation, ProviderMutationResult, RequestId, RpcKind,
-    RpcMethod, RunFlowRequest, RunFlowResponse, SanitizeSessionAttachmentsRequest,
-    SanitizeSessionAttachmentsResponse, SessionId, SessionSummary, SwitchDefaultModelRequest,
-    SwitchDefaultModelResponse, UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
+    ListMcpResourcesResponse, ListMcpServersResponse, ListMcpToolsResponse, ListProjectsRequest,
+    ListProjectsResponse, ListSessionsRequest, McpServerInput, McpServerMutation, McpServerRequest,
+    MutateMcpServerRequest, MutateMcpServerResponse, MutateProviderRequest, PROTOCOL_VERSION,
+    ProbeProviderRequest, ProbeResponse, ProjectionEventEnvelope, ProviderMutation,
+    ProviderMutationResult, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
+    SanitizeSessionAttachmentsRequest, SanitizeSessionAttachmentsResponse, SessionId,
+    SessionSummary, SwitchDefaultModelRequest, SwitchDefaultModelResponse,
+    UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -387,6 +389,41 @@ impl Client {
 
     pub async fn probe_mcp(&self, name: impl Into<String>) -> Result<ProbeResponse, ClientError> {
         self.call::<rpc::ProbeMcp>(&McpServerRequest { name: name.into() })
+            .await
+    }
+
+    pub async fn list_mcp_servers(&self) -> Result<ListMcpServersResponse, ClientError> {
+        self.call::<rpc::ListMcpServers>(&atman_proto::EmptyParams {})
+            .await
+    }
+
+    pub async fn upsert_mcp_server(
+        &self,
+        server: McpServerInput,
+    ) -> Result<MutateMcpServerResponse, ClientError> {
+        self.command::<rpc::MutateMcpServer>(&MutateMcpServerRequest {
+            request_id: Some(RequestId::now()),
+            mutation: McpServerMutation::Upsert { server },
+        })
+        .await
+    }
+
+    pub async fn remove_mcp_server(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<MutateMcpServerResponse, ClientError> {
+        self.command::<rpc::MutateMcpServer>(&MutateMcpServerRequest {
+            request_id: Some(RequestId::now()),
+            mutation: McpServerMutation::Remove { name: name.into() },
+        })
+        .await
+    }
+
+    pub async fn list_mcp_tools(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<ListMcpToolsResponse, ClientError> {
+        self.call::<rpc::ListMcpTools>(&McpServerRequest { name: name.into() })
             .await
     }
 
