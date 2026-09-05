@@ -245,7 +245,7 @@ atman daemon start
 atman daemon status
 ```
 
-Local terminal clients use the owner-only Unix socket. HTTP clients connect to `http://127.0.0.1:65099`, authenticate with the bearer in `~/.config/atman/daemon.toml`, and use short-lived session tickets for browser event streams. Set `ATMAN_DAEMON_PORT` to change the daemon HTTP port, or run `atman daemon rotate-token` while the daemon is stopped to replace the bearer.
+Local terminal clients use the owner-only Unix socket. HTTP clients connect to `http://127.0.0.1:65099` and authenticate with the bearer in `~/.config/atman/daemon.toml`. SDK event streams send it in the `Authorization` header without placing it in the URL; clients that require URL-only authentication can request a short-lived session ticket. Set `ATMAN_DAEMON_PORT` to change the daemon HTTP port, or run `atman daemon rotate-token` while the daemon is stopped to replace the bearer.
 
 Multiple TUI and Web UI clients can attach to the same session. Messages, tool state, runs, approvals, forms, compaction, and resources converge through the durable projection; simultaneous approval decisions commit once and the losing client observes a stale decision before removing the resolved request. Input drafts, pending image references, scroll, expanded panels, and theme choices stay local to each client.
 

@@ -18,7 +18,7 @@ An attached client never opens a second writer for the same persistent session. 
 
 Local terminal clients use the owner-only Unix socket at the Atman data directory's `run/atman.sock`. Browser and remote-capable clients use JSON-RPC at `http://127.0.0.1:65099/rpc` and projection events over SSE; `ATMAN_DAEMON_PORT` changes the HTTP port.
 
-The HTTP API requires the bearer token stored in `~/.config/atman/daemon.toml`, or the path selected by `ATMAN_DAEMON_CONFIG_PATH`. Keep this token outside source code and browser URLs. `atman daemon rotate-token` replaces it while the daemon is stopped. Browser event streams exchange the bearer for a short-lived, session-scoped ticket so the long-lived token does not appear in URLs, history, or access logs.
+The HTTP API requires the bearer token stored in `~/.config/atman/daemon.toml`, or the path selected by `ATMAN_DAEMON_CONFIG_PATH`. Keep this token outside source code and browser URLs. `atman daemon rotate-token` replaces it while the daemon is stopped. The SDK sends the bearer in the `Authorization` header, never in an event-stream URL. Clients that require URL-only stream authentication can exchange the bearer at `/event-ticket` for a short-lived, session-scoped ticket.
 
 The daemon currently represents one local operator. Authenticated HTTP clients and owner-only Unix clients share that principal, while each loaded session still checks its owner before any query or mutation.
 
