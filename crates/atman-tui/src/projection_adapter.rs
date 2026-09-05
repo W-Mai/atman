@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use atman_proto::{
@@ -29,7 +30,10 @@ use atman_runtime::workflow::{
     WorkflowPermissionRequest, WorkflowPermissionState,
 };
 
-use crate::app::{PendingPermission, PendingPermissionGroup};
+use crate::app::{
+    Disclosure, NoteLevel, OutputItem, PendingPermission, PendingPermissionGroup, ToolCallStatus,
+};
+use crate::history::ToolDisplayMeta;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TuiSessionProjection {
@@ -46,13 +50,27 @@ pub(crate) struct TuiSessionProjection {
     pub(crate) pending_forms: Vec<PendingForm>,
     pub(crate) pending_compact_reviews: Vec<atman_runtime::PendingCompactReview>,
     pub(crate) pending_injections: Vec<Injection>,
-    pub(crate) workflows: Vec<WorkflowProjection>,
+    pub(crate) transcript: Option<Vec<OutputItem>>,
+    pub(crate) transcript_revision: u64,
 }
 
-impl TryFrom<&SessionProjection> for TuiSessionProjection {
-    type Error = anyhow::Error;
+impl TuiSessionProjection {
+    pub(crate) fn try_from_state(
+        state: &atman_client::SessionState,
+        current_transcript_revision: Option<u64>,
+    ) -> Result<Self> {
+        Self::convert(
+            state.projection(),
+            state.transcript_revision(),
+            current_transcript_revision != Some(state.transcript_revision()),
+        )
+    }
 
-    fn try_from(projection: &SessionProjection) -> Result<Self> {
+    fn convert(
+        projection: &SessionProjection,
+        transcript_revision: u64,
+        include_transcript: bool,
+    ) -> Result<Self> {
         let audits = projection
             .interactions
             .approvals
@@ -110,6 +128,17 @@ impl TryFrom<&SessionProjection> for TuiSessionProjection {
             })
             .collect();
 
+        let transcript = if include_transcript {
+            let workflows = projection
+                .workflows
+                .iter()
+                .map(|workflow| workflow_projection(workflow, &audits, &groups, projection))
+                .collect::<Result<Vec<_>>>()?;
+            Some(transcript(projection, &workflows, &audits, &groups)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             revision: projection.revision.0,
             session_name: (!projection.metadata.title.is_empty())
@@ -147,12 +176,588 @@ impl TryFrom<&SessionProjection> for TuiSessionProjection {
                 })
                 .map(interjection)
                 .collect(),
-            workflows: projection
-                .workflows
-                .iter()
-                .map(|workflow| workflow_projection(workflow, &audits, &groups, projection))
-                .collect::<Result<Vec<_>>>()?,
+            transcript,
+            transcript_revision,
         })
+    }
+}
+
+impl TryFrom<&SessionProjection> for TuiSessionProjection {
+    type Error = anyhow::Error;
+
+    fn try_from(projection: &SessionProjection) -> Result<Self> {
+        Self::convert(projection, projection.revision.0, true)
+    }
+}
+
+fn transcript(
+    projection: &SessionProjection,
+    workflows: &[WorkflowProjection],
+    approvals: &[PermissionRequestAudit],
+    groups: &[PermissionGroupAudit],
+) -> Result<Vec<OutputItem>> {
+    let messages = projection
+        .transcript
+        .iter()
+        .map(|item| match item {
+            atman_proto::TranscriptItem::Message { message, .. } => {
+                message_from_projection(message).map(Some)
+            }
+            _ => Ok(None),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let tool_map = messages
+        .iter()
+        .flatten()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| {
+            let atman_runtime::message::MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } = part
+            else {
+                return None;
+            };
+            Some((
+                id.clone(),
+                ToolDisplayMeta::from_tool_use(name, input, intent.as_ref()),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let subflows = subflow_roots(projection);
+    let mut subflow_messages =
+        HashMap::<atman_proto::FlowRunId, Vec<atman_runtime::Message>>::new();
+    let mut workflow_slots = projection
+        .workflows
+        .iter()
+        .zip(workflows)
+        .enumerate()
+        .map(|(index, (source, workflow))| (source.turn_id.0, (index, workflow.clone())))
+        .collect::<HashMap<_, _>>();
+    let mut out = Vec::new();
+
+    for (item, message) in projection.transcript.iter().zip(messages) {
+        match item {
+            atman_proto::TranscriptItem::Message {
+                run_id,
+                message: source,
+                ..
+            } => {
+                let message = message.expect("message projections were converted above");
+                if matches!(source.origin, atman_proto::MessageOrigin::Interjection) {
+                    continue;
+                }
+                if let Some(root) = run_id.as_ref().and_then(|run_id| subflows.get(run_id)) {
+                    subflow_messages
+                        .entry(root.clone())
+                        .or_default()
+                        .push(message);
+                    continue;
+                }
+                let workflow = workflow_slots.remove(&source.turn_id.0);
+                let after_user = matches!(
+                    (source.role, source.origin),
+                    (
+                        atman_proto::MessageRole::User,
+                        atman_proto::MessageOrigin::User
+                    )
+                );
+                if !after_user && let Some((index, workflow)) = workflow.as_ref() {
+                    out.push(workflow_item(*index, workflow));
+                }
+                crate::history::flatten_message(&message, &mut out, &tool_map);
+                if after_user && let Some((index, workflow)) = workflow.as_ref() {
+                    out.push(workflow_item(*index, workflow));
+                }
+            }
+            atman_proto::TranscriptItem::Diff {
+                tool_use_id,
+                title,
+                old_content,
+                new_content,
+                unified_diff,
+                ..
+            } => {
+                let detail = OutputItem::DiffPreview {
+                    title: title.clone(),
+                    old_content: old_content.clone(),
+                    new_content: new_content.clone(),
+                    unified_diff: unified_diff.clone(),
+                    expanded: false,
+                };
+                if tool_use_id
+                    .as_deref()
+                    .is_none_or(|id| !crate::history::attach_detail(&mut out, id, detail.clone()))
+                {
+                    out.push(detail);
+                }
+            }
+            atman_proto::TranscriptItem::FileEdit {
+                tool_use_id,
+                path,
+                added_lines,
+                removed_lines,
+                hunks,
+                ..
+            } => {
+                let metrics = atman_runtime::activity::EditMetrics {
+                    hunks: usize::try_from(*hunks).context("file edit hunk count exceeds usize")?,
+                    insertions: usize::try_from(*added_lines)
+                        .context("file edit insertion count exceeds usize")?,
+                    deletions: usize::try_from(*removed_lines)
+                        .context("file edit deletion count exceeds usize")?,
+                };
+                if let Some(tool_use_id) = tool_use_id {
+                    for item in out.iter_mut().rev() {
+                        let OutputItem::ToolDispatch { calls } = item else {
+                            continue;
+                        };
+                        if let Some(call) = calls.iter_mut().find(|call| call.id == *tool_use_id) {
+                            call.applied_edit = Some((path.clone(), metrics));
+                            break;
+                        }
+                    }
+                }
+            }
+            atman_proto::TranscriptItem::Compaction {
+                operation_id,
+                context_id,
+                run_id,
+                outcome,
+                range_start,
+                range_end,
+                compacted_count,
+                before_tokens,
+                after_tokens,
+                summary,
+                ..
+            } => {
+                let range_start = usize::try_from(*range_start)
+                    .context("compaction range start exceeds usize")?;
+                let range_end =
+                    usize::try_from(*range_end).context("compaction range end exceeds usize")?;
+                let item = OutputItem::CompactionSummary {
+                    operation_id: operation_id.as_ref().map(ToString::to_string),
+                    context_id: context_id.as_ref().map(|id| id.0.to_string()),
+                    run_id: run_id.as_ref().map(|id| id.0.to_string()),
+                    phase: match outcome {
+                        atman_proto::CompactionOutcome::Finished => {
+                            atman_runtime::stream::CompactionPhase::Finished
+                        }
+                        atman_proto::CompactionOutcome::Failed
+                        | atman_proto::CompactionOutcome::Abandoned => {
+                            atman_runtime::stream::CompactionPhase::Failed
+                        }
+                    },
+                    range_start,
+                    range_end,
+                    summary: summary.clone(),
+                    before_tokens: *before_tokens,
+                    after_tokens: *after_tokens,
+                    compacted_count: usize::try_from(*compacted_count)
+                        .context("compaction message count exceeds usize")?,
+                    disclosure: Disclosure::Summary,
+                };
+                if matches!(
+                    out.last(),
+                    Some(OutputItem::CompactionSummary {
+                        phase: atman_runtime::stream::CompactionPhase::Finished,
+                        range_start: last_start,
+                        range_end: last_end,
+                        summary: last_summary,
+                        ..
+                    }) if *last_start == range_start
+                        && *last_end == range_end
+                        && last_summary == summary
+                ) {
+                    *out.last_mut().expect("matched the last item") = item;
+                } else {
+                    out.push(item);
+                }
+            }
+            atman_proto::TranscriptItem::Mermaid { source, .. } => {
+                out.push(OutputItem::MermaidDiagram {
+                    source: source.clone(),
+                });
+            }
+            atman_proto::TranscriptItem::Notice { level, text, .. } => {
+                out.push(OutputItem::SystemNote {
+                    text: text.clone(),
+                    level: note_level(*level),
+                });
+            }
+            atman_proto::TranscriptItem::Extension { kind, payload, .. } => {
+                out.push(OutputItem::SystemNote {
+                    text: format!("{kind}: {payload}"),
+                    level: NoteLevel::Debug,
+                });
+            }
+        }
+    }
+
+    let mut remaining = workflow_slots.into_values().collect::<Vec<_>>();
+    remaining.sort_by_key(|(index, _)| *index);
+    out.extend(
+        remaining
+            .into_iter()
+            .map(|(index, workflow)| workflow_item(index, &workflow)),
+    );
+    for compaction in &projection.compactions {
+        out.push(OutputItem::CompactionSummary {
+            operation_id: Some(compaction.id.to_string()),
+            context_id: compaction.context_id.map(|id| id.0.to_string()),
+            run_id: compaction.run_id.as_ref().map(|id| id.0.to_string()),
+            phase: atman_runtime::stream::CompactionPhase::Running,
+            range_start: usize::try_from(compaction.range_start)
+                .context("active compaction range start exceeds usize")?,
+            range_end: usize::try_from(compaction.range_end)
+                .context("active compaction range end exceeds usize")?,
+            summary: compaction.summary.clone(),
+            before_tokens: compaction.before_tokens,
+            after_tokens: 0,
+            compacted_count: usize::try_from(compaction.compacted_count)
+                .context("active compaction message count exceeds usize")?,
+            disclosure: Disclosure::Summary,
+        });
+    }
+    attach_subflows(
+        &mut out,
+        projection,
+        &subflow_messages,
+        &subflows,
+        approvals,
+        groups,
+    )?;
+    apply_workflow_tool_state(&mut out, workflows);
+    Ok(out)
+}
+
+fn message_from_projection(
+    source: &atman_proto::MessageProjection,
+) -> Result<atman_runtime::Message> {
+    use atman_runtime::message::{MessageOrigin, MessagePart, MessageRole};
+
+    let mut parts = Vec::with_capacity(source.parts.len());
+    for part in &source.parts {
+        match part {
+            atman_proto::MessagePart::ContextRecord { .. } => {}
+            atman_proto::MessagePart::CompactSummary {
+                summary,
+                seq_start,
+                seq_end,
+                count,
+            } => parts.push(MessagePart::CompactSummary {
+                summary: summary.clone(),
+                seq_start: *seq_start,
+                seq_end: *seq_end,
+                count: *count,
+            }),
+            atman_proto::MessagePart::Text { text } => {
+                parts.push(MessagePart::Text { text: text.clone() });
+            }
+            atman_proto::MessagePart::Thinking { thinking } => {
+                parts.push(MessagePart::Thinking {
+                    thinking: thinking.clone(),
+                    signature: None,
+                });
+            }
+            atman_proto::MessagePart::Image {
+                media_type,
+                artifact_id,
+                name,
+                ..
+            } => {
+                let label = name
+                    .as_deref()
+                    .or(artifact_id.as_deref())
+                    .unwrap_or(media_type);
+                let separator = if parts
+                    .iter()
+                    .any(|part| matches!(part, MessagePart::Text { .. }))
+                {
+                    "\n"
+                } else {
+                    ""
+                };
+                parts.push(MessagePart::Text {
+                    text: format!("{separator}[image: {label}]"),
+                });
+            }
+            atman_proto::MessagePart::ToolUse {
+                id,
+                name,
+                input,
+                intent,
+            } => parts.push(MessagePart::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                intent: intent
+                    .as_deref()
+                    .map(|intent| {
+                        atman_runtime::message::ToolCallIntent::new(intent)
+                            .context("transcript projection has an empty tool intent")
+                    })
+                    .transpose()?,
+            }),
+            atman_proto::MessagePart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => parts.push(MessagePart::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            }),
+        }
+    }
+    Ok(atman_runtime::Message {
+        role: match source.role {
+            atman_proto::MessageRole::User => MessageRole::User,
+            atman_proto::MessageRole::Assistant => MessageRole::Assistant,
+            atman_proto::MessageRole::System => MessageRole::System,
+            atman_proto::MessageRole::Tool => MessageRole::Tool,
+        },
+        parts,
+        turn_id: TurnId(source.turn_id.0),
+        origin: match source.origin {
+            atman_proto::MessageOrigin::User => MessageOrigin::User,
+            atman_proto::MessageOrigin::Watcher => MessageOrigin::Watcher,
+            atman_proto::MessageOrigin::Interjection => MessageOrigin::Interjection,
+            atman_proto::MessageOrigin::Internal => MessageOrigin::Internal,
+        },
+    })
+}
+
+fn workflow_item(turn_index: usize, workflow: &WorkflowProjection) -> OutputItem {
+    let terminal = !workflow.graph().root.is_empty()
+        && workflow
+            .graph()
+            .root
+            .iter()
+            .all(|node| !matches!(node.status, NodeStatus::Pending | NodeStatus::Running));
+    OutputItem::WorkflowPanel {
+        turn_index,
+        graph: workflow.clone(),
+        expanded_nodes: HashSet::new(),
+        panel_expanded: true,
+        started_at: Instant::now(),
+        ended_at: terminal.then(Instant::now),
+        cancelled: workflow
+            .graph()
+            .root
+            .iter()
+            .any(|node| matches!(node.status, NodeStatus::Cancelled)),
+    }
+}
+
+fn note_level(source: atman_proto::NoticeLevel) -> NoteLevel {
+    match source {
+        atman_proto::NoticeLevel::Debug => NoteLevel::Debug,
+        atman_proto::NoticeLevel::Info => NoteLevel::Info,
+        atman_proto::NoticeLevel::Success => NoteLevel::Success,
+        atman_proto::NoticeLevel::Warning => NoteLevel::Warn,
+        atman_proto::NoticeLevel::Error => NoteLevel::Error,
+    }
+}
+
+fn subflow_roots(
+    projection: &SessionProjection,
+) -> HashMap<atman_proto::FlowRunId, atman_proto::FlowRunId> {
+    fn collect(nodes: &[WorkflowNodeProjection], roots: &mut HashSet<atman_proto::FlowRunId>) {
+        for node in nodes {
+            if let WorkflowNodeKind::Subflow { run_id, .. } = &node.kind {
+                roots.insert(run_id.clone());
+            }
+            collect(&node.children, roots);
+        }
+    }
+
+    let mut roots = HashSet::new();
+    for workflow in &projection.workflows {
+        collect(&workflow.roots, &mut roots);
+    }
+    let mut by_run = roots
+        .iter()
+        .cloned()
+        .map(|run_id| (run_id.clone(), run_id))
+        .collect::<HashMap<_, _>>();
+    loop {
+        let mut changed = false;
+        for run in &projection.runs {
+            let Some(parent) = run.parent_run_id.as_ref() else {
+                continue;
+            };
+            if let Some(root) = by_run.get(parent).cloned()
+                && by_run.insert(run.id.clone(), root).is_none()
+            {
+                changed = true;
+            }
+        }
+        if !changed {
+            return by_run;
+        }
+    }
+}
+
+fn attach_subflows(
+    out: &mut Vec<OutputItem>,
+    projection: &SessionProjection,
+    messages: &HashMap<atman_proto::FlowRunId, Vec<atman_runtime::Message>>,
+    roots_by_run: &HashMap<atman_proto::FlowRunId, atman_proto::FlowRunId>,
+    approvals: &[PermissionRequestAudit],
+    groups: &[PermissionGroupAudit],
+) -> Result<()> {
+    fn locate(
+        turn_id: &atman_proto::TurnId,
+        nodes: &[WorkflowNodeProjection],
+        parent_tool: Option<&str>,
+        found: &mut HashMap<
+            atman_proto::FlowRunId,
+            (atman_proto::TurnId, WorkflowNodeProjection, Option<String>),
+        >,
+    ) {
+        for node in nodes {
+            let parent_tool = match &node.kind {
+                WorkflowNodeKind::ToolCall { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => parent_tool,
+            };
+            if let WorkflowNodeKind::Subflow { run_id, .. } = &node.kind {
+                found.insert(
+                    run_id.clone(),
+                    (
+                        turn_id.clone(),
+                        node.clone(),
+                        parent_tool.map(str::to_owned),
+                    ),
+                );
+            }
+            locate(turn_id, &node.children, parent_tool, found);
+        }
+    }
+
+    let mut locations = HashMap::new();
+    for workflow in &projection.workflows {
+        locate(&workflow.turn_id, &workflow.roots, None, &mut locations);
+    }
+    let mut roots = roots_by_run.values().cloned().collect::<Vec<_>>();
+    roots.sort_by_key(|run_id| {
+        projection
+            .runs
+            .iter()
+            .find(|run| run.id == *run_id)
+            .map(|run| run.started_at)
+    });
+    roots.dedup();
+    for root in roots {
+        let root_messages = messages.get(&root).cloned().unwrap_or_default();
+        let run = projection.runs.iter().find(|run| run.id == root);
+        let (status, done) = run.map_or_else(
+            || ("running".to_owned(), false),
+            |run| match run.state {
+                atman_proto::RunLifecycle::Succeeded => ("ok".to_owned(), true),
+                atman_proto::RunLifecycle::Failed | atman_proto::RunLifecycle::Lost => {
+                    ("error".to_owned(), true)
+                }
+                atman_proto::RunLifecycle::Cancelled => ("killed".to_owned(), true),
+                _ => ("running".to_owned(), false),
+            },
+        );
+        let (workflow_graph, tool_use_id) = match locations.get(&root) {
+            Some((turn_id, node, tool_use_id)) => (
+                workflow_projection(
+                    &atman_proto::WorkflowProjection {
+                        turn_id: turn_id.clone(),
+                        roots: vec![node.clone()],
+                    },
+                    approvals,
+                    groups,
+                    projection,
+                )?,
+                tool_use_id.clone(),
+            ),
+            None => (WorkflowProjection::new(TurnId::now()), None),
+        };
+        let detail = OutputItem::SubAgentActivity {
+            handle: root.0.to_string(),
+            goal: root_messages
+                .iter()
+                .find(|message| matches!(message.role, atman_runtime::message::MessageRole::User))
+                .map(atman_runtime::Message::text_concat)
+                .unwrap_or_default(),
+            child_run_id: root.0.to_string(),
+            model: run.and_then(|run| run.model.clone()).unwrap_or_default(),
+            status,
+            output: root_messages
+                .iter()
+                .filter(|message| {
+                    matches!(message.role, atman_runtime::message::MessageRole::Assistant)
+                })
+                .map(atman_runtime::Message::text_concat)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            iteration: 0,
+            done,
+            expanded: false,
+            messages: root_messages,
+            workflow_graph,
+            expanded_nodes: HashSet::new(),
+            workflow_expanded: false,
+        };
+        if tool_use_id
+            .as_deref()
+            .is_none_or(|id| !crate::history::attach_detail(out, id, detail.clone()))
+        {
+            out.push(detail);
+        }
+    }
+    Ok(())
+}
+
+fn apply_workflow_tool_state(out: &mut [OutputItem], workflows: &[WorkflowProjection]) {
+    fn collect<'a>(nodes: &'a [WorkflowNode], out: &mut HashMap<&'a str, &'a WorkflowNode>) {
+        for node in nodes {
+            if let RuntimeWorkflowNodeKind::ToolCall { tool_use_id, .. } = &node.kind {
+                out.insert(tool_use_id, node);
+            }
+            collect(&node.children, out);
+        }
+    }
+
+    let mut nodes = HashMap::new();
+    for workflow in workflows {
+        collect(&workflow.graph().root, &mut nodes);
+    }
+    let now = chrono::Utc::now();
+    let instant = Instant::now();
+    for item in out {
+        let OutputItem::ToolDispatch { calls } = item else {
+            continue;
+        };
+        for call in calls {
+            let Some(node) = nodes.get(call.id.as_str()) else {
+                continue;
+            };
+            call.status = match node.status {
+                NodeStatus::Pending | NodeStatus::Running => ToolCallStatus::Running,
+                NodeStatus::Ok => ToolCallStatus::Ok,
+                NodeStatus::Err | NodeStatus::Cancelled => ToolCallStatus::Error,
+            };
+            if let Some(started_at) = node.started_at {
+                let elapsed = node
+                    .ended_at
+                    .unwrap_or(now)
+                    .signed_duration_since(started_at)
+                    .num_milliseconds()
+                    .max(0) as u64;
+                call.started_at = instant
+                    .checked_sub(Duration::from_millis(elapsed))
+                    .unwrap_or(instant);
+            }
+            call.ended_at = node.ended_at.map(|_| instant);
+        }
     }
 }
 
@@ -1058,16 +1663,409 @@ mod tests {
             converted.pending_injections[0].level,
             InjectionLevel::L2CourseCorrect
         );
-        assert_eq!(converted.workflows[0].graph().permission_requests.len(), 1);
-        assert_eq!(converted.workflows[0].graph().permission_groups.len(), 1);
+        let workflow = converted
+            .transcript
+            .as_deref()
+            .unwrap()
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .expect("daemon workflow is placed in the transcript");
+        assert_eq!(workflow.graph().permission_requests.len(), 1);
+        assert_eq!(workflow.graph().permission_groups.len(), 1);
         assert_eq!(
-            converted.workflows[0].graph().root[0].children[0]
+            workflow.graph().root[0].children[0]
                 .llm_stats
                 .as_ref()
                 .unwrap()
                 .cache_read,
             80
         );
+    }
+
+    #[test]
+    fn converts_durable_transcript_into_existing_output_items() {
+        let mut source = projection();
+        let now = chrono::Utc::now();
+        let turn_id = source.workflows[0].turn_id.clone();
+        let run_id = match &source.workflows[0].roots[0].kind {
+            WorkflowNodeKind::Flow { run_id, .. } => run_id.clone(),
+            _ => unreachable!(),
+        };
+        source.workflows[0].roots[0]
+            .children
+            .push(WorkflowNodeProjection {
+                id: "tool-node".into(),
+                kind: WorkflowNodeKind::ToolCall {
+                    tool_use_id: "call-1".into(),
+                    tool_name: "fs.read".into(),
+                    args_preview: "README.md".into(),
+                    intent: Some("Read project documentation".into()),
+                    result_preview: Some("contents".into()),
+                },
+                label: "Read project documentation".into(),
+                state: WorkflowNodeState::Succeeded,
+                started_at: Some(now - chrono::Duration::milliseconds(250)),
+                finished_at: Some(now),
+                output_preview: Some("contents".into()),
+                children: Vec::new(),
+                parallel: false,
+                approval: None,
+                llm_usage: None,
+            });
+        let message = |role, origin, parts| atman_proto::MessageProjection {
+            role,
+            origin,
+            turn_id: turn_id.clone(),
+            parts,
+        };
+        source.transcript = vec![
+            atman_proto::TranscriptItem::Message {
+                seq: 1,
+                ts: now,
+                run_id: None,
+                context_id: None,
+                checkpoint_index: None,
+                message: message(
+                    atman_proto::MessageRole::User,
+                    atman_proto::MessageOrigin::User,
+                    vec![
+                        atman_proto::MessagePart::Text {
+                            text: "Inspect the project".into(),
+                        },
+                        atman_proto::MessagePart::Image {
+                            id: None,
+                            media_type: "image/png".into(),
+                            artifact_id: Some("artifact-1".into()),
+                            name: Some("layout.png".into()),
+                            detail: atman_proto::ImageDetail::High,
+                        },
+                    ],
+                ),
+            },
+            atman_proto::TranscriptItem::Message {
+                seq: 2,
+                ts: now,
+                run_id: Some(run_id.clone()),
+                context_id: None,
+                checkpoint_index: None,
+                message: message(
+                    atman_proto::MessageRole::Assistant,
+                    atman_proto::MessageOrigin::User,
+                    vec![
+                        atman_proto::MessagePart::Thinking {
+                            thinking: "Checking files".into(),
+                        },
+                        atman_proto::MessagePart::Text {
+                            text: "I will inspect the documentation.".into(),
+                        },
+                        atman_proto::MessagePart::ToolUse {
+                            id: "call-1".into(),
+                            name: "fs.read".into(),
+                            input: serde_json::json!({"path": "README.md"}),
+                            intent: Some("Read project documentation".into()),
+                        },
+                    ],
+                ),
+            },
+            atman_proto::TranscriptItem::Message {
+                seq: 3,
+                ts: now,
+                run_id: Some(run_id),
+                context_id: None,
+                checkpoint_index: None,
+                message: message(
+                    atman_proto::MessageRole::Tool,
+                    atman_proto::MessageOrigin::User,
+                    vec![atman_proto::MessagePart::ToolResult {
+                        tool_use_id: "call-1".into(),
+                        content: "contents".into(),
+                        is_error: false,
+                    }],
+                ),
+            },
+            atman_proto::TranscriptItem::Diff {
+                seq: 4,
+                ts: now,
+                run_id: None,
+                tool_use_id: Some("call-1".into()),
+                title: "README.md".into(),
+                old_content: Some("old".into()),
+                new_content: Some("new".into()),
+                unified_diff: None,
+            },
+            atman_proto::TranscriptItem::FileEdit {
+                seq: 5,
+                ts: now,
+                turn_id: Some(turn_id.clone()),
+                run_id: None,
+                tool_use_id: Some("call-1".into()),
+                tool_name: "fs.edit".into(),
+                path: "README.md".into(),
+                added_lines: 2,
+                removed_lines: 1,
+                hunks: 1,
+            },
+            atman_proto::TranscriptItem::Message {
+                seq: 6,
+                ts: now,
+                run_id: None,
+                context_id: None,
+                checkpoint_index: None,
+                message: message(
+                    atman_proto::MessageRole::User,
+                    atman_proto::MessageOrigin::Interjection,
+                    vec![atman_proto::MessagePart::Text {
+                        text: "hidden correction".into(),
+                    }],
+                ),
+            },
+            atman_proto::TranscriptItem::Message {
+                seq: 7,
+                ts: now,
+                run_id: None,
+                context_id: None,
+                checkpoint_index: None,
+                message: message(
+                    atman_proto::MessageRole::System,
+                    atman_proto::MessageOrigin::Internal,
+                    vec![atman_proto::MessagePart::CompactSummary {
+                        summary: "summary".into(),
+                        seq_start: 0,
+                        seq_end: 4,
+                        count: 5,
+                    }],
+                ),
+            },
+            atman_proto::TranscriptItem::Compaction {
+                seq: 8,
+                ts: now,
+                operation_id: Some(CompactionOperationId(uuid::Uuid::now_v7())),
+                context_id: None,
+                run_id: None,
+                outcome: atman_proto::CompactionOutcome::Finished,
+                range_start: 0,
+                range_end: 4,
+                compacted_count: 5,
+                before_tokens: 2_000,
+                after_tokens: 500,
+                summary: "summary".into(),
+            },
+            atman_proto::TranscriptItem::Notice {
+                seq: 9,
+                ts: now,
+                level: atman_proto::NoticeLevel::Warning,
+                text: "watch warning".into(),
+            },
+            atman_proto::TranscriptItem::Mermaid {
+                seq: 10,
+                ts: now,
+                source: "graph TD; A-->B".into(),
+            },
+        ];
+
+        let converted = TuiSessionProjection::try_from(&source).unwrap();
+        let transcript = converted.transcript.as_deref().unwrap();
+        assert_eq!(converted.transcript_revision, source.revision.0);
+        assert!(matches!(
+            transcript.first(),
+            Some(OutputItem::UserTurn { text })
+                if text.contains("Inspect the project") && text.contains("[image: layout.png]")
+        ));
+        assert!(matches!(
+            transcript.get(1),
+            Some(OutputItem::WorkflowPanel { .. })
+        ));
+        let call = transcript
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::ToolDispatch { calls } => calls.first(),
+                _ => None,
+            })
+            .expect("tool dispatch is restored");
+        assert_eq!(call.status, ToolCallStatus::Ok);
+        assert_eq!(call.applied_edit.as_ref().unwrap().1.insertions, 2);
+        assert!(matches!(
+            call.detail.as_deref(),
+            Some(OutputItem::DiffPreview { title, .. }) if title == "README.md"
+        ));
+        assert!(transcript.iter().all(|item| {
+            !matches!(item, OutputItem::UserTurn { text } if text.contains("hidden correction"))
+        }));
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|item| matches!(item, OutputItem::CompactionSummary { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            transcript
+                .iter()
+                .find(|item| matches!(item, OutputItem::CompactionSummary { .. })),
+            Some(OutputItem::CompactionSummary {
+                compacted_count: 5,
+                before_tokens: 2_000,
+                after_tokens: 500,
+                ..
+            })
+        ));
+        assert!(transcript.iter().any(|item| matches!(
+            item,
+            OutputItem::SystemNote { text, level: NoteLevel::Warn }
+                if text == "watch warning"
+        )));
+        assert!(transcript.iter().any(|item| matches!(
+            item,
+            OutputItem::MermaidDiagram { source } if source == "graph TD; A-->B"
+        )));
+    }
+
+    #[test]
+    fn routes_spawned_messages_into_the_existing_subagent_detail() {
+        let mut source = projection();
+        let now = chrono::Utc::now();
+        let turn_id = source.workflows[0].turn_id.clone();
+        let root_run_id = match &source.workflows[0].roots[0].kind {
+            WorkflowNodeKind::Flow { run_id, .. } => run_id.clone(),
+            _ => unreachable!(),
+        };
+        let child_run_id = atman_proto::FlowRunId(uuid::Uuid::now_v7());
+        source.runs = vec![
+            atman_proto::RunProjection {
+                id: root_run_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                flow_name: "agent".into(),
+                model: Some("reasoning-model".into()),
+                provider: Some("openai-compatible".into()),
+                parent_run_id: None,
+                parent_node_id: None,
+                state: atman_proto::RunLifecycle::Running,
+                started_at: now,
+                finished_at: None,
+                error: None,
+            },
+            atman_proto::RunProjection {
+                id: child_run_id.clone(),
+                turn_id: Some(turn_id.clone()),
+                flow_name: "implementation".into(),
+                model: Some("child-model".into()),
+                provider: Some("openai-compatible".into()),
+                parent_run_id: Some(root_run_id.clone()),
+                parent_node_id: Some("spawn-call".into()),
+                state: atman_proto::RunLifecycle::Succeeded,
+                started_at: now,
+                finished_at: Some(now),
+                error: None,
+            },
+        ];
+        source.workflows[0].roots[0]
+            .children
+            .push(WorkflowNodeProjection {
+                id: "spawn-call".into(),
+                kind: WorkflowNodeKind::ToolCall {
+                    tool_use_id: "spawn-1".into(),
+                    tool_name: "agent.at".into(),
+                    args_preview: "implementation".into(),
+                    intent: Some("Implement the change".into()),
+                    result_preview: Some("done".into()),
+                },
+                label: "Implement the change".into(),
+                state: WorkflowNodeState::Succeeded,
+                started_at: Some(now),
+                finished_at: Some(now),
+                output_preview: Some("done".into()),
+                children: vec![WorkflowNodeProjection {
+                    id: child_run_id.0.to_string(),
+                    kind: WorkflowNodeKind::Subflow {
+                        run_id: child_run_id.clone(),
+                        flow_name: "implementation".into(),
+                    },
+                    label: "implementation".into(),
+                    state: WorkflowNodeState::Succeeded,
+                    started_at: Some(now),
+                    finished_at: Some(now),
+                    output_preview: Some("implemented".into()),
+                    children: Vec::new(),
+                    parallel: false,
+                    approval: None,
+                    llm_usage: None,
+                }],
+                parallel: false,
+                approval: None,
+                llm_usage: None,
+            });
+        let message = |role, run_id, text: &str| atman_proto::TranscriptItem::Message {
+            seq: 1,
+            ts: now,
+            run_id,
+            context_id: None,
+            checkpoint_index: None,
+            message: atman_proto::MessageProjection {
+                role,
+                origin: atman_proto::MessageOrigin::User,
+                turn_id: turn_id.clone(),
+                parts: vec![atman_proto::MessagePart::Text { text: text.into() }],
+            },
+        };
+        source.transcript = vec![
+            message(atman_proto::MessageRole::User, None, "Ship the change"),
+            atman_proto::TranscriptItem::Message {
+                seq: 2,
+                ts: now,
+                run_id: Some(root_run_id),
+                context_id: None,
+                checkpoint_index: None,
+                message: atman_proto::MessageProjection {
+                    role: atman_proto::MessageRole::Assistant,
+                    origin: atman_proto::MessageOrigin::User,
+                    turn_id: turn_id.clone(),
+                    parts: vec![atman_proto::MessagePart::ToolUse {
+                        id: "spawn-1".into(),
+                        name: "agent.at".into(),
+                        input: serde_json::json!({"flow": "implementation"}),
+                        intent: Some("Implement the change".into()),
+                    }],
+                },
+            },
+            message(
+                atman_proto::MessageRole::User,
+                Some(child_run_id.clone()),
+                "Implement carefully",
+            ),
+            message(
+                atman_proto::MessageRole::Assistant,
+                Some(child_run_id),
+                "Implemented",
+            ),
+        ];
+
+        let converted = TuiSessionProjection::try_from(&source).unwrap();
+        let transcript = converted.transcript.as_deref().unwrap();
+        let detail = transcript
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::ToolDispatch { calls } => calls
+                    .iter()
+                    .find(|call| call.id == "spawn-1")
+                    .and_then(|call| call.detail.as_deref()),
+                _ => None,
+            })
+            .expect("spawned flow is attached to its tool call");
+        assert!(matches!(
+            detail,
+            OutputItem::SubAgentActivity {
+                model,
+                output,
+                done: true,
+                ..
+            } if model == "child-model" && output == "Implemented"
+        ));
+        assert!(transcript.iter().all(|item| {
+            !matches!(item, OutputItem::AssistantMd { md, .. } if md == "Implemented")
+        }));
     }
 
     #[test]

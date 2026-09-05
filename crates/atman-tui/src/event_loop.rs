@@ -29,7 +29,7 @@ pub(crate) async fn run_frames(
         .daemon_state_rx
         .as_ref()
         .map(|rx| {
-            crate::projection_adapter::TuiSessionProjection::try_from(rx.borrow().projection())
+            crate::projection_adapter::TuiSessionProjection::try_from_state(&rx.borrow(), None)
         })
         .transpose()?;
     if let Some(projected) = daemon_projection.as_ref() {
@@ -1324,12 +1324,26 @@ pub(crate) async fn run_frames(
             }
             _ = wait_daemon_state_change(handle.daemon_state_rx.as_mut()) => {
                 if let Some(rx) = handle.daemon_state_rx.as_mut() {
+                    let transcript_revision = app.app.daemon_transcript_revision();
                     let projected = {
                         let state = rx.borrow();
-                        crate::projection_adapter::TuiSessionProjection::try_from(state.projection())
+                        if app
+                            .app
+                            .daemon_revision
+                            .is_some_and(|revision| revision >= state.projection().revision.0)
+                        {
+                            Ok(None)
+                        } else {
+                            crate::projection_adapter::TuiSessionProjection::try_from_state(
+                                &state,
+                                transcript_revision,
+                            )
+                            .map(Some)
+                        }
                     };
                     match projected {
-                        Ok(projected) => apply_daemon_projection(&mut app, projected),
+                        Ok(Some(projected)) => apply_daemon_projection(&mut app, projected),
+                        Ok(None) => {}
                         Err(error) => app.app.push_note(
                             format!("daemon projection rejected: {error}"),
                             app::NoteLevel::Error,
@@ -1734,7 +1748,10 @@ fn apply_daemon_projection(
         .flat_map(|group| group.payload.request_ids.iter().cloned())
         .collect();
     app.app.pending_injections = projected.pending_injections;
-    app.app.reconcile_daemon_workflows(&projected.workflows);
+    if let Some(transcript) = projected.transcript {
+        app.app
+            .reconcile_daemon_transcript(transcript, projected.transcript_revision);
+    }
     app.wm.modals.form_modal.reconcile(&projected.pending_forms);
     crate::compact_review_modal::CompactReviewModal::reconcile(
         &mut app.wm.modals.compact_review,
@@ -1916,6 +1933,7 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
+        let workflow = graph.into();
         crate::projection_adapter::TuiSessionProjection {
             revision,
             session_name: Some("remote".into()),
@@ -1930,7 +1948,21 @@ mod tests {
             pending_forms: Vec::new(),
             pending_compact_reviews: Vec::new(),
             pending_injections: Vec::new(),
-            workflows: vec![graph.into()],
+            transcript: Some(vec![crate::app::OutputItem::WorkflowPanel {
+                turn_index: 0,
+                graph: workflow,
+                expanded_nodes: Default::default(),
+                panel_expanded: true,
+                started_at: std::time::Instant::now(),
+                ended_at: (!matches!(
+                    status,
+                    atman_runtime::workflow::NodeStatus::Pending
+                        | atman_runtime::workflow::NodeStatus::Running
+                ))
+                .then(std::time::Instant::now),
+                cancelled: matches!(status, atman_runtime::workflow::NodeStatus::Cancelled),
+            }]),
+            transcript_revision: revision,
         }
     }
 
@@ -1952,30 +1984,59 @@ mod tests {
             &*app.app.items,
             [app::OutputItem::WorkflowPanel { ended_at: None, .. }]
         ));
+        app.app.toggle_workflow_panel_expansion(0);
+        app.app.push_item(app::OutputItem::AssistantMd {
+            md: "ephemeral".into(),
+            streaming: true,
+            retried: false,
+        });
+        app.app.push_note("local diagnostic", app::NoteLevel::Warn);
+
+        let mut metadata_only =
+            projected_session(3, "metadata", atman_runtime::workflow::NodeStatus::Running);
+        metadata_only.transcript_revision = 2;
+        apply_daemon_projection(&mut app, metadata_only);
+        assert_eq!(app.app.goal.as_deref(), Some("metadata"));
+        assert!(app.app.items.iter().any(|item| matches!(
+            item,
+            app::OutputItem::AssistantMd { md, .. } if md == "ephemeral"
+        )));
 
         apply_daemon_projection(
             &mut app,
             projected_session(1, "stale", atman_runtime::workflow::NodeStatus::Ok),
         );
-        assert_eq!(app.app.goal.as_deref(), Some("current"));
+        assert_eq!(app.app.goal.as_deref(), Some("metadata"));
 
-        let mut terminal = projected_session(3, "done", atman_runtime::workflow::NodeStatus::Ok);
-        terminal.workflows[0] = {
-            let mut graph = terminal.workflows[0].clone().into_graph();
-            graph.turn_id = match &app.app.items[0] {
+        let mut terminal = projected_session(4, "done", atman_runtime::workflow::NodeStatus::Ok);
+        if let app::OutputItem::WorkflowPanel { graph, .. } =
+            &mut terminal.transcript.as_mut().unwrap()[0]
+        {
+            let mut updated = graph.clone().into_graph();
+            updated.turn_id = match &app.app.items[0] {
                 app::OutputItem::WorkflowPanel { graph, .. } => graph.graph().turn_id.clone(),
                 _ => unreachable!(),
             };
-            graph.into()
-        };
+            *graph = updated.into();
+        }
         apply_daemon_projection(&mut app, terminal);
         assert_eq!(app.app.goal.as_deref(), Some("done"));
         assert!(matches!(
-            &*app.app.items,
-            [app::OutputItem::WorkflowPanel {
+            app.app.items.first(),
+            Some(app::OutputItem::WorkflowPanel {
                 ended_at: Some(_),
+                panel_expanded: false,
                 ..
-            }]
+            })
+        ));
+        assert!(app.app.items.iter().all(|item| !matches!(
+            item,
+            app::OutputItem::AssistantMd { md, .. } if md == "ephemeral"
+        )));
+        assert!(matches!(
+            app.app.items.last(),
+            Some(app::OutputItem::SystemNote { text, level: app::NoteLevel::Warn })
+                if text == "local diagnostic"
         ));
     }
 

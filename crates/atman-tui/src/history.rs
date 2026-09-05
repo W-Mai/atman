@@ -1126,7 +1126,11 @@ pub(crate) fn flatten_message_with_output_store(
     }
 }
 
-fn attach_detail(items: &mut [OutputItem], tool_use_id: &str, detail: OutputItem) -> bool {
+pub(crate) fn attach_detail(
+    items: &mut [OutputItem],
+    tool_use_id: &str,
+    detail: OutputItem,
+) -> bool {
     for item in items.iter_mut().rev() {
         let OutputItem::ToolDispatch { calls } = item else {
             continue;

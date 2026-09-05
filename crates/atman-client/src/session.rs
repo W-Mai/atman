@@ -83,6 +83,7 @@ impl ReconcileError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionState {
     snapshot: SessionSnapshot,
+    transcript_revision: u64,
 }
 
 impl SessionState {
@@ -91,7 +92,11 @@ impl SessionState {
         expected_generation: &DaemonGeneration,
     ) -> Result<Self, ReconcileError> {
         validate_snapshot(&snapshot, expected_generation)?;
-        Ok(Self { snapshot })
+        let transcript_revision = snapshot.projection.revision.0;
+        Ok(Self {
+            snapshot,
+            transcript_revision,
+        })
     }
 
     pub fn snapshot(&self) -> &SessionSnapshot {
@@ -104,6 +109,10 @@ impl SessionState {
 
     pub fn cursor(&self) -> EventCursor {
         self.snapshot.cursor
+    }
+
+    pub fn transcript_revision(&self) -> u64 {
+        self.transcript_revision
     }
 
     pub fn apply_updates(
@@ -127,7 +136,9 @@ impl SessionState {
             if envelope.cursor <= next.snapshot.cursor {
                 continue;
             }
-            apply_envelope(&mut next.snapshot, envelope, &mut signals)?;
+            if apply_envelope(&mut next.snapshot, envelope, &mut signals)? {
+                next.transcript_revision = next.transcript_revision.wrapping_add(1);
+            }
             applied += 1;
         }
         if response.next_cursor > next.snapshot.cursor
@@ -347,7 +358,8 @@ impl SessionClient {
                     })
                     .await?;
                 validate_session(&snapshot, &self.session_id)?;
-                let next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
+                let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
+                next.transcript_revision = current.transcript_revision.wrapping_add(1);
                 self.state.send_replace(next);
                 Ok(RefreshOutcome::Reconnected)
             }
@@ -359,7 +371,8 @@ impl SessionClient {
                     })
                     .await?;
                 validate_session(&snapshot, &self.session_id)?;
-                let next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
+                let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
+                next.transcript_revision = current.transcript_revision.wrapping_add(1);
                 self.state.send_replace(next);
                 Ok(RefreshOutcome::Resynced)
             }
@@ -923,7 +936,7 @@ fn apply_envelope(
     snapshot: &mut SessionSnapshot,
     envelope: &ProjectionEventEnvelope,
     signals: &mut Vec<SessionSignal>,
-) -> Result<(), ReconcileError> {
+) -> Result<bool, ReconcileError> {
     if envelope.schema_version != PROJECTION_EVENT_SCHEMA_VERSION {
         return Err(ReconcileError::EventSchema {
             expected: PROJECTION_EVENT_SCHEMA_VERSION,
@@ -952,14 +965,31 @@ fn apply_envelope(
             received: envelope.cursor,
         });
     }
-    match &envelope.event {
-        ServerEvent::ProjectionDelta { delta } => apply_delta(&mut snapshot.projection, delta)?,
-        ServerEvent::Signal { signal } => signals.push(signal.clone()),
+    let transcript_changed = match &envelope.event {
+        ServerEvent::ProjectionDelta { delta } => {
+            apply_delta(&mut snapshot.projection, delta)?;
+            delta.changes.iter().any(|change| {
+                matches!(
+                    change,
+                    ProjectionChange::RunUpsert { .. }
+                        | ProjectionChange::RunRemove { .. }
+                        | ProjectionChange::TranscriptAppend { .. }
+                        | ProjectionChange::TranscriptReplace { .. }
+                        | ProjectionChange::WorkflowsReplace { .. }
+                        | ProjectionChange::CompactionsReplace { .. }
+                        | ProjectionChange::InteractionsSet { .. }
+                )
+            })
+        }
+        ServerEvent::Signal { signal } => {
+            signals.push(signal.clone());
+            false
+        }
         ServerEvent::ResyncRequired { .. } => unreachable!("handled before cursor validation"),
-        ServerEvent::Heartbeat => {}
-    }
+        ServerEvent::Heartbeat => false,
+    };
     snapshot.cursor = envelope.cursor;
-    Ok(())
+    Ok(transcript_changed)
 }
 
 fn apply_delta(
@@ -1145,6 +1175,75 @@ mod tests {
         assert_eq!(state.cursor(), EventCursor(8));
         assert_eq!(state.projection().revision, Revision(4));
         assert_eq!(state.projection().goal.as_deref(), Some("Converge"));
+    }
+
+    #[test]
+    fn transcript_revision_only_advances_for_document_changes() {
+        let mut state = state();
+        let initial = state.transcript_revision();
+        let metadata = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            events: vec![envelope(
+                &state,
+                8,
+                ProjectionDelta {
+                    base_revision: Revision(3),
+                    revision: Revision(4),
+                    changes: vec![ProjectionChange::GoalSet {
+                        goal: Some("metadata only".into()),
+                    }],
+                },
+            )],
+            next_cursor: EventCursor(8),
+            has_more: false,
+            resync_required: None,
+        };
+        state.apply_updates(&metadata).unwrap();
+        assert_eq!(state.transcript_revision(), initial);
+
+        let document = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            events: vec![envelope(
+                &state,
+                9,
+                ProjectionDelta {
+                    base_revision: Revision(4),
+                    revision: Revision(5),
+                    changes: vec![ProjectionChange::TranscriptAppend {
+                        items: vec![atman_proto::TranscriptItem::Notice {
+                            seq: 9,
+                            ts: chrono::Utc::now(),
+                            level: atman_proto::NoticeLevel::Info,
+                            text: "durable note".into(),
+                        }],
+                    }],
+                },
+            )],
+            next_cursor: EventCursor(9),
+            has_more: false,
+            resync_required: None,
+        };
+        state.apply_updates(&document).unwrap();
+        assert_eq!(state.transcript_revision(), initial.wrapping_add(1));
+
+        let heartbeat = ProjectionEventEnvelope {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            session_id: state.snapshot.projection.metadata.id.clone(),
+            cursor: EventCursor(10),
+            ts: chrono::Utc::now(),
+            event: ServerEvent::Heartbeat,
+        };
+        state
+            .apply_updates(&GetSessionUpdatesResponse {
+                daemon_generation: state.snapshot.daemon_generation.clone(),
+                events: vec![heartbeat],
+                next_cursor: EventCursor(10),
+                has_more: false,
+                resync_required: None,
+            })
+            .unwrap();
+        assert_eq!(state.transcript_revision(), initial.wrapping_add(1));
     }
 
     #[test]
@@ -1464,6 +1563,7 @@ mod tests {
             session.current().projection().goal.as_deref(),
             Some("before")
         );
+        let transcript_revision = session.current().transcript_revision();
 
         assert_eq!(session.refresh().await.unwrap(), RefreshOutcome::Resynced);
         assert_eq!(
@@ -1471,6 +1571,10 @@ mod tests {
             Some("after")
         );
         assert_eq!(session.current().cursor(), EventCursor(2));
+        assert_eq!(
+            session.current().transcript_revision(),
+            transcript_revision.wrapping_add(1)
+        );
     }
 
     #[tokio::test]
@@ -1703,6 +1807,7 @@ mod tests {
         .unwrap();
         let session = client.attach_session(session_id).await.unwrap();
         assert_eq!(client.capabilities().daemon_generation.0, "generation-a");
+        let transcript_revision = session.current().transcript_revision();
 
         assert_eq!(
             session.refresh().await.unwrap(),
@@ -1714,6 +1819,10 @@ mod tests {
             Some("after")
         );
         assert_eq!(session.current().cursor(), EventCursor(2));
+        assert_eq!(
+            session.current().transcript_revision(),
+            transcript_revision.wrapping_add(1)
+        );
     }
 
     struct CommandTransport {

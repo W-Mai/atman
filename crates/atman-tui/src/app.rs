@@ -448,6 +448,160 @@ impl OutputItem {
     }
 }
 
+fn output_identity(item: &OutputItem) -> Option<String> {
+    match item {
+        OutputItem::Thinking { text, .. } => {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hash);
+            Some(format!("thinking:{}", hash.finish()))
+        }
+        OutputItem::ToolDispatch { calls } if !calls.is_empty() => Some(format!(
+            "tools:{}",
+            calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>()
+                .join("\u{1f}")
+        )),
+        OutputItem::WorkflowPanel { graph, .. } => {
+            Some(format!("workflow:{}", graph.graph().turn_id))
+        }
+        OutputItem::Terminal { handle, .. } => Some(format!("terminal:{handle}")),
+        OutputItem::Bash { handle, .. } => Some(format!("bash:{handle}")),
+        OutputItem::DiffPreview { title, .. } => Some(format!("diff:{title}")),
+        OutputItem::FsDetail { view, .. } => Some(format!("fs:{}", view.title())),
+        OutputItem::CompactionSummary {
+            operation_id: Some(operation_id),
+            ..
+        } => Some(format!("compaction:{operation_id}")),
+        OutputItem::CompactionSummary {
+            range_start,
+            range_end,
+            ..
+        } => Some(format!("compaction-range:{range_start}:{range_end}")),
+        OutputItem::SubAgentActivity { handle, .. } => Some(format!("subagent:{handle}")),
+        _ => None,
+    }
+}
+
+fn preserve_output_interaction(source: &OutputItem, target: &mut OutputItem) {
+    match (source, target) {
+        (
+            OutputItem::Thinking {
+                disclosure: source, ..
+            },
+            OutputItem::Thinking {
+                disclosure: target, ..
+            },
+        ) => *target = *source,
+        (
+            OutputItem::ToolDispatch { calls: source },
+            OutputItem::ToolDispatch { calls: target },
+        ) => {
+            for target_call in target {
+                let Some(source_call) = source.iter().find(|call| call.id == target_call.id) else {
+                    continue;
+                };
+                target_call.disclosure = source_call.disclosure;
+                if let (Some(source), Some(target)) = (
+                    source_call.detail.as_deref(),
+                    target_call.detail.as_deref_mut(),
+                ) {
+                    preserve_output_interaction(source, target);
+                }
+            }
+        }
+        (
+            OutputItem::WorkflowPanel {
+                expanded_nodes: source_nodes,
+                panel_expanded: source_expanded,
+                started_at: source_started,
+                ..
+            },
+            OutputItem::WorkflowPanel {
+                expanded_nodes: target_nodes,
+                panel_expanded: target_expanded,
+                started_at: target_started,
+                ..
+            },
+        ) => {
+            target_nodes.clone_from(source_nodes);
+            *target_expanded = *source_expanded;
+            *target_started = *source_started;
+        }
+        (
+            OutputItem::Terminal {
+                mode: source_mode,
+                expanded: source_expanded,
+                scroll_offset: source_scroll,
+                ..
+            },
+            OutputItem::Terminal {
+                mode: target_mode,
+                expanded: target_expanded,
+                scroll_offset: target_scroll,
+                ..
+            },
+        ) => {
+            *target_mode = *source_mode;
+            *target_expanded = *source_expanded;
+            *target_scroll = *source_scroll;
+        }
+        (
+            OutputItem::Bash {
+                expanded: source, ..
+            },
+            OutputItem::Bash {
+                expanded: target, ..
+            },
+        ) => *target = *source,
+        (
+            OutputItem::DiffPreview {
+                expanded: source, ..
+            },
+            OutputItem::DiffPreview {
+                expanded: target, ..
+            },
+        ) => *target = *source,
+        (
+            OutputItem::FsDetail {
+                expanded: source, ..
+            },
+            OutputItem::FsDetail {
+                expanded: target, ..
+            },
+        ) => *target = *source,
+        (
+            OutputItem::CompactionSummary {
+                disclosure: source, ..
+            },
+            OutputItem::CompactionSummary {
+                disclosure: target, ..
+            },
+        ) => *target = *source,
+        (
+            OutputItem::SubAgentActivity {
+                expanded: source_expanded,
+                expanded_nodes: source_nodes,
+                workflow_expanded: source_workflow,
+                ..
+            },
+            OutputItem::SubAgentActivity {
+                expanded: target_expanded,
+                expanded_nodes: target_nodes,
+                workflow_expanded: target_workflow,
+                ..
+            },
+        ) => {
+            *target_expanded = *source_expanded;
+            target_nodes.clone_from(source_nodes);
+            *target_workflow = *source_workflow;
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OutputRevision {
     pub id: u64,
@@ -707,6 +861,8 @@ pub struct AppState {
     pub session_name: Option<String>,
     pub project_root: Option<String>,
     pub daemon_revision: Option<u64>,
+    daemon_transcript_revision: Option<u64>,
+    daemon_item_count: usize,
     pub latest_release: Option<String>,
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
@@ -1059,6 +1215,11 @@ impl AppState {
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
+        self.replace_items(items);
+        self
+    }
+
+    fn replace_items(&mut self, items: Vec<OutputItem>) {
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
@@ -1164,7 +1325,6 @@ impl AppState {
         }
         self.items_version = self.items_version.wrapping_add(1);
         self.layout_cache.invalidate();
-        self
     }
 
     pub fn with_session_dir(mut self, dir: String) -> Self {
@@ -1971,122 +2131,42 @@ impl AppState {
         self.reset_lag_state();
     }
 
-    pub(crate) fn reconcile_daemon_workflows(
+    pub(crate) fn reconcile_daemon_transcript(
         &mut self,
-        workflows: &[atman_runtime::projection::workflow::WorkflowProjection],
+        mut projected: Vec<OutputItem>,
+        revision: u64,
     ) {
-        let projected_turns = workflows
-            .iter()
-            .map(|workflow| workflow.graph().turn_id.0)
-            .collect::<std::collections::HashSet<_>>();
-        let removals = self
+        if self.daemon_transcript_revision == Some(revision) {
+            return;
+        }
+        let previous = self
             .items
             .iter()
-            .enumerate()
-            .filter_map(|(index, item)| match item {
-                OutputItem::WorkflowPanel { graph, .. }
-                    if !projected_turns.contains(&graph.graph().turn_id.0) =>
-                {
-                    Some(index)
-                }
+            .filter_map(|item| output_identity(item).map(|identity| (identity, item)))
+            .collect::<std::collections::HashMap<_, _>>();
+        for item in &mut projected {
+            if let Some(source) = output_identity(item).and_then(|identity| previous.get(&identity))
+            {
+                preserve_output_interaction(source, item);
+            }
+        }
+        let local_notes = self
+            .items
+            .iter()
+            .skip(self.daemon_item_count)
+            .filter_map(|item| match item {
+                OutputItem::SystemNote { .. } => Some(item.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for index in removals.into_iter().rev() {
-            self.remove_item(index);
-        }
+        self.daemon_item_count = projected.len();
+        projected.extend(local_notes);
+        self.replace_items(projected);
+        self.daemon_transcript_revision = Some(revision);
+    }
 
-        for (turn_index, projected) in workflows.iter().enumerate() {
-            let terminal = !projected.graph().root.is_empty()
-                && projected.graph().root.iter().all(|node| {
-                    !matches!(
-                        node.status,
-                        atman_runtime::workflow::NodeStatus::Pending
-                            | atman_runtime::workflow::NodeStatus::Running
-                    )
-                });
-            let cancelled =
-                projected.graph().root.iter().any(|node| {
-                    matches!(node.status, atman_runtime::workflow::NodeStatus::Cancelled)
-                });
-            let existing = self.items.iter().position(|item| {
-                matches!(
-                    item,
-                    OutputItem::WorkflowPanel { graph, .. }
-                        if graph.graph().turn_id == projected.graph().turn_id
-                )
-            });
-            if let Some(index) = existing {
-                self.mutate_item(index, OutputMutation::Semantic, |item| {
-                    let OutputItem::WorkflowPanel {
-                        turn_index: current_turn_index,
-                        graph,
-                        ended_at,
-                        cancelled: current_cancelled,
-                        ..
-                    } = item
-                    else {
-                        return false;
-                    };
-                    let next_ended_at = if terminal {
-                        ended_at.or_else(|| Some(std::time::Instant::now()))
-                    } else {
-                        None
-                    };
-                    let changed = *current_turn_index != turn_index
-                        || graph != projected
-                        || *ended_at != next_ended_at
-                        || *current_cancelled != cancelled;
-                    if changed {
-                        *current_turn_index = turn_index;
-                        *graph = projected.clone();
-                        *ended_at = next_ended_at;
-                        *current_cancelled = cancelled;
-                    }
-                    changed
-                });
-            } else {
-                self.push_item(OutputItem::WorkflowPanel {
-                    turn_index,
-                    graph: projected.clone(),
-                    expanded_nodes: HashSet::new(),
-                    panel_expanded: true,
-                    started_at: std::time::Instant::now(),
-                    ended_at: terminal.then(std::time::Instant::now),
-                    cancelled,
-                });
-            }
-        }
-
-        let mut routes = std::collections::HashMap::new();
-        let mut top_level = std::collections::HashSet::new();
-        for (index, item) in self.items.iter().enumerate() {
-            let OutputItem::WorkflowPanel { graph, .. } = item else {
-                continue;
-            };
-            let mut nodes = graph.graph().root.iter().collect::<Vec<_>>();
-            while let Some(node) = nodes.pop() {
-                match &node.kind {
-                    atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } => {
-                        routes.insert(run_id.clone(), index);
-                        if graph.graph().root.iter().any(|root| root.id == node.id) {
-                            top_level.insert(run_id.clone());
-                        }
-                    }
-                    atman_runtime::workflow::WorkflowNodeKind::Subflow { run_id, .. } => {
-                        routes.insert(run_id.clone(), index);
-                    }
-                    _ => {}
-                }
-                nodes.extend(&node.children);
-            }
-        }
-        self.workflow_run_to_panel = routes;
-        self.top_level_run_ids = top_level;
-        self.last_workflow_panel_idx = self
-            .items
-            .iter()
-            .rposition(|item| matches!(item, OutputItem::WorkflowPanel { ended_at: None, .. }));
+    pub(crate) fn daemon_transcript_revision(&self) -> Option<u64> {
+        self.daemon_transcript_revision
     }
 
     pub fn remove_item(&mut self, index: usize) -> Option<OutputItem> {
