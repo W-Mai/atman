@@ -13,9 +13,12 @@ use std::sync::{
 use atman_proto::{
     CapabilitiesRequest, CapabilitiesResponse, ClientId, CloseSessionRequest, CloseSessionResponse,
     CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor,
-    GetEventsRequest, GetEventsResponse, JsonRpcRequest, JsonRpcResponse, ListProjectsRequest,
-    ListProjectsResponse, ListSessionsRequest, PROTOCOL_VERSION, ProjectionEventEnvelope,
-    RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse, SessionId, SessionSummary, rpc,
+    GetEventsRequest, GetEventsResponse, ImportSessionMessagesRequest,
+    ImportSessionMessagesResponse, ImportedMessage, JsonRpcRequest, JsonRpcResponse,
+    ListProjectsRequest, ListProjectsResponse, ListSessionsRequest, PROTOCOL_VERSION,
+    ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
+    SanitizeSessionAttachmentsRequest, SanitizeSessionAttachmentsResponse, SessionId,
+    SessionSummary, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -283,6 +286,32 @@ impl Client {
         self.command::<rpc::DeleteSession>(&DeleteSessionRequest {
             request_id: Some(RequestId::now()),
             session_id,
+        })
+        .await
+    }
+
+    pub async fn sanitize_session_attachments(
+        &self,
+        session_id: SessionId,
+        dry_run: bool,
+    ) -> Result<SanitizeSessionAttachmentsResponse, ClientError> {
+        self.command::<rpc::SanitizeSessionAttachments>(&SanitizeSessionAttachmentsRequest {
+            request_id: Some(RequestId::now()),
+            session_id,
+            dry_run,
+        })
+        .await
+    }
+
+    pub async fn import_session_messages(
+        &self,
+        session_id: SessionId,
+        messages: Vec<ImportedMessage>,
+    ) -> Result<ImportSessionMessagesResponse, ClientError> {
+        self.command::<rpc::ImportSessionMessages>(&ImportSessionMessagesRequest {
+            request_id: Some(RequestId::now()),
+            session_id,
+            messages,
         })
         .await
     }

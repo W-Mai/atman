@@ -1186,88 +1186,49 @@ fn extract_snippet(payload: &str, query: &str) -> String {
 }
 
 async fn cmd_session_gc() -> Result<()> {
-    let root = data_dir()?;
-    let sessions = root.join("sessions");
-    if !sessions.exists() {
-        return Ok(());
-    }
+    let client = daemon_tui::connect_local_daemon().await?;
     let mut removed = 0usize;
-    for entry in std::fs::read_dir(&sessions)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
+    let mut skipped = 0usize;
+    for session in client.list_sessions(None, None, None).await? {
+        if session.message_count != 0 {
             continue;
         }
-        let events_path = path.join("events.jsonl");
-        let empty = match std::fs::metadata(&events_path) {
-            Ok(m) => m.len() == 0,
-            Err(_) => true,
-        };
-        if empty {
-            std::fs::remove_dir_all(&path).with_context(|| format!("rm -r {}", path.display()))?;
-            removed += 1;
+        match client.delete_session(session.id).await?.status {
+            atman_proto::SessionDeleteStatus::Deleted
+            | atman_proto::SessionDeleteStatus::NotFound => removed += 1,
+            atman_proto::SessionDeleteStatus::Busy
+            | atman_proto::SessionDeleteStatus::UnsafeResources => skipped += 1,
         }
     }
-    println!("gc removed {} empty session(s)", removed);
+    println!("gc removed {removed} empty session(s), skipped {skipped} active session(s)");
     Ok(())
 }
 
 async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
-    let root = data_dir()?;
-    let dir = root.join("sessions").join(&sid);
-    if !dir.is_dir() {
-        bail!("session not found: {}", dir.display());
-    }
-    let events_path = dir.join("events.jsonl");
-    if !events_path.exists() {
-        println!("no events.jsonl in session");
-        return Ok(());
-    }
-
-    let events = atman_runtime::event_log::reader::read_event_envelopes(&events_path)?;
-    let findings = atman_runtime::attachment_store::sanitize_findings(&events)?;
-
-    if findings.is_empty() {
+    let client = daemon_tui::connect_local_daemon().await?;
+    let session_id = daemon_tui::resolve_session_prefix(&client, &sid).await?;
+    let response = client
+        .sanitize_session_attachments(session_id, dry_run)
+        .await?;
+    if response.issues.is_empty() {
         println!("sanitize: no attachment problems found");
         return Ok(());
     }
-    println!("sanitize: found {} attachment issue(s)", findings.len());
-    for finding in &findings {
+    println!(
+        "sanitize: found {} attachment issue(s)",
+        response.issues.len()
+    );
+    for issue in &response.issues {
         println!(
             "  {} part_id={} {} → {}",
-            finding.context,
-            match finding.patch.target {
-                atman_runtime::message::AttachmentTarget::Part { part_id } => part_id.0,
-                atman_runtime::message::AttachmentTarget::Legacy { .. } => {
-                    unreachable!("sanitize only emits stable part identities")
-                }
-            },
-            finding.patch.file_basename,
-            finding.patch.reason
+            issue.context, issue.part_id, issue.file_basename, issue.reason
         );
     }
     if dry_run {
         println!("sanitize: dry-run, no events written");
-        return Ok(());
+    } else {
+        println!("sanitize: wrote {} degrade event(s)", response.repaired);
     }
-
-    let session =
-        atman_runtime::Session::open_existing_with_trust(&root, &sid, load_global_trust_config()?)
-            .with_context(|| format!("open session {sid}"))?;
-    let session = std::sync::Arc::new(session);
-    for finding in &findings {
-        atman_runtime::attachment_store::emit_sanitize_finding(session.sink(), finding);
-    }
-    match std::sync::Arc::try_unwrap(session) {
-        Ok(s) => s.shutdown().await,
-        Err(_) => atman_runtime::notify!(
-            warn,
-            location = Log,
-            stack = dedupe("sanitize.refs_at_shutdown", 60_000),
-            "sanitize: session still had refs at shutdown"
-        ),
-    }
-    println!("sanitize: wrote {} degrade event(s)", findings.len());
     Ok(())
 }
 
@@ -3118,20 +3079,44 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
                 );
                 return Ok(());
             }
-            let root = data_dir()?;
-            let session = Session::open_with_trust(&root, load_global_trust_config()?)
-                .with_context(|| format!("open a fresh atman session under {}", root.display()))?;
-            let sid = session.id().to_string();
-            let events = session.events_path().map(|p| p.display().to_string());
-            replay_messages_into(&session, source.source_tag(), &messages);
-            session.shutdown().await;
+            let client = daemon_tui::connect_local_daemon().await?;
+            let session = client
+                .create_session(
+                    Some(std::env::current_dir()?.to_string_lossy().into_owned()),
+                    None,
+                )
+                .await?;
+            let sid = session.session_id().clone();
+            let imported = messages
+                .iter()
+                .map(|message| {
+                    let text = if let Some(agent) = &message.agent {
+                        format!(
+                            "[migrated from {}, agent={agent}]\n{}",
+                            source.source_tag(),
+                            message.text
+                        )
+                    } else {
+                        format!("[migrated from {}]\n{}", source.source_tag(), message.text)
+                    };
+                    let role = match message.role {
+                        migrate_source::MessageRole::User => atman_proto::MessageRole::User,
+                        migrate_source::MessageRole::Assistant => {
+                            atman_proto::MessageRole::Assistant
+                        }
+                        migrate_source::MessageRole::System => atman_proto::MessageRole::System,
+                        migrate_source::MessageRole::Tool => atman_proto::MessageRole::Tool,
+                    };
+                    atman_proto::ImportedMessage { role, text }
+                })
+                .collect();
+            client
+                .import_session_messages(sid.clone(), imported)
+                .await?;
             println!(
                 "[atman] migrate: replayed {} messages from {from}/{resolved_id} into new session {sid}",
                 messages.len()
             );
-            if let Some(p) = events {
-                println!("[atman] migrate: events → {p}");
-            }
             Ok(())
         }
     }
@@ -3171,39 +3156,6 @@ fn pick_session_interactively(
         );
     }
     Ok(sessions[idx - 1].id.clone())
-}
-
-fn replay_messages_into(
-    session: &Session,
-    source_tag: &str,
-    messages: &[migrate_source::ImportedMessage],
-) {
-    for m in messages {
-        let turn_id = atman_runtime::event::TurnId::now();
-        let text = if let Some(agent) = &m.agent {
-            format!("[migrated from {source_tag}, agent={agent}]\n{}", m.text)
-        } else {
-            format!("[migrated from {source_tag}]\n{}", m.text)
-        };
-        let msg = match m.role {
-            migrate_source::MessageRole::User => {
-                atman_runtime::message::Message::user_text(turn_id, text)
-            }
-            migrate_source::MessageRole::Assistant => {
-                atman_runtime::message::Message::assistant_text(turn_id, text)
-            }
-            migrate_source::MessageRole::System => {
-                atman_runtime::message::Message::system_text(turn_id, text)
-            }
-            migrate_source::MessageRole::Tool => atman_runtime::message::Message {
-                role: atman_runtime::message::MessageRole::Tool,
-                parts: vec![atman_runtime::message::MessagePart::Text { text }],
-                turn_id,
-                origin: atman_runtime::message::MessageOrigin::User,
-            },
-        };
-        session.append_message(msg, None);
-    }
 }
 
 fn build_migration_source(

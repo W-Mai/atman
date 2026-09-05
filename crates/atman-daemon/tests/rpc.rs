@@ -192,6 +192,51 @@ async fn create_session_returns_an_idle_snapshot_and_replays_retries() {
 }
 
 #[tokio::test]
+async fn imported_messages_are_canonical_and_command_retries_are_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open(tmp.path()).unwrap());
+    let session_id = atman_proto::SessionId(session.id().0);
+    state
+        .register_session(session_id.clone(), session.clone(), "local-daemon")
+        .await
+        .unwrap();
+    let request = atman_proto::ImportSessionMessagesRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: session_id.clone(),
+        messages: vec![
+            atman_proto::ImportedMessage {
+                role: atman_proto::MessageRole::User,
+                text: "question".into(),
+            },
+            atman_proto::ImportedMessage {
+                role: atman_proto::MessageRole::Assistant,
+                text: "answer".into(),
+            },
+        ],
+    };
+
+    for id in [1, 2] {
+        let response = dispatch(
+            state.clone(),
+            JsonRpcRequest::for_method::<atman_proto::rpc::ImportSessionMessages>(id, &request)
+                .unwrap(),
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::ImportSessionMessages>()
+        .unwrap();
+        assert_eq!(response.imported, 2);
+    }
+
+    assert_eq!(session.messages().len(), 2);
+    let snapshot = state
+        .session_snapshot(&session_id, "local-daemon")
+        .await
+        .unwrap();
+    assert_eq!(snapshot.projection.transcript.len(), 2);
+}
+
+#[tokio::test]
 async fn update_session_trust_persists_and_projects_the_complete_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");

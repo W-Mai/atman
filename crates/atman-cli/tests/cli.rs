@@ -510,13 +510,31 @@ fn doctor_reports_paths_and_provider_marks() {
 #[test]
 fn session_gc_removes_only_empty_sessions() {
     let data = tempfile::tempdir().unwrap();
-    let sessions = data.path().join("sessions");
-    let empty = sessions.join("019f0000-empty");
-    let full = sessions.join("019f0000-full");
-    std::fs::create_dir_all(&empty).unwrap();
-    std::fs::create_dir_all(&full).unwrap();
-    std::fs::write(empty.join("events.jsonl"), "").unwrap();
-    std::fs::write(full.join("events.jsonl"), "{\"type\":\"flow_start\"}\n").unwrap();
+    let _daemon = spawn_test_daemon(data.path());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (empty_id, full_id) = runtime.block_on(async {
+        let client = atman_client::Client::connect(
+            atman_client::UnixTransport::new(data.path().join("run/atman.sock")),
+            atman_client::ClientIdentity::new("gc-test", "1"),
+        )
+        .await
+        .unwrap();
+        let empty = client.create_session(None, None).await.unwrap();
+        let full = client.create_session(None, None).await.unwrap();
+        client
+            .import_session_messages(
+                full.session_id().clone(),
+                vec![atman_proto::ImportedMessage {
+                    role: atman_proto::MessageRole::User,
+                    text: "keep this session".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        (empty.session_id().clone(), full.session_id().clone())
+    });
+    let empty = data.path().join("sessions").join(empty_id.to_string());
+    let full = data.path().join("sessions").join(full_id.to_string());
 
     let out = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())

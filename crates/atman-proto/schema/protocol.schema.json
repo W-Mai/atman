@@ -34,6 +34,18 @@
       "$ref": "#/$defs/DeleteSessionResponse"
     },
     {
+      "$ref": "#/$defs/SanitizeSessionAttachmentsRequest"
+    },
+    {
+      "$ref": "#/$defs/SanitizeSessionAttachmentsResponse"
+    },
+    {
+      "$ref": "#/$defs/ImportSessionMessagesRequest"
+    },
+    {
+      "$ref": "#/$defs/ImportSessionMessagesResponse"
+    },
+    {
       "$ref": "#/$defs/SendMessageRequest"
     },
     {
@@ -929,6 +941,29 @@
           }
         }
       ]
+    },
+    "AttachmentIssue": {
+      "type": "object",
+      "required": [
+        "context",
+        "part_id",
+        "file_basename",
+        "reason"
+      ],
+      "properties": {
+        "context": {
+          "type": "string"
+        },
+        "file_basename": {
+          "type": "string"
+        },
+        "part_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
     },
     "AutoNameSessionRequest": {
       "type": "object",
@@ -2039,6 +2074,73 @@
         "original",
         "auto"
       ]
+    },
+    "ImportSessionMessagesRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "messages"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImportedMessage"
+          }
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ImportSessionMessagesResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "imported",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "imported": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ImportedMessage": {
+      "type": "object",
+      "required": [
+        "role",
+        "text"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
     },
     "InlineImage": {
       "type": "object",
@@ -4846,6 +4948,61 @@
               "description": "Owning turn, when known. Older event logs may not contain this association."
             }
           ]
+        }
+      }
+    },
+    "SanitizeSessionAttachmentsRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "dry_run": {
+          "type": "boolean"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "SanitizeSessionAttachmentsResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "issues",
+        "repaired",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AttachmentIssue"
+          }
+        },
+        "repaired": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
         }
       }
     },

@@ -11,6 +11,10 @@ export type AtmanDaemonProtocolPayloads =
   | CloseSessionResponse
   | DeleteSessionRequest
   | DeleteSessionResponse
+  | SanitizeSessionAttachmentsRequest
+  | SanitizeSessionAttachmentsResponse
+  | ImportSessionMessagesRequest
+  | ImportSessionMessagesResponse
   | SendMessageRequest
   | SendMessageResponse
   | InterjectSessionRequest
@@ -1253,6 +1257,45 @@ export interface DeleteSessionResponse {
   blocking_resources?: ResourceId[]
   session_id: SessionId
   status: SessionDeleteStatus
+  [k: string]: unknown
+}
+export interface SanitizeSessionAttachmentsRequest {
+  dry_run?: boolean
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface SanitizeSessionAttachmentsResponse {
+  cursor: EventCursor
+  issues: AttachmentIssue[]
+  repaired: number
+  revision: Revision
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface AttachmentIssue {
+  context: string
+  file_basename: string
+  part_id: string
+  reason: string
+  [k: string]: unknown
+}
+export interface ImportSessionMessagesRequest {
+  messages: ImportedMessage[]
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface ImportedMessage {
+  role: MessageRole
+  text: string
+  [k: string]: unknown
+}
+export interface ImportSessionMessagesResponse {
+  cursor: EventCursor
+  imported: number
+  revision: Revision
+  session_id: SessionId
   [k: string]: unknown
 }
 export interface SendMessageRequest {

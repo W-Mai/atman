@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+use common::spawn_test_daemon;
+
 fn atman_bin() -> &'static str {
     env!("CARGO_BIN_EXE_atman")
 }
@@ -219,6 +222,7 @@ fn migrate_import_into_new_writes_session_events() {
     let storage = tmp.path().to_str().unwrap();
     let data = tmp.path().join("atman_data");
     std::fs::create_dir_all(&data).unwrap();
+    let _daemon = spawn_test_daemon(&data);
 
     let out = Command::new(atman_bin())
         .args([

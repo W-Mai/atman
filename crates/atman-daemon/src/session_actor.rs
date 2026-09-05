@@ -122,6 +122,19 @@ pub(crate) struct McpReloadCommit {
     pub cursor: EventCursor,
 }
 
+pub(crate) struct AttachmentSanitizeCommit {
+    pub issues: Vec<atman_proto::AttachmentIssue>,
+    pub repaired: usize,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct MessageImportCommit {
+    pub imported: usize,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
 pub(crate) struct ResourceTerminationCommit {
     pub status: ResourceTerminationStatus,
     pub revision: atman_proto::Revision,
@@ -395,6 +408,25 @@ impl SessionActorHandle {
         configs: Vec<atman_runtime::mcp::McpServerConfig>,
     ) -> Result<McpReloadCommit> {
         request(&self.tx, |reply| Command::ReloadMcp { configs, reply }).await?
+    }
+
+    pub async fn sanitize_attachments(&self, dry_run: bool) -> Result<AttachmentSanitizeCommit> {
+        request(&self.tx, |reply| Command::SanitizeAttachments {
+            dry_run,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn import_messages(
+        &self,
+        messages: Vec<atman_proto::ImportedMessage>,
+    ) -> Result<MessageImportCommit> {
+        request(&self.tx, |reply| Command::ImportMessages {
+            messages,
+            reply,
+        })
+        .await?
     }
 
     pub async fn cancel_run(&self, run_id: FlowRunId) -> Result<RunCancellationCommit> {
@@ -721,6 +753,14 @@ enum Command {
     ReloadMcp {
         configs: Vec<atman_runtime::mcp::McpServerConfig>,
         reply: oneshot::Sender<Result<McpReloadCommit>>,
+    },
+    SanitizeAttachments {
+        dry_run: bool,
+        reply: oneshot::Sender<Result<AttachmentSanitizeCommit>>,
+    },
+    ImportMessages {
+        messages: Vec<atman_proto::ImportedMessage>,
+        reply: oneshot::Sender<Result<MessageImportCommit>>,
     },
     CancelRun {
         run_id: FlowRunId,
@@ -1073,6 +1113,14 @@ impl SessionActor {
                     revision: self.projection.projection().revision,
                     cursor: self.event_cursor,
                 }));
+            }
+            Command::SanitizeAttachments { dry_run, reply } => {
+                let result = self.sanitize_attachments(dry_run).await;
+                let _ = reply.send(result);
+            }
+            Command::ImportMessages { messages, reply } => {
+                let result = self.import_messages(messages).await;
+                let _ = reply.send(result);
             }
             Command::CancelRun { run_id, reply } => {
                 let result = self.cancel_run(run_id);
@@ -1933,6 +1981,82 @@ impl SessionActor {
         }
         Ok(RenameSessionCommit {
             session,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    async fn sanitize_attachments(&mut self, dry_run: bool) -> Result<AttachmentSanitizeCommit> {
+        let findings = atman_runtime::attachment_store::sanitize_findings(
+            &self.session.sink().snapshot_envelopes(),
+        )?;
+        let issues = findings
+            .iter()
+            .map(|finding| atman_proto::AttachmentIssue {
+                context: finding.context.to_string(),
+                part_id: match finding.patch.target {
+                    atman_runtime::message::AttachmentTarget::Part { part_id } => {
+                        part_id.0.to_string()
+                    }
+                    atman_runtime::message::AttachmentTarget::Legacy { .. } => {
+                        unreachable!("sanitizer emits stable part identities")
+                    }
+                },
+                file_basename: finding.patch.file_basename.clone(),
+                reason: finding.patch.reason.clone(),
+            })
+            .collect::<Vec<_>>();
+        let repaired = if dry_run { 0 } else { findings.len() };
+        if !dry_run {
+            for finding in &findings {
+                atman_runtime::attachment_store::emit_sanitize_finding(
+                    self.session.sink(),
+                    finding,
+                );
+            }
+            self.catch_up_through(self.session.sink().published_seq())?;
+            self.session.flush_writer().await;
+        }
+        Ok(AttachmentSanitizeCommit {
+            issues,
+            repaired,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    async fn import_messages(
+        &mut self,
+        messages: Vec<atman_proto::ImportedMessage>,
+    ) -> Result<MessageImportCommit> {
+        let imported = messages.len();
+        for imported_message in messages {
+            let turn_id = atman_runtime::event::TurnId::now();
+            let message = match imported_message.role {
+                atman_proto::MessageRole::User => {
+                    atman_runtime::message::Message::user_text(turn_id, imported_message.text)
+                }
+                atman_proto::MessageRole::Assistant => {
+                    atman_runtime::message::Message::assistant_text(turn_id, imported_message.text)
+                }
+                atman_proto::MessageRole::System => {
+                    atman_runtime::message::Message::system_text(turn_id, imported_message.text)
+                }
+                atman_proto::MessageRole::Tool => atman_runtime::message::Message {
+                    role: atman_runtime::message::MessageRole::Tool,
+                    parts: vec![atman_runtime::message::MessagePart::Text {
+                        text: imported_message.text,
+                    }],
+                    turn_id,
+                    origin: atman_runtime::message::MessageOrigin::User,
+                },
+            };
+            self.session.append_message(message, None);
+        }
+        self.catch_up_through(self.session.sink().published_seq())?;
+        self.session.flush_writer().await;
+        Ok(MessageImportCommit {
+            imported,
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })

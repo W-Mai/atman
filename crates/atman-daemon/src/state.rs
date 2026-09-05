@@ -1128,6 +1128,30 @@ impl DaemonState {
             .await
     }
 
+    pub(crate) async fn sanitize_session_attachments(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        dry_run: bool,
+        principal: &str,
+    ) -> Result<crate::session_actor::AttachmentSanitizeCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .sanitize_attachments(dry_run)
+            .await
+    }
+
+    pub(crate) async fn import_session_messages(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        messages: Vec<atman_proto::ImportedMessage>,
+        principal: &str,
+    ) -> Result<crate::session_actor::MessageImportCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .import_messages(messages)
+            .await
+    }
+
     pub(crate) async fn request_session_compaction(
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,

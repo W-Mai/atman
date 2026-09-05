@@ -22,6 +22,8 @@ import type {
   GetSessionSnapshotRequest,
   GetSessionUpdatesRequest,
   GetSessionUpdatesResponse,
+  ImportSessionMessagesRequest,
+  ImportSessionMessagesResponse,
   InspectResourceRequest,
   InspectResourceResponse,
   InstallSuggestedFlowRequest,
@@ -57,6 +59,8 @@ import type {
   RetainResourceResponse,
   RunFlowRequest,
   RunFlowResponse,
+  SanitizeSessionAttachmentsRequest,
+  SanitizeSessionAttachmentsResponse,
   SendMessageRequest,
   SendMessageResponse,
   SessionSnapshot,
@@ -110,6 +114,18 @@ export interface RpcMethodMap {
     revision: 1
     params: DeleteSessionRequest
     result: DeleteSessionResponse
+  }
+  'session.sanitize_attachments': {
+    kind: 'command'
+    revision: 1
+    params: SanitizeSessionAttachmentsRequest
+    result: SanitizeSessionAttachmentsResponse
+  }
+  'session.import_messages': {
+    kind: 'command'
+    revision: 1
+    params: ImportSessionMessagesRequest
+    result: ImportSessionMessagesResponse
   }
   'session.send_message': {
     kind: 'command'
@@ -315,6 +331,8 @@ export const RPC_METHODS = {
   'session.create': { kind: 'command', revision: 1 },
   'session.close': { kind: 'command', revision: 1 },
   'session.delete': { kind: 'command', revision: 1 },
+  'session.sanitize_attachments': { kind: 'command', revision: 1 },
+  'session.import_messages': { kind: 'command', revision: 1 },
   'session.send_message': { kind: 'command', revision: 1 },
   'session.interject': { kind: 'command', revision: 1 },
   'session.update_trust': { kind: 'command', revision: 1 },

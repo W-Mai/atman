@@ -89,6 +89,40 @@
       }
     },
     {
+      "name": "session.sanitize_attachments",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "SanitizeSessionAttachmentsRequest",
+        "schema": {
+          "$ref": "#/$defs/SanitizeSessionAttachmentsRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SanitizeSessionAttachmentsResponse",
+        "schema": {
+          "$ref": "#/$defs/SanitizeSessionAttachmentsResponse"
+        }
+      }
+    },
+    {
+      "name": "session.import_messages",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "ImportSessionMessagesRequest",
+        "schema": {
+          "$ref": "#/$defs/ImportSessionMessagesRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ImportSessionMessagesResponse",
+        "schema": {
+          "$ref": "#/$defs/ImportSessionMessagesResponse"
+        }
+      }
+    },
+    {
       "name": "session.send_message",
       "kind": "command",
       "revision": 1,

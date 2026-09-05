@@ -320,6 +320,8 @@ pub mod methods {
     pub const CREATE_SESSION: &str = "session.create";
     pub const CLOSE_SESSION: &str = "session.close";
     pub const DELETE_SESSION: &str = "session.delete";
+    pub const SANITIZE_SESSION_ATTACHMENTS: &str = "session.sanitize_attachments";
+    pub const IMPORT_SESSION_MESSAGES: &str = "session.import_messages";
     pub const SEND_MESSAGE: &str = "session.send_message";
     pub const INTERJECT_SESSION: &str = "session.interject";
     pub const UPDATE_SESSION_TRUST: &str = "session.update_trust";
@@ -357,6 +359,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::CreateSession>(),
         super::method_descriptor::<super::rpc::CloseSession>(),
         super::method_descriptor::<super::rpc::DeleteSession>(),
+        super::method_descriptor::<super::rpc::SanitizeSessionAttachments>(),
+        super::method_descriptor::<super::rpc::ImportSessionMessages>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::UpdateSessionTrust>(),
@@ -538,6 +542,54 @@ pub struct DeleteSessionResponse {
     pub status: SessionDeleteStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocking_resources: Vec<ResourceId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SanitizeSessionAttachmentsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct AttachmentIssue {
+    pub context: String,
+    pub part_id: String,
+    pub file_basename: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SanitizeSessionAttachmentsResponse {
+    pub session_id: SessionId,
+    pub issues: Vec<AttachmentIssue>,
+    pub repaired: usize,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ImportedMessage {
+    pub role: MessageRole,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportSessionMessagesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub messages: Vec<ImportedMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ImportSessionMessagesResponse {
+    pub session_id: SessionId,
+    pub imported: usize,
+    pub revision: Revision,
+    pub cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1333,6 +1385,20 @@ pub mod rpc {
         Command,
         DeleteSessionRequest,
         DeleteSessionResponse
+    );
+    method!(
+        SanitizeSessionAttachments,
+        methods::SANITIZE_SESSION_ATTACHMENTS,
+        Command,
+        SanitizeSessionAttachmentsRequest,
+        SanitizeSessionAttachmentsResponse
+    );
+    method!(
+        ImportSessionMessages,
+        methods::IMPORT_SESSION_MESSAGES,
+        Command,
+        ImportSessionMessagesRequest,
+        ImportSessionMessagesResponse
     );
     method!(
         SendMessage,

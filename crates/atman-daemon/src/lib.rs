@@ -1,13 +1,14 @@
 use atman_proto::{
     AutoNameSessionResponse, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
     CompactSessionResponse, DaemonGeneration, EventCursor, GetSessionSnapshotRequest,
-    GetSessionUpdatesRequest, InspectResourceResponse, InstallSuggestedFlowResponse,
-    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListProjectsRequest,
-    ListResourcesResponse, ListSessionsRequest, MethodCapability, MoveSessionResponse,
-    PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
-    ReloadSessionMcpResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
-    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, SetSessionGoalResponse,
+    GetSessionUpdatesRequest, ImportSessionMessagesResponse, InspectResourceResponse,
+    InstallSuggestedFlowResponse, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
+    JsonRpcResponse, ListProjectsRequest, ListResourcesResponse, ListSessionsRequest,
+    MethodCapability, MoveSessionResponse, PermissionRpcAction, PermissionRpcScope, PingResponse,
+    ProtocolLimits, ReleaseResourceResponse, ReloadSessionMcpResponse, RenameSessionResponse,
+    RequestId, ResizeTerminalResourceResponse, ResolveCompactReviewResponse, ResolvePromptResponse,
+    RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse,
+    SanitizeSessionAttachmentsResponse, SendMessageResponse, SetSessionGoalResponse,
     StartRunResponse, SubmitFormResponse, SuggestFlowResponse, SuggestFlowStatus,
     TerminateResourceResponse, UpdateSessionTodosResponse, UpdateSessionTrustResponse,
     method_descriptor, methods, rpc,
@@ -159,6 +160,8 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::CreateSession>(),
     method_descriptor::<rpc::CloseSession>(),
     method_descriptor::<rpc::DeleteSession>(),
+    method_descriptor::<rpc::SanitizeSessionAttachments>(),
+    method_descriptor::<rpc::ImportSessionMessages>(),
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::UpdateSessionTrust>(),
@@ -360,6 +363,87 @@ async fn dispatch_as_inner(
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::SANITIZE_SESSION_ATTACHMENTS => {
+            match parse_params::<rpc::SanitizeSessionAttachments>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::SanitizeSessionAttachments, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let commit = operation_state
+                                .sanitize_session_attachments(
+                                    &operation_params.session_id,
+                                    operation_params.dry_run,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(SanitizeSessionAttachmentsResponse {
+                                session_id: operation_params.session_id,
+                                issues: commit.issues,
+                                repaired: commit.repaired,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                        },
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            method_response::<rpc::SanitizeSessionAttachments>(id, response)
+                        }
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::IMPORT_SESSION_MESSAGES => {
+            match parse_params::<rpc::ImportSessionMessages>(req.params) {
+                Ok(params) if !params.messages.is_empty() => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::ImportSessionMessages, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let commit = operation_state
+                                .import_session_messages(
+                                    &operation_params.session_id,
+                                    operation_params.messages,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            Ok(ImportSessionMessagesResponse {
+                                session_id: operation_params.session_id,
+                                imported: commit.imported,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                        },
+                    )
+                    .await
+                    {
+                        Ok(response) => method_response::<rpc::ImportSessionMessages>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Ok(_) => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::invalid_params("messages must not be empty"),
+                ),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::LIST_SESSIONS => match parse_params::<rpc::ListSessions>(req.params) {
             Ok(ListSessionsRequest {
                 project_root,
