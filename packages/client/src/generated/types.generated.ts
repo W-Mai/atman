@@ -73,6 +73,40 @@ export type EventCursor = number
 export type ContextId = string
 export type CompactionOperationId = string
 export type FlowRunId = string
+export type McpServerStateProjection =
+  | {
+      type: 'disabled'
+      [k: string]: unknown
+    }
+  | {
+      type: 'pending'
+      [k: string]: unknown
+    }
+  | {
+      type: 'connecting'
+      [k: string]: unknown
+    }
+  | {
+      tools?: McpToolProjection[]
+      type: 'connected'
+      [k: string]: unknown
+    }
+  | {
+      message: string
+      type: 'error'
+      [k: string]: unknown
+    }
+  | {
+      message: string
+      type: 'disconnected'
+      [k: string]: unknown
+    }
+  | {
+      message: string
+      type: 'timeout'
+      [k: string]: unknown
+    }
+export type McpTransportProjection = 'stdio' | 'http' | 'sse'
 export type LlmCallPurpose =
   | 'general'
   | 'classification'
@@ -855,9 +889,13 @@ export interface ContextProjection {
 }
 export interface McpServerProjection {
   name: string
-  state: string
-  tool_count?: number
-  transport: string
+  state: McpServerStateProjection
+  transport: McpTransportProjection
+  [k: string]: unknown
+}
+export interface McpToolProjection {
+  description?: string | null
+  name: string
   [k: string]: unknown
 }
 export interface ContextUsageBucketProjection {

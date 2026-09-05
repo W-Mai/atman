@@ -612,10 +612,44 @@ pub struct ContextUsageBucketProjection {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct McpServerProjection {
     pub name: String,
-    pub transport: String,
-    pub state: String,
+    pub transport: McpTransportProjection,
+    pub state: McpServerStateProjection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransportProjection {
+    Stdio,
+    Http,
+    Sse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerStateProjection {
+    Disabled,
+    Pending,
+    Connecting,
+    Connected {
+        #[serde(default)]
+        tools: Vec<McpToolProjection>,
+    },
+    Error {
+        message: String,
+    },
+    Disconnected {
+        message: String,
+    },
+    Timeout {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpToolProjection {
+    pub name: String,
     #[serde(default)]
-    pub tool_count: usize,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

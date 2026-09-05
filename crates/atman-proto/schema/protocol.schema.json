@@ -2507,16 +2507,157 @@
           "type": "string"
         },
         "state": {
-          "type": "string"
-        },
-        "tool_count": {
-          "type": "integer",
-          "minimum": 0
+          "$ref": "#/$defs/McpServerStateProjection"
         },
         "transport": {
+          "$ref": "#/$defs/McpTransportProjection"
+        }
+      }
+    },
+    "McpServerStateProjection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "disabled"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "pending"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "connecting"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/McpToolProjection"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "connected"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "message",
+            "type"
+          ],
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "error"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "message",
+            "type"
+          ],
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "disconnected"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "message",
+            "type"
+          ],
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "timeout"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "McpToolProjection": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
           "type": "string"
         }
       }
+    },
+    "McpTransportProjection": {
+      "type": "string",
+      "enum": [
+        "stdio",
+        "http",
+        "sse"
+      ]
     },
     "MessageOrigin": {
       "type": "string",

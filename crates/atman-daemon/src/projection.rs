@@ -7,10 +7,11 @@ use atman_proto::{
     ApprovalState, ApprovalTarget, CompactionOperationId, CompactionOutcome, CompactionProjection,
     ContextProjection, ContextUsageBucketProjection, EventCursor, FlowRunId, ImageDetail,
     InteractionProjection, InterjectionProjection, InterjectionSource, LlmCallPurpose,
-    LlmCallScope, LlmUsageProjection, McpServerProjection, MessageOrigin, MessagePart,
-    MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection,
-    ProjectionChange, ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState,
-    Revision, RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
+    LlmCallScope, LlmUsageProjection, McpServerProjection, McpServerStateProjection,
+    McpToolProjection, McpTransportProjection, MessageOrigin, MessagePart, MessageProjection,
+    MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange,
+    ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState, Revision,
+    RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
     SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
     TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
     UsageProjection, WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection,
@@ -2395,22 +2396,44 @@ fn merged_usage(events: &UsageProjection, watch: &UsageProjection) -> UsageProje
 }
 
 fn mcp_server_projection(status: &atman_runtime::mcp::McpServerStatus) -> McpServerProjection {
-    let (state, tool_count) = match &status.state {
-        atman_runtime::mcp::McpServerState::Disabled => ("disabled", 0),
-        atman_runtime::mcp::McpServerState::Pending => ("pending", 0),
-        atman_runtime::mcp::McpServerState::Connecting => ("connecting", 0),
-        atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => {
-            ("connected", *tool_count)
-        }
-        atman_runtime::mcp::McpServerState::Error { .. } => ("error", 0),
-        atman_runtime::mcp::McpServerState::Disconnected { .. } => ("disconnected", 0),
-        atman_runtime::mcp::McpServerState::Timeout { .. } => ("timeout", 0),
-    };
     McpServerProjection {
         name: status.name.clone(),
-        transport: format!("{:?}", status.transport).to_lowercase(),
-        state: state.into(),
-        tool_count,
+        transport: match status.transport {
+            atman_runtime::mcp::TransportKind::Stdio => McpTransportProjection::Stdio,
+            atman_runtime::mcp::TransportKind::Http => McpTransportProjection::Http,
+            atman_runtime::mcp::TransportKind::Sse => McpTransportProjection::Sse,
+        },
+        state: match &status.state {
+            atman_runtime::mcp::McpServerState::Disabled => McpServerStateProjection::Disabled,
+            atman_runtime::mcp::McpServerState::Pending => McpServerStateProjection::Pending,
+            atman_runtime::mcp::McpServerState::Connecting => McpServerStateProjection::Connecting,
+            atman_runtime::mcp::McpServerState::Connected { tools, .. } => {
+                McpServerStateProjection::Connected {
+                    tools: tools
+                        .iter()
+                        .map(|tool| McpToolProjection {
+                            name: tool.name.clone(),
+                            description: tool.description.clone(),
+                        })
+                        .collect(),
+                }
+            }
+            atman_runtime::mcp::McpServerState::Error { message } => {
+                McpServerStateProjection::Error {
+                    message: message.clone(),
+                }
+            }
+            atman_runtime::mcp::McpServerState::Disconnected { message } => {
+                McpServerStateProjection::Disconnected {
+                    message: message.clone(),
+                }
+            }
+            atman_runtime::mcp::McpServerState::Timeout { message } => {
+                McpServerStateProjection::Timeout {
+                    message: message.clone(),
+                }
+            }
+        },
     }
 }
 
@@ -2548,6 +2571,46 @@ mod tests {
         assert_eq!(bytes.last(), Some(&0xfe));
         assert!(!String::from_utf8_lossy(&bytes).contains(secret));
         assert!(String::from_utf8_lossy(&bytes).contains("<REDACTED:openai_api_key>"));
+    }
+
+    #[test]
+    fn mcp_projection_preserves_transport_tools_and_failure_details() {
+        let connected = mcp_server_projection(&atman_runtime::mcp::McpServerStatus {
+            name: "catalog".into(),
+            transport: atman_runtime::mcp::TransportKind::Http,
+            state: atman_runtime::mcp::McpServerState::Connected {
+                tool_count: 1,
+                tools: vec![atman_runtime::mcp::McpToolInfo {
+                    name: "search".into(),
+                    description: Some("Search the catalog".into()),
+                }],
+            },
+        });
+        assert_eq!(connected.transport, McpTransportProjection::Http);
+        assert_eq!(
+            connected.state,
+            McpServerStateProjection::Connected {
+                tools: vec![McpToolProjection {
+                    name: "search".into(),
+                    description: Some("Search the catalog".into()),
+                }],
+            }
+        );
+
+        let failed = mcp_server_projection(&atman_runtime::mcp::McpServerStatus {
+            name: "catalog".into(),
+            transport: atman_runtime::mcp::TransportKind::Sse,
+            state: atman_runtime::mcp::McpServerState::Error {
+                message: "authentication failed".into(),
+            },
+        });
+        assert_eq!(failed.transport, McpTransportProjection::Sse);
+        assert_eq!(
+            failed.state,
+            McpServerStateProjection::Error {
+                message: "authentication failed".into(),
+            }
+        );
     }
 
     #[test]
