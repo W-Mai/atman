@@ -469,16 +469,7 @@ async fn cmd_daemon_run(
     reasoning: Option<String>,
     images: Vec<PathBuf>,
 ) -> Result<()> {
-    let cfg_path = atman_daemon::config::default_config_path()?;
-    let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
-        .load_or_init_daemon_config()?;
-    let base = format!("http://127.0.0.1:{port}");
-    let client = atman_client::Client::connect(
-        atman_client::HttpTransport::new(&base, &cfg.auth_token)?,
-        atman_client::ClientIdentity::new("atman-cli", env!("CARGO_PKG_VERSION")),
-    )
-    .await
-    .with_context(|| format!("connect to {base} (is atman-daemon running?)"))?;
+    let client = connect_http_daemon(port).await?;
 
     let abs = if file.is_absolute() {
         file.clone()
@@ -567,47 +558,6 @@ fn run_projection_finished(
                     | atman_proto::RunLifecycle::Lost
             )
     })
-}
-
-async fn stream_daemon_events(
-    client: &reqwest::Client,
-    base: &str,
-    token: &str,
-    sid: &str,
-    since_seq: Option<u64>,
-    stop_on_flow_end: bool,
-) -> Result<()> {
-    let mut url = format!("{base}/events?session_id={sid}");
-    if let Some(seq) = since_seq {
-        url.push_str(&format!("&since_seq={seq}"));
-    }
-    let sse = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .with_context(|| format!("GET {url} (is atman-daemon running?)"))?;
-    if !sse.status().is_success() {
-        bail!("daemon SSE returned HTTP {}", sse.status());
-    }
-    use futures::StreamExt;
-    let mut stream = sse.bytes_stream();
-    let mut buf = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        buf.extend_from_slice(&chunk);
-        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
-            let line = buf.drain(..=nl).collect::<Vec<u8>>();
-            let text = String::from_utf8_lossy(&line).trim().to_string();
-            if let Some(data) = text.strip_prefix("data: ") {
-                println!("{data}");
-                if stop_on_flow_end && data.contains("\"flow_end\"") {
-                    return Ok(());
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn cmd_daemon_start() -> Result<()> {
@@ -6628,22 +6578,38 @@ async fn cmd_logs_stream(
     port: u16,
     since_seq: Option<u64>,
 ) -> Result<()> {
-    let root = data_dir()?;
-    let sid = match session_id {
-        Some(s) => s,
-        None => latest_session(&root)?
-            .with_context(|| format!("no sessions found under {}", root.display()))?,
-    };
+    let client = connect_http_daemon(port).await?;
+    let base = format!("http://127.0.0.1:{port}");
+    let sid = resolve_daemon_session(&client, session_id).await?;
+    atman_runtime::notify!(info, "streaming events for session {sid} from {base}");
+    let mut cursor = since_seq.unwrap_or(0);
+    loop {
+        let page = client.get_events(sid.clone(), Some(cursor)).await?;
+        if page.has_more && page.next_cursor.0 <= cursor {
+            bail!("daemon event page did not advance beyond cursor {cursor}");
+        }
+        cursor = page.next_cursor.0;
+        if page.events.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+        for event in page.events {
+            println!("{}", serde_json::to_string(&event)?);
+        }
+    }
+}
+
+async fn connect_http_daemon(port: u16) -> Result<atman_client::Client> {
     let cfg_path = atman_daemon::config::default_config_path()?;
     let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
         .load_or_init_daemon_config()?;
     let base = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::new();
-    atman_runtime::notify!(
-        info,
-        "streaming events for session {sid} from {base}/events"
-    );
-    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, since_seq, false).await
+    atman_client::Client::connect(
+        atman_client::HttpTransport::new(&base, &cfg.auth_token)?,
+        atman_client::ClientIdentity::new("atman-cli", env!("CARGO_PKG_VERSION")),
+    )
+    .await
+    .with_context(|| format!("connect to {base} (is atman-daemon running?)"))
 }
 
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {
@@ -6753,31 +6719,6 @@ fn resolve_session_prefix(root: &std::path::Path, sid: &str) -> Result<String> {
             )
         }
     }
-}
-
-fn latest_session(root: &std::path::Path) -> Result<Option<String>> {
-    let sessions = root.join("sessions");
-    if !sessions.exists() {
-        return Ok(None);
-    }
-    let mut best: Option<(std::time::SystemTime, String)> = None;
-    for entry in std::fs::read_dir(&sessions)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        let name = entry.file_name().to_string_lossy().to_string();
-        match &best {
-            Some((t, _)) if *t >= modified => {}
-            _ => best = Some((modified, name)),
-        }
-    }
-    Ok(best.map(|(_, n)| n))
 }
 
 fn parse_args(raw: &[String]) -> Result<Vec<(String, Value)>> {
