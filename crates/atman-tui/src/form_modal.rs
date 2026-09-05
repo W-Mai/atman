@@ -527,10 +527,12 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         })) = outcome.map(Some)
         {
             if let Some(tx) = tx {
-                let _ = tx.send(crate::TuiControl::FormSubmit {
-                    form_id,
-                    submission,
-                });
+                let _ = tx.send(crate::TuiControl::Domain(
+                    crate::TuiDomainCommand::FormSubmit {
+                        form_id,
+                        submission,
+                    },
+                ));
             }
         }
         Some(ModalAction::Consumed)

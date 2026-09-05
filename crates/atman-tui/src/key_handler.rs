@@ -1,7 +1,7 @@
 use crate::UiState;
 use tokio::sync::mpsc;
 
-use super::TuiControl;
+use super::{TuiControl, TuiDomainCommand};
 use crate::app::AppState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
@@ -296,15 +296,18 @@ pub(crate) fn handle_approval_key(
             '1'..='9' if deny_armed => {
                 let idx = (*c as u8 - b'1') as usize;
                 if let Some(p) = canonical.get(idx) {
-                    let _ = tx.send(TuiControl::ResolvePermission {
-                        selector: atman_runtime::permission::PermissionSelector::RequestIds(vec![
-                            p.request_id.clone(),
-                        ]),
-                        expected_revision: p.revision,
-                        action: atman_runtime::permission::PermissionAction::Deny,
-                        grant_scope: None,
-                        reason: Some("denied by user".into()),
-                    });
+                    let _ = tx.send(
+                        TuiDomainCommand::ResolvePermission {
+                            selector: atman_runtime::permission::PermissionSelector::RequestIds(
+                                vec![p.request_id.clone()],
+                            ),
+                            expected_revision: p.revision,
+                            action: atman_runtime::permission::PermissionAction::Deny,
+                            grant_scope: None,
+                            reason: Some("denied by user".into()),
+                        }
+                        .into(),
+                    );
                     app.push_note(format!("denied {}", p.payload.tool), app::NoteLevel::Warn);
                 }
                 app.deny_arm = None;
@@ -313,18 +316,21 @@ pub(crate) fn handle_approval_key(
             '1'..='9' => {
                 let idx = (*c as u8 - b'1') as usize;
                 if let Some(p) = canonical.get(idx) {
-                    let _ = tx.send(TuiControl::ResolvePermission {
-                        selector: atman_runtime::permission::PermissionSelector::RequestIds(vec![
-                            p.request_id.clone(),
-                        ]),
-                        expected_revision: p.revision,
-                        action: atman_runtime::permission::PermissionAction::Approve,
-                        grant_scope: scope(p, app.approval_scope_index).or_else(|| {
-                            (app.approval_scope_index == 2)
-                                .then_some(atman_runtime::permission::GrantScope::CurrentCall)
-                        }),
-                        reason: None,
-                    });
+                    let _ = tx.send(
+                        TuiDomainCommand::ResolvePermission {
+                            selector: atman_runtime::permission::PermissionSelector::RequestIds(
+                                vec![p.request_id.clone()],
+                            ),
+                            expected_revision: p.revision,
+                            action: atman_runtime::permission::PermissionAction::Approve,
+                            grant_scope: scope(p, app.approval_scope_index).or_else(|| {
+                                (app.approval_scope_index == 2)
+                                    .then_some(atman_runtime::permission::GrantScope::CurrentCall)
+                            }),
+                            reason: None,
+                        }
+                        .into(),
+                    );
                     app.push_note(
                         format!("approved {} ({})", p.payload.tool, p.request_id),
                         app::NoteLevel::Info,
@@ -401,18 +407,21 @@ pub(crate) fn handle_approval_key(
                     } else {
                         atman_runtime::permission::PermissionAction::Approve
                     };
-                    let _ = tx.send(TuiControl::ResolvePermission {
-                        selector: atman_runtime::permission::PermissionSelector::Group(
-                            group.group_id.clone(),
-                        ),
-                        expected_revision: group.revision,
-                        action,
-                        grant_scope: (action
-                            == atman_runtime::permission::PermissionAction::Approve)
-                            .then_some(atman_runtime::permission::GrantScope::CurrentCall),
-                        reason: (action == atman_runtime::permission::PermissionAction::Deny)
-                            .then(|| "denied by user".into()),
-                    });
+                    let _ = tx.send(
+                        TuiDomainCommand::ResolvePermission {
+                            selector: atman_runtime::permission::PermissionSelector::Group(
+                                group.group_id.clone(),
+                            ),
+                            expected_revision: group.revision,
+                            action,
+                            grant_scope: (action
+                                == atman_runtime::permission::PermissionAction::Approve)
+                                .then_some(atman_runtime::permission::GrantScope::CurrentCall),
+                            reason: (action == atman_runtime::permission::PermissionAction::Deny)
+                                .then(|| "denied by user".into()),
+                        }
+                        .into(),
+                    );
                     app.push_note(
                         format!("group {}: {action:?}", group.group_id),
                         if action == atman_runtime::permission::PermissionAction::Deny {
@@ -427,29 +436,35 @@ pub(crate) fn handle_approval_key(
             }
             'a' | 'A' => {
                 for group in &groups {
-                    let _ = tx.send(TuiControl::ResolvePermission {
-                        selector: atman_runtime::permission::PermissionSelector::Group(
-                            group.group_id.clone(),
-                        ),
-                        expected_revision: group.revision,
-                        action: atman_runtime::permission::PermissionAction::Approve,
-                        grant_scope: Some(atman_runtime::permission::GrantScope::CurrentCall),
-                        reason: None,
-                    });
+                    let _ = tx.send(
+                        TuiDomainCommand::ResolvePermission {
+                            selector: atman_runtime::permission::PermissionSelector::Group(
+                                group.group_id.clone(),
+                            ),
+                            expected_revision: group.revision,
+                            action: atman_runtime::permission::PermissionAction::Approve,
+                            grant_scope: Some(atman_runtime::permission::GrantScope::CurrentCall),
+                            reason: None,
+                        }
+                        .into(),
+                    );
                 }
                 for p in &canonical {
-                    let _ = tx.send(TuiControl::ResolvePermission {
-                        selector: atman_runtime::permission::PermissionSelector::RequestIds(vec![
-                            p.request_id.clone(),
-                        ]),
-                        expected_revision: p.revision,
-                        action: atman_runtime::permission::PermissionAction::Approve,
-                        grant_scope: scope(p, app.approval_scope_index).or_else(|| {
-                            (app.approval_scope_index == 2)
-                                .then_some(atman_runtime::permission::GrantScope::CurrentCall)
-                        }),
-                        reason: None,
-                    });
+                    let _ = tx.send(
+                        TuiDomainCommand::ResolvePermission {
+                            selector: atman_runtime::permission::PermissionSelector::RequestIds(
+                                vec![p.request_id.clone()],
+                            ),
+                            expected_revision: p.revision,
+                            action: atman_runtime::permission::PermissionAction::Approve,
+                            grant_scope: scope(p, app.approval_scope_index).or_else(|| {
+                                (app.approval_scope_index == 2)
+                                    .then_some(atman_runtime::permission::GrantScope::CurrentCall)
+                            }),
+                            reason: None,
+                        }
+                        .into(),
+                    );
                 }
                 app.push_note(
                     format!("approved all {} pending", canonical.len()),
@@ -463,15 +478,18 @@ pub(crate) fn handle_approval_key(
                 let deny_first = pending_len <= 1 || deny_armed;
                 if deny_first {
                     if let Some(p) = canonical.first() {
-                        let _ = tx.send(TuiControl::ResolvePermission {
-                            selector: atman_runtime::permission::PermissionSelector::RequestIds(
-                                vec![p.request_id.clone()],
-                            ),
-                            expected_revision: p.revision,
-                            action: atman_runtime::permission::PermissionAction::Deny,
-                            grant_scope: None,
-                            reason: Some("denied by user".into()),
-                        });
+                        let _ = tx.send(
+                            TuiDomainCommand::ResolvePermission {
+                                selector: atman_runtime::permission::PermissionSelector::RequestIds(
+                                    vec![p.request_id.clone()],
+                                ),
+                                expected_revision: p.revision,
+                                action: atman_runtime::permission::PermissionAction::Deny,
+                                grant_scope: None,
+                                reason: Some("denied by user".into()),
+                            }
+                            .into(),
+                        );
                         app.push_note(format!("denied {}", p.payload.tool), app::NoteLevel::Warn);
                     }
                     app.deny_arm = None;
@@ -491,28 +509,34 @@ pub(crate) fn handle_approval_key(
         },
         KeyAction::Escape => {
             for group in &groups {
-                let _ = tx.send(TuiControl::ResolvePermission {
-                    selector: atman_runtime::permission::PermissionSelector::Group(
-                        group.group_id.clone(),
-                    ),
-                    expected_revision: group.revision,
-                    action: atman_runtime::permission::PermissionAction::Deny,
-                    grant_scope: None,
-                    reason: Some("user pressed Esc".into()),
-                });
+                let _ = tx.send(
+                    TuiDomainCommand::ResolvePermission {
+                        selector: atman_runtime::permission::PermissionSelector::Group(
+                            group.group_id.clone(),
+                        ),
+                        expected_revision: group.revision,
+                        action: atman_runtime::permission::PermissionAction::Deny,
+                        grant_scope: None,
+                        reason: Some("user pressed Esc".into()),
+                    }
+                    .into(),
+                );
             }
             for p in &canonical {
-                let _ = tx.send(TuiControl::ResolvePermission {
-                    selector: atman_runtime::permission::PermissionSelector::RequestIds(vec![
-                        p.request_id.clone(),
-                    ]),
-                    expected_revision: p.revision,
-                    action: atman_runtime::permission::PermissionAction::Deny,
-                    grant_scope: None,
-                    reason: Some("user pressed Esc".into()),
-                });
+                let _ = tx.send(
+                    TuiDomainCommand::ResolvePermission {
+                        selector: atman_runtime::permission::PermissionSelector::RequestIds(vec![
+                            p.request_id.clone(),
+                        ]),
+                        expected_revision: p.revision,
+                        action: atman_runtime::permission::PermissionAction::Deny,
+                        grant_scope: None,
+                        reason: Some("user pressed Esc".into()),
+                    }
+                    .into(),
+                );
             }
-            let _ = tx.send(TuiControl::CancelFlow);
+            let _ = tx.send(TuiDomainCommand::CancelFlow.into());
             app.push_note(
                 format!("denied all {} pending, flow cancelled", canonical.len()),
                 app::NoteLevel::Warn,
@@ -1075,12 +1099,14 @@ pub(crate) fn handle_key(
                         reasoning: app.input_reasoning_for_submission(),
                     };
                     let failed = if let Some(tx) = control_tx {
-                        tx.send(TuiControl::Submit(submission)).err().and_then(
-                            |error| match error.0 {
-                                TuiControl::Submit(submission) => Some(submission),
+                        tx.send(TuiDomainCommand::Submit(submission).into())
+                            .err()
+                            .and_then(|error| match error.0 {
+                                TuiControl::Domain(TuiDomainCommand::Submit(submission)) => {
+                                    Some(submission)
+                                }
                                 _ => None,
-                            },
-                        )
+                            })
                     } else {
                         submit_tx
                             .and_then(|tx| tx.send(submission).err())
@@ -1147,7 +1173,7 @@ pub(crate) fn handle_key(
                 let mut trust = app.trust.clone();
                 trust.escalation = trust.escalation.next();
                 if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::UpdateTrust(trust));
+                    let _ = tx.send(TuiDomainCommand::UpdateTrust(trust).into());
                 }
             } else if editor.expand_paste_at_cursor() {
                 edited = true;
@@ -1171,7 +1197,7 @@ pub(crate) fn handle_key(
         }
         KeyAction::HardStop => {
             if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::HardStop);
+                let _ = tx.send(TuiDomainCommand::HardStop.into());
             }
             app.cancel_running_activities();
             *interrupt_prompt = None;
@@ -1233,7 +1259,7 @@ pub(crate) fn handle_key(
             }
             if app.streaming || app.has_running_workflow() {
                 if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::CancelFlow);
+                    let _ = tx.send(TuiDomainCommand::CancelFlow.into());
                 }
                 app.push_note("cancel requested", app::NoteLevel::Warn);
                 app.cancel_running_activities();
@@ -1299,7 +1325,7 @@ pub(crate) fn handle_key(
                 *interrupt_prompt = None;
             } else if app.streaming || app.has_running_workflow() {
                 if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::HardStop);
+                    let _ = tx.send(TuiDomainCommand::HardStop.into());
                 }
                 app.push_note("flow stopped (Ctrl+C)", app::NoteLevel::Warn);
                 app.cancel_running_activities();
@@ -1557,7 +1583,9 @@ mod tests {
         );
 
         assert!(submit_rx.try_recv().is_err());
-        let TuiControl::Submit(submission) = control_rx.try_recv().unwrap() else {
+        let TuiControl::Domain(TuiDomainCommand::Submit(submission)) =
+            control_rx.try_recv().unwrap()
+        else {
             panic!("submission must share the ordered control channel");
         };
         assert_eq!(submission.text, "run after mode update");
@@ -1595,11 +1623,15 @@ mod tests {
             Some(&control_tx),
         );
 
-        let TuiControl::UpdateTrust(trust) = control_rx.try_recv().unwrap() else {
+        let TuiControl::Domain(TuiDomainCommand::UpdateTrust(trust)) =
+            control_rx.try_recv().unwrap()
+        else {
             panic!("trust update must be queued first");
         };
         assert_eq!(trust.mode, atman_runtime::trust::TrustMode::Reckless);
-        let TuiControl::Submit(submission) = control_rx.try_recv().unwrap() else {
+        let TuiControl::Domain(TuiDomainCommand::Submit(submission)) =
+            control_rx.try_recv().unwrap()
+        else {
             panic!("submission must follow the trust update");
         };
         assert_eq!(submission.text, "start the new flow");
@@ -1802,12 +1834,12 @@ mod tests {
             &mut app,
             Some(&tx)
         ));
-        let TuiControl::ResolvePermission {
+        let TuiControl::Domain(TuiDomainCommand::ResolvePermission {
             selector,
             expected_revision,
             action,
             ..
-        } = rx.try_recv().unwrap()
+        }) = rx.try_recv().unwrap()
         else {
             panic!("expected canonical permission control");
         };
@@ -1827,7 +1859,9 @@ mod tests {
             &mut app,
             Some(&tx)
         ));
-        let TuiControl::ResolvePermission { selector, .. } = rx.try_recv().unwrap() else {
+        let TuiControl::Domain(TuiDomainCommand::ResolvePermission { selector, .. }) =
+            rx.try_recv().unwrap()
+        else {
             panic!("expected canonical permission control");
         };
         assert_eq!(

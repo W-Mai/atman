@@ -540,10 +540,12 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                             app.session_name = title.clone();
                         }
                         if let Some(tx) = tx {
-                            let _ = tx.send(TuiControl::RenameSession {
-                                session_id: sid.clone(),
-                                title: title.clone(),
-                            });
+                            let _ = tx.send(TuiControl::Domain(
+                                crate::TuiDomainCommand::RenameSession {
+                                    session_id: sid.clone(),
+                                    title: title.clone(),
+                                },
+                            ));
                         }
                         let msg = match &title {
                             Some(t) => format!("renamed {sid} → {t}"),
@@ -573,7 +575,9 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             if self.delete_armed_matches_selected() {
                 if let Some(sid) = self.remove_selected() {
                     if let Some(tx) = tx {
-                        let _ = tx.send(TuiControl::DeleteSession(sid.clone()));
+                        let _ = tx.send(TuiControl::Domain(
+                            crate::TuiDomainCommand::DeleteSession(sid.clone()),
+                        ));
                     }
                     app.push_note(
                         format!("deleted session {sid}"),
@@ -795,7 +799,7 @@ mod tests {
         assert_eq!(app.session_name.as_deref(), Some("New name"));
         assert!(matches!(
             rx.try_recv(),
-            Ok(TuiControl::RenameSession { session_id, title })
+            Ok(TuiControl::Domain(crate::TuiDomainCommand::RenameSession { session_id, title }))
                 if session_id == "current" && title.as_deref() == Some("New name")
         ));
     }

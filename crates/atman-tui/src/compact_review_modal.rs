@@ -234,10 +234,12 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
             CompactReviewMode::Viewing => match action {
                 KeyAction::Submit => {
                     if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::CompactReviewAccept {
-                            review_id: self.pending.review_id.clone(),
-                            edited: None,
-                        });
+                        let _ = tx.send(crate::TuiControl::Domain(
+                            crate::TuiDomainCommand::CompactReviewAccept {
+                                review_id: self.pending.review_id.clone(),
+                                edited: None,
+                            },
+                        ));
                     }
                     Some(ModalAction::Consumed)
                 }
@@ -247,9 +249,11 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
                 }
                 KeyAction::Escape | KeyAction::Char('r') => {
                     if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::CompactReviewReject {
-                            review_id: self.pending.review_id.clone(),
-                        });
+                        let _ = tx.send(crate::TuiControl::Domain(
+                            crate::TuiDomainCommand::CompactReviewReject {
+                                review_id: self.pending.review_id.clone(),
+                            },
+                        ));
                     }
                     Some(ModalAction::Consumed)
                 }
@@ -267,10 +271,12 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
                 KeyAction::Submit => {
                     let edited = self.edited_summary();
                     if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::CompactReviewAccept {
-                            review_id: self.pending.review_id.clone(),
-                            edited: Some(edited),
-                        });
+                        let _ = tx.send(crate::TuiControl::Domain(
+                            crate::TuiDomainCommand::CompactReviewAccept {
+                                review_id: self.pending.review_id.clone(),
+                                edited: Some(edited),
+                            },
+                        ));
                     }
                     Some(ModalAction::Consumed)
                 }

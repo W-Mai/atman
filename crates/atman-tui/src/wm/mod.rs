@@ -633,7 +633,9 @@ impl WindowManager {
             PaletteEntryId::CopyLastTool => crate::key_handler::copy_last_tool(app),
             PaletteEntryId::CompactNow => {
                 if let Some(tx) = control_tx {
-                    let _ = tx.send(crate::TuiControl::CompactNow);
+                    let _ = tx.send(crate::TuiControl::Domain(
+                        crate::TuiDomainCommand::CompactNow,
+                    ));
                     app.push_note(
                         "requested transcript compaction",
                         crate::app::NoteLevel::Info,
@@ -790,11 +792,13 @@ impl WindowManager {
                     if let (Some(tx), Some(resource_id)) =
                         (control_tx, app.task_resource_id(&handle))
                     {
-                        let _ = tx.send(crate::TuiControl::TermResize {
-                            resource_id,
-                            rows,
-                            cols,
-                        });
+                        let _ = tx.send(crate::TuiControl::Domain(
+                            crate::TuiDomainCommand::TermResize {
+                                resource_id,
+                                rows,
+                                cols,
+                            },
+                        ));
                     }
                 }
                 WmCommand::OpenTaskPanel { handle, maximized } => {

@@ -1746,92 +1746,206 @@ async fn cmd_repl_once(
                         continue;
                     }
                 };
-                match msg {
-                    atman_tui::TuiControl::Submit(submission) => {
-                        if let Some(error) = trust_update_error.take() {
-                            if !submission.images.is_empty() {
-                                session_for_ctrl.restore_pending_images(submission.images);
+                if let atman_tui::TuiControl::Domain(command) = msg {
+                    match command {
+                        atman_tui::TuiDomainCommand::Submit(submission) => {
+                            if let Some(error) = trust_update_error.take() {
+                                if !submission.images.is_empty() {
+                                    session_for_ctrl.restore_pending_images(submission.images);
+                                }
+                                reporter_for_ctrl.error(format!(
+                                    "input not submitted because the trust policy update failed: {error}"
+                                ));
+                                continue;
                             }
-                            reporter_for_ctrl.error(format!(
-                                "input not submitted because the trust policy update failed: {error}"
-                            ));
-                            continue;
+                            tui_input_sink.send(submission);
                         }
-                        tui_input_sink.send(submission);
-                    }
-                    atman_tui::TuiControl::UpdateTrust(mut trust) => {
-                        trust.theme = session_for_ctrl.trust_config().theme;
-                        let result = session_for_ctrl.update_trust(trust, |config| {
-                            let hub = atman_runtime::config_hub::ConfigHub::global()
-                                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                            hub.set_trust_config(config)
-                                .map_err(|error| std::io::Error::other(error.to_string()))
-                        });
-                        match result {
-                            Ok(()) => trust_update_error = None,
-                            Err(error) => {
-                                let error = error.to_string();
-                                trust_update_error = Some(error.clone());
+                        atman_tui::TuiDomainCommand::UpdateTrust(mut trust) => {
+                            trust.theme = session_for_ctrl.trust_config().theme;
+                            let result = session_for_ctrl.update_trust(trust, |config| {
+                                let hub = atman_runtime::config_hub::ConfigHub::global()
+                                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                                hub.set_trust_config(config)
+                                    .map_err(|error| std::io::Error::other(error.to_string()))
+                            });
+                            match result {
+                                Ok(()) => trust_update_error = None,
+                                Err(error) => {
+                                    let error = error.to_string();
+                                    trust_update_error = Some(error.clone());
+                                    reporter_for_ctrl
+                                        .error(format!("failed to update trust policy: {error}"));
+                                }
+                            }
+                        }
+                        atman_tui::TuiDomainCommand::CancelFlow => session_for_ctrl.cancel_flow(),
+                        atman_tui::TuiDomainCommand::HardStop => {
+                            session_for_ctrl.cancel_flow();
+                            let _ = session_for_ctrl.enqueue_injection_with_level(
+                                "stop",
+                                atman_runtime::injection::InjectionLevel::L4HardStop,
+                                None,
+                            );
+                        }
+                        atman_tui::TuiDomainCommand::ResolvePermission {
+                            selector,
+                            expected_revision,
+                            action,
+                            grant_scope,
+                            reason,
+                        } => {
+                            let result = match selector {
+                                atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
+                                    let expected = ids
+                                        .iter()
+                                        .cloned()
+                                        .map(|id| (id, expected_revision))
+                                        .collect();
+                                    session_for_ctrl.permission_broker().user_resolve(
+                                        &session_for_ctrl.id().to_string(),
+                                        Some("local-tui-user".into()),
+                                        ids,
+                                        &expected,
+                                        None,
+                                        action,
+                                        grant_scope,
+                                        reason,
+                                    )
+                                }
+                                atman_runtime::permission::PermissionSelector::Group(group_id) => {
+                                    session_for_ctrl.permission_broker().user_resolve(
+                                        &session_for_ctrl.id().to_string(),
+                                        Some("local-tui-user".into()),
+                                        Vec::new(),
+                                        &std::collections::HashMap::new(),
+                                        Some((group_id, expected_revision)),
+                                        action,
+                                        grant_scope,
+                                        reason,
+                                    )
+                                }
+                                _ => Err(
+                                    atman_runtime::permission::PermissionError::GroupRevisionConflict,
+                                ),
+                            };
+                            if let Err(error) = result {
                                 reporter_for_ctrl
-                                    .error(format!("failed to update trust policy: {error}"));
+                                    .error(format!("permission decision rejected: {error}"));
                             }
                         }
-                    }
-                    atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
-                    atman_tui::TuiControl::HardStop => {
-                        session_for_ctrl.cancel_flow();
-                        let _ = session_for_ctrl.enqueue_injection_with_level(
-                            "stop",
-                            atman_runtime::injection::InjectionLevel::L4HardStop,
-                            None,
-                        );
-                    }
-                    atman_tui::TuiControl::ResolvePermission {
-                        selector,
-                        expected_revision,
-                        action,
-                        grant_scope,
-                        reason,
-                    } => {
-                        let result = match selector {
-                            atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
-                                let expected = ids
-                                    .iter()
-                                    .cloned()
-                                    .map(|id| (id, expected_revision))
-                                    .collect();
-                                session_for_ctrl.permission_broker().user_resolve(
-                                    &session_for_ctrl.id().to_string(),
-                                    Some("local-tui-user".into()),
-                                    ids,
-                                    &expected,
-                                    None,
-                                    action,
-                                    grant_scope,
-                                    reason,
-                                )
+                        atman_tui::TuiDomainCommand::CompactNow => {
+                            session_for_ctrl.request_manual_compact();
+                            let session_for_compact = std::sync::Arc::clone(&session_for_ctrl);
+                            let providers_for_compact = providers_for_ctrl.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let rt = match tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                {
+                                    Ok(rt) => rt,
+                                    Err(e) => {
+                                        atman_runtime::notify!(
+                                            error,
+                                            "compact runtime init failed: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                rt.block_on(async {
+                                    let model = session_for_compact.last_model();
+                                    atman_runtime::compaction::maybe_auto_compact(
+                                        &session_for_compact,
+                                        &model,
+                                        &providers_for_compact,
+                                    )
+                                    .await;
+                                });
+                            });
+                        }
+                        atman_tui::TuiDomainCommand::CompactReviewAccept { review_id, edited } => {
+                            let decision = match edited {
+                                Some(summary) => {
+                                    atman_runtime::CompactReviewDecision::AcceptEdited { summary }
+                                }
+                                None => atman_runtime::CompactReviewDecision::AcceptAsIs,
+                            };
+                            session_for_ctrl
+                                .compact_reviews()
+                                .decide(&review_id, decision);
+                        }
+                        atman_tui::TuiDomainCommand::CompactReviewReject { review_id } => {
+                            session_for_ctrl
+                                .compact_reviews()
+                                .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
+                        }
+                        atman_tui::TuiDomainCommand::DeleteSession(sid) => {
+                            delete_session_dir(&data_root_for_ctrl, &sid);
+                            if let Some(idx) = session_for_ctrl.project_index() {
+                                let _ = idx.delete_events_for_session(&sid);
                             }
-                            atman_runtime::permission::PermissionSelector::Group(group_id) => {
-                                session_for_ctrl.permission_broker().user_resolve(
-                                    &session_for_ctrl.id().to_string(),
-                                    Some("local-tui-user".into()),
-                                    Vec::new(),
-                                    &std::collections::HashMap::new(),
-                                    Some((group_id, expected_revision)),
-                                    action,
-                                    grant_scope,
-                                    reason,
-                                )
+                        }
+                        atman_tui::TuiDomainCommand::RenameSession { session_id, title } => {
+                            let dir = data_root_for_ctrl.join("sessions").join(&session_id);
+                            match atman_runtime::session_meta::SessionMeta::set_title(
+                                &dir,
+                                title.clone(),
+                            ) {
+                                Ok(()) => {
+                                    if session_id == session_for_ctrl.id().to_string()
+                                        && let Some(name) = title
+                                    {
+                                        let _ = cmd_tx_for_models
+                                            .send(atman_tui::TuiCommand::SessionNameUpdated(name));
+                                    }
+                                }
+                                Err(e) => {
+                                    atman_runtime::notify!(error, "rename {session_id} failed: {e}")
+                                }
                             }
-                            _ => Err(
-                                atman_runtime::permission::PermissionError::GroupRevisionConflict,
-                            ),
-                        };
-                        if let Err(error) = result {
-                            reporter_for_ctrl
-                                .error(format!("permission decision rejected: {error}"));
+                        }
+                        atman_tui::TuiDomainCommand::FormSubmit {
+                            form_id,
+                            submission,
+                        } => {
+                            let _ = session_for_ctrl.forms().submit(&form_id, submission);
+                        }
+                        atman_tui::TuiDomainCommand::TermResize {
+                            resource_id,
+                            rows,
+                            cols,
+                        } => {
+                            let task = resource_id
+                                .task_id()
+                                .map(atman_runtime::TaskId)
+                                .and_then(|id| {
+                                    executor_for_ctrl
+                                        .tool_ctx
+                                        .task_registry
+                                        .as_ref()
+                                        .and_then(|registry| registry.lookup(&id))
+                                })
+                                .filter(|task| {
+                                    task.session_id == session_for_ctrl.id().to_string()
+                                        && task.kind == atman_runtime::TaskKind::Terminal
+                                });
+                            if let (Some(registry), Some(task)) =
+                                (&session_for_ctrl_term_registry, task)
+                                && let Ok(entry) = registry
+                                    .lookup(&task.source_handle, &session_for_ctrl.id().to_string())
+                            {
+                                let _ = entry.resize(rows, cols);
+                            }
+                        }
+                        _ => {
+                            atman_runtime::notify!(
+                                error,
+                                "TUI session command is unsupported by this host"
+                            );
                         }
                     }
+                    continue;
+                }
+                match msg {
                     atman_tui::TuiControl::AutoNameSession => {
                         match atman_runtime::session_naming::force_generate_session_name(
                             &executor_for_ctrl,
@@ -1860,51 +1974,6 @@ async fn cmd_repl_once(
                                 )
                             }
                         }
-                    }
-                    atman_tui::TuiControl::CompactNow => {
-                        session_for_ctrl.request_manual_compact();
-                        let session_for_compact = std::sync::Arc::clone(&session_for_ctrl);
-                        let providers_for_compact = providers_for_ctrl.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let rt = match tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                            {
-                                Ok(rt) => rt,
-                                Err(e) => {
-                                    atman_runtime::notify!(
-                                        error,
-                                        "compact runtime init failed: {e}"
-                                    );
-                                    return;
-                                }
-                            };
-                            rt.block_on(async {
-                                let model = session_for_compact.last_model();
-                                atman_runtime::compaction::maybe_auto_compact(
-                                    &session_for_compact,
-                                    &model,
-                                    &providers_for_compact,
-                                )
-                                .await;
-                            });
-                        });
-                    }
-                    atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
-                        let decision = match edited {
-                            Some(summary) => {
-                                atman_runtime::CompactReviewDecision::AcceptEdited { summary }
-                            }
-                            None => atman_runtime::CompactReviewDecision::AcceptAsIs,
-                        };
-                        session_for_ctrl
-                            .compact_reviews()
-                            .decide(&review_id, decision);
-                    }
-                    atman_tui::TuiControl::CompactReviewReject { review_id } => {
-                        session_for_ctrl
-                            .compact_reviews()
-                            .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
                     }
                     atman_tui::TuiControl::SwitchSession { sid, intro } => {
                         // spawn_blocking + fresh current_thread runtime because MCP registration
@@ -1966,37 +2035,6 @@ async fn cmd_repl_once(
                                     .unwrap_or(atman_runtime::form::FormSubmission::Rejected)
                             });
                         }
-                    }
-                    atman_tui::TuiControl::DeleteSession(sid) => {
-                        delete_session_dir(&data_root_for_ctrl, &sid);
-                        if let Some(idx) = session_for_ctrl.project_index() {
-                            let _ = idx.delete_events_for_session(&sid);
-                        }
-                    }
-                    atman_tui::TuiControl::RenameSession { session_id, title } => {
-                        let dir = data_root_for_ctrl.join("sessions").join(&session_id);
-                        match atman_runtime::session_meta::SessionMeta::set_title(
-                            &dir,
-                            title.clone(),
-                        ) {
-                            Ok(()) => {
-                                if session_id == session_for_ctrl.id().to_string()
-                                    && let Some(name) = title
-                                {
-                                    let _ = cmd_tx_for_models
-                                        .send(atman_tui::TuiCommand::SessionNameUpdated(name));
-                                }
-                            }
-                            Err(e) => {
-                                atman_runtime::notify!(error, "rename {session_id} failed: {e}")
-                            }
-                        }
-                    }
-                    atman_tui::TuiControl::FormSubmit {
-                        form_id,
-                        submission,
-                    } => {
-                        let _ = session_for_ctrl.forms().submit(&form_id, submission);
                     }
                     atman_tui::TuiControl::MutateProvider(request) => {
                         let lifecycle = provider_lifecycle_for_ctrl.clone();
@@ -2075,33 +2113,6 @@ async fn cmd_repl_once(
                             let (msg, ok) = test_provider_endpoint(&name, &entry).await;
                             let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult((msg, ok)));
                         });
-                    }
-                    atman_tui::TuiControl::TermResize {
-                        resource_id,
-                        rows,
-                        cols,
-                    } => {
-                        let task = resource_id
-                            .task_id()
-                            .map(atman_runtime::TaskId)
-                            .and_then(|id| {
-                                executor_for_ctrl
-                                    .tool_ctx
-                                    .task_registry
-                                    .as_ref()
-                                    .and_then(|registry| registry.lookup(&id))
-                            })
-                            .filter(|task| {
-                                task.session_id == session_for_ctrl.id().to_string()
-                                    && task.kind == atman_runtime::TaskKind::Terminal
-                            });
-                        if let (Some(registry), Some(task)) =
-                            (&session_for_ctrl_term_registry, task)
-                            && let Ok(entry) = registry
-                                .lookup(&task.source_handle, &session_for_ctrl.id().to_string())
-                        {
-                            let _ = entry.resize(rows, cols);
-                        }
                     }
                     atman_tui::TuiControl::McpTest { name } => {
                         let tx = cmd_tx_for_models.clone();
@@ -4797,55 +4808,74 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
     let ctrl_task = tokio::spawn(async move {
         while let Some(msg) = ctrl_rx.recv().await {
             match msg {
-                atman_tui::TuiControl::ResolvePermission {
-                    selector,
-                    expected_revision,
-                    action,
-                    grant_scope,
-                    reason,
-                } => {
-                    let result = match selector {
-                        atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
-                            let expected = ids
-                                .iter()
-                                .cloned()
-                                .map(|id| (id, expected_revision))
-                                .collect();
-                            ctrl_session.permission_broker().user_resolve(
-                                &ctrl_session.id().to_string(),
-                                Some("local-tui-preview".into()),
-                                ids,
-                                &expected,
-                                None,
-                                action,
-                                grant_scope,
-                                reason,
-                            )
+                atman_tui::TuiControl::Domain(command) => match command {
+                    atman_tui::TuiDomainCommand::ResolvePermission {
+                        selector,
+                        expected_revision,
+                        action,
+                        grant_scope,
+                        reason,
+                    } => {
+                        let result = match selector {
+                            atman_runtime::permission::PermissionSelector::RequestIds(ids) => {
+                                let expected = ids
+                                    .iter()
+                                    .cloned()
+                                    .map(|id| (id, expected_revision))
+                                    .collect();
+                                ctrl_session.permission_broker().user_resolve(
+                                    &ctrl_session.id().to_string(),
+                                    Some("local-tui-preview".into()),
+                                    ids,
+                                    &expected,
+                                    None,
+                                    action,
+                                    grant_scope,
+                                    reason,
+                                )
+                            }
+                            atman_runtime::permission::PermissionSelector::Group(group_id) => {
+                                ctrl_session.permission_broker().user_resolve(
+                                    &ctrl_session.id().to_string(),
+                                    Some("local-tui-preview".into()),
+                                    Vec::new(),
+                                    &std::collections::HashMap::new(),
+                                    Some((group_id, expected_revision)),
+                                    action,
+                                    grant_scope,
+                                    reason,
+                                )
+                            }
+                            _ => Err(
+                                atman_runtime::permission::PermissionError::GroupRevisionConflict,
+                            ),
+                        };
+                        if let Err(error) = result {
+                            atman_runtime::notify!(error, "permission decision rejected: {error}");
                         }
-                        atman_runtime::permission::PermissionSelector::Group(group_id) => {
-                            ctrl_session.permission_broker().user_resolve(
-                                &ctrl_session.id().to_string(),
-                                Some("local-tui-preview".into()),
-                                Vec::new(),
-                                &std::collections::HashMap::new(),
-                                Some((group_id, expected_revision)),
-                                action,
-                                grant_scope,
-                                reason,
-                            )
-                        }
-                        _ => Err(atman_runtime::permission::PermissionError::GroupRevisionConflict),
-                    };
-                    if let Err(error) = result {
-                        atman_runtime::notify!(error, "permission decision rejected: {error}");
                     }
-                }
-                atman_tui::TuiControl::FormSubmit {
-                    form_id,
-                    submission,
-                } => {
-                    ctrl_session.forms().submit(&form_id, submission);
-                }
+                    atman_tui::TuiDomainCommand::FormSubmit {
+                        form_id,
+                        submission,
+                    } => {
+                        ctrl_session.forms().submit(&form_id, submission);
+                    }
+                    atman_tui::TuiDomainCommand::CompactReviewAccept { review_id, edited } => {
+                        let decision = match edited {
+                            Some(summary) => {
+                                atman_runtime::CompactReviewDecision::AcceptEdited { summary }
+                            }
+                            None => atman_runtime::CompactReviewDecision::AcceptAsIs,
+                        };
+                        ctrl_session.compact_reviews().decide(&review_id, decision);
+                    }
+                    atman_tui::TuiDomainCommand::CompactReviewReject { review_id } => {
+                        ctrl_session
+                            .compact_reviews()
+                            .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
+                    }
+                    _ => {}
+                },
                 atman_tui::TuiControl::MutateProvider(request) => {
                     let _ = cmd_tx.send(atman_tui::TuiCommand::ProviderMutationResult {
                         request,
@@ -4858,20 +4888,6 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                         model,
                         result: Err("model switching is unavailable in TUI preview".into()),
                     });
-                }
-                atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
-                    let decision = match edited {
-                        Some(summary) => {
-                            atman_runtime::CompactReviewDecision::AcceptEdited { summary }
-                        }
-                        None => atman_runtime::CompactReviewDecision::AcceptAsIs,
-                    };
-                    ctrl_session.compact_reviews().decide(&review_id, decision);
-                }
-                atman_tui::TuiControl::CompactReviewReject { review_id } => {
-                    ctrl_session
-                        .compact_reviews()
-                        .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
                 }
                 _ => {}
             }

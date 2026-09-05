@@ -989,7 +989,7 @@ impl ModalManager {
                 };
                 *slot = Some(next_policy_action(current));
                 if let Some(tx) = tx {
-                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                    let _ = tx.send(crate::TuiDomainCommand::UpdateTrust(draft.clone()).into());
                 }
             }
             crate::keys::KeyAction::Char(c @ ('n' | 'w' | 'i' | 'x' | 'p' | 'r'))
@@ -1015,7 +1015,7 @@ impl ModalManager {
                 };
                 *slot = Some(next_policy_action(current));
                 if let Some(tx) = tx {
-                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                    let _ = tx.send(crate::TuiDomainCommand::UpdateTrust(draft.clone()).into());
                 }
             }
             crate::keys::KeyAction::Char('e')
@@ -1024,7 +1024,7 @@ impl ModalManager {
             {
                 draft.escalation = draft.escalation.next();
                 if let Some(tx) = tx {
-                    let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                    let _ = tx.send(crate::TuiDomainCommand::UpdateTrust(draft.clone()).into());
                 }
             }
             crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char('\r') => {
@@ -1034,7 +1034,7 @@ impl ModalManager {
                 if new_mode != prev {
                     draft.mode = new_mode;
                     if let Some(tx) = tx {
-                        let _ = tx.send(crate::TuiControl::UpdateTrust(draft.clone()));
+                        let _ = tx.send(crate::TuiDomainCommand::UpdateTrust(draft.clone()).into());
                     }
                     let display = app.trust.theme.display(new_mode);
                     if let Some(warning) = new_mode.warning(&display) {

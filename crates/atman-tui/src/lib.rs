@@ -98,42 +98,14 @@ impl TuiNote {
 
 #[non_exhaustive]
 pub enum TuiControl {
-    Submit(TuiSubmission),
-    UpdateTrust(atman_runtime::trust::TrustConfig),
-    CancelFlow,
-    HardStop,
-    ResolvePermission {
-        selector: atman_runtime::permission::PermissionSelector,
-        expected_revision: u64,
-        action: atman_runtime::permission::PermissionAction,
-        grant_scope: Option<atman_runtime::permission::GrantScope>,
-        reason: Option<String>,
-    },
-    CompactNow,
+    Domain(TuiDomainCommand),
     AutoNameSession,
-    CompactReviewAccept {
-        review_id: String,
-        edited: Option<String>,
-    },
-    CompactReviewReject {
-        review_id: String,
-    },
     SwitchSession {
         sid: String,
         intro: app::StartupIntro,
     },
     NewSession,
     MoveSession,
-    DeleteSession(String),
-    RenameSession {
-        session_id: String,
-        title: Option<String>,
-    },
-    FormSubmit {
-        form_id: String,
-        submission: atman_runtime::form::FormSubmission,
-    },
-    /// Execute a provider mutation; completed operations return one matching result.
     MutateProvider(ProviderMutationRequest),
     UpsertConfigModel {
         old_name: Option<String>,
@@ -157,11 +129,6 @@ pub enum TuiControl {
         name: String,
         entry: atman_runtime::model_registry::ProviderEntry,
     },
-    TermResize {
-        resource_id: atman_proto::ResourceId,
-        rows: u16,
-        cols: u16,
-    },
     McpTest {
         name: String,
     },
@@ -172,6 +139,50 @@ pub enum TuiControl {
     McpListPrompts {
         name: String,
     },
+}
+
+/// Session mutations shared by embedded and daemon-backed TUI hosts.
+#[non_exhaustive]
+pub enum TuiDomainCommand {
+    Submit(TuiSubmission),
+    UpdateTrust(atman_runtime::trust::TrustConfig),
+    CancelFlow,
+    HardStop,
+    ResolvePermission {
+        selector: atman_runtime::permission::PermissionSelector,
+        expected_revision: u64,
+        action: atman_runtime::permission::PermissionAction,
+        grant_scope: Option<atman_runtime::permission::GrantScope>,
+        reason: Option<String>,
+    },
+    CompactNow,
+    CompactReviewAccept {
+        review_id: String,
+        edited: Option<String>,
+    },
+    CompactReviewReject {
+        review_id: String,
+    },
+    DeleteSession(String),
+    RenameSession {
+        session_id: String,
+        title: Option<String>,
+    },
+    FormSubmit {
+        form_id: String,
+        submission: atman_runtime::form::FormSubmission,
+    },
+    TermResize {
+        resource_id: atman_proto::ResourceId,
+        rows: u16,
+        cols: u16,
+    },
+}
+
+impl From<TuiDomainCommand> for TuiControl {
+    fn from(command: TuiDomainCommand) -> Self {
+        Self::Domain(command)
+    }
 }
 
 #[derive(Debug, Clone)]

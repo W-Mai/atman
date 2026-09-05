@@ -395,11 +395,11 @@ pub(crate) async fn run_frames(
                                                     &handle.control_tx,
                                                     terminal_handle.and_then(|handle| app.app.task_resource_id(handle)),
                                                 ) {
-                                                    let _ = tx.send(TuiControl::TermResize {
+                                                    let _ = tx.send(TuiControl::Domain(crate::TuiDomainCommand::TermResize {
                                                         resource_id,
                                                         rows: inner_rows,
                                                         cols: inner_cols,
-                                                    });
+                                                    }));
                                                 }
                                             }
                                         }
@@ -954,11 +954,11 @@ pub(crate) async fn run_frames(
                                                         &handle.control_tx,
                                                         terminal_handle.and_then(|handle| app.app.task_resource_id(handle)),
                                                     ) {
-                                                        let _ = tx.send(TuiControl::TermResize {
+                                                        let _ = tx.send(TuiControl::Domain(crate::TuiDomainCommand::TermResize {
                                                             resource_id,
                                                             rows: inner_rows,
                                                             cols: inner_cols,
-                                                        });
+                                                        }));
                                                     }
                                                 }
                                             }
@@ -1231,11 +1231,11 @@ pub(crate) async fn run_frames(
                                                 &handle.control_tx,
                                                 terminal_handle.and_then(|handle| app.app.task_resource_id(handle)),
                                             ) {
-                                                let _ = tx.send(TuiControl::TermResize {
+                                                let _ = tx.send(TuiControl::Domain(crate::TuiDomainCommand::TermResize {
                                                     resource_id,
                                                     rows: inner_rows,
                                                     cols: inner_cols,
-                                                });
+                                                }));
                                             }
                                         }
                                     }
