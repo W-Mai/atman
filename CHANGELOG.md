@@ -42,6 +42,10 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-owned configuration and MCP management** — terminal and command-line clients mutate, probe, and inspect provider, model, and MCP configuration through typed daemon methods. Active sessions hot-reload MCP namespaces, and client-side configuration refreshes remain read-only.
+
+- **Daemon client integration contract** — Rust and TypeScript SDK examples cover attach, send, subscribe, and reconnect behavior. Persistent state converges across Unix and HTTP clients while drafts and presentation state remain client-local.
+
 - **Daemon-owned flow suggestions** — `:suggest` derives recent turns and observed dynamic tool names from the daemon context, runs its auxiliary model with provider-default reasoning, and installs accepted flows through typed Rust and TypeScript client commands.
 
 - **Daemon TUI command and image drafts** — interactive clients route REPL meta commands through host controls instead of session messages, and clipboard or path images remain client-local drafts until the next daemon submission.
@@ -107,6 +111,10 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Daemon compatibility diagnostics** — Rust and TypeScript clients identify protocol, snapshot, event, and method revision mismatches and direct the operator to restart the daemon from the same Atman installation.
+
+- **TUI onboarding bootstrap** — terminal startup reads provider state without running migrations, refreshes after daemon initialization, and presents first-run onboarding once instead of repeating it after session switches.
 
 - **Single-binary daemon startup** — the main `atman` executable can host the daemon through a hidden service entry when a separate `atman-daemon` binary is unavailable. Both launch paths share the same server implementation and pidfile ownership.
 

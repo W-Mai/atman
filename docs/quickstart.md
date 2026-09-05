@@ -236,19 +236,35 @@ atman flow test ~/.config/atman/commands/hello.at
 
 First run writes `hello.at.snap.json`. Subsequent runs compare the current output to the snapshot; mismatches print one line per drift case and exit non-zero. Re-run with `--bless` when the change is intended.
 
-## 8. Session discovery and spec state
+## 8. Attach daemon clients
+
+The default TUI, normal `atman run`, session commands, logs, cost reports, monitor, provider settings, and MCP management use the local daemon. The daemon owns persistent session and configuration writes; attached clients consume one snapshot followed by cursor-ordered projection updates.
+
+```bash
+atman daemon start
+atman daemon status
+```
+
+Local terminal clients use the owner-only Unix socket. HTTP clients connect to `http://127.0.0.1:65099`, authenticate with the bearer in `~/.config/atman/daemon.toml`, and use short-lived session tickets for browser event streams. Set `ATMAN_DAEMON_PORT` to change the daemon HTTP port, or run `atman daemon rotate-token` while the daemon is stopped to replace the bearer.
+
+Multiple TUI and Web UI clients can attach to the same session. Messages, tool state, runs, approvals, forms, compaction, and resources converge through the durable projection; simultaneous approval decisions commit once and the losing client observes a stale decision before removing the resolved request. Input drafts, pending image references, scroll, expanded panels, and theme choices stay local to each client.
+
+The Rust attach/send/subscribe example is [`crates/atman-client/examples/attach.rs`](../crates/atman-client/examples/attach.rs). The browser-neutral TypeScript example is [`packages/client/examples/attach.ts`](../packages/client/examples/attach.ts). [Daemon client platform](./daemon-client-platform.md) documents ownership, reconnect, authentication, compatibility, and client implementation rules.
+
+## 9. Session discovery and spec state
 
 Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`.
 
 `memory.spec.*` stores runtime state in JSONL. `memory.spec.materialize` writes a reviewable `IMPLEMENTATION.md` atomically and returns a revision; passing a stale `expected_revision` rejects the write instead of overwriting edits.
 
-## 9. Where to go from here
+## 10. Where to go from here
 
 - **`atman monitor`** starts an HTTP UI at `http://localhost:65098/` showing live session projections from the local daemon.
 - **`atman logs stream <session>`** tails a running daemon's SSE feed in the terminal.
 - **`atman sync init <url>`** turns `<project>/.atman/` into a git repo so your memory travels across machines.
 - **`atman migrate list --from opencode`** imports opencode / kiro session transcripts into a fresh atman session.
 - **[docs/context-strategy.md](./context-strategy.md)** covers the goal / todos / sliding-window / recall / compaction layering and when to reach for each.
+- **[docs/daemon-client-platform.md](./daemon-client-platform.md)** covers daemon ownership, SDK transports, synchronization, authentication, and multi-client behavior.
 - **[docs/how-to-filter.md](./how-to-filter.md)** covers the list combinators plus the pipe operator.
 - **`examples/`** in the atman source tree has larger canonical flows (agent loop, hunk review, LSP-style code review, etc).
 

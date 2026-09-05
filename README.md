@@ -297,6 +297,7 @@ atman cost [session] [--all]
 atman upgrade [--yes] [--verbose] [--no-modify-path]
 atman monitor [--port 65098]       # live daemon projection UI
 atman daemon start | stop | status | run [--reasoning <level>] [--image <path>]...
+atman mcp list | add | remove | test | tools | resources | prompts | import
 atman flow snapshot | versions | diff | rollback | lint | test
 atman sync init | push | pull      # git-based cross-machine memory sync
 atman migrate list | import [--from opencode|kiro]
@@ -304,6 +305,8 @@ atman doctor [--fix]
 ```
 
 `atman` terminal sessions and normal `atman run` commands start or reuse the local daemon. Terminal submissions and routed commands share daemon-owned session state, while `atman run` waits for the selected flow's durable terminal result. `--mock` and `--ephemeral` are explicit embedded execution modes.
+
+The daemon is the exclusive writer for persistent sessions, runs, approvals, forms, resources, provider settings, and MCP settings. Multiple TUI and browser clients can attach to one session and converge through the same snapshot and ordered projection stream; unsent drafts, scroll, disclosure, and themes remain local to each client. See [Daemon client platform](docs/daemon-client-platform.md) for the ownership, authentication, synchronization, and SDK contracts.
 
 REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:attach`, …
 
@@ -387,10 +390,12 @@ atman/
     atman-dsl/       # Parser + AST + pretty-printer (.at files)
     atman-runtime/   # Executor, tools, providers, memory, MCP, hunk, compaction
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
+    atman-client/    # Typed Rust daemon transports and session client
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
     atman-tui/       # Terminal UI — themes, workflow panel, diff preview, input
   examples/          # canonical .at flow examples
+  packages/client/   # Framework-neutral TypeScript daemon client
   docs/              # Quickstart, context strategy, list combinators
 ```
 
