@@ -24,14 +24,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     run_boot_flow(&session).await;
 
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::task::spawn_blocking(move || {
-        let stdin = std::io::stdin();
-        for line in stdin.lock().lines().map_while(Result::ok) {
-            if input_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    spawn_input_reader(input_tx);
     let mut pushback = VecDeque::new();
     let mut attachments = Vec::new();
     loop {
@@ -71,6 +64,51 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
         .await;
     }
     Ok(())
+}
+
+fn spawn_input_reader(input_tx: tokio::sync::mpsc::UnboundedSender<String>) {
+    let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
+    tokio::task::spawn_blocking(move || {
+        if non_interactive {
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines().map_while(Result::ok) {
+                if input_tx.send(line).is_err() {
+                    break;
+                }
+            }
+            return;
+        }
+
+        use rustyline::error::ReadlineError;
+        use rustyline::history::DefaultHistory;
+        use rustyline::{Config, Editor};
+        let config = Config::builder().auto_add_history(true).build();
+        let mut editor: Editor<crate::repl_completer::AtmanCompleter, DefaultHistory> =
+            match Editor::with_config(config) {
+                Ok(editor) => editor,
+                Err(error) => {
+                    eprintln!("[atman] readline initialization failed: {error}");
+                    return;
+                }
+            };
+        editor.set_helper(Some(crate::repl_completer::AtmanCompleter::new(
+            atman_runtime::storage::config_dir().ok(),
+        )));
+        loop {
+            match editor.readline("atman> ") {
+                Ok(line) => {
+                    if input_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(ReadlineError::Eof | ReadlineError::Interrupted) => break,
+                Err(error) => {
+                    eprintln!("[atman] readline error: {error}");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 async fn run_boot_flow(session: &SessionClient) {
