@@ -235,7 +235,9 @@ pub enum TuiCommand {
         message: String,
         ok: bool,
     },
-    McpReloaded,
+    McpReloaded {
+        active_runs: Option<usize>,
+    },
     SessionNameUpdated(String),
     SessionListUpdated {
         scope: session_switcher::SessionScope,

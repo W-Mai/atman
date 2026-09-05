@@ -10,14 +10,15 @@ use atman_proto::{
     ListResourcesResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
     PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
     ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
-    RenameSessionRequest, RenameSessionResponse, RequestId, ResizeTerminalResourceRequest,
-    ResizeTerminalResourceResponse, ResolveCompactReviewRequest, ResolveCompactReviewResponse,
-    ResolvePermissionRequestsRequest, ResolvePermissionRequestsResponse, ResolvePromptRequest,
-    ResolvePromptResponse, ResourceId, RetainResourceRequest, RetainResourceResponse, Revision,
-    SNAPSHOT_SCHEMA_VERSION, SendMessageRequest, SendMessageResponse, ServerEvent, SessionId,
-    SessionProjection, SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse,
-    SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse,
-    TrustProjection, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
+    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
+    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
+    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
+    RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
+    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
+    SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
+    SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, TrustProjection,
+    UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -529,6 +530,19 @@ impl SessionClient {
                 request_id: Some(RequestId::now()),
                 session_id: self.session_id.clone(),
                 trust,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn reload_mcp(&self) -> Result<ReloadSessionMcpResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::ReloadSessionMcp>(&ReloadSessionMcpRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
             })
             .await?;
         self.validate_command_session(&response.session_id)?;

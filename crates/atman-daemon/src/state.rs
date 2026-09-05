@@ -265,6 +265,20 @@ impl DaemonState {
         actor.lease()?.admit_run(run, user_message).await
     }
 
+    pub(crate) async fn register_mcp_reloader(
+        &self,
+        session_id: &SessionId,
+        run_id: FlowRunId,
+        sender: tokio::sync::mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
+        principal: &str,
+    ) -> Result<()> {
+        self.authorized_actor(session_id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .lease()?
+            .register_mcp_reloader(run_id, sender)
+            .await
+    }
+
     async fn register_session_with_runs(
         &self,
         id: SessionId,
@@ -899,6 +913,21 @@ impl DaemonState {
             .await
     }
 
+    pub(crate) async fn reload_session_mcp(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        principal: &str,
+    ) -> Result<crate::session_actor::McpReloadCommit> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        let configs = launcher.mcp_configs()?;
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .reload_mcp(configs)
+            .await
+    }
+
     pub(crate) async fn request_session_compaction(
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,
@@ -1334,6 +1363,53 @@ mod tests {
         ] {
             assert!(!resource_blocks_session_deletion(state));
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_reload_targets_each_active_run_and_projects_pending_status() {
+        let state = DaemonState::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        let run = live_run("agent");
+        let run_id = run.run_id.clone();
+        state
+            .register_session_run(session_id.clone(), session.clone(), run, "owner")
+            .await
+            .unwrap();
+        let actor = state.authorized_actor(&session_id, "owner").unwrap();
+        let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel();
+        actor
+            .lease()
+            .unwrap()
+            .register_mcp_reloader(run_id, reload_tx)
+            .await
+            .unwrap();
+        let config = atman_runtime::mcp::McpServerConfig::stdio(
+            "local-tools",
+            "tool-server",
+            Vec::new(),
+            Tier::One,
+            1_000,
+        );
+
+        let commit = actor
+            .lease()
+            .unwrap()
+            .reload_mcp(vec![config.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(commit.active_runs, 1);
+        assert_eq!(reload_rx.try_recv().unwrap()[0].name, config.name);
+        let context = session.subscribe_context().borrow().clone();
+        assert!(matches!(
+            context.mcp_servers.as_slice(),
+            [atman_runtime::mcp::McpServerStatus {
+                name,
+                state: atman_runtime::mcp::McpServerState::Pending,
+                ..
+            }] if name == "local-tools"
+        ));
     }
 
     #[tokio::test]

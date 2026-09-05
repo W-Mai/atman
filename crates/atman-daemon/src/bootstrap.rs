@@ -6,6 +6,7 @@ use atman_runtime::event::EventSink;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::sandbox::Sandbox;
 use atman_runtime::{Executor, Value, tools};
+use futures::StreamExt;
 
 pub use atman_runtime::config_hub::{RedactConfig, SandboxConfig};
 
@@ -102,6 +103,37 @@ pub fn spawn_mcp_boot(
             .map(|hub| hub.load_mcp())
             .unwrap_or_default(),
     };
+    spawn_mcp_boot_with_configs(executor, session, configs).map(|boot| boot.shutdown)
+}
+
+pub(crate) struct McpBoot {
+    pub shutdown: tokio::sync::oneshot::Sender<()>,
+    pub ready: tokio::sync::oneshot::Receiver<()>,
+    pub stopped: tokio::sync::oneshot::Receiver<()>,
+}
+
+pub(crate) fn initial_mcp_statuses(
+    configs: &[atman_runtime::mcp::McpServerConfig],
+) -> Vec<atman_runtime::mcp::McpServerStatus> {
+    configs
+        .iter()
+        .map(|config| atman_runtime::mcp::McpServerStatus {
+            name: config.name.clone(),
+            transport: config.transport,
+            state: if config.disabled {
+                atman_runtime::mcp::McpServerState::Disabled
+            } else {
+                atman_runtime::mcp::McpServerState::Pending
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn spawn_mcp_boot_with_configs(
+    executor: atman_runtime::Executor,
+    session: std::sync::Arc<atman_runtime::Session>,
+    configs: Vec<atman_runtime::mcp::McpServerConfig>,
+) -> Option<McpBoot> {
     let retained_namespaces = configs
         .iter()
         .filter(|config| !config.disabled)
@@ -110,23 +142,13 @@ pub fn spawn_mcp_boot(
     executor
         .tools
         .retain_namespaces("mcp.", &retained_namespaces);
+    session.replace_mcp_servers(initial_mcp_statuses(&configs));
     if configs.is_empty() {
         return None;
     }
-    // Initialise all servers: disabled → Disabled, rest → Pending.
-    for cfg in &configs {
-        let state = if cfg.disabled {
-            atman_runtime::mcp::McpServerState::Disabled
-        } else {
-            atman_runtime::mcp::McpServerState::Pending
-        };
-        session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
-            name: cfg.name.clone(),
-            transport: cfg.transport,
-            state,
-        });
-    }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -134,7 +156,7 @@ pub fn spawn_mcp_boot(
             .expect("mcp runtime");
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async move {
-            let mut tasks = Vec::new();
+            let mut tasks = futures::stream::FuturesUnordered::new();
             for cfg in &configs {
                 if cfg.disabled {
                     continue;
@@ -321,14 +343,29 @@ pub fn spawn_mcp_boot(
                     }
                 }));
             }
-            for t in tasks {
-                let _ = t.await;
+            tokio::pin!(shutdown_rx);
+            while !tasks.is_empty() {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        for task in tasks.iter() {
+                            task.abort();
+                        }
+                        while tasks.next().await.is_some() {}
+                        return;
+                    }
+                    _ = tasks.next() => {}
+                }
             }
-            // Keep runtime alive until shutdown signal (for hot-reload).
+            let _ = ready_tx.send(());
             let _ = shutdown_rx.await;
         });
+        let _ = stopped_tx.send(());
     });
-    Some(shutdown_tx)
+    Some(McpBoot {
+        shutdown: shutdown_tx,
+        ready: ready_rx,
+        stopped: stopped_rx,
+    })
 }
 
 pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
@@ -695,6 +732,40 @@ pub fn default_data_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_mcp_boot_reports_ready_and_stops_cleanly() {
+        let executor = atman_runtime::Executor::new();
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let mut config = atman_runtime::mcp::McpServerConfig::stdio(
+            "disabled-tools",
+            "tool-server",
+            Vec::new(),
+            atman_runtime::Tier::One,
+            1_000,
+        );
+        config.disabled = true;
+
+        let boot = spawn_mcp_boot_with_configs(executor, session.clone(), vec![config]).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), boot.ready)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = boot.shutdown.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(1), boot.stopped)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let context = session.subscribe_context().borrow().clone();
+        assert!(matches!(
+            context.mcp_servers.as_slice(),
+            [atman_runtime::mcp::McpServerStatus {
+                state: atman_runtime::mcp::McpServerState::Disabled,
+                ..
+            }]
+        ));
+    }
 
     #[test]
     fn build_executor_injects_tool_output_budget() {

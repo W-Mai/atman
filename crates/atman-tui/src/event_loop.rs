@@ -1583,9 +1583,14 @@ pub(crate) async fn run_frames(
                                 app::ToastPosition::TopRight,
                             );
                         }
-                        TuiCommand::McpReloaded => {
+                        TuiCommand::McpReloaded { active_runs } => {
+                            let message = match active_runs {
+                                Some(0) => "MCP configuration loaded; connections start with the next run".into(),
+                                Some(count) => format!("MCP servers reloaded for {count} active run(s)"),
+                                None => "MCP servers reloaded".into(),
+                            };
                             app.app.push_toast(
-                                "MCP servers reloaded",
+                                message,
                                 app::NoteLevel::Success,
                                 std::time::Duration::from_secs(3),
                                 app::ToastPosition::TopRight,

@@ -35,6 +35,8 @@ import type {
   PingResponse,
   ReleaseResourceRequest,
   ReleaseResourceResponse,
+  ReloadSessionMcpRequest,
+  ReloadSessionMcpResponse,
   RenameSessionRequest,
   RenameSessionResponse,
   ResizeTerminalResourceRequest,
@@ -114,6 +116,12 @@ export interface RpcMethodMap {
     revision: 1
     params: UpdateSessionTrustRequest
     result: UpdateSessionTrustResponse
+  }
+  'session.reload_mcp': {
+    kind: 'command'
+    revision: 1
+    params: ReloadSessionMcpRequest
+    result: ReloadSessionMcpResponse
   }
   'project.list': {
     kind: 'query'
@@ -262,6 +270,7 @@ export const RPC_METHODS = {
   'session.send_message': { kind: 'command', revision: 1 },
   'session.interject': { kind: 'command', revision: 1 },
   'session.update_trust': { kind: 'command', revision: 1 },
+  'session.reload_mcp': { kind: 'command', revision: 1 },
   'project.list': { kind: 'query', revision: 1 },
   'list_sessions': { kind: 'query', revision: 1 },
   'rename_session': { kind: 'command', revision: 2 },

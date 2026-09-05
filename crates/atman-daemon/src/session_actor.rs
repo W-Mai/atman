@@ -91,6 +91,12 @@ pub(crate) struct TrustUpdateCommit {
     pub cursor: EventCursor,
 }
 
+pub(crate) struct McpReloadCommit {
+    pub active_runs: usize,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
 pub(crate) struct ResourceTerminationCommit {
     pub status: ResourceTerminationStatus,
     pub revision: atman_proto::Revision,
@@ -236,6 +242,7 @@ impl SessionActorHandle {
             session_id,
             session: session.clone(),
             runs,
+            mcp_reloaders: HashMap::new(),
             prompts: HashMap::new(),
             prompt_terminals: VecDeque::new(),
             form_terminals: VecDeque::new(),
@@ -342,6 +349,26 @@ impl SessionActorHandle {
 
     pub fn finish_run(&self, run_id: FlowRunId) -> bool {
         self.tx.send(Command::FinishRun { run_id }).is_ok()
+    }
+
+    pub async fn register_mcp_reloader(
+        &self,
+        run_id: FlowRunId,
+        sender: mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
+    ) -> Result<()> {
+        request(&self.tx, |reply| Command::RegisterMcpReloader {
+            run_id,
+            sender,
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn reload_mcp(
+        &self,
+        configs: Vec<atman_runtime::mcp::McpServerConfig>,
+    ) -> Result<McpReloadCommit> {
+        request(&self.tx, |reply| Command::ReloadMcp { configs, reply }).await?
     }
 
     pub async fn cancel_run(&self, run_id: FlowRunId) -> Result<RunCancellationCommit> {
@@ -619,6 +646,15 @@ enum Command {
     FinishRun {
         run_id: FlowRunId,
     },
+    RegisterMcpReloader {
+        run_id: FlowRunId,
+        sender: mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ReloadMcp {
+        configs: Vec<atman_runtime::mcp::McpServerConfig>,
+        reply: oneshot::Sender<Result<McpReloadCommit>>,
+    },
     CancelRun {
         run_id: FlowRunId,
         reply: oneshot::Sender<Result<RunCancellationCommit>>,
@@ -751,6 +787,8 @@ struct SessionActor {
     session_id: SessionId,
     session: Arc<atman_runtime::Session>,
     runs: HashMap<FlowRunId, LiveRun>,
+    mcp_reloaders:
+        HashMap<FlowRunId, mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>>,
     prompts: HashMap<PromptId, PendingPrompt>,
     prompt_terminals: VecDeque<(PromptId, PromptResolutionStatus)>,
     form_terminals: VecDeque<(String, FormResolutionStatus)>,
@@ -914,9 +952,37 @@ impl SessionActor {
             }
             Command::FinishRun { run_id } => {
                 if let Some(run) = self.runs.remove(&run_id) {
+                    self.mcp_reloaders.remove(&run_id);
                     self.session.end_turn(&run.turn_id);
                     self.publish();
                 }
+            }
+            Command::RegisterMcpReloader {
+                run_id,
+                sender,
+                reply,
+            } => {
+                let result = if self.runs.contains_key(&run_id) {
+                    self.mcp_reloaders.insert(run_id, sender);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "cannot register MCP reloader for an inactive run"
+                    ))
+                };
+                let _ = reply.send(result);
+            }
+            Command::ReloadMcp { configs, reply } => {
+                self.session
+                    .replace_mcp_servers(crate::bootstrap::initial_mcp_statuses(&configs));
+                self.mcp_reloaders
+                    .retain(|_, sender| sender.send(configs.clone()).is_ok());
+                self.refresh_watch_projections();
+                let _ = reply.send(Ok(McpReloadCommit {
+                    active_runs: self.mcp_reloaders.len(),
+                    revision: self.projection.projection().revision,
+                    cursor: self.event_cursor,
+                }));
             }
             Command::CancelRun { run_id, reply } => {
                 let result = self.cancel_run(run_id);

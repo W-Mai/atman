@@ -140,6 +140,23 @@
       }
     },
     {
+      "name": "session.reload_mcp",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "ReloadSessionMcpRequest",
+        "schema": {
+          "$ref": "#/$defs/ReloadSessionMcpRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ReloadSessionMcpResponse",
+        "schema": {
+          "$ref": "#/$defs/ReloadSessionMcpResponse"
+        }
+      }
+    },
+    {
       "name": "project.list",
       "kind": "query",
       "revision": 1,

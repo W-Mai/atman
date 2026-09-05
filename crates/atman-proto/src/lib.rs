@@ -323,6 +323,7 @@ pub mod methods {
     pub const SEND_MESSAGE: &str = "session.send_message";
     pub const INTERJECT_SESSION: &str = "session.interject";
     pub const UPDATE_SESSION_TRUST: &str = "session.update_trust";
+    pub const RELOAD_SESSION_MCP: &str = "session.reload_mcp";
     pub const LIST_PROJECTS: &str = "project.list";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
@@ -353,6 +354,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::UpdateSessionTrust>(),
+        super::method_descriptor::<super::rpc::ReloadSessionMcp>(),
         super::method_descriptor::<super::rpc::ListProjects>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
@@ -554,6 +556,21 @@ pub struct UpdateSessionTrustRequest {
 pub struct UpdateSessionTrustResponse {
     pub session_id: SessionId,
     pub trust: TrustProjection,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReloadSessionMcpRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ReloadSessionMcpResponse {
+    pub session_id: SessionId,
+    pub active_runs: usize,
     pub revision: Revision,
     pub cursor: EventCursor,
 }
@@ -1194,6 +1211,13 @@ pub mod rpc {
         Command,
         UpdateSessionTrustRequest,
         UpdateSessionTrustResponse
+    );
+    method!(
+        ReloadSessionMcp,
+        methods::RELOAD_SESSION_MCP,
+        Command,
+        ReloadSessionMcpRequest,
+        ReloadSessionMcpResponse
     );
     method!(
         ListSessions,

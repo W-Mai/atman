@@ -522,6 +522,52 @@ describe('SessionClient', () => {
     expect(command?.params.request_id).toBeString()
   })
 
+  test('reloads MCP runtimes and reconciles their projected status', async () => {
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'session.reload_mcp', kind: 'command', revision: 1 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'session.reload_mcp':
+          return result(request, {
+            session_id: sessionId,
+            active_runs: 2,
+            revision: 1,
+            cursor: 1,
+          })
+        case 'session.get_updates':
+          return result(
+            request,
+            page('generation-1', 0, [
+              event('generation-1', 1, { type: 'heartbeat' }),
+            ]),
+          )
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    const response = await session.reloadMcp()
+
+    expect(response.active_runs).toBe(2)
+    expect(session.current.cursor).toBe(1)
+    const command = transport.requests.find(
+      (request) => request.method === 'session.reload_mcp',
+    )
+    expect(command?.params.request_id).toBeString()
+  })
+
   test('preserves permission revisions across grouped decisions', async () => {
     const transport = new MockTransport((request) => {
       switch (request.method) {

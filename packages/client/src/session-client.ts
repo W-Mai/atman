@@ -24,6 +24,7 @@ import type {
   PermissionRpcSelector,
   PromptId,
   ReleaseResourceResponse,
+  ReloadSessionMcpResponse,
   RenameSessionResponse,
   ResizeTerminalResourceResponse,
   ResolveCompactReviewResponse,
@@ -248,6 +249,22 @@ export class SessionClient {
   ): Promise<CompactSessionResponse> {
     const response = await this.#client.command(
       'session.compact',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async reloadMcp(
+    options: TransportRequestOptions = {},
+  ): Promise<ReloadSessionMcpResponse> {
+    const response = await this.#client.command(
+      'session.reload_mcp',
       {
         request_id: crypto.randomUUID(),
         session_id: this.#sessionId,

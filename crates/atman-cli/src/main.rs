@@ -2266,7 +2266,8 @@ async fn cmd_repl_once(
                             session_for_ctrl.clone(),
                             crate::config_dir().ok().as_deref(),
                         );
-                        let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::McpReloaded);
+                        let _ = cmd_tx_for_models
+                            .send(atman_tui::TuiCommand::McpReloaded { active_runs: None });
                     }
                     _ => {
                         atman_runtime::notify!(

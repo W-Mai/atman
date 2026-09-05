@@ -1785,6 +1785,12 @@ impl Session {
         });
     }
 
+    pub fn replace_mcp_servers(&self, servers: Vec<crate::mcp::McpServerStatus>) {
+        self.watch.context.send_modify(|snap| {
+            snap.mcp_servers = servers;
+        });
+    }
+
     pub fn set_memory_recent_count(&self, count: u16) {
         self.watch.context.send_modify(|snap| {
             snap.memory_recent_count = count;

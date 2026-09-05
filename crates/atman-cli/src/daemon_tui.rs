@@ -245,6 +245,18 @@ async fn run_session(
                     };
                     let _ = command_tx.send(TuiCommand::McpPromptsResult { name, prompts });
                 }
+                TuiControl::McpReload => match control_session.reload_mcp().await {
+                    Ok(response) => {
+                        let _ = command_tx.send(TuiCommand::McpReloaded {
+                            active_runs: Some(response.active_runs),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                            "could not reload MCP servers: {error}"
+                        )));
+                    }
+                },
                 _ => {
                     let _ = control_note_tx.send(TuiNote::Warn(
                         "this control is not available through the daemon yet".into(),

@@ -229,6 +229,65 @@ struct RegistryCleanup {
     run_id: ProtoRunId,
 }
 
+struct McpController {
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct ActiveMcpBoot {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    stopped: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl McpController {
+    async fn start(
+        executor: atman_runtime::Executor,
+        session: Arc<atman_runtime::Session>,
+        initial: Vec<atman_runtime::mcp::McpServerConfig>,
+        mut reloads: tokio::sync::mpsc::UnboundedReceiver<Vec<atman_runtime::mcp::McpServerConfig>>,
+    ) -> Self {
+        let mut active = match crate::bootstrap::spawn_mcp_boot_with_configs(
+            executor.clone(),
+            session.clone(),
+            initial,
+        ) {
+            Some(boot) => {
+                let crate::bootstrap::McpBoot {
+                    shutdown,
+                    ready,
+                    stopped,
+                } = boot;
+                let _ = ready.await;
+                Some(ActiveMcpBoot { shutdown, stopped })
+            }
+            None => None,
+        };
+        let task = tokio::spawn(async move {
+            while let Some(configs) = reloads.recv().await {
+                if let Some(previous) = active.take() {
+                    let _ = previous.shutdown.send(());
+                    let _ = previous.stopped.await;
+                }
+                active = crate::bootstrap::spawn_mcp_boot_with_configs(
+                    executor.clone(),
+                    session.clone(),
+                    configs,
+                )
+                .map(|boot| ActiveMcpBoot {
+                    shutdown: boot.shutdown,
+                    stopped: boot.stopped,
+                });
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for McpController {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 fn spawn_with_provider_lifecycle(
     builder: std::thread::Builder,
     provider_lifecycle: atman_runtime::ProviderLifecycle,
@@ -376,6 +435,10 @@ impl RunLauncher {
             None => atman_runtime::config_hub::ConfigHub::global()
                 .map_err(|error| anyhow::anyhow!("resolve config hub: {error}")),
         }
+    }
+
+    pub(crate) fn mcp_configs(&self) -> Result<Vec<atman_runtime::mcp::McpServerConfig>> {
+        Ok(self.config_hub()?.load_mcp())
     }
 
     pub(crate) fn trust_config(&self) -> Result<atman_runtime::trust::TrustConfig> {
@@ -777,6 +840,8 @@ impl RunLauncher {
         let user_message = prepare_user_message(turn_id.clone(), &flow_name, &args, turn, images);
 
         let cancel = tokio_util::sync::CancellationToken::new();
+        let initial_mcp_configs = self.mcp_configs()?;
+        let (mcp_reload_tx, mcp_reload_rx) = tokio::sync::mpsc::unbounded_channel();
         let live_run = LiveRun {
             run_id: run_id_proto.clone(),
             turn_id: turn_id.clone(),
@@ -793,6 +858,18 @@ impl RunLauncher {
                 owner_principal,
             )
             .await?;
+        if let Err(error) = state
+            .register_mcp_reloader(
+                &sid_proto,
+                run_id_proto.clone(),
+                mcp_reload_tx,
+                owner_principal,
+            )
+            .await
+        {
+            state.finish_run(&sid_proto, &run_id_proto);
+            return Err(error);
+        }
         let config_dir = self.config_dir.clone();
         let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
@@ -842,6 +919,8 @@ impl RunLauncher {
                         scope_root,
                         config_dir,
                         home_dir,
+                        initial_mcp_configs,
+                        mcp_reload_rx,
                         Some(state_for_run),
                         provider_catalog_refresh,
                         invocation_env,
@@ -889,6 +968,8 @@ async fn run_flow_inner(
     scope_root: PathBuf,
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
+    initial_mcp_configs: Vec<atman_runtime::mcp::McpServerConfig>,
+    mcp_reload_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<atman_runtime::mcp::McpServerConfig>>,
     daemon_state: Option<Arc<crate::DaemonState>>,
     provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
     invocation_env: atman_runtime::InvocationEnv,
@@ -925,6 +1006,13 @@ async fn run_flow_inner(
     provider_catalog_refresh.dispatch(outcome.provider_catalog_refresh_plan);
     let mut executor = outcome.executor;
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
+    let _mcp_controller = McpController::start(
+        executor.clone(),
+        session.clone(),
+        initial_mcp_configs,
+        mcp_reload_rx,
+    )
+    .await;
 
     let lifecycles = match &config_dir {
         Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),

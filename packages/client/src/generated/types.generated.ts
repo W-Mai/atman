@@ -17,6 +17,8 @@ export type AtmanDaemonProtocolPayloads =
   | InterjectSessionResponse
   | UpdateSessionTrustRequest
   | UpdateSessionTrustResponse
+  | ReloadSessionMcpRequest
+  | ReloadSessionMcpResponse
   | ListProjectsRequest
   | ListProjectsResponse
   | ListSessionsRequest
@@ -1260,6 +1262,18 @@ export interface UpdateSessionTrustResponse {
   revision: Revision
   session_id: SessionId
   trust: TrustProjection
+  [k: string]: unknown
+}
+export interface ReloadSessionMcpRequest {
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface ReloadSessionMcpResponse {
+  active_runs: number
+  cursor: EventCursor
+  revision: Revision
+  session_id: SessionId
   [k: string]: unknown
 }
 export interface ListProjectsRequest {

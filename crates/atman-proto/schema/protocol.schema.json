@@ -52,6 +52,12 @@
       "$ref": "#/$defs/UpdateSessionTrustResponse"
     },
     {
+      "$ref": "#/$defs/ReloadSessionMcpRequest"
+    },
+    {
+      "$ref": "#/$defs/ReloadSessionMcpResponse"
+    },
+    {
       "$ref": "#/$defs/ListProjectsRequest"
     },
     {
@@ -3950,6 +3956,51 @@
         },
         "resource": {
           "$ref": "#/$defs/ResourceProjection"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ReloadSessionMcpRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "ReloadSessionMcpResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "active_runs",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "active_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
         },
         "revision": {
           "$ref": "#/$defs/Revision"

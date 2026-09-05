@@ -4,11 +4,11 @@ use atman_proto::{
     InspectResourceResponse, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, ListProjectsRequest, ListResourcesResponse, ListSessionsRequest,
     MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits,
-    ReleaseResourceResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
-    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
-    SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse, method_descriptor,
-    methods, rpc,
+    ReleaseResourceResponse, ReloadSessionMcpResponse, RenameSessionResponse, RequestId,
+    ResizeTerminalResourceResponse, ResolveCompactReviewResponse, ResolvePromptResponse,
+    RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
+    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse,
+    method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -160,6 +160,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::UpdateSessionTrust>(),
+    method_descriptor::<rpc::ReloadSessionMcp>(),
     method_descriptor::<rpc::ListProjects>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
@@ -550,6 +551,37 @@ pub async fn dispatch_as(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        methods::RELOAD_SESSION_MCP => match parse_params::<rpc::ReloadSessionMcp>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::ReloadSessionMcp, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .reload_session_mcp(&operation_params.session_id, &operation_principal)
+                            .await
+                            .map(|commit| ReloadSessionMcpResponse {
+                                session_id: operation_params.session_id,
+                                active_runs: commit.active_runs,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(result) => method_response::<rpc::ReloadSessionMcp>(id, result),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {
             Ok(params) => {
                 let operation_state = state.clone();
