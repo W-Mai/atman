@@ -15,6 +15,7 @@ pub mod boot_animation;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
+pub mod daemon_adapter;
 mod directional_selector;
 pub mod form_modal;
 pub mod highlight;

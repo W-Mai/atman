@@ -3269,8 +3269,7 @@
     "RenameSessionRequest": {
       "type": "object",
       "required": [
-        "session_id",
-        "title"
+        "session_id"
       ],
       "properties": {
         "request_id": {
@@ -3287,7 +3286,10 @@
           "$ref": "#/$defs/SessionId"
         },
         "title": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

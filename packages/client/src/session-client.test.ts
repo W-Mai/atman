@@ -360,6 +360,64 @@ describe('SessionClient', () => {
     expect(session.current.cursor).toBe(1)
   })
 
+  test('clears a session title through the rename command', async () => {
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'rename_session', kind: 'command', revision: 2 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'rename_session':
+          return result(request, {
+            session: {
+              id: sessionId,
+              event_count: 0,
+              status: 'finished',
+              title: 'Untitled session',
+            },
+            revision: 1,
+            cursor: 1,
+          })
+        case 'session.get_updates':
+          return result(
+            request,
+            page('generation-1', 0, [
+              event(
+                'generation-1',
+                1,
+                delta(1, [
+                  {
+                    type: 'metadata_set',
+                    metadata: { id: sessionId, title: 'Untitled session' },
+                  },
+                ]),
+              ),
+            ]),
+          )
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    await session.rename(null)
+
+    const command = transport.requests.find(
+      (request) => request.method === 'rename_session',
+    )
+    expect(command?.params.title).toBeNull()
+    expect(session.current.projection.metadata.title).toBe('Untitled session')
+  })
+
   test('updates trust through one command and reconciles the committed projection', async () => {
     const trust: TrustProjection = {
       mode: 'eager',

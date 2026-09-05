@@ -722,7 +722,7 @@ async fn rename_session_retries_return_the_original_committed_result() {
     let request = atman_proto::RenameSessionRequest {
         request_id: Some(request_id.clone()),
         session_id: atman_proto::SessionId(sid),
-        title: "Committed title".into(),
+        title: Some("Committed title".into()),
     };
 
     let first = dispatch(
@@ -780,7 +780,7 @@ async fn rename_session_retries_return_the_original_committed_result() {
             &atman_proto::RenameSessionRequest {
                 request_id: Some(atman_proto::RequestId::now()),
                 session_id: atman_proto::SessionId(sid),
-                title: "Rejected title".into(),
+                title: Some("Rejected title".into()),
             },
         )
         .unwrap(),
@@ -806,7 +806,7 @@ async fn rename_session_retries_return_the_original_committed_result() {
             &atman_proto::RenameSessionRequest {
                 request_id: Some(request_id),
                 session_id: atman_proto::SessionId(sid),
-                title: "Different command".into(),
+                title: Some("Different command".into()),
             },
         )
         .unwrap(),

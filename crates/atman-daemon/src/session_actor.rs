@@ -442,7 +442,7 @@ impl SessionActorHandle {
         .await?
     }
 
-    pub async fn rename(&self, title: String) -> Result<RenameSessionCommit> {
+    pub async fn rename(&self, title: Option<String>) -> Result<RenameSessionCommit> {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
     }
 
@@ -662,7 +662,7 @@ enum Command {
         reply: oneshot::Sender<Result<CompactionRequestCommit>>,
     },
     Rename {
-        title: String,
+        title: Option<String>,
         reply: oneshot::Sender<Result<RenameSessionCommit>>,
     },
     UpdateTrust {
@@ -1736,8 +1736,8 @@ impl SessionActor {
         }
     }
 
-    fn rename(&mut self, title: String) -> Result<RenameSessionCommit> {
-        atman_runtime::session_meta::SessionMeta::rename(self.session.dir(), title)
+    fn rename(&mut self, title: Option<String>) -> Result<RenameSessionCommit> {
+        atman_runtime::session_meta::SessionMeta::set_title(self.session.dir(), title)
             .with_context(|| format!("rename session {}", self.session_id))?;
         let session = session_summary(
             self.session.dir(),

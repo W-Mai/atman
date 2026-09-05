@@ -446,12 +446,23 @@ impl SessionClient {
         &self,
         title: impl Into<String>,
     ) -> Result<RenameSessionResponse, SessionClientError> {
+        self.set_title(Some(title.into())).await
+    }
+
+    pub async fn clear_title(&self) -> Result<RenameSessionResponse, SessionClientError> {
+        self.set_title(None).await
+    }
+
+    async fn set_title(
+        &self,
+        title: Option<String>,
+    ) -> Result<RenameSessionResponse, SessionClientError> {
         let response = self
             .client
             .command::<rpc::RenameSession>(&RenameSessionRequest {
                 request_id: Some(RequestId::now()),
                 session_id: self.session_id.clone(),
-                title: title.into(),
+                title,
             })
             .await?;
         self.validate_command_session(&response.session.id)?;
@@ -1865,7 +1876,10 @@ mod tests {
                                 event_count: 1,
                                 first_ts: None,
                                 status: atman_proto::SessionStatus::Running,
-                                title: params["title"].as_str().unwrap().into(),
+                                title: params["title"]
+                                    .as_str()
+                                    .unwrap_or("Untitled session")
+                                    .into(),
                                 goal: None,
                                 project_root: None,
                                 name_source: atman_proto::NameSource::User,
@@ -2147,6 +2161,10 @@ mod tests {
         let renamed = session.rename("Renamed").await.unwrap();
         assert_eq!(renamed.session.title, "Renamed");
         assert_eq!(renamed.cursor, EventCursor(2));
+
+        let cleared = session.clear_title().await.unwrap();
+        assert_eq!(cleared.session.title, "Untitled session");
+        assert_eq!(cleared.cursor, EventCursor(2));
 
         let trust = atman_proto::TrustProjection {
             mode: atman_proto::TrustMode::Eager,

@@ -1042,4 +1042,16 @@ async fn rename_session_updates_metadata_and_list_summary() {
     let snapshot = state.session_snapshot(&sid, "local-daemon").await.unwrap();
     assert_eq!(response.revision, snapshot.projection.revision);
     assert_eq!(response.cursor, snapshot.cursor);
+
+    let clear = JsonRpcRequest::new(
+        2,
+        methods::RENAME_SESSION,
+        serde_json::json!({"session_id": sid, "title": null}),
+    );
+    let cleared = dispatch(state.clone(), clear).await;
+    let cleared: atman_proto::RenameSessionResponse =
+        serde_json::from_value(cleared.result.expect("clear title returns response")).unwrap();
+    assert_eq!(cleared.session.title, "Untitled session");
+    let snapshot = state.session_snapshot(&sid, "local-daemon").await.unwrap();
+    assert_eq!(snapshot.projection.metadata.title, "Untitled session");
 }

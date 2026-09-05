@@ -208,7 +208,7 @@ export class SessionClient {
   }
 
   async rename(
-    title: string,
+    title: string | null,
     options: TransportRequestOptions = {},
   ): Promise<RenameSessionResponse> {
     const response = await this.#client.command(

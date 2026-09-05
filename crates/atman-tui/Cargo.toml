@@ -15,6 +15,7 @@ categories = ["command-line-interface", "development-tools"]
 [dependencies]
 atman-runtime = { path = "../atman-runtime", version = "1.10.0" }
 atman-proto = { path = "../atman-proto", version = "1.10.0" }
+atman-client = { path = "../atman-client", version = "1.10.0" }
 anyhow.workspace = true
 chrono.workspace = true
 tokio.workspace = true
@@ -35,7 +36,7 @@ txm = "0.1"
 base64.workspace = true
 arboard.workspace = true
 image.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-uuid.workspace = true

@@ -1046,7 +1046,7 @@ export interface ListSessionsRequest {
 export interface RenameSessionRequest {
   request_id?: null | RequestId
   session_id: SessionId
-  title: string
+  title?: string | null
   [k: string]: unknown
 }
 export interface RenameSessionResponse {

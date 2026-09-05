@@ -877,11 +877,11 @@ impl DaemonState {
     pub async fn rename_session(
         self: &std::sync::Arc<Self>,
         sid: &SessionId,
-        title: &str,
+        title: Option<String>,
         principal: &str,
     ) -> Result<crate::RenameSessionCommit> {
         let actor = self.get_or_load_actor(sid, principal).await?;
-        actor.rename(title.to_owned()).await
+        actor.rename(title).await
     }
 
     pub(crate) async fn update_session_trust(

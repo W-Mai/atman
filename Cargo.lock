@@ -326,6 +326,7 @@ version = "1.10.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "atman-client",
  "atman-proto",
  "atman-runtime",
  "base64",

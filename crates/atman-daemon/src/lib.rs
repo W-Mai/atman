@@ -470,7 +470,12 @@ pub async fn dispatch_as(
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::RENAME_SESSION => match parse_params::<rpc::RenameSession>(req.params) {
-            Ok(params) if !params.title.trim().is_empty() => {
+            Ok(params)
+                if params
+                    .title
+                    .as_deref()
+                    .is_none_or(|title| !title.trim().is_empty()) =>
+            {
                 let operation_state = state.clone();
                 let operation_principal = principal_id.to_owned();
                 let operation_params = params.clone();
@@ -483,7 +488,7 @@ pub async fn dispatch_as(
                         operation_state
                             .rename_session(
                                 &operation_params.session_id,
-                                &operation_params.title,
+                                operation_params.title,
                                 &operation_principal,
                             )
                             .await
