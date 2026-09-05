@@ -134,30 +134,21 @@ impl SessionProjector {
 
     pub(crate) fn reconcile_disconnected(&mut self) -> Option<ProjectionDelta> {
         let mut changes = Vec::new();
-        for run in &mut self.projection.runs {
-            if matches!(
-                run.state,
-                RunLifecycle::Queued
-                    | RunLifecycle::Starting
-                    | RunLifecycle::Running
-                    | RunLifecycle::WaitingInput
-                    | RunLifecycle::Cancelling
-            ) {
-                run.state = RunLifecycle::Lost;
-                changes.push(ProjectionChange::RunUpsert { run: run.clone() });
-            }
-        }
-        for resource in &mut self.projection.resources {
-            if matches!(
-                resource.state,
-                ResourceState::Starting | ResourceState::Running | ResourceState::Terminating
-            ) {
-                resource.state = ResourceState::Orphaned;
-                changes.push(ProjectionChange::ResourceUpsert {
-                    resource: resource.clone(),
-                });
-            }
-        }
+        let (lost_runs, orphaned_resources) = self.disconnected_candidates();
+        self.apply_disconnected_facts(
+            &lost_runs,
+            &orphaned_resources,
+            chrono::Utc::now(),
+            "daemon disconnected before a terminal event",
+            None,
+            &mut changes,
+        );
+        self.apply_disconnected_transients(&mut changes);
+        self.finish_disconnected_reconciliation(&mut changes);
+        self.commit(changes)
+    }
+
+    fn apply_disconnected_transients(&mut self, changes: &mut Vec<ProjectionChange>) {
         if !self.projection.compactions.is_empty() {
             for compaction in self.projection.compactions.drain(..) {
                 self.projection.transcript.push(TranscriptItem::Compaction {
@@ -205,13 +196,129 @@ impl SessionProjector {
                 interactions: self.projection.interactions.clone(),
             });
         }
-        if self.projection.lifecycle != SessionLifecycle::Idle {
+    }
+
+    fn finish_disconnected_reconciliation(&mut self, changes: &mut Vec<ProjectionChange>) {
+        if self.all_runs_terminal() && self.projection.lifecycle != SessionLifecycle::Idle {
             self.projection.lifecycle = SessionLifecycle::Idle;
             changes.push(ProjectionChange::LifecycleSet {
                 lifecycle: SessionLifecycle::Idle,
             });
         }
-        self.commit(changes)
+    }
+
+    pub(crate) fn generation_reconciliation_event(&self, daemon_generation: &str) -> Option<Event> {
+        let (lost_runs, orphaned_resources) = self.disconnected_candidates();
+        let has_pending_interactions = !self.projection.interactions.prompts.is_empty()
+            || !self.projection.interactions.forms.is_empty()
+            || !self.projection.interactions.compact_reviews.is_empty()
+            || self
+                .projection
+                .interactions
+                .interjections
+                .iter()
+                .any(|item| item.state == atman_proto::InterjectionState::Pending)
+            || self.projection.interactions.approvals.iter().any(|item| {
+                matches!(
+                    item.state,
+                    ApprovalState::Evaluating | ApprovalState::Pending
+                )
+            });
+        (!lost_runs.is_empty()
+            || !orphaned_resources.is_empty()
+            || !self.projection.compactions.is_empty()
+            || has_pending_interactions)
+            .then(|| Event::GenerationReconciled {
+                daemon_generation: daemon_generation.to_owned(),
+                reason: "daemon restarted before a terminal event".into(),
+                lost_runs,
+                orphaned_resources,
+            })
+    }
+
+    fn disconnected_candidates(&self) -> (Vec<atman_runtime::event::FlowRunId>, Vec<String>) {
+        let lost_runs = self
+            .projection
+            .runs
+            .iter()
+            .filter(|run| {
+                matches!(
+                    run.state,
+                    RunLifecycle::Queued
+                        | RunLifecycle::Starting
+                        | RunLifecycle::Running
+                        | RunLifecycle::WaitingInput
+                        | RunLifecycle::Cancelling
+                )
+            })
+            .map(|run| atman_runtime::event::FlowRunId(run.id.0))
+            .collect();
+        let orphaned_resources = self
+            .projection
+            .resources
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource.state,
+                    ResourceState::Starting | ResourceState::Running | ResourceState::Terminating
+                )
+            })
+            .map(|resource| resource.id.0.clone())
+            .collect();
+        (lost_runs, orphaned_resources)
+    }
+
+    fn apply_disconnected_facts(
+        &mut self,
+        lost_runs: &[atman_runtime::event::FlowRunId],
+        orphaned_resources: &[String],
+        at: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+        daemon_generation: Option<&str>,
+        changes: &mut Vec<ProjectionChange>,
+    ) {
+        for run in &mut self.projection.runs {
+            if lost_runs.iter().any(|run_id| run_id.0 == run.id.0)
+                && !matches!(
+                    run.state,
+                    RunLifecycle::Cancelled
+                        | RunLifecycle::Succeeded
+                        | RunLifecycle::Failed
+                        | RunLifecycle::Lost
+                )
+            {
+                run.state = RunLifecycle::Lost;
+                run.finished_at = Some(at);
+                run.error = Some(reason.into());
+                changes.push(ProjectionChange::RunUpsert { run: run.clone() });
+            }
+        }
+        for resource in &mut self.projection.resources {
+            if orphaned_resources.iter().any(|id| id == &resource.id.0)
+                && !matches!(
+                    resource.state,
+                    ResourceState::Exited
+                        | ResourceState::Failed
+                        | ResourceState::Released
+                        | ResourceState::Lost
+                        | ResourceState::Orphaned
+                )
+            {
+                resource.state = ResourceState::Orphaned;
+                resource.finished_at = Some(at);
+                resource
+                    .details
+                    .insert("recovery_reason".into(), reason.into());
+                if let Some(daemon_generation) = daemon_generation {
+                    resource
+                        .details
+                        .insert("reconciled_by_generation".into(), daemon_generation.into());
+                }
+                changes.push(ProjectionChange::ResourceUpsert {
+                    resource: resource.clone(),
+                });
+            }
+        }
     }
 
     pub(crate) fn register_run(
@@ -410,6 +517,23 @@ impl SessionProjector {
                     run.state = RunLifecycle::Cancelling;
                     changes.push(ProjectionChange::RunUpsert { run: run.clone() });
                 }
+            }
+            Event::GenerationReconciled {
+                daemon_generation,
+                reason,
+                lost_runs,
+                orphaned_resources,
+            } => {
+                self.apply_disconnected_facts(
+                    lost_runs,
+                    orphaned_resources,
+                    envelope.ts,
+                    reason,
+                    Some(daemon_generation),
+                    &mut changes,
+                );
+                self.apply_disconnected_transients(&mut changes);
+                self.finish_disconnected_reconciliation(&mut changes);
             }
             Event::DiffPreview {
                 flow_run_id,
@@ -2773,6 +2897,122 @@ mod tests {
         let resource = &projector.projection().resources[0];
         assert_eq!(resource.details["rows"], "50");
         assert_eq!(resource.details["cols"], "140");
+    }
+
+    #[test]
+    fn generation_reconciliation_is_a_durable_replay_boundary() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let turn_id = RuntimeTurnId::now();
+        let run_id = RuntimeRunId::now();
+        let task_id = atman_runtime::TaskId::now();
+        let operation_id = atman_runtime::event::CompactionOperationId::now();
+        let context_id = atman_runtime::event::ContextId::now();
+        let started_at = chrono::Utc::now() - chrono::Duration::seconds(2);
+        let reconciled_at = chrono::Utc::now();
+        let mut events = vec![
+            envelope(
+                1,
+                started_at,
+                Event::TurnStart {
+                    turn_id: turn_id.clone(),
+                },
+            ),
+            envelope(
+                2,
+                started_at,
+                Event::FlowStart {
+                    run_id: run_id.clone(),
+                    turn_id: Some(turn_id),
+                    flow_name: "interrupted".into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            ),
+            envelope(
+                3,
+                started_at,
+                Event::TaskLifecycle {
+                    task_id: task_id.clone(),
+                    kind: atman_runtime::TaskKind::Bash,
+                    run_id: Some(run_id.clone()),
+                    source_handle: "bg_interrupted".into(),
+                    label: "interrupted command".into(),
+                    command: Some("cargo check".into()),
+                    workspace_id: None,
+                    status: atman_runtime::TaskStatus::Running,
+                    termination: None,
+                },
+            ),
+            EventEnvelope {
+                seq: 4,
+                ts: started_at,
+                context_id: Some(context_id.clone()),
+                event: Event::CompactionStarted {
+                    operation_id: operation_id.clone(),
+                    flow_run_id: Some(run_id.clone()),
+                    range_start: 2,
+                    range_end: 5,
+                    compacted_count: 4,
+                    before_tokens: 8_000,
+                },
+            },
+        ];
+        let mut live = SessionProjector::from_events(session_id.clone(), None, &events);
+        let recovery = live
+            .generation_reconciliation_event("generation-after-restart")
+            .unwrap();
+        let serialized = serde_json::to_value(&recovery).unwrap();
+        assert_eq!(serialized["type"], "generation_reconciled");
+        let recovery: Event = serde_json::from_value(serialized).unwrap();
+        let recovery = envelope(5, reconciled_at, recovery);
+        live.apply_envelope(&recovery);
+        events.push(recovery);
+
+        let run = live
+            .projection()
+            .runs
+            .iter()
+            .find(|item| item.id.0 == run_id.0)
+            .unwrap();
+        assert_eq!(run.state, RunLifecycle::Lost);
+        assert_eq!(run.finished_at, Some(reconciled_at));
+        assert_eq!(
+            run.error.as_deref(),
+            Some("daemon restarted before a terminal event")
+        );
+        let resource = live
+            .projection()
+            .resources
+            .iter()
+            .find(|item| item.id == task_resource_id(&task_id))
+            .unwrap();
+        assert_eq!(resource.state, ResourceState::Orphaned);
+        assert_eq!(resource.finished_at, Some(reconciled_at));
+        assert_eq!(
+            resource
+                .details
+                .get("reconciled_by_generation")
+                .map(String::as_str),
+            Some("generation-after-restart")
+        );
+        assert!(live.projection().compactions.is_empty());
+        assert!(live.projection().transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Compaction {
+                operation_id: Some(id),
+                outcome: CompactionOutcome::Abandoned,
+                ..
+            } if id.0 == operation_id.0
+        )));
+        assert_eq!(live.projection().lifecycle, SessionLifecycle::Idle);
+        assert!(
+            live.generation_reconciliation_event("another-generation")
+                .is_none()
+        );
+
+        let replayed = SessionProjector::from_events(session_id, None, &events);
+        assert_eq!(live.projection(), replayed.projection());
     }
 
     #[test]

@@ -485,6 +485,10 @@ impl RunLauncher {
         let previous_revision = projection.projection().revision.0;
         projection.set_metadata(restored.session.meta());
         projection.set_trust(restored.session.trust_config());
+        if let Some(event) = projection.generation_reconciliation_event(state.daemon_generation()) {
+            let envelope = restored.session.sink().emit_returning_envelope(event);
+            projection.apply_envelope(&envelope);
+        }
         projection.reconcile_disconnected();
         event_cursor.0 = event_cursor.0.saturating_add(
             projection
@@ -1085,6 +1089,115 @@ mod tests {
         .unwrap();
         assert!(reconcile_workspaces(repository.path(), "generation").is_err());
         assert!(manager.managed_root().exists());
+    }
+
+    #[tokio::test]
+    async fn opening_an_interrupted_session_persists_recovery_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = repo();
+        let data_dir = temp.path().join("data");
+        let config_dir = temp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let state = DaemonState::new_with_generation(data_dir.clone(), "generation-b".into());
+        let session = atman_runtime::Session::open(&data_dir).unwrap();
+        let session_id = ProtoSessionId(session.id().0);
+        let mut metadata = session.meta().unwrap_or_default();
+        metadata.rebase(repository.path());
+        metadata.save(session.dir()).unwrap();
+        let run_id = atman_runtime::event::FlowRunId::now();
+        let turn_id = atman_runtime::event::TurnId::now();
+        let task_id = atman_runtime::TaskId::now();
+        session.sink().emit(atman_runtime::event::Event::TurnStart {
+            turn_id: turn_id.clone(),
+        });
+        session.sink().emit(atman_runtime::event::Event::FlowStart {
+            run_id: run_id.clone(),
+            turn_id: Some(turn_id),
+            flow_name: "interrupted".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: false,
+        });
+        session
+            .sink()
+            .emit(atman_runtime::event::Event::TaskLifecycle {
+                task_id: task_id.clone(),
+                kind: atman_runtime::TaskKind::Bash,
+                run_id: Some(run_id.clone()),
+                source_handle: "bg_interrupted".into(),
+                label: "interrupted command".into(),
+                command: Some("cargo check".into()),
+                workspace_id: None,
+                status: atman_runtime::TaskStatus::Running,
+                termination: None,
+            });
+        let session_dir = session.dir().to_path_buf();
+        session.shutdown().await;
+
+        let launcher = RunLauncher::new(
+            repository.path().to_path_buf(),
+            Some(config_dir.clone()),
+            None,
+        )
+        .unwrap();
+        let loaded = launcher.open_existing_session(&state, &session_id).unwrap();
+        assert_eq!(
+            loaded.projection.projector.projection().runs[0].state,
+            atman_proto::RunLifecycle::Lost
+        );
+        let resource = loaded
+            .projection
+            .projector
+            .projection()
+            .resources
+            .iter()
+            .find(|item| item.id.0 == format!("task:{task_id}"))
+            .unwrap();
+        assert_eq!(resource.state, atman_proto::ResourceState::Orphaned);
+        assert_eq!(
+            resource
+                .details
+                .get("reconciled_by_generation")
+                .map(String::as_str),
+            Some("generation-b")
+        );
+        loaded.session.shutdown().await;
+
+        let events_path = session_dir.join("events.jsonl");
+        let recovered =
+            atman_runtime::event_log::reader::read_event_envelopes(&events_path).unwrap();
+        assert_eq!(
+            recovered
+                .iter()
+                .filter(|envelope| matches!(
+                    envelope.event,
+                    atman_runtime::event::Event::GenerationReconciled { .. }
+                ))
+                .count(),
+            1
+        );
+
+        let next_state = DaemonState::new_with_generation(data_dir, "generation-c".into());
+        let reopened = launcher
+            .open_existing_session(&next_state, &session_id)
+            .unwrap();
+        assert_eq!(
+            reopened.projection.projector.projection().runs[0].state,
+            atman_proto::RunLifecycle::Lost
+        );
+        reopened.session.shutdown().await;
+        let reopened_events =
+            atman_runtime::event_log::reader::read_event_envelopes(&events_path).unwrap();
+        assert_eq!(
+            reopened_events
+                .iter()
+                .filter(|envelope| matches!(
+                    envelope.event,
+                    atman_runtime::event::Event::GenerationReconciled { .. }
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]

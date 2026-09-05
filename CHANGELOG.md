@@ -59,6 +59,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Durable daemon recovery** — reopening an interrupted session records one generation reconciliation event. Active runs become lost, live resources become orphaned, interrupted compactions become abandoned, and pending interactions are cancelled with the same result in live state and complete event replay.
+
 - **Durable run admission** — daemon run acceptance records the user message and selected context head before executor bootstrap. Each invocation keeps that captured history owner through provider work, and bootstrap failures publish a terminal run fact.
 
 - **Attachment sanitizer replay** — session sanitization applies existing attachment patches before checking raw history and materialized windows, repairs checkpoint-only images by stable part identity, preserves root and child context ownership, and produces no duplicate repair events on repeated runs.

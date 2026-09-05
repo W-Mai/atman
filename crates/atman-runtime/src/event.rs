@@ -210,6 +210,12 @@ pub enum Event {
     RunCancelRequested {
         run_id: FlowRunId,
     },
+    GenerationReconciled {
+        daemon_generation: String,
+        reason: String,
+        lost_runs: Vec<FlowRunId>,
+        orphaned_resources: Vec<String>,
+    },
     WorkspaceLifecycle {
         run_id: FlowRunId,
         workspace_id: String,

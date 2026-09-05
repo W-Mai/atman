@@ -528,6 +528,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::FlowStart { .. } => "flow_start",
         Event::FlowEnd { .. } => "flow_end",
         Event::RunCancelRequested { .. } => "run_cancel_requested",
+        Event::GenerationReconciled { .. } => "generation_reconciled",
         Event::WorkspaceLifecycle { .. } => "workspace_lifecycle",
         Event::TaskLifecycle { .. } => "task_lifecycle",
         Event::TaskReaped { .. } => "task_reaped",
@@ -730,6 +731,7 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         Event::FormRequested { form } => (None, Some(form.run_id.0.to_string())),
         Event::FormResolved { run_id, .. } => (None, Some(run_id.0.to_string())),
         Event::LlmCall { .. }
+        | Event::GenerationReconciled { .. }
         | Event::PendingPrompt { .. }
         | Event::PromptResolved { .. }
         | Event::CompactReviewRequested { .. }
@@ -749,6 +751,7 @@ pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
         Event::WatchWarn { message, .. } => Some(message.clone()),
         Event::CompactionSummary { summary, .. } => Some(summary.clone()),
         Event::CompactionFailed { reason, .. } => Some(reason.clone()),
+        Event::GenerationReconciled { reason, .. } => Some(reason.clone()),
         Event::AttachmentDegraded { patch, .. } => {
             Some(format!("{} {}", patch.file_basename, patch.reason))
         }
