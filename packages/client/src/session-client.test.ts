@@ -534,6 +534,82 @@ describe('SessionClient', () => {
     expect(command?.params.trust).toEqual(trust)
   })
 
+  test('updates goal and todos through typed commands and committed deltas', async () => {
+    const todo = {
+      id: '00000000-0000-0000-0000-000000000002',
+      where: 'src/main.rs',
+      why: 'finish the migration',
+      how: 'route writes through the daemon',
+      expected_result: 'clients converge',
+      state: 'done' as const,
+    }
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'session.set_goal', kind: 'command', revision: 1 },
+              { name: 'session.update_todos', kind: 'command', revision: 1 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'session.set_goal':
+          return result(request, {
+            session_id: sessionId,
+            goal: request.params.goal,
+            revision: 1,
+            cursor: 1,
+          })
+        case 'session.update_todos':
+          return result(request, {
+            session_id: sessionId,
+            todos: [todo],
+            revision: 2,
+            cursor: 2,
+          })
+        case 'session.get_updates': {
+          const afterCursor = Number(request.params.after_cursor ?? 0)
+          return result(
+            request,
+            afterCursor === 0
+              ? page('generation-1', 0, [
+                  event(
+                    'generation-1',
+                    1,
+                    delta(1, [{ type: 'goal_set', goal: 'Ship daemon clients' }]),
+                  ),
+                ])
+              : page('generation-1', 1, [
+                  event(
+                    'generation-1',
+                    2,
+                    delta(2, [{ type: 'todos_replace', todos: [todo] }]),
+                  ),
+                ]),
+          )
+        }
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    await session.setGoal('Ship daemon clients')
+    expect(session.current.projection.goal).toBe('Ship daemon clients')
+    await session.updateTodos({
+      action: 'set_state',
+      id: todo.id,
+      state: 'done',
+    })
+    expect(session.current.projection.todos).toEqual([todo])
+  })
+
   test('requests compaction and reconciles through the accepted cursor', async () => {
     const transport = new MockTransport((request) => {
       switch (request.method) {

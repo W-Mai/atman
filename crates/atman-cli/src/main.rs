@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+mod daemon_repl;
 mod daemon_tui;
 mod init;
 mod mcp_templates;
@@ -499,7 +500,7 @@ async fn cmd_daemon_run(
     Ok(())
 }
 
-fn inline_images(images: Vec<PathBuf>) -> Result<Vec<atman_proto::InlineImage>> {
+pub(crate) fn inline_images(images: Vec<PathBuf>) -> Result<Vec<atman_proto::InlineImage>> {
     images
         .into_iter()
         .map(|path| {
@@ -1532,6 +1533,9 @@ async fn boot_first_session(
 }
 
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
+    if !tui_mode_requested() {
+        return daemon_repl::run(resume_sid).await;
+    }
     // Hold the terminal guard across every session switch so the
     // alternate screen stays alive between one cmd_repl_once and the
     // next. Without this, each SwitchSession would call
@@ -3535,7 +3539,7 @@ async fn consume_interjection_input(
     true
 }
 
-fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
+pub(crate) fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
     let mut text = String::with_capacity(line.len());
     let mut attachments = Vec::new();
     let mut first = true;

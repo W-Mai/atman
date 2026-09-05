@@ -1055,3 +1055,71 @@ async fn rename_session_updates_metadata_and_list_summary() {
     let snapshot = state.session_snapshot(&sid, "local-daemon").await.unwrap();
     assert_eq!(snapshot.projection.metadata.title, "Untitled session");
 }
+
+#[tokio::test]
+async fn goal_and_todo_commands_publish_one_convergent_projection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let session = Arc::new(atman_runtime::Session::open(tmp.path()).unwrap());
+    let sid = SessionId(session.id().0);
+    let todo = atman_runtime::memory::todo::Todo {
+        id: atman_runtime::memory::MemoryId::now(),
+        where_: "src/main.rs".into(),
+        why: "exercise daemon-owned mutation".into(),
+        how: "update through the actor".into(),
+        expected_result: "all clients observe done".into(),
+        status: atman_runtime::memory::todo::TodoStatus::Pending,
+    };
+    atman_runtime::memory::todo::TodoStore::at(session.dir())
+        .add(todo.clone())
+        .await
+        .unwrap();
+    state
+        .register_session(sid.clone(), session, "local-daemon")
+        .await
+        .unwrap();
+
+    let goal = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::SetSessionGoal>(
+            1,
+            &atman_proto::SetSessionGoalRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: sid.clone(),
+                goal: Some("Ship the daemon client".into()),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::SetSessionGoal>()
+    .unwrap();
+    assert_eq!(goal.goal.as_deref(), Some("Ship the daemon client"));
+
+    let todos = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::UpdateSessionTodos>(
+            2,
+            &atman_proto::UpdateSessionTodosRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                session_id: sid.clone(),
+                mutation: atman_proto::TodoMutation::SetState {
+                    id: todo.id.to_string(),
+                    state: atman_proto::TodoState::Done,
+                },
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::UpdateSessionTodos>()
+    .unwrap();
+    assert_eq!(todos.todos.len(), 1);
+    assert_eq!(todos.todos[0].state, atman_proto::TodoState::Done);
+
+    let snapshot = state.session_snapshot(&sid, "local-daemon").await.unwrap();
+    assert_eq!(snapshot.projection.goal, goal.goal);
+    assert_eq!(snapshot.projection.todos, todos.todos);
+    assert_eq!(snapshot.projection.revision, todos.revision);
+    assert_eq!(snapshot.cursor, todos.cursor);
+}

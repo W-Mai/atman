@@ -959,6 +959,30 @@ impl DaemonState {
             .await
     }
 
+    pub(crate) async fn set_session_goal(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        goal: Option<String>,
+        principal: &str,
+    ) -> Result<crate::session_actor::GoalMutationCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .set_goal(goal)
+            .await
+    }
+
+    pub(crate) async fn update_session_todos(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        mutation: atman_proto::TodoMutation,
+        principal: &str,
+    ) -> Result<crate::session_actor::TodoMutationCommit> {
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .update_todos(mutation)
+            .await
+    }
+
     pub(crate) async fn update_session_trust(
         self: &std::sync::Arc<Self>,
         session_id: &SessionId,

@@ -1,7 +1,7 @@
 use std::process::Command;
 
 mod common;
-use common::spawn_test_daemon;
+use common::{spawn_test_daemon, spawn_test_daemon_with_config};
 
 fn atman_binary() -> String {
     env!("CARGO_BIN_EXE_atman").to_string()
@@ -225,6 +225,7 @@ fn repl_runs_boot_flow_at_startup() {
 "#,
     )
     .unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -247,6 +248,11 @@ fn repl_fires_dsl_on_session_start_body_at_startup() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     std::fs::write(
+        cfg.path().join("on_session_start.at"),
+        "flow boot() -> string { return \"\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
         cfg.path().join("lifecycle.at"),
         r#"on session.start {
     memory.todo.set(
@@ -259,6 +265,7 @@ fn repl_fires_dsl_on_session_start_body_at_startup() {
 "#,
     )
     .unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -312,6 +319,7 @@ fn repl_route_dsl_dispatches_by_prefix() {
 "#,
     )
     .unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
     std::fs::write(
         cfg.path().join("routes.at"),
         r#"route "hello" { flow: greet }
@@ -361,6 +369,7 @@ fn repl_route_dsl_dispatches_default_route() {
 "#,
     )
     .unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
     std::fs::write(
         cfg.path().join("routes.at"),
         "default_route { flow: fallback }\n",
@@ -406,6 +415,7 @@ fn repl_slash_command_runs_flow_from_config_dir() {
 "#,
     )
     .unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -432,6 +442,7 @@ fn repl_slash_command_runs_flow_from_config_dir() {
 fn repl_slash_command_unknown_reports_error() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
@@ -456,6 +467,7 @@ fn repl_slash_command_unknown_reports_error() {
 #[test]
 fn repl_help_and_exit_via_stdin() {
     let data = tempfile::tempdir().unwrap();
+    let _daemon = spawn_test_daemon(data.path());
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -573,6 +585,7 @@ fn repl_attach_list_shows_pending_paths() {
     let cfg = tempfile::tempdir().unwrap();
     let img = data.path().join("a.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -777,6 +790,7 @@ fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
     .unwrap();
     let img = data.path().join("pic.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -828,6 +842,7 @@ fn repl_attach_clear_empties_pending() {
     let cfg = tempfile::tempdir().unwrap();
     let img = data.path().join("b.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -864,6 +879,7 @@ fn repl_attach_command_accepts_existing_file() {
     let cfg = tempfile::tempdir().unwrap();
     let img = data.path().join("pic.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -892,6 +908,7 @@ fn repl_attach_command_accepts_existing_file() {
 fn repl_attach_command_rejects_missing_file() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
         .env("ATMAN_CONFIG_DIR", cfg.path())
@@ -1029,6 +1046,7 @@ fn daemon_rotate_token_refuses_when_daemon_running() {
 fn repl_unrouted_input_hints_at_routes_at() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -1057,6 +1075,7 @@ fn repl_invalid_routes_at_surfaces_parse_error() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     std::fs::write(cfg.path().join("routes.at"), "route invalid").unwrap();
+    let _daemon = spawn_test_daemon_with_config(data.path(), cfg.path());
 
     let mut child = std::process::Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())

@@ -15,7 +15,7 @@ enum NextSession {
 pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     crate::load_model_config_from_disk();
     let provider_lifecycle = settings_provider_lifecycle().await?;
-    let client = connect_local_daemon().await?;
+    let client = connect_local_daemon_as("atman-tui").await?;
     let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
     let first = match resume {
         Some(prefix) => {
@@ -490,6 +490,10 @@ pub(crate) async fn resolve_session_prefix(
 }
 
 pub(crate) async fn connect_local_daemon() -> Result<Client> {
+    connect_local_daemon_as("atman-cli").await
+}
+
+async fn connect_local_daemon_as(client_name: &str) -> Result<Client> {
     let socket_path = atman_runtime::storage::data_dir()?
         .join("run")
         .join("atman.sock");
@@ -501,7 +505,7 @@ pub(crate) async fn connect_local_daemon() -> Result<Client> {
     loop {
         let error = match Client::connect(
             UnixTransport::new(&socket_path),
-            ClientIdentity::new("atman-tui", env!("CARGO_PKG_VERSION")),
+            ClientIdentity::new(client_name, env!("CARGO_PKG_VERSION")),
         )
         .await
         {

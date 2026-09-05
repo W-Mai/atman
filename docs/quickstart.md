@@ -146,6 +146,8 @@ If a provider row shows `unreachable`, fix that before moving on.
 
 ## 5. First REPL turn
 
+The terminal client starts or reuses the local daemon, creates one daemon-owned session, and keeps runs alive if the client disconnects. Piped and non-interactive input uses the same session API and durable run projection as the TUI.
+
 ```bash
 atman
 ```

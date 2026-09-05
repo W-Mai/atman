@@ -191,6 +191,40 @@
       }
     },
     {
+      "name": "session.set_goal",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "SetSessionGoalRequest",
+        "schema": {
+          "$ref": "#/$defs/SetSessionGoalRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SetSessionGoalResponse",
+        "schema": {
+          "$ref": "#/$defs/SetSessionGoalResponse"
+        }
+      }
+    },
+    {
+      "name": "session.update_todos",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "UpdateSessionTodosRequest",
+        "schema": {
+          "$ref": "#/$defs/UpdateSessionTodosRequest"
+        }
+      },
+      "result": {
+        "rust_type": "UpdateSessionTodosResponse",
+        "schema": {
+          "$ref": "#/$defs/UpdateSessionTodosResponse"
+        }
+      }
+    },
+    {
       "name": "project.list",
       "kind": "query",
       "revision": 1,

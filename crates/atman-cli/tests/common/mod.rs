@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 pub struct TestDaemon {
     child: std::process::Child,
-    _config: tempfile::TempDir,
+    _config: Option<tempfile::TempDir>,
 }
 
 impl Drop for TestDaemon {
@@ -14,10 +14,25 @@ impl Drop for TestDaemon {
     }
 }
 
+#[allow(dead_code)]
 pub fn spawn_test_daemon(data_dir: &Path) -> TestDaemon {
     let config = tempfile::tempdir().unwrap();
+    let config_path = config.path().to_path_buf();
+    spawn_test_daemon_at(data_dir, &config_path, Some(config))
+}
+
+#[allow(dead_code)]
+pub fn spawn_test_daemon_with_config(data_dir: &Path, config_dir: &Path) -> TestDaemon {
+    spawn_test_daemon_at(data_dir, config_dir, None)
+}
+
+fn spawn_test_daemon_at(
+    data_dir: &Path,
+    config_dir: &Path,
+    config: Option<tempfile::TempDir>,
+) -> TestDaemon {
     let child = Command::new(env!("CARGO_BIN_EXE_atman"))
-        .env("ATMAN_CONFIG_DIR", config.path())
+        .env("ATMAN_CONFIG_DIR", config_dir)
         .env("ATMAN_DATA_DIR", data_dir)
         .env("ATMAN_DAEMON_PORT", "0")
         .args(["daemon", "serve"])

@@ -58,12 +58,16 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
   SessionSnapshot,
+  SetSessionGoalRequest,
+  SetSessionGoalResponse,
   StartRunRequest,
   StartRunResponse,
   SubmitFormRequest,
   SubmitFormResponse,
   TerminateResourceRequest,
   TerminateResourceResponse,
+  UpdateSessionTodosRequest,
+  UpdateSessionTodosResponse,
   UpdateSessionTrustRequest,
   UpdateSessionTrustResponse,
 } from './types.generated'
@@ -138,6 +142,18 @@ export interface RpcMethodMap {
     revision: 1
     params: MoveSessionRequest
     result: MoveSessionResponse
+  }
+  'session.set_goal': {
+    kind: 'command'
+    revision: 1
+    params: SetSessionGoalRequest
+    result: SetSessionGoalResponse
+  }
+  'session.update_todos': {
+    kind: 'command'
+    revision: 1
+    params: UpdateSessionTodosRequest
+    result: UpdateSessionTodosResponse
   }
   'project.list': {
     kind: 'query'
@@ -289,6 +305,8 @@ export const RPC_METHODS = {
   'session.reload_mcp': { kind: 'command', revision: 1 },
   'session.auto_name': { kind: 'command', revision: 1 },
   'session.move': { kind: 'command', revision: 1 },
+  'session.set_goal': { kind: 'command', revision: 1 },
+  'session.update_todos': { kind: 'command', revision: 1 },
   'project.list': { kind: 'query', revision: 1 },
   'list_sessions': { kind: 'query', revision: 1 },
   'rename_session': { kind: 'command', revision: 2 },

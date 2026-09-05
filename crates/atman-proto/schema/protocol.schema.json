@@ -70,6 +70,18 @@
       "$ref": "#/$defs/MoveSessionResponse"
     },
     {
+      "$ref": "#/$defs/SetSessionGoalRequest"
+    },
+    {
+      "$ref": "#/$defs/SetSessionGoalResponse"
+    },
+    {
+      "$ref": "#/$defs/UpdateSessionTodosRequest"
+    },
+    {
+      "$ref": "#/$defs/UpdateSessionTodosResponse"
+    },
+    {
       "$ref": "#/$defs/ListProjectsRequest"
     },
     {
@@ -5427,6 +5439,58 @@
         }
       }
     },
+    "SetSessionGoalRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "goal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "SetSessionGoalResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "goal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
     "StartRunRequest": {
       "type": "object",
       "required": [
@@ -5617,6 +5681,46 @@
           "$ref": "#/$defs/ResourceTerminationStatus"
         }
       }
+    },
+    "TodoMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "clear"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "state",
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "set_state"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/TodoState"
+            }
+          }
+        }
+      ]
     },
     "TodoProjection": {
       "type": "object",
@@ -6274,6 +6378,57 @@
     "TurnId": {
       "type": "string",
       "format": "uuid"
+    },
+    "UpdateSessionTodosRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "mutation"
+      ],
+      "properties": {
+        "mutation": {
+          "$ref": "#/$defs/TodoMutation"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "UpdateSessionTodosResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "todos",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TodoProjection"
+          }
+        }
+      }
     },
     "UpdateSessionTrustRequest": {
       "type": "object",

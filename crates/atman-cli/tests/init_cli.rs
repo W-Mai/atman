@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+use common::spawn_test_daemon_with_config;
+
 fn atman_bin() -> &'static str {
     env!("CARGO_BIN_EXE_atman")
 }
@@ -97,6 +100,7 @@ fn repl_goal_builtin_set_show_clear() {
     let cfg = tmp.path().join("atman");
     let data = tmp.path().join("data");
     run_init(&cfg);
+    let _daemon = spawn_test_daemon_with_config(&data, &cfg);
 
     use std::io::Write;
     let mut cmd = Command::new(atman_bin());
@@ -116,21 +120,22 @@ fn repl_goal_builtin_set_show_clear() {
         .expect("write");
     let out = child.wait_with_output().expect("wait");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stdout.contains("no session goal set"),
-        "want empty-goal hint: {stdout}"
+        "want empty-goal hint: stdout={stdout}\nstderr={stderr}"
     );
     assert!(
         stdout.contains("goal set: ship an agent"),
-        "want set confirmation: {stdout}"
+        "want set confirmation: stdout={stdout}\nstderr={stderr}"
     );
     assert!(
         stdout.contains("goal: ship an agent"),
-        "want current goal readback: {stdout}"
+        "want current goal readback: stdout={stdout}\nstderr={stderr}"
     );
     assert!(
         stdout.contains("goal cleared"),
-        "want clear confirmation: {stdout}"
+        "want clear confirmation: stdout={stdout}\nstderr={stderr}"
     );
 }
 
@@ -140,6 +145,7 @@ fn slash_command_resolver_accepts_multi_flow_agent_at() {
     let cfg = tmp.path().join("atman");
     let data = tmp.path().join("data");
     run_init(&cfg);
+    let _daemon = spawn_test_daemon_with_config(&data, &cfg);
 
     let mut child = Command::new(atman_bin())
         .env("ATMAN_CONFIG_DIR", cfg.to_str().unwrap())
@@ -217,6 +223,7 @@ fn slash_command_passes_multi_word_bare_text_intact_to_single_string_param() {
         "flow echo(msg: string) -> string { return msg }\n",
     )
     .unwrap();
+    let _daemon = spawn_test_daemon_with_config(&data, &cfg);
 
     let out = Command::new(atman_bin())
         .env("ATMAN_CONFIG_DIR", cfg.to_str().unwrap())

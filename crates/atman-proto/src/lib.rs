@@ -326,6 +326,8 @@ pub mod methods {
     pub const RELOAD_SESSION_MCP: &str = "session.reload_mcp";
     pub const AUTO_NAME_SESSION: &str = "session.auto_name";
     pub const MOVE_SESSION: &str = "session.move";
+    pub const SET_SESSION_GOAL: &str = "session.set_goal";
+    pub const UPDATE_SESSION_TODOS: &str = "session.update_todos";
     pub const LIST_PROJECTS: &str = "project.list";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
@@ -359,6 +361,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::ReloadSessionMcp>(),
         super::method_descriptor::<super::rpc::AutoNameSession>(),
         super::method_descriptor::<super::rpc::MoveSession>(),
+        super::method_descriptor::<super::rpc::SetSessionGoal>(),
+        super::method_descriptor::<super::rpc::UpdateSessionTodos>(),
         super::method_descriptor::<super::rpc::ListProjects>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
@@ -581,6 +585,50 @@ pub struct MoveSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MoveSessionResponse {
     pub session: SessionSummary,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetSessionGoalRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SetSessionGoalResponse {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum TodoMutation {
+    Clear,
+    SetState {
+        id: String,
+        state: projection::TodoState,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateSessionTodosRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub mutation: TodoMutation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct UpdateSessionTodosResponse {
+    pub session_id: SessionId,
+    pub todos: Vec<projection::TodoProjection>,
     pub revision: Revision,
     pub cursor: EventCursor,
 }
@@ -1279,6 +1327,20 @@ pub mod rpc {
         Command,
         MoveSessionRequest,
         MoveSessionResponse
+    );
+    method!(
+        SetSessionGoal,
+        methods::SET_SESSION_GOAL,
+        Command,
+        SetSessionGoalRequest,
+        SetSessionGoalResponse
+    );
+    method!(
+        UpdateSessionTodos,
+        methods::UPDATE_SESSION_TODOS,
+        Command,
+        UpdateSessionTodosRequest,
+        UpdateSessionTodosResponse
     );
     method!(
         ListSessions,

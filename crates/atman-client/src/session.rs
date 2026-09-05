@@ -18,9 +18,10 @@ use atman_proto::{
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
-    SessionSignal, SessionSnapshot, StartRunRequest, StartRunResponse, SubmitFormRequest,
-    SubmitFormResponse, TerminateResourceRequest, TerminateResourceResponse, TrustProjection,
-    UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
+    SessionSignal, SessionSnapshot, SetSessionGoalRequest, SetSessionGoalResponse, StartRunRequest,
+    StartRunResponse, SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest,
+    TerminateResourceResponse, TodoMutation, TrustProjection, UpdateSessionTodosRequest,
+    UpdateSessionTodosResponse, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -533,6 +534,40 @@ impl SessionClient {
             })
             .await?;
         self.validate_command_session(&response.session.id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn set_goal(
+        &self,
+        goal: Option<String>,
+    ) -> Result<SetSessionGoalResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::SetSessionGoal>(&SetSessionGoalRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                goal,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn update_todos(
+        &self,
+        mutation: TodoMutation,
+    ) -> Result<UpdateSessionTodosResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::UpdateSessionTodos>(&UpdateSessionTodosRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                mutation,
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
         self.refresh_through(response.cursor).await?;
         Ok(response)
     }

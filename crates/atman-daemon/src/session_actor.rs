@@ -98,6 +98,18 @@ pub(crate) struct MoveSessionCommit {
     pub cursor: EventCursor,
 }
 
+pub(crate) struct GoalMutationCommit {
+    pub goal: Option<String>,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct TodoMutationCommit {
+    pub todos: Vec<atman_proto::TodoProjection>,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
 pub(crate) struct TrustUpdateCommit {
     pub trust: TrustProjection,
     pub revision: atman_proto::Revision,
@@ -516,6 +528,17 @@ impl SessionActorHandle {
         .await?
     }
 
+    pub(crate) async fn set_goal(&self, goal: Option<String>) -> Result<GoalMutationCommit> {
+        request(&self.tx, |reply| Command::SetGoal { goal, reply }).await?
+    }
+
+    pub(crate) async fn update_todos(
+        &self,
+        mutation: atman_proto::TodoMutation,
+    ) -> Result<TodoMutationCommit> {
+        request(&self.tx, |reply| Command::UpdateTodos { mutation, reply }).await?
+    }
+
     pub async fn update_trust(
         &self,
         trust: TrustProjection,
@@ -758,6 +781,14 @@ enum Command {
         project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
         reply: oneshot::Sender<Result<MoveSessionCommit>>,
     },
+    SetGoal {
+        goal: Option<String>,
+        reply: oneshot::Sender<Result<GoalMutationCommit>>,
+    },
+    UpdateTodos {
+        mutation: atman_proto::TodoMutation,
+        reply: oneshot::Sender<Result<TodoMutationCommit>>,
+    },
     UpdateTrust {
         trust: TrustProjection,
         launcher: Arc<crate::run::RunLauncher>,
@@ -927,7 +958,7 @@ impl SessionActor {
                     let _ = reply.send(result);
                     break;
                 }
-                ActorInput::Command(Some(command)) => self.handle_command(command),
+                ActorInput::Command(Some(command)) => self.handle_command(command).await,
                 ActorInput::Event(event) => match *event {
                     Ok(event) => self.apply_runtime_event(&event),
                     Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up_projection(),
@@ -976,7 +1007,7 @@ impl SessionActor {
         }
     }
 
-    fn handle_command(&mut self, command: Command) {
+    async fn handle_command(&mut self, command: Command) {
         match command {
             Command::AddRun { run, reply } => {
                 let result = self.validate_run_admission(&run).map(|()| {
@@ -1126,6 +1157,14 @@ impl SessionActor {
                 reply,
             } => {
                 let result = self.move_session(project_root, project_index);
+                let _ = reply.send(result);
+            }
+            Command::SetGoal { goal, reply } => {
+                let result = self.set_goal(goal);
+                let _ = reply.send(result);
+            }
+            Command::UpdateTodos { mutation, reply } => {
+                let result = self.update_todos(mutation).await;
                 let _ = reply.send(result);
             }
             Command::UpdateTrust {
@@ -1894,6 +1933,64 @@ impl SessionActor {
         }
         Ok(RenameSessionCommit {
             session,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn set_goal(&mut self, goal: Option<String>) -> Result<GoalMutationCommit> {
+        let goal = goal
+            .map(|goal| goal.trim().to_owned())
+            .filter(|goal| !goal.is_empty());
+        let store = atman_runtime::memory::goal::GoalStore::at(self.session.dir());
+        match goal.as_deref() {
+            Some(goal) => store.set(goal),
+            None => store.clear(),
+        }
+        .with_context(|| format!("update goal for session {}", self.session_id))?;
+        self.session.set_goal(goal.clone());
+        if let Some(delta) = self.projection.set_goal(goal.clone()) {
+            self.publish_projection_delta(delta);
+        }
+        Ok(GoalMutationCommit {
+            goal,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    async fn update_todos(
+        &mut self,
+        mutation: atman_proto::TodoMutation,
+    ) -> Result<TodoMutationCommit> {
+        use atman_runtime::memory::MemoryId;
+        use atman_runtime::memory::todo::{TodoStatus, TodoStore};
+
+        let store = TodoStore::at(self.session.dir());
+        match mutation {
+            atman_proto::TodoMutation::Clear => match tokio::fs::remove_file(store.path()).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            },
+            atman_proto::TodoMutation::SetState { id, state } => {
+                let id = MemoryId::parse(&id).map_err(anyhow::Error::new)?;
+                let state = match state {
+                    atman_proto::TodoState::Pending => TodoStatus::Pending,
+                    atman_proto::TodoState::InProgress => TodoStatus::InProgress,
+                    atman_proto::TodoState::Done => TodoStatus::Done,
+                    atman_proto::TodoState::Cancelled => TodoStatus::Cancelled,
+                };
+                store.set_status(&id, state).await?;
+            }
+        }
+        let todos = store.list().await?;
+        let _ = self.session.todos_watch().send(todos.clone());
+        if let Some(delta) = self.projection.set_todos(todos) {
+            self.publish_projection_delta(delta);
+        }
+        Ok(TodoMutationCommit {
+            todos: self.projection.projection().todos.clone(),
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })

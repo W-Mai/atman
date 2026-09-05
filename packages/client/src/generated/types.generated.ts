@@ -23,6 +23,10 @@ export type AtmanDaemonProtocolPayloads =
   | AutoNameSessionResponse
   | MoveSessionRequest
   | MoveSessionResponse
+  | SetSessionGoalRequest
+  | SetSessionGoalResponse
+  | UpdateSessionTodosRequest
+  | UpdateSessionTodosResponse
   | ListProjectsRequest
   | ListProjectsResponse
   | ListSessionsRequest
@@ -493,6 +497,17 @@ export type SessionCloseStatus = 'closed' | 'already_closed' | 'busy'
 export type SessionDeleteStatus = 'deleted' | 'not_found' | 'busy' | 'unsafe_resources'
 export type SessionStatus = 'running' | 'finished' | 'pending'
 export type AutoNameSessionStatus = 'updated' | 'superseded'
+export type TodoMutation =
+  | {
+      action: 'clear'
+      [k: string]: unknown
+    }
+  | {
+      action: 'set_state'
+      id: string
+      state: TodoState
+      [k: string]: unknown
+    }
 export type ProjectId = string
 export type ListSessionsResult = {
   event_count: number
@@ -1317,6 +1332,32 @@ export interface MoveSessionResponse {
   cursor: EventCursor
   revision: Revision
   session: SessionSummary
+  [k: string]: unknown
+}
+export interface SetSessionGoalRequest {
+  goal?: string | null
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface SetSessionGoalResponse {
+  cursor: EventCursor
+  goal?: string | null
+  revision: Revision
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface UpdateSessionTodosRequest {
+  mutation: TodoMutation
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface UpdateSessionTodosResponse {
+  cursor: EventCursor
+  revision: Revision
+  session_id: SessionId
+  todos: TodoProjection[]
   [k: string]: unknown
 }
 export interface ListProjectsRequest {

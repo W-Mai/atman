@@ -38,10 +38,13 @@ import type {
   SessionId,
   SessionSignal,
   SessionSnapshot,
+  SetSessionGoalResponse,
   StartRunResponse,
   SubmitFormResponse,
   TerminateResourceResponse,
+  TodoMutation,
   TrustProjection,
+  UpdateSessionTodosResponse,
   UpdateSessionTrustResponse,
 } from './generated/types.generated'
 import { SessionStore, type SessionView } from './session-store'
@@ -260,6 +263,42 @@ export class SessionClient {
       options,
     )
     this.#validateSession(response.session.id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async setGoal(
+    goal: string | null,
+    options: TransportRequestOptions = {},
+  ): Promise<SetSessionGoalResponse> {
+    const response = await this.#client.command(
+      'session.set_goal',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        goal,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async updateTodos(
+    mutation: TodoMutation,
+    options: TransportRequestOptions = {},
+  ): Promise<UpdateSessionTodosResponse> {
+    const response = await this.#client.command(
+      'session.update_todos',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        mutation,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
     await this.#refreshThrough(response.cursor, options)
     return response
   }

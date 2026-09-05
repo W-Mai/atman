@@ -7,9 +7,9 @@ use atman_proto::{
     PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
     ReloadSessionMcpResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
     ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
-    SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse, method_descriptor,
-    methods, rpc,
+    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, SetSessionGoalResponse,
+    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, UpdateSessionTodosResponse,
+    UpdateSessionTrustResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -164,6 +164,8 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::ReloadSessionMcp>(),
     method_descriptor::<rpc::AutoNameSession>(),
     method_descriptor::<rpc::MoveSession>(),
+    method_descriptor::<rpc::SetSessionGoal>(),
+    method_descriptor::<rpc::UpdateSessionTodos>(),
     method_descriptor::<rpc::ListProjects>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
@@ -654,6 +656,86 @@ pub async fn dispatch_as(
             ),
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::SET_SESSION_GOAL => match parse_params::<rpc::SetSessionGoal>(req.params) {
+            Ok(params)
+                if params
+                    .goal
+                    .as_deref()
+                    .is_none_or(|goal| !goal.trim().is_empty()) =>
+            {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::SetSessionGoal, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .set_session_goal(
+                                &operation_params.session_id,
+                                operation_params.goal,
+                                &operation_principal,
+                            )
+                            .await
+                            .map(|commit| SetSessionGoalResponse {
+                                session_id: operation_params.session_id,
+                                goal: commit.goal,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(result) => method_response::<rpc::SetSessionGoal>(id, result),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Ok(_) => {
+                JsonRpcResponse::err(id, JsonRpcError::invalid_params("goal must not be empty"))
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::UPDATE_SESSION_TODOS => {
+            match parse_params::<rpc::UpdateSessionTodos>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    let outcome = execute_command::<rpc::UpdateSessionTodos, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            operation_state
+                                .update_session_todos(
+                                    &operation_params.session_id,
+                                    operation_params.mutation,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map(|commit| UpdateSessionTodosResponse {
+                                    session_id: operation_params.session_id,
+                                    todos: commit.todos,
+                                    revision: commit.revision,
+                                    cursor: commit.cursor,
+                                })
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(result) => method_response::<rpc::UpdateSessionTodos>(id, result),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {
             Ok(params) => {
                 let operation_state = state.clone();

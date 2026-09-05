@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-backed non-interactive REPL** — piped terminal sessions create or resume sessions through the Rust client, submit routed commands and attachments to daemon-owned runs, wait on durable terminal projections, and send explicit interjections without opening a second session writer.
+
 - **Daemon-backed flow CLI** — normal `atman run` invocations execute through the local daemon, wait on durable run projections, preserve selected flow names, arguments, images, reasoning effort, output, and terminal failures, while explicit mock and ephemeral runs remain embedded.
 
 - **Durable flow results** — successful flow returns are recorded on terminal run events and retained in daemon projections so detached clients can recover the same textual result after reconnecting.
