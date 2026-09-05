@@ -64,6 +64,18 @@
       "$ref": "#/$defs/AutoNameSessionResponse"
     },
     {
+      "$ref": "#/$defs/SuggestFlowRequest"
+    },
+    {
+      "$ref": "#/$defs/SuggestFlowResponse"
+    },
+    {
+      "$ref": "#/$defs/InstallSuggestedFlowRequest"
+    },
+    {
+      "$ref": "#/$defs/InstallSuggestedFlowResponse"
+    },
+    {
       "$ref": "#/$defs/MoveSessionRequest"
     },
     {
@@ -2077,6 +2089,50 @@
         },
         "revision": {
           "$ref": "#/$defs/Revision"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "InstallSuggestedFlowRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "flow_name",
+        "source"
+      ],
+      "properties": {
+        "flow_name": {
+          "type": "string"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "InstallSuggestedFlowResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "flow_name"
+      ],
+      "properties": {
+        "flow_name": {
+          "type": "string"
         },
         "session_id": {
           "$ref": "#/$defs/SessionId"
@@ -5619,6 +5675,113 @@
           "$ref": "#/$defs/FormResolutionStatus"
         }
       }
+    },
+    "SuggestFlowRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "SuggestFlowResponse": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "model",
+        "turn_count",
+        "result"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/SuggestFlowStatus"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "SuggestFlowStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "no_suggestion"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "reason",
+            "status"
+          ],
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "invalid"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "flow_name",
+            "source",
+            "has_shell",
+            "status"
+          ],
+          "properties": {
+            "flow_name": {
+              "type": "string"
+            },
+            "has_shell": {
+              "type": "boolean"
+            },
+            "source": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "proposal"
+              ]
+            }
+          }
+        }
+      ]
     },
     "TerminalResizeStatus": {
       "type": "string",

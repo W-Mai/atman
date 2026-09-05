@@ -1525,10 +1525,20 @@ pub(crate) async fn run_frames(
                             }
                         }
                         TuiCommand::OpenSessionMoveForm(form) => {
-                            app.wm.modals.form_modal.attach(form);
+                            app.wm.modals.form_modal.attach_host(form);
                             app.app.mark_visual_dirty();
                         }
                         TuiCommand::CloseSessionMoveForm(form_id) => {
+                            if app.wm.modals.form_modal.pending.as_ref().is_some_and(|form| form.form_id == form_id) {
+                                app.wm.modals.form_modal.reconcile(&[]);
+                                app.app.mark_visual_dirty();
+                            }
+                        }
+                        TuiCommand::OpenSuggestionForm(form) => {
+                            app.wm.modals.form_modal.attach_host(form);
+                            app.app.mark_visual_dirty();
+                        }
+                        TuiCommand::CloseSuggestionForm(form_id) => {
                             if app.wm.modals.form_modal.pending.as_ref().is_some_and(|form| form.form_id == form_id) {
                                 app.wm.modals.form_modal.reconcile(&[]);
                                 app.app.mark_visual_dirty();

@@ -24,6 +24,8 @@ import type {
   GetSessionUpdatesResponse,
   InspectResourceRequest,
   InspectResourceResponse,
+  InstallSuggestedFlowRequest,
+  InstallSuggestedFlowResponse,
   InterjectSessionRequest,
   InterjectSessionResponse,
   ListPermissionRequestsRequest,
@@ -64,6 +66,8 @@ import type {
   StartRunResponse,
   SubmitFormRequest,
   SubmitFormResponse,
+  SuggestFlowRequest,
+  SuggestFlowResponse,
   TerminateResourceRequest,
   TerminateResourceResponse,
   UpdateSessionTodosRequest,
@@ -136,6 +140,18 @@ export interface RpcMethodMap {
     revision: 1
     params: AutoNameSessionRequest
     result: AutoNameSessionResponse
+  }
+  'session.suggest_flow': {
+    kind: 'command'
+    revision: 1
+    params: SuggestFlowRequest
+    result: SuggestFlowResponse
+  }
+  'session.install_suggested_flow': {
+    kind: 'command'
+    revision: 1
+    params: InstallSuggestedFlowRequest
+    result: InstallSuggestedFlowResponse
   }
   'session.move': {
     kind: 'command'
@@ -304,6 +320,8 @@ export const RPC_METHODS = {
   'session.update_trust': { kind: 'command', revision: 1 },
   'session.reload_mcp': { kind: 'command', revision: 1 },
   'session.auto_name': { kind: 'command', revision: 1 },
+  'session.suggest_flow': { kind: 'command', revision: 1 },
+  'session.install_suggested_flow': { kind: 'command', revision: 1 },
   'session.move': { kind: 'command', revision: 1 },
   'session.set_goal': { kind: 'command', revision: 1 },
   'session.update_todos': { kind: 'command', revision: 1 },

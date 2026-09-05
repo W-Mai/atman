@@ -21,6 +21,10 @@ export type AtmanDaemonProtocolPayloads =
   | ReloadSessionMcpResponse
   | AutoNameSessionRequest
   | AutoNameSessionResponse
+  | SuggestFlowRequest
+  | SuggestFlowResponse
+  | InstallSuggestedFlowRequest
+  | InstallSuggestedFlowResponse
   | MoveSessionRequest
   | MoveSessionResponse
   | SetSessionGoalRequest
@@ -497,6 +501,23 @@ export type SessionCloseStatus = 'closed' | 'already_closed' | 'busy'
 export type SessionDeleteStatus = 'deleted' | 'not_found' | 'busy' | 'unsafe_resources'
 export type SessionStatus = 'running' | 'finished' | 'pending'
 export type AutoNameSessionStatus = 'updated' | 'superseded'
+export type SuggestFlowStatus =
+  | {
+      status: 'no_suggestion'
+      [k: string]: unknown
+    }
+  | {
+      reason: string
+      status: 'invalid'
+      [k: string]: unknown
+    }
+  | {
+      flow_name: string
+      has_shell: boolean
+      source: string
+      status: 'proposal'
+      [k: string]: unknown
+    }
 export type TodoMutation =
   | {
       action: 'clear'
@@ -1320,6 +1341,30 @@ export interface SessionSummary {
   status: SessionStatus
   title?: string
   updated_at?: string | null
+  [k: string]: unknown
+}
+export interface SuggestFlowRequest {
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface SuggestFlowResponse {
+  model: string
+  result: SuggestFlowStatus
+  session_id: SessionId
+  turn_count: number
+  [k: string]: unknown
+}
+export interface InstallSuggestedFlowRequest {
+  flow_name: string
+  request_id?: null | RequestId
+  session_id: SessionId
+  source: string
+  [k: string]: unknown
+}
+export interface InstallSuggestedFlowResponse {
+  flow_name: string
+  session_id: SessionId
   [k: string]: unknown
 }
 export interface MoveSessionRequest {

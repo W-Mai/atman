@@ -6,22 +6,23 @@ use atman_proto::{
     CreatePermissionGroupRequest, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
     FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
     GetSessionUpdatesResponse, InlineImage, InspectResourceRequest, InspectResourceResponse,
-    InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
-    ListPermissionRequestsRequest, ListPermissionRequestsResponse, ListResourcesRequest,
-    ListResourcesResponse, MoveSessionRequest, MoveSessionResponse,
-    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
-    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    ReleaseResourceRequest, ReleaseResourceResponse, ReloadSessionMcpRequest,
-    ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse, RequestId,
-    ResizeTerminalResourceRequest, ResizeTerminalResourceResponse, ResolveCompactReviewRequest,
-    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    InstallSuggestedFlowRequest, InstallSuggestedFlowResponse, InterjectSessionRequest,
+    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
+    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
+    MoveSessionRequest, MoveSessionResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
+    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
+    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
+    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
+    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
+    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
     SessionSignal, SessionSnapshot, SetSessionGoalRequest, SetSessionGoalResponse, StartRunRequest,
-    StartRunResponse, SubmitFormRequest, SubmitFormResponse, TerminateResourceRequest,
-    TerminateResourceResponse, TodoMutation, TrustProjection, UpdateSessionTodosRequest,
-    UpdateSessionTodosResponse, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
+    StartRunResponse, SubmitFormRequest, SubmitFormResponse, SuggestFlowRequest,
+    SuggestFlowResponse, TerminateResourceRequest, TerminateResourceResponse, TodoMutation,
+    TrustProjection, UpdateSessionTodosRequest, UpdateSessionTodosResponse,
+    UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -518,6 +519,36 @@ impl SessionClient {
             .await?;
         self.validate_command_session(&response.session.id)?;
         self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn suggest_flow(&self) -> Result<SuggestFlowResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::SuggestFlow>(&SuggestFlowRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
+        Ok(response)
+    }
+
+    pub async fn install_suggested_flow(
+        &self,
+        flow_name: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Result<InstallSuggestedFlowResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::InstallSuggestedFlow>(&InstallSuggestedFlowRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                flow_name: flow_name.into(),
+                source: source.into(),
+            })
+            .await?;
+        self.validate_command_session(&response.session_id)?;
         Ok(response)
     }
 

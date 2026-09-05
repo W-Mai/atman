@@ -36,10 +36,14 @@ pub struct FormModal {
     pub error: Option<String>,
     pub last_input_rect: Option<Rect>,
     pub scroll: u16,
+    host_owned: bool,
 }
 
 impl FormModal {
     pub fn reconcile(&mut self, pending: &[PendingForm]) -> bool {
+        if self.host_owned && self.pending.is_some() {
+            return false;
+        }
         if self
             .active_form_id()
             .is_some_and(|id| pending.iter().any(|form| form.form_id == id))
@@ -58,6 +62,16 @@ impl FormModal {
     }
 
     pub fn attach(&mut self, form: PendingForm) {
+        self.host_owned = false;
+        self.attach_inner(form);
+    }
+
+    pub fn attach_host(&mut self, form: PendingForm) {
+        self.host_owned = true;
+        self.attach_inner(form);
+    }
+
+    fn attach_inner(&mut self, form: PendingForm) {
         let questions = questions(&form);
         self.pending = Some(form);
         self.open = true;
@@ -81,6 +95,7 @@ impl FormModal {
         self.text_editor = InputEditor::default();
         self.error = None;
         self.scroll = 0;
+        self.host_owned = false;
     }
 
     pub fn active_form_id(&self) -> Option<&str> {
@@ -652,6 +667,22 @@ mod tests {
         assert!(!modal.open);
         assert!(modal.active_form_id().is_none());
         assert!(!modal.reconcile(&[]));
+    }
+
+    #[test]
+    fn host_owned_form_survives_daemon_reconciliation_until_closed() {
+        let form = mk_questions(vec![FormKind::Confirm {
+            prompt: "Install suggestion?".into(),
+        }]);
+        let mut modal = FormModal::default();
+        modal.attach_host(form);
+
+        assert!(!modal.reconcile(&[]));
+        assert_eq!(modal.active_form_id(), Some("f"));
+
+        modal.close();
+        assert!(modal.active_form_id().is_none());
+        assert!(!modal.open);
     }
 
     #[test]

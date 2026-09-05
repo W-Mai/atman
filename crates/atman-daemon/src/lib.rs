@@ -1,15 +1,16 @@
 use atman_proto::{
     AutoNameSessionResponse, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
     CompactSessionResponse, DaemonGeneration, EventCursor, GetSessionSnapshotRequest,
-    GetSessionUpdatesRequest, InspectResourceResponse, InterjectSessionResponse, JsonRpcError,
-    JsonRpcRequest, JsonRpcResponse, ListProjectsRequest, ListResourcesResponse,
-    ListSessionsRequest, MethodCapability, MoveSessionResponse, PermissionRpcAction,
-    PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
+    GetSessionUpdatesRequest, InspectResourceResponse, InstallSuggestedFlowResponse,
+    InterjectSessionResponse, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListProjectsRequest,
+    ListResourcesResponse, ListSessionsRequest, MethodCapability, MoveSessionResponse,
+    PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
     ReloadSessionMcpResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
     ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
     RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, SetSessionGoalResponse,
-    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, UpdateSessionTodosResponse,
-    UpdateSessionTrustResponse, method_descriptor, methods, rpc,
+    StartRunResponse, SubmitFormResponse, SuggestFlowResponse, SuggestFlowStatus,
+    TerminateResourceResponse, UpdateSessionTodosResponse, UpdateSessionTrustResponse,
+    method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -163,6 +164,8 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::UpdateSessionTrust>(),
     method_descriptor::<rpc::ReloadSessionMcp>(),
     method_descriptor::<rpc::AutoNameSession>(),
+    method_descriptor::<rpc::SuggestFlow>(),
+    method_descriptor::<rpc::InstallSuggestedFlow>(),
     method_descriptor::<rpc::MoveSession>(),
     method_descriptor::<rpc::SetSessionGoal>(),
     method_descriptor::<rpc::UpdateSessionTodos>(),
@@ -194,7 +197,15 @@ pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcRe
     dispatch_as(state, req, LOCAL_OPERATOR_PRINCIPAL).await
 }
 
-pub async fn dispatch_as(
+pub fn dispatch_as<'a>(
+    state: Arc<DaemonState>,
+    req: JsonRpcRequest,
+    principal_id: &'a str,
+) -> std::pin::Pin<Box<dyn Future<Output = JsonRpcResponse> + Send + 'a>> {
+    Box::pin(dispatch_as_inner(state, req, principal_id))
+}
+
+async fn dispatch_as_inner(
     state: Arc<DaemonState>,
     req: JsonRpcRequest,
     principal_id: &str,
@@ -618,6 +629,89 @@ pub async fn dispatch_as(
             }
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::SUGGEST_FLOW => match parse_params::<rpc::SuggestFlow>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::SuggestFlow, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .suggest_flow(&operation_params.session_id, &operation_principal)
+                            .await
+                            .map(|(model, context, suggestion)| SuggestFlowResponse {
+                                session_id: operation_params.session_id,
+                                model,
+                                turn_count: context.turn_count,
+                                result: match suggestion {
+                                    atman_runtime::suggestion::Suggestion::None => {
+                                        SuggestFlowStatus::NoSuggestion
+                                    }
+                                    atman_runtime::suggestion::Suggestion::Invalid(reason) => {
+                                        SuggestFlowStatus::Invalid { reason }
+                                    }
+                                    atman_runtime::suggestion::Suggestion::Proposal {
+                                        flow_name,
+                                        source,
+                                        has_shell,
+                                    } => SuggestFlowStatus::Proposal {
+                                        flow_name,
+                                        source,
+                                        has_shell,
+                                    },
+                                },
+                            })
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(result) => method_response::<rpc::SuggestFlow>(id, result),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::INSTALL_SUGGESTED_FLOW => {
+            match parse_params::<rpc::InstallSuggestedFlow>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_principal = principal_id.to_owned();
+                    let operation_params = params.clone();
+                    let outcome = execute_command::<rpc::InstallSuggestedFlow, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            operation_state
+                                .install_suggested_flow(
+                                    &operation_params.session_id,
+                                    &operation_params.flow_name,
+                                    &operation_params.source,
+                                    &operation_principal,
+                                )
+                                .await
+                                .map(|flow_name| InstallSuggestedFlowResponse {
+                                    session_id: operation_params.session_id,
+                                    flow_name,
+                                })
+                                .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await;
+                    match outcome {
+                        Ok(result) => method_response::<rpc::InstallSuggestedFlow>(id, result),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::MOVE_SESSION => match parse_params::<rpc::MoveSession>(req.params) {
             Ok(params) if !params.project_root.trim().is_empty() => {
                 let operation_state = state.clone();

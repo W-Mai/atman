@@ -16,6 +16,7 @@ import type {
   GetSessionUpdatesResponse,
   InlineImage,
   InspectResourceResponse,
+  InstallSuggestedFlowResponse,
   InterjectionLevel,
   InterjectSessionResponse,
   ListPermissionRequestsResponse,
@@ -41,6 +42,7 @@ import type {
   SetSessionGoalResponse,
   StartRunResponse,
   SubmitFormResponse,
+  SuggestFlowResponse,
   TerminateResourceResponse,
   TodoMutation,
   TrustProjection,
@@ -246,6 +248,40 @@ export class SessionClient {
     )
     this.#validateSession(response.session.id)
     await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async suggestFlow(
+    options: TransportRequestOptions = {},
+  ): Promise<SuggestFlowResponse> {
+    const response = await this.#client.command(
+      'session.suggest_flow',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
+    return response
+  }
+
+  async installSuggestedFlow(
+    flowName: string,
+    source: string,
+    options: TransportRequestOptions = {},
+  ): Promise<InstallSuggestedFlowResponse> {
+    const response = await this.#client.command(
+      'session.install_suggested_flow',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        flow_name: flowName,
+        source,
+      },
+      options,
+    )
+    this.#validateSession(response.session_id)
     return response
   }
 

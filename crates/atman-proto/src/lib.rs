@@ -325,6 +325,8 @@ pub mod methods {
     pub const UPDATE_SESSION_TRUST: &str = "session.update_trust";
     pub const RELOAD_SESSION_MCP: &str = "session.reload_mcp";
     pub const AUTO_NAME_SESSION: &str = "session.auto_name";
+    pub const SUGGEST_FLOW: &str = "session.suggest_flow";
+    pub const INSTALL_SUGGESTED_FLOW: &str = "session.install_suggested_flow";
     pub const MOVE_SESSION: &str = "session.move";
     pub const SET_SESSION_GOAL: &str = "session.set_goal";
     pub const UPDATE_SESSION_TODOS: &str = "session.update_todos";
@@ -360,6 +362,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::UpdateSessionTrust>(),
         super::method_descriptor::<super::rpc::ReloadSessionMcp>(),
         super::method_descriptor::<super::rpc::AutoNameSession>(),
+        super::method_descriptor::<super::rpc::SuggestFlow>(),
+        super::method_descriptor::<super::rpc::InstallSuggestedFlow>(),
         super::method_descriptor::<super::rpc::MoveSession>(),
         super::method_descriptor::<super::rpc::SetSessionGoal>(),
         super::method_descriptor::<super::rpc::UpdateSessionTodos>(),
@@ -572,6 +576,50 @@ pub struct AutoNameSessionResponse {
     pub status: AutoNameSessionStatus,
     pub revision: Revision,
     pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SuggestFlowRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SuggestFlowStatus {
+    NoSuggestion,
+    Invalid {
+        reason: String,
+    },
+    Proposal {
+        flow_name: String,
+        source: String,
+        has_shell: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SuggestFlowResponse {
+    pub session_id: SessionId,
+    pub model: String,
+    pub turn_count: usize,
+    pub result: SuggestFlowStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InstallSuggestedFlowRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub flow_name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InstallSuggestedFlowResponse {
+    pub session_id: SessionId,
+    pub flow_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1320,6 +1368,20 @@ pub mod rpc {
         Command,
         AutoNameSessionRequest,
         AutoNameSessionResponse
+    );
+    method!(
+        SuggestFlow,
+        methods::SUGGEST_FLOW,
+        Command,
+        SuggestFlowRequest,
+        SuggestFlowResponse
+    );
+    method!(
+        InstallSuggestedFlow,
+        methods::INSTALL_SUGGESTED_FLOW,
+        Command,
+        InstallSuggestedFlowRequest,
+        InstallSuggestedFlowResponse
     );
     method!(
         MoveSession,

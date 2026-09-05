@@ -48,7 +48,15 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             continue;
         }
         if let Some(command) = trimmed.strip_prefix(':') {
-            if handle_meta(&client, &session, command.trim(), &mut attachments).await? {
+            if handle_meta(
+                &client,
+                &session,
+                command.trim(),
+                &mut attachments,
+                &mut input_rx,
+            )
+            .await?
+            {
                 break;
             }
             continue;
@@ -244,6 +252,7 @@ async fn handle_meta(
     session: &SessionClient,
     command: &str,
     attachments: &mut Vec<PathBuf>,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<bool> {
     let Some(meta) = atman_runtime::meta_commands::match_command(command) else {
         eprintln!("unknown `:{command}` — try `:help`");
@@ -272,10 +281,55 @@ async fn handle_meta(
         "mode" | "mode-theme" | "sidebar" => {
             println!("[atman] :{} is available in TUI mode", meta.name)
         }
-        "suggest" => eprintln!("[atman] :suggest is not available through the daemon yet"),
+        "suggest" => suggest(session, input_rx).await,
         _ => {}
     }
     Ok(false)
+}
+
+async fn suggest(
+    session: &SessionClient,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    let response = match session.suggest_flow().await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("[atman] :suggest failed: {error}");
+            return;
+        }
+    };
+    let (flow_name, source, has_shell) = match response.result {
+        atman_proto::SuggestFlowStatus::NoSuggestion => {
+            println!("[atman] no reusable pattern found in recent turns");
+            return;
+        }
+        atman_proto::SuggestFlowStatus::Invalid { reason } => {
+            eprintln!("[atman] suggestion was rejected: {reason}");
+            return;
+        }
+        atman_proto::SuggestFlowStatus::Proposal {
+            flow_name,
+            source,
+            has_shell,
+        } => (flow_name, source, has_shell),
+    };
+    println!("[atman] suggested flow `{flow_name}`:\n---\n{source}\n---");
+    if has_shell {
+        println!("[atman] this flow executes shell tools; review it before accepting");
+    }
+    println!("[atman] install this flow? [y/N]");
+    let accepted = input_rx
+        .recv()
+        .await
+        .is_some_and(|answer| matches!(answer.trim(), "y" | "Y" | "yes"));
+    if !accepted {
+        println!("[atman] suggested flow discarded");
+        return;
+    }
+    match session.install_suggested_flow(flow_name, source).await {
+        Ok(response) => println!("[atman] installed suggested flow `{}`", response.flow_name),
+        Err(error) => eprintln!("[atman] could not install suggested flow: {error}"),
+    }
 }
 
 async fn print_sessions(client: &Client) -> Result<()> {

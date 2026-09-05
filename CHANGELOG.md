@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-owned flow suggestions** — `:suggest` derives recent turns and observed dynamic tool names from the daemon context, runs its auxiliary model with provider-default reasoning, and installs accepted flows through typed Rust and TypeScript client commands.
+
 - **Daemon TUI command and image drafts** — interactive clients route REPL meta commands through host controls instead of session messages, and clipboard or path images remain client-local drafts until the next daemon submission.
 
 - **Daemon projection monitor** — `atman monitor` lists sessions and renders covered session snapshots through the Rust client instead of tailing session files or accepting bearer tokens in browser URLs.

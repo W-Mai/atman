@@ -920,6 +920,121 @@ impl DaemonState {
         actor.finish_auto_name(generation, title).await
     }
 
+    pub(crate) async fn suggest_flow(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        principal: &str,
+    ) -> Result<(
+        String,
+        atman_runtime::suggestion::RecentContext,
+        atman_runtime::suggestion::Suggestion,
+    )> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        let actor = self.get_or_load_actor(session_id, principal).await?;
+        let context = atman_runtime::suggestion::recent_context(
+            &actor.runtime_session().messages(),
+            atman_runtime::suggestion::DEFAULT_RECENT_TURNS,
+        );
+        let hub = crate::bootstrap::resolve_config_hub(launcher.config_dir.as_deref())?;
+        let configured = hub.suggest_model()?.unwrap_or_else(|| "gpt-4o-mini".into());
+        let model = atman_runtime::model_registry::resolve_alias(&configured);
+        let executor = launcher.naming_executor(self).await?;
+        let provider = executor
+            .providers
+            .resolve(&model)
+            .ok_or_else(|| anyhow::anyhow!("no provider resolves suggestion model `{model}`"))?;
+        let suggestion = atman_runtime::suggestion::generate(provider, &model, &context).await?;
+        Ok((model, context, suggestion))
+    }
+
+    pub(crate) async fn install_suggested_flow(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        flow_name: &str,
+        source: &str,
+        principal: &str,
+    ) -> Result<String> {
+        use std::io::Write;
+
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        let actor = self.get_or_load_actor(session_id, principal).await?;
+        let parsed_name = atman_runtime::suggestion::extract_flow_name(source)?;
+        anyhow::ensure!(
+            parsed_name == flow_name,
+            "suggested flow name `{flow_name}` does not match source `{parsed_name}`"
+        );
+        let context = atman_runtime::suggestion::recent_context(
+            &actor.runtime_session().messages(),
+            atman_runtime::suggestion::DEFAULT_RECENT_TURNS,
+        );
+        let parsed = atman_dsl::parse::parse_file(source)
+            .map_err(|error| anyhow::anyhow!("parse suggested flow: {error}"))?;
+        if let Err(errors) =
+            atman_runtime::validate::validate_with_tool_lookup(&parsed.flows[0], &|name| {
+                context.tool_names.contains(name)
+            })
+        {
+            anyhow::bail!(
+                "suggested flow validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+
+        let hub = crate::bootstrap::resolve_config_hub(launcher.config_dir.as_deref())?;
+        let commands_dir = hub.config_dir().join("commands");
+        std::fs::create_dir_all(&commands_dir)?;
+        let mut suffix = 1usize;
+        loop {
+            let final_name = if suffix == 1 {
+                flow_name.to_owned()
+            } else {
+                format!("{flow_name}_v{suffix}")
+            };
+            let target = commands_dir.join(format!("{final_name}.at"));
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    suffix += 1;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let installed_source = if final_name == flow_name {
+                source.to_owned()
+            } else {
+                let mut renamed = parsed.clone();
+                renamed.flows[0].name.name = final_name.clone();
+                atman_dsl::print::print_file(&renamed)
+            };
+            let write_result = file
+                .write_all(format!("{}\n", installed_source.trim_end()).as_bytes())
+                .and_then(|_| file.sync_all());
+            drop(file);
+            if let Err(error) = write_result {
+                let _ = std::fs::remove_file(&target);
+                return Err(error.into());
+            }
+            let trigger = format!("{final_name} ");
+            if let Err(error) = hub.append_dsl_route(&final_name, &trigger) {
+                let _ = std::fs::remove_file(&target);
+                return Err(anyhow::anyhow!(error));
+            }
+            return Ok(final_name);
+        }
+    }
+
     pub(crate) async fn maybe_auto_name_session(
         &self,
         session: &std::sync::Arc<atman_runtime::Session>,
@@ -1821,6 +1936,75 @@ mod tests {
         let restored = state.session_snapshot(&session_id, "owner").await.unwrap();
         assert_eq!(restored.projection.transcript, live.projection.transcript);
         assert_eq!(restored.projection.usage, live.projection.usage);
+    }
+
+    #[tokio::test]
+    async fn suggestion_install_validates_tools_and_renames_collisions() {
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let state = Arc::new(DaemonState::new(root.path().join("data")));
+        state.set_launcher(Arc::new(
+            crate::run::RunLauncher::new(
+                root.path().to_path_buf(),
+                Some(config.path().to_path_buf()),
+                None,
+            )
+            .unwrap(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let turn_id = atman_runtime::event::TurnId::now();
+        session.append_message(
+            atman_runtime::message::Message {
+                role: atman_runtime::message::MessageRole::Assistant,
+                parts: vec![atman_runtime::message::MessagePart::ToolUse {
+                    id: "call".into(),
+                    name: "remote.search".into(),
+                    input: serde_json::json!({"query": "docs"}),
+                    intent: None,
+                }],
+                turn_id,
+                origin: atman_runtime::message::MessageOrigin::Internal,
+            },
+            None,
+        );
+        let session_id = SessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session, "owner")
+            .await
+            .unwrap();
+        let source = "flow search() -> string { return remote.search(query: \"atman\") }";
+
+        let installed = state
+            .install_suggested_flow(&session_id, "search", source, "owner")
+            .await
+            .unwrap();
+        assert_eq!(installed, "search");
+        assert_eq!(
+            std::fs::read_to_string(config.path().join("commands/search.at")).unwrap(),
+            format!("{source}\n")
+        );
+        let collision = state
+            .install_suggested_flow(&session_id, "search", source, "owner")
+            .await
+            .unwrap();
+        assert_eq!(collision, "search_v2");
+        let collision_source =
+            std::fs::read_to_string(config.path().join("commands/search_v2.at")).unwrap();
+        assert!(collision_source.contains("flow search_v2("));
+        assert!(atman_dsl::parse::parse_file(&collision_source).is_ok());
+        let routes = std::fs::read_to_string(config.path().join("routes.at")).unwrap();
+        assert!(routes.contains("route \"search_v2 \" { flow: search_v2 }"));
+        let invalid = state
+            .install_suggested_flow(
+                &session_id,
+                "write",
+                "flow write() -> string { return fs.write(\"x\", content: \"y\") }",
+                "owner",
+            )
+            .await
+            .unwrap_err();
+        assert!(invalid.to_string().contains("undefined tool `fs.write`"));
+        assert!(!config.path().join("commands/write.at").exists());
     }
 
     #[tokio::test]

@@ -76,6 +76,7 @@ pub mod settings_catalog;
 pub mod storage;
 pub mod stream;
 pub(crate) mod streaming;
+pub mod suggestion;
 pub mod task_registry;
 pub mod templates;
 pub mod tool;

@@ -74,6 +74,7 @@ async fn run_session(
     let control_note_tx = note_tx.clone();
     let control_task = tokio::spawn(async move {
         let mut shutdown_tx = Some(shutdown_tx);
+        let mut pending_suggestions = std::collections::HashMap::<String, (String, String)>::new();
         while let Some(control) = control_rx.recv().await {
             match control {
                 TuiControl::MetaCommand(command) => {
@@ -82,6 +83,7 @@ async fn run_session(
                         &command_tx,
                         &control_note_tx,
                         &command,
+                        &mut pending_suggestions,
                     )
                     .await
                     {
@@ -90,6 +92,53 @@ async fn run_session(
                         }
                         break;
                     }
+                }
+                TuiControl::Domain(atman_tui::TuiDomainCommand::FormSubmit {
+                    form_id,
+                    submission,
+                }) if form_id.starts_with("suggest_flow:") => {
+                    let proposal = pending_suggestions.remove(&form_id);
+                    let accepted = matches!(
+                        &submission,
+                        atman_runtime::form::FormSubmission::Submitted { answers }
+                            if matches!(
+                                answers.first(),
+                                Some(atman_runtime::form::FormAnswer::Confirmed { value: true })
+                            )
+                    );
+                    if accepted {
+                        if let Some((flow_name, source)) = proposal {
+                            match control_session
+                                .install_suggested_flow(flow_name, source)
+                                .await
+                            {
+                                Ok(response) => note(
+                                    &control_note_tx,
+                                    TuiNote::Info(format!(
+                                        "installed suggested flow `{}`",
+                                        response.flow_name
+                                    )),
+                                ),
+                                Err(error) => note(
+                                    &control_note_tx,
+                                    TuiNote::Error(format!(
+                                        "could not install suggested flow: {error}"
+                                    )),
+                                ),
+                            }
+                        } else {
+                            note(
+                                &control_note_tx,
+                                TuiNote::Warn("suggestion proposal is no longer available".into()),
+                            );
+                        }
+                    } else {
+                        note(
+                            &control_note_tx,
+                            TuiNote::Info("suggested flow discarded".into()),
+                        );
+                    }
+                    let _ = command_tx.send(TuiCommand::CloseSuggestionForm(form_id));
                 }
                 TuiControl::Domain(atman_tui::TuiDomainCommand::FormSubmit {
                     form_id,
@@ -375,6 +424,7 @@ async fn handle_meta_command(
     command_tx: &mpsc::UnboundedSender<TuiCommand>,
     note_tx: &mpsc::UnboundedSender<TuiNote>,
     command: &str,
+    pending_suggestions: &mut std::collections::HashMap<String, (String, String)>,
 ) -> bool {
     let Some(meta) = atman_runtime::meta_commands::match_command(command) else {
         note(
@@ -430,10 +480,61 @@ async fn handle_meta_command(
                 )),
             );
         }
-        "suggest" => note(
-            note_tx,
-            TuiNote::Warn(":suggest is not available through the daemon yet".into()),
-        ),
+        "suggest" => match session.suggest_flow().await {
+            Ok(response) => match response.result {
+                atman_proto::SuggestFlowStatus::NoSuggestion => note(
+                    note_tx,
+                    TuiNote::Info("no reusable pattern found in recent turns".into()),
+                ),
+                atman_proto::SuggestFlowStatus::Invalid { reason } => note(
+                    note_tx,
+                    TuiNote::Warn(format!("suggestion was rejected: {reason}")),
+                ),
+                atman_proto::SuggestFlowStatus::Proposal {
+                    flow_name,
+                    source,
+                    has_shell,
+                } => {
+                    note(
+                        note_tx,
+                        TuiNote::Info(format!("suggested flow `{flow_name}`:\n{source}")),
+                    );
+                    if has_shell {
+                        note(
+                            note_tx,
+                            TuiNote::Warn(
+                                "the suggested flow executes shell tools; review it before accepting"
+                                    .into(),
+                            ),
+                        );
+                    }
+                    let form_id = format!("suggest_flow:{}", uuid::Uuid::now_v7());
+                    pending_suggestions.insert(form_id.clone(), (flow_name.clone(), source));
+                    let kind = atman_runtime::form::FormKind::Confirm {
+                        prompt: format!("install suggested flow `{flow_name}`?"),
+                    };
+                    let _ = command_tx.send(TuiCommand::OpenSuggestionForm(
+                        atman_runtime::form::PendingForm {
+                            form_id,
+                            run_id: atman_runtime::event::FlowRunId::now(),
+                            tool_use_id: "suggest_flow".into(),
+                            kind: kind.clone(),
+                            form: atman_runtime::form::CompositeForm {
+                                questions: vec![atman_runtime::form::FormQuestion {
+                                    id: "question".into(),
+                                    kind,
+                                }],
+                            },
+                            emitted_at: chrono::Utc::now(),
+                        },
+                    ));
+                }
+            },
+            Err(error) => note(
+                note_tx,
+                TuiNote::Error(format!("could not generate flow suggestion: {error}")),
+            ),
+        },
         _ => {}
     }
     false

@@ -476,6 +476,62 @@ describe('SessionClient', () => {
     ).toBe('/workspace/new')
   })
 
+  test('generates and installs a flow suggestion through typed commands', async () => {
+    const source = 'flow inspect() -> string { return fs.read("README.md") }'
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'session.suggest_flow', kind: 'command', revision: 1 },
+              {
+                name: 'session.install_suggested_flow',
+                kind: 'command',
+                revision: 1,
+              },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'session.suggest_flow':
+          return result(request, {
+            session_id: sessionId,
+            model: 'meta-model',
+            turn_count: 2,
+            result: {
+              status: 'proposal',
+              flow_name: 'inspect',
+              source,
+              has_shell: false,
+            },
+          })
+        case 'session.install_suggested_flow':
+          return result(request, {
+            session_id: sessionId,
+            flow_name: request.params.flow_name,
+          })
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    const suggestion = await session.suggestFlow()
+    expect(suggestion.result.status).toBe('proposal')
+    const installed = await session.installSuggestedFlow('inspect', source)
+    expect(installed.flow_name).toBe('inspect')
+    expect(
+      transport.requests.find(
+        (request) => request.method === 'session.install_suggested_flow',
+      )?.params.source,
+    ).toBe(source)
+  })
+
   test('updates trust through one command and reconciles the committed projection', async () => {
     const trust: TrustProjection = {
       mode: 'eager',

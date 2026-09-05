@@ -244,6 +244,8 @@ pub enum TuiCommand {
     },
     OpenSessionMoveForm(atman_runtime::form::PendingForm),
     CloseSessionMoveForm(String),
+    OpenSuggestionForm(atman_runtime::form::PendingForm),
+    CloseSuggestionForm(String),
     SessionNameUpdated(String),
     SessionListUpdated {
         scope: session_switcher::SessionScope,

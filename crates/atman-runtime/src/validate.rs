@@ -27,6 +27,13 @@ pub enum ValidationError {
 }
 
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
+    validate_with_tool_lookup(flow, &|name| tools.has(name))
+}
+
+pub fn validate_with_tool_lookup(
+    flow: &FlowDecl,
+    has_tool: &dyn Fn(&str) -> bool,
+) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
     validate_invocation_contract(flow, &mut errors);
     let mut scope: HashSet<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
@@ -34,7 +41,7 @@ pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<Validat
         scope.insert(name.to_string());
     }
     let mut kinds: HashMap<String, &'static str> = HashMap::new();
-    walk_stmts(&flow.body, &mut scope, &mut kinds, tools, &mut errors);
+    walk_stmts(&flow.body, &mut scope, &mut kinds, has_tool, &mut errors);
     if errors.is_empty() {
         Ok(())
     } else {
@@ -137,13 +144,13 @@ fn walk_stmts(
     stmts: &[Stmt],
     scope: &mut HashSet<String>,
     kinds: &mut HashMap<String, &'static str>,
-    tools: &ToolRegistry,
+    has_tool: &dyn Fn(&str) -> bool,
     errors: &mut Vec<ValidationError>,
 ) {
     for stmt in stmts {
         match stmt {
             Stmt::Bind { name, value } => {
-                walk_expr(value, scope, tools, errors);
+                walk_expr(value, scope, has_tool, errors);
                 let bound = name.bound_names();
                 if let Some(k) = infer_node_kind(value)
                     && let Some(single) = name.as_single_ident()
@@ -155,11 +162,11 @@ fn walk_stmts(
                 }
             }
             Stmt::When { cond, body } => {
-                walk_expr(cond, scope, tools, errors);
-                walk_stmts(body, scope, kinds, tools, errors);
+                walk_expr(cond, scope, has_tool, errors);
+                walk_stmts(body, scope, kinds, has_tool, errors);
             }
-            Stmt::Return { value } => walk_expr(value, scope, tools, errors),
-            Stmt::Expr(e) => walk_expr(e, scope, tools, errors),
+            Stmt::Return { value } => walk_expr(value, scope, has_tool, errors),
+            Stmt::Expr(e) => walk_expr(e, scope, has_tool, errors),
             Stmt::Watch(w) => {
                 if !scope.contains(&w.target.name) {
                     errors.push(ValidationError::UndefinedVar(w.target.name.clone()));
@@ -181,7 +188,7 @@ fn walk_stmts(
                 }
             }
             Stmt::Loop { body } => {
-                walk_stmts(body, scope, kinds, tools, errors);
+                walk_stmts(body, scope, kinds, has_tool, errors);
             }
             Stmt::Break => {}
             Stmt::Continue => {}
@@ -200,7 +207,7 @@ fn watch_event_label(event: &WatchEvent) -> &'static str {
 fn walk_expr(
     expr: &Expr,
     scope: &HashSet<String>,
-    tools: &ToolRegistry,
+    has_tool: &dyn Fn(&str) -> bool,
     errors: &mut Vec<ValidationError>,
 ) {
     match expr {
@@ -210,38 +217,38 @@ fn walk_expr(
                 errors.push(ValidationError::UndefinedVar(id.name.clone()));
             }
         }
-        Expr::Member { base, .. } => walk_expr(base, scope, tools, errors),
+        Expr::Member { base, .. } => walk_expr(base, scope, has_tool, errors),
         Expr::Binary { left, right, .. } => {
-            walk_expr(left, scope, tools, errors);
-            walk_expr(right, scope, tools, errors);
+            walk_expr(left, scope, has_tool, errors);
+            walk_expr(right, scope, has_tool, errors);
         }
-        Expr::Unary { operand, .. } => walk_expr(operand, scope, tools, errors),
+        Expr::Unary { operand, .. } => walk_expr(operand, scope, has_tool, errors),
         Expr::List(items) => {
             for item in items {
-                walk_expr(item, scope, tools, errors);
+                walk_expr(item, scope, has_tool, errors);
             }
         }
         Expr::Struct(fields) => {
             for (_, v) in fields {
-                walk_expr(v, scope, tools, errors);
+                walk_expr(v, scope, has_tool, errors);
             }
         }
-        Expr::Node(node) => walk_node(node, scope, tools, errors),
+        Expr::Node(node) => walk_node(node, scope, has_tool, errors),
         Expr::Call { args, .. } => {
             for a in args {
-                walk_expr(a, scope, tools, errors);
+                walk_expr(a, scope, has_tool, errors);
             }
         }
         Expr::Pipe { lhs, rhs } => {
-            walk_expr(lhs, scope, tools, errors);
-            walk_expr(rhs, scope, tools, errors);
+            walk_expr(lhs, scope, has_tool, errors);
+            walk_expr(rhs, scope, has_tool, errors);
         }
         Expr::Lambda { params, body } => {
             let mut child_scope = scope.clone();
             for p in params {
                 child_scope.insert(p.name.clone());
             }
-            walk_expr(body, &child_scope, tools, errors);
+            walk_expr(body, &child_scope, has_tool, errors);
         }
         Expr::Annotated { expr, .. } => {
             // Type names and type list expressions in annotation position
@@ -254,9 +261,9 @@ fn walk_expr(
                             return;
                         }
                     }
-                    walk_expr(expr, scope, tools, errors);
+                    walk_expr(expr, scope, has_tool, errors);
                 }
-                _ => walk_expr(expr, scope, tools, errors),
+                _ => walk_expr(expr, scope, has_tool, errors),
             }
         }
     }
@@ -265,7 +272,7 @@ fn walk_expr(
 fn walk_node(
     node: &Node,
     scope: &HashSet<String>,
-    tools: &ToolRegistry,
+    has_tool: &dyn Fn(&str) -> bool,
     errors: &mut Vec<ValidationError>,
 ) {
     match node {
@@ -277,44 +284,44 @@ fn walk_node(
                 .join(".");
             // Evaluator intrinsics are not registered or exposed as provider tools.
             let is_intrinsic = crate::eval::is_evaluator_intrinsic(&name);
-            if !is_intrinsic && !tools.has(&name) {
+            if !is_intrinsic && !has_tool(&name) {
                 errors.push(ValidationError::UndefinedTool(name));
             }
             for arg in args {
                 match arg {
-                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
-                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
+                    Arg::Positional(e) => walk_expr(e, scope, has_tool, errors),
+                    Arg::Named { value, .. } => walk_expr(value, scope, has_tool, errors),
                 }
             }
         }
         Node::DynamicFanout { source, lambda, .. } => {
-            walk_expr(source, scope, tools, errors);
-            walk_expr(lambda, scope, tools, errors);
+            walk_expr(source, scope, has_tool, errors);
+            walk_expr(lambda, scope, has_tool, errors);
         }
         Node::Fanout { items, .. } => {
             for item in items {
-                walk_expr(item, scope, tools, errors);
+                walk_expr(item, scope, has_tool, errors);
             }
         }
-        Node::UserConfirm { msg } => walk_expr(msg, scope, tools, errors),
+        Node::UserConfirm { msg } => walk_expr(msg, scope, has_tool, errors),
         Node::Subflow { args, .. } => {
             for arg in args {
                 match arg {
-                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
-                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
+                    Arg::Positional(e) => walk_expr(e, scope, has_tool, errors),
+                    Arg::Named { value, .. } => walk_expr(value, scope, has_tool, errors),
                 }
             }
         }
         Node::FixUntilTestPasses { kwargs } => {
             for (_, v) in kwargs {
-                walk_expr(v, scope, tools, errors);
+                walk_expr(v, scope, has_tool, errors);
             }
         }
         Node::Message { args, .. } => {
             for arg in args {
                 match arg {
-                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
-                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
+                    Arg::Positional(e) => walk_expr(e, scope, has_tool, errors),
+                    Arg::Named { value, .. } => walk_expr(value, scope, has_tool, errors),
                 }
             }
         }
@@ -396,6 +403,19 @@ mod tests {
             errs.iter()
                 .any(|e| matches!(e, ValidationError::UndefinedTool(name) if name == "fs.nope"))
         );
+    }
+
+    #[test]
+    fn tool_lookup_accepts_dynamic_tool_names_without_a_registry_clone() {
+        let file = parse_file(
+            r#"flow t() -> string {
+    return remote.search(query: "atman")
+}"#,
+        )
+        .unwrap();
+
+        validate_with_tool_lookup(&file.flows[0], &|name| name == "remote.search")
+            .expect("dynamic tool name is available");
     }
 
     #[test]
