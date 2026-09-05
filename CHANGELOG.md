@@ -87,6 +87,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Single-binary daemon startup** — the main `atman` executable can host the daemon through a hidden service entry when a separate `atman-daemon` binary is unavailable. Both launch paths share the same server implementation and pidfile ownership.
+
 - **Generation-aware terminal reconciliation** — attached terminal clients replace shared state after daemon restart or snapshot resynchronization even when the incoming projection revision is equal to or lower than the previously observed revision.
 
 - **Durable daemon recovery** — reopening an interrupted session records one generation reconciliation event. Active runs become lost, live resources become orphaned, interrupted compactions become abandoned, and pending interactions are cancelled with the same result in live state and complete event replay. Workspace reconciliation reasons enter the owning session projection, and dirty worktrees are excluded from orphan pruning.

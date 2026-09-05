@@ -14,6 +14,8 @@ use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
 
+pub mod server;
+
 // Owner-only local access and the daemon bearer authenticate the same operator.
 pub(crate) const LOCAL_OPERATOR_PRINCIPAL: &str = "local-daemon";
 

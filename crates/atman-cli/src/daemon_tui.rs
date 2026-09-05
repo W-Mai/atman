@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context, Result, bail};
 use atman_client::{Client, ClientIdentity, SessionClient, UnixTransport};
 use atman_tui::daemon_adapter::{DaemonCommandOutcome, DaemonTuiAdapter};
@@ -234,7 +232,7 @@ async fn connect_local_daemon() -> Result<Client> {
         .join("run")
         .join("atman.sock");
     if daemon_pid()?.is_none() {
-        spawn_daemon()?;
+        crate::spawn_daemon_process()?;
     }
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -260,23 +258,4 @@ fn daemon_pid() -> Result<Option<u32>> {
     let pid_path = atman_daemon::pidfile::default_pid_path()?;
     Ok(atman_daemon::pidfile::read_pid(&pid_path)?
         .filter(|pid| atman_daemon::pidfile::is_alive(*pid)))
-}
-
-fn spawn_daemon() -> Result<()> {
-    let binary = daemon_binary();
-    std::process::Command::new(&binary)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawning {}", binary.display()))?;
-    Ok(())
-}
-
-fn daemon_binary() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|dir| dir.join("atman-daemon")))
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| Path::new("atman-daemon").to_path_buf())
 }

@@ -203,6 +203,8 @@ enum DaemonAction {
     Stop,
     Status,
     RotateToken,
+    #[command(hide = true)]
+    Serve,
     Run {
         file: PathBuf,
         #[arg(long)]
@@ -440,6 +442,9 @@ async fn async_main() -> Result<()> {
         Some(Cmd::Daemon {
             action: DaemonAction::RotateToken,
         }) => cmd_daemon_rotate_token().await,
+        Some(Cmd::Daemon {
+            action: DaemonAction::Serve,
+        }) => atman_daemon::server::serve().await,
         Some(Cmd::Flow { action }) => cmd_flow(action).await,
         Some(Cmd::Sync { action }) => cmd_sync(action).await,
         Some(Cmd::Migrate { action }) => cmd_migrate(action).await,
@@ -613,20 +618,35 @@ async fn cmd_daemon_start() -> Result<()> {
         println!("atman-daemon already running (pid={pid})");
         return Ok(());
     }
-    let bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("atman-daemon")))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("atman-daemon"));
-    let child = std::process::Command::new(&bin)
+    let child = spawn_daemon_process()?;
+    println!("atman-daemon spawned (pid={})", child.id());
+    println!("pid file: {}", pid_path.display());
+    Ok(())
+}
+
+pub(crate) fn spawn_daemon_process() -> Result<std::process::Child> {
+    let current = std::env::current_exe().context("resolve current executable")?;
+    let mut command = daemon_process_command(&current);
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .with_context(|| format!("spawning {}", bin.display()))?;
-    println!("atman-daemon spawned (pid={})", child.id());
-    println!("pid file: {}", pid_path.display());
-    Ok(())
+        .context("spawn atman daemon")
+}
+
+fn daemon_process_command(current: &Path) -> std::process::Command {
+    let sibling = current
+        .parent()
+        .map(|directory| directory.join("atman-daemon"));
+    match sibling.filter(|path| path.exists()) {
+        Some(binary) => std::process::Command::new(binary),
+        None => {
+            let mut command = std::process::Command::new(current);
+            command.args(["daemon", "serve"]);
+            command
+        }
+    }
 }
 
 async fn cmd_daemon_stop() -> Result<()> {
@@ -7188,6 +7208,36 @@ mod tests {
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    #[test]
+    fn daemon_command_uses_self_hosted_service_without_a_sibling_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let current = temp.path().join("atman");
+
+        let command = daemon_process_command(&current);
+
+        assert_eq!(command.get_program(), current.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("daemon"),
+                std::ffi::OsStr::new("serve")
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_command_prefers_the_dedicated_sibling_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let current = temp.path().join("atman");
+        let sibling = temp.path().join("atman-daemon");
+        std::fs::write(&sibling, []).unwrap();
+
+        let command = daemon_process_command(&current);
+
+        assert_eq!(command.get_program(), sibling.as_os_str());
+        assert_eq!(command.get_args().count(), 0);
+    }
 
     fn run_projection(
         id: atman_proto::FlowRunId,
