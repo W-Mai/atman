@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon TUI command and image drafts** — interactive clients route REPL meta commands through host controls instead of session messages, and clipboard or path images remain client-local drafts until the next daemon submission.
+
 - **Daemon projection monitor** — `atman monitor` lists sessions and renders covered session snapshots through the Rust client instead of tailing session files or accepting bearer tokens in browser URLs.
 
 - **Daemon-backed non-interactive REPL** — piped terminal sessions create or resume sessions through the Rust client, submit routed commands and attachments to daemon-owned runs, wait on durable terminal projections, and send explicit interjections without opening a second session writer.

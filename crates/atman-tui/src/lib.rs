@@ -101,6 +101,7 @@ impl TuiNote {
 #[non_exhaustive]
 pub enum TuiControl {
     Domain(TuiDomainCommand),
+    MetaCommand(String),
     AutoNameSession,
     SwitchSession {
         sid: String,
@@ -208,6 +209,9 @@ pub enum TuiCommand {
     OpenTrustModePicker,
     OpenThemePicker,
     OpenModelPicker,
+    AddDraftAttachment(atman_runtime::message::ImageSource),
+    ClearDraftAttachments,
+    ListDraftAttachments,
     ModelSwitchResult {
         request_id: u64,
         model: String,

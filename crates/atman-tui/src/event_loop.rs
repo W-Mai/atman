@@ -1543,6 +1543,38 @@ pub(crate) async fn run_frames(
                         TuiCommand::OpenModelPicker => {
                             app.wm.modals.model_picker.open();
                         }
+                        TuiCommand::AddDraftAttachment(source) => {
+                            let number = editor.attach_image(source);
+                            app.app.attach_count = editor.pending_images().len();
+                            app.app.push_note(
+                                format!("attached image as [image {number}] ({} pending)", app.app.attach_count),
+                                crate::app::NoteLevel::Info,
+                            );
+                        }
+                        TuiCommand::ClearDraftAttachments => {
+                            while editor.remove_last_image().is_some() {}
+                            app.app.attach_count = 0;
+                            app.app.push_note(
+                                "pending attachments cleared",
+                                crate::app::NoteLevel::Info,
+                            );
+                        }
+                        TuiCommand::ListDraftAttachments => {
+                            if editor.pending_images().is_empty() {
+                                app.app.push_note(
+                                    "no pending attachments",
+                                    crate::app::NoteLevel::Info,
+                                );
+                            } else {
+                                let names = editor
+                                    .pending_images()
+                                    .iter()
+                                    .map(|image| format!("[image {}] {}", image.number, image.name))
+                                    .collect::<Vec<_>>()
+                                    .join(" · ");
+                                app.app.push_note(names, crate::app::NoteLevel::Info);
+                            }
+                        }
                         TuiCommand::ModelSwitchResult {
                             request_id,
                             model,

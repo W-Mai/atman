@@ -990,21 +990,23 @@ pub(crate) fn handle_key(
     let mut edited = false;
     match action {
         KeyAction::PasteImage => {
-            let Some(session) = app.session.clone() else {
-                app.push_note(
-                    "image paste requires an active session",
-                    app::NoteLevel::Warn,
-                );
-                return;
-            };
             match crate::clipboard::read_image_png().and_then(|bytes| {
-                session
-                    .import_image_bytes(&bytes, Some("clipboard.png"))
-                    .map_err(Into::into)
+                if let Some(session) = app.session.as_ref() {
+                    session
+                        .import_image_bytes(&bytes, Some("clipboard.png"))
+                        .map_err(Into::into)
+                } else {
+                    atman_runtime::attachment_store::AttachmentStore::at("")
+                        .import_bytes(&bytes, Some("clipboard.png"))
+                        .map_err(Into::into)
+                }
             }) {
                 Ok(source) => {
-                    let count = session.queue_image_source(source.clone());
+                    if let Some(session) = app.session.as_ref() {
+                        session.queue_image_source(source.clone());
+                    }
                     let number = editor.attach_image(source);
+                    let count = editor.pending_images().len();
                     app.attach_count = count;
                     app.push_note(
                         format!("attached clipboard image as [image {number}] ({count} pending)"),
@@ -1019,14 +1021,15 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::RemoveAttachment => {
-            let Some(session) = app.session.clone() else {
-                return;
-            };
-            editor.reconcile_images(&session.pending_images());
+            if let Some(session) = app.session.as_ref() {
+                editor.reconcile_images(&session.pending_images());
+            }
             match editor.remove_last_image() {
                 Some(source) => {
-                    session.remove_pending_image(&source);
-                    let count = session.pending_image_count();
+                    if let Some(session) = app.session.as_ref() {
+                        session.remove_pending_image(&source);
+                    }
+                    let count = editor.pending_images().len();
                     app.attach_count = count;
                     app.push_note(
                         format!(
@@ -1102,46 +1105,62 @@ pub(crate) fn handle_key(
                     app.save_ui_state();
                 }
                 let line = editor_submission.text;
-                if !app.has_running_workflow() {
+                let is_meta = line.trim_start().starts_with(':');
+                if !is_meta && !app.has_running_workflow() {
                     app.push_user_turn(line.clone());
                 }
                 if control_tx.is_some() || submit_tx.is_some() {
-                    let images = if line.trim_start().starts_with(':') {
-                        Vec::new()
-                    } else {
-                        app.session
-                            .as_ref()
-                            .map(|session| session.take_pending_images())
-                            .unwrap_or_default()
-                    };
-                    let submission = crate::TuiSubmission {
-                        text: line,
-                        images,
-                        reasoning: app.input_reasoning_for_submission(),
-                    };
-                    let failed = if let Some(tx) = control_tx {
-                        tx.send(TuiDomainCommand::Submit(submission).into())
-                            .err()
-                            .and_then(|error| match error.0 {
-                                TuiControl::Domain(TuiDomainCommand::Submit(submission)) => {
-                                    Some(submission)
-                                }
-                                _ => None,
-                            })
-                    } else {
-                        submit_tx
-                            .and_then(|tx| tx.send(submission).err())
-                            .map(|error| error.0)
-                    };
-                    if let Some(failed) = failed {
-                        if let Some(session) = app.session.clone() {
-                            app.attach_count = session.restore_pending_images(failed.images);
-                            editor.reconcile_images(&session.pending_images());
+                    if is_meta {
+                        for source in editor_submission.images {
+                            editor.attach_image(source);
                         }
-                    } else if let Some(session) = app.session.clone() {
-                        app.attach_count = session.pending_image_count();
-                        if !editor_submission.images.is_empty() {
-                            editor.reconcile_images(&session.pending_images());
+                        app.attach_count = editor.pending_images().len();
+                        if let Some(tx) = control_tx {
+                            let command = line.trim_start_matches(':').trim().to_owned();
+                            let _ = tx.send(TuiControl::MetaCommand(command));
+                        } else if let Some(tx) = submit_tx {
+                            let _ = tx.send(crate::TuiSubmission {
+                                text: line,
+                                images: Vec::new(),
+                                reasoning: None,
+                            });
+                        }
+                    } else {
+                        let images = editor_submission.images;
+                        let submission = crate::TuiSubmission {
+                            text: line,
+                            images,
+                            reasoning: app.input_reasoning_for_submission(),
+                        };
+                        if let Some(session) = app.session.as_ref() {
+                            session.take_pending_images();
+                        }
+                        let failed = if let Some(tx) = control_tx {
+                            tx.send(TuiDomainCommand::Submit(submission).into())
+                                .err()
+                                .and_then(|error| match error.0 {
+                                    TuiControl::Domain(TuiDomainCommand::Submit(submission)) => {
+                                        Some(submission)
+                                    }
+                                    _ => None,
+                                })
+                        } else {
+                            submit_tx
+                                .and_then(|tx| tx.send(submission).err())
+                                .map(|error| error.0)
+                        };
+                        if let Some(failed) = failed {
+                            if let Some(session) = app.session.clone() {
+                                app.attach_count = session.restore_pending_images(failed.images);
+                                editor.reconcile_images(&session.pending_images());
+                            } else {
+                                for source in failed.images {
+                                    editor.attach_image(source);
+                                }
+                                app.attach_count = editor.pending_images().len();
+                            }
+                        } else {
+                            app.attach_count = 0;
                         }
                     }
                 } else if let Some(session) = app.session.clone() {
@@ -1377,8 +1396,10 @@ pub(crate) fn handle_key(
             for source in editor.prune_missing_image_references() {
                 session.remove_pending_image(&source);
             }
-            app.attach_count = session.pending_image_count();
+        } else {
+            editor.prune_missing_image_references();
         }
+        app.attach_count = editor.pending_images().len();
         app.refresh_popup(editor.buf());
     }
 }
@@ -1658,6 +1679,69 @@ mod tests {
             panic!("submission must share the ordered control channel");
         };
         assert_eq!(submission.text, "run after mode update");
+    }
+
+    #[test]
+    fn daemon_submission_forwards_editor_owned_attachment() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let mut editor = InputEditor::default();
+        editor.insert_str("inspect this ");
+        let source = atman_runtime::attachment_store::AttachmentStore::at("")
+            .import_bytes(PNG_BYTES, Some("clipboard.png"))
+            .unwrap();
+        editor.attach_image(source);
+        state.app.attach_count = 1;
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&control_tx),
+        );
+
+        let TuiControl::Domain(TuiDomainCommand::Submit(submission)) =
+            control_rx.try_recv().unwrap()
+        else {
+            panic!("expected daemon submission");
+        };
+        assert_eq!(submission.text.trim(), "inspect this");
+        assert_eq!(submission.images.len(), 1);
+        assert_eq!(state.app.attach_count, 0);
+    }
+
+    #[test]
+    fn meta_command_is_not_a_user_turn_and_preserves_draft_attachments() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let mut editor = InputEditor::default();
+        editor.insert_str(":help ");
+        let source = atman_runtime::attachment_store::AttachmentStore::at("")
+            .import_bytes(PNG_BYTES, Some("clipboard.png"))
+            .unwrap();
+        editor.attach_image(source);
+        state.app.attach_count = 1;
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let mut interrupt_prompt = None;
+
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&control_tx),
+        );
+
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(TuiControl::MetaCommand(command)) if command == "help"
+        ));
+        assert!(state.app.items.is_empty());
+        assert_eq!(editor.pending_images().len(), 1);
+        assert_eq!(state.app.attach_count, 1);
     }
 
     #[test]

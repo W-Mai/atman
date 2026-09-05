@@ -76,6 +76,21 @@ async fn run_session(
         let mut shutdown_tx = Some(shutdown_tx);
         while let Some(control) = control_rx.recv().await {
             match control {
+                TuiControl::MetaCommand(command) => {
+                    if handle_meta_command(
+                        &control_session,
+                        &command_tx,
+                        &control_note_tx,
+                        &command,
+                    )
+                    .await
+                    {
+                        if let Some(tx) = shutdown_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        break;
+                    }
+                }
                 TuiControl::Domain(atman_tui::TuiDomainCommand::FormSubmit {
                     form_id,
                     submission,
@@ -353,6 +368,327 @@ async fn run_session(
     control_task.await.context("join daemon TUI control task")?;
     result?;
     Ok(next_rx.try_recv().ok())
+}
+
+async fn handle_meta_command(
+    session: &SessionClient,
+    command_tx: &mpsc::UnboundedSender<TuiCommand>,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+    command: &str,
+) -> bool {
+    let Some(meta) = atman_runtime::meta_commands::match_command(command) else {
+        note(
+            note_tx,
+            TuiNote::Error(format!("unknown `:{command}` — try `:help`")),
+        );
+        return false;
+    };
+    match meta.name {
+        "exit" => return true,
+        "help" => {
+            for line in atman_runtime::meta_commands::help_lines() {
+                note(note_tx, TuiNote::Info(line.into()));
+            }
+        }
+        "session" => note(
+            note_tx,
+            TuiNote::Info(format!("session_id: {}", session.session_id())),
+        ),
+        "sessions" => {
+            let _ = command_tx.send(TuiCommand::OpenSessionSwitcher);
+        }
+        "mode" => {
+            let _ = command_tx.send(TuiCommand::OpenTrustModePicker);
+        }
+        "mode-theme" => {
+            let _ = command_tx.send(TuiCommand::OpenThemePicker);
+        }
+        "model" => {
+            let _ = command_tx.send(TuiCommand::OpenModelPicker);
+        }
+        "sidebar" => handle_sidebar(command_tx, note_tx, command),
+        "rename" => handle_rename(session, command_tx, note_tx, command).await,
+        "compact" => match session.compact().await {
+            Ok(_) => note(note_tx, TuiNote::Info("compaction requested".into())),
+            Err(error) => note(
+                note_tx,
+                TuiNote::Error(format!("could not request compaction: {error}")),
+            ),
+        },
+        "attach" => handle_attach(command_tx, note_tx, command),
+        "copy" => handle_copy(session, note_tx, command),
+        "goal" => handle_goal(session, note_tx, command).await,
+        "todo" => handle_todo(session, note_tx, command).await,
+        "cost" => {
+            let state = session.current();
+            let usage = &state.projection().usage;
+            note(
+                note_tx,
+                TuiNote::Info(format!(
+                    "total llm_calls: {} · input: {} · output: {}",
+                    usage.llm_calls, usage.input_tokens, usage.output_tokens
+                )),
+            );
+        }
+        "suggest" => note(
+            note_tx,
+            TuiNote::Warn(":suggest is not available through the daemon yet".into()),
+        ),
+        _ => {}
+    }
+    false
+}
+
+fn note(note_tx: &mpsc::UnboundedSender<TuiNote>, note: TuiNote) {
+    let _ = note_tx.send(note);
+}
+
+fn handle_sidebar(
+    command_tx: &mpsc::UnboundedSender<TuiCommand>,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+    command: &str,
+) {
+    let arg = command.strip_prefix("sidebar").unwrap_or("").trim();
+    let mode = match arg {
+        "on" | "open" => atman_tui::sidebar::SidebarMode::Open,
+        "off" | "close" | "closed" => atman_tui::sidebar::SidebarMode::Closed,
+        _ => {
+            note(note_tx, TuiNote::Warn(":sidebar on | off".into()));
+            return;
+        }
+    };
+    let _ = command_tx.send(TuiCommand::SetSidebar(mode));
+}
+
+async fn handle_rename(
+    session: &SessionClient,
+    command_tx: &mpsc::UnboundedSender<TuiCommand>,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+    command: &str,
+) {
+    let arg = command.strip_prefix("rename").unwrap_or("").trim();
+    if arg.is_empty() {
+        note(
+            note_tx,
+            TuiNote::Info(format!(
+                "session title: {}",
+                session.current().projection().metadata.title
+            )),
+        );
+        return;
+    }
+    let result = if arg == "clear" {
+        session.clear_title().await
+    } else {
+        session.rename(arg).await
+    };
+    match result {
+        Ok(response) => {
+            let _ = command_tx.send(TuiCommand::SessionNameUpdated(response.session.title));
+        }
+        Err(error) => note(
+            note_tx,
+            TuiNote::Error(format!("could not rename session: {error}")),
+        ),
+    }
+}
+
+fn handle_attach(
+    command_tx: &mpsc::UnboundedSender<TuiCommand>,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+    command: &str,
+) {
+    let arg = command.strip_prefix("attach").unwrap_or("").trim();
+    match arg {
+        "" => note(
+            note_tx,
+            TuiNote::Warn(":attach <path> | :attach clear | :attach list".into()),
+        ),
+        "clear" => {
+            let _ = command_tx.send(TuiCommand::ClearDraftAttachments);
+        }
+        "list" => {
+            let _ = command_tx.send(TuiCommand::ListDraftAttachments);
+        }
+        path => match atman_runtime::attachment_store::AttachmentStore::at("").import_path(path) {
+            Ok(source) => {
+                let _ = command_tx.send(TuiCommand::AddDraftAttachment(source));
+            }
+            Err(error) => note(note_tx, TuiNote::Error(format!(":attach: {error}"))),
+        },
+    }
+}
+
+fn handle_copy(session: &SessionClient, note_tx: &mpsc::UnboundedSender<TuiNote>, command: &str) {
+    use atman_proto::{MessagePart, MessageRole, TranscriptItem};
+
+    let target = command.strip_prefix("copy").unwrap_or("").trim();
+    let target = if target.is_empty() {
+        "last-message"
+    } else {
+        target
+    };
+    let assistant = match target {
+        "last-message" | "last" => true,
+        "last-tool" => false,
+        _ => {
+            note(
+                note_tx,
+                TuiNote::Warn(format!(":copy: unknown target `{target}`")),
+            );
+            return;
+        }
+    };
+    let payload = session
+        .current()
+        .projection()
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|item| {
+            let TranscriptItem::Message { message, .. } = item else {
+                return None;
+            };
+            if assistant && message.role != MessageRole::Assistant {
+                return None;
+            }
+            message.parts.iter().rev().find_map(|part| match part {
+                MessagePart::Text { text } if assistant => Some(text.clone()),
+                MessagePart::ToolResult { content, .. } if !assistant => Some(content.clone()),
+                _ => None,
+            })
+        });
+    let Some(payload) = payload else {
+        note(
+            note_tx,
+            TuiNote::Info(format!(":copy: nothing to copy for {target}")),
+        );
+        return;
+    };
+    use base64::Engine;
+    use std::io::Write;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+    let _ = std::io::stderr().write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes());
+    let _ = std::io::stderr().flush();
+    note(
+        note_tx,
+        TuiNote::Info(format!(
+            ":copy: pushed {} chars to clipboard",
+            payload.chars().count()
+        )),
+    );
+}
+
+async fn handle_goal(
+    session: &SessionClient,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+    command: &str,
+) {
+    let arg = command.strip_prefix("goal").unwrap_or("").trim();
+    if arg.is_empty() {
+        let message = session
+            .current()
+            .projection()
+            .goal
+            .as_deref()
+            .map(|goal| format!("goal: {goal}"))
+            .unwrap_or_else(|| "no session goal set".into());
+        note(note_tx, TuiNote::Info(message));
+        return;
+    }
+    let goal = (arg != "clear").then(|| arg.to_owned());
+    match session.set_goal(goal).await {
+        Ok(_) => note(note_tx, TuiNote::Info("goal updated".into())),
+        Err(error) => note(
+            note_tx,
+            TuiNote::Error(format!("could not update goal: {error}")),
+        ),
+    }
+}
+
+async fn handle_todo(
+    session: &SessionClient,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+    command: &str,
+) {
+    let arg = command.strip_prefix("todo").unwrap_or("").trim();
+    if matches!(arg, "" | "list") {
+        let state = session.current();
+        let todos = &state.projection().todos;
+        if todos.is_empty() {
+            note(note_tx, TuiNote::Info("no todos yet".into()));
+        } else {
+            for (index, todo) in todos.iter().enumerate() {
+                let state = match todo.state {
+                    atman_proto::TodoState::Pending => "pending",
+                    atman_proto::TodoState::InProgress => "in progress",
+                    atman_proto::TodoState::Done => "done",
+                    atman_proto::TodoState::Cancelled => "cancelled",
+                };
+                note(
+                    note_tx,
+                    TuiNote::Info(format!("{index:>2} · {state} · {}", todo.where_)),
+                );
+            }
+        }
+        return;
+    }
+    let mutation = if arg == "clear" {
+        atman_proto::TodoMutation::Clear
+    } else if let Some(id) = arg.strip_prefix("done ") {
+        let Some(id) = resolve_todo_id(session, id.trim(), note_tx) else {
+            return;
+        };
+        atman_proto::TodoMutation::SetState {
+            id,
+            state: atman_proto::TodoState::Done,
+        }
+    } else if let Some(id) = arg.strip_prefix("cancel ") {
+        let Some(id) = resolve_todo_id(session, id.trim(), note_tx) else {
+            return;
+        };
+        atman_proto::TodoMutation::SetState {
+            id,
+            state: atman_proto::TodoState::Cancelled,
+        }
+    } else {
+        note(
+            note_tx,
+            TuiNote::Warn(":todo list | done <id> | cancel <id> | clear".into()),
+        );
+        return;
+    };
+    match session.update_todos(mutation).await {
+        Ok(_) => note(note_tx, TuiNote::Info("todo updated".into())),
+        Err(error) => note(
+            note_tx,
+            TuiNote::Error(format!("could not update todo: {error}")),
+        ),
+    }
+}
+
+fn resolve_todo_id(
+    session: &SessionClient,
+    value: &str,
+    note_tx: &mpsc::UnboundedSender<TuiNote>,
+) -> Option<String> {
+    if uuid::Uuid::parse_str(value).is_ok() {
+        return Some(value.to_owned());
+    }
+    let Ok(index) = value.parse::<usize>() else {
+        note(note_tx, TuiNote::Warn(format!("invalid todo id `{value}`")));
+        return None;
+    };
+    match session.current().projection().todos.get(index) {
+        Some(todo) => Some(todo.id.clone()),
+        None => {
+            note(
+                note_tx,
+                TuiNote::Warn(format!("todo index {index} out of range")),
+            );
+            None
+        }
+    }
 }
 
 fn submitted_text(submission: &atman_runtime::form::FormSubmission) -> Option<&str> {

@@ -1983,6 +1983,13 @@ async fn cmd_repl_once(
                     continue;
                 }
                 match msg {
+                    atman_tui::TuiControl::MetaCommand(command) => {
+                        tui_input_sink.send(atman_tui::TuiSubmission {
+                            text: format!(":{command}"),
+                            images: Vec::new(),
+                            reasoning: None,
+                        });
+                    }
                     atman_tui::TuiControl::AutoNameSession => {
                         match atman_runtime::session_naming::force_generate_session_name(
                             &executor_for_ctrl,
