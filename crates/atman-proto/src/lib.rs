@@ -322,6 +322,9 @@ pub mod methods {
     pub const DELETE_SESSION: &str = "session.delete";
     pub const SANITIZE_SESSION_ATTACHMENTS: &str = "session.sanitize_attachments";
     pub const IMPORT_SESSION_MESSAGES: &str = "session.import_messages";
+    pub const MUTATE_PROVIDER: &str = "config.provider.mutate";
+    pub const UPSERT_MODEL_CONFIG: &str = "config.model.upsert";
+    pub const SWITCH_DEFAULT_MODEL: &str = "config.model.switch_default";
     pub const SEND_MESSAGE: &str = "session.send_message";
     pub const INTERJECT_SESSION: &str = "session.interject";
     pub const UPDATE_SESSION_TRUST: &str = "session.update_trust";
@@ -361,6 +364,9 @@ pub mod methods {
         super::method_descriptor::<super::rpc::DeleteSession>(),
         super::method_descriptor::<super::rpc::SanitizeSessionAttachments>(),
         super::method_descriptor::<super::rpc::ImportSessionMessages>(),
+        super::method_descriptor::<super::rpc::MutateProvider>(),
+        super::method_descriptor::<super::rpc::UpsertModelConfig>(),
+        super::method_descriptor::<super::rpc::SwitchDefaultModel>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::UpdateSessionTrust>(),
@@ -590,6 +596,129 @@ pub struct ImportSessionMessagesResponse {
     pub imported: usize,
     pub revision: Revision,
     pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderKind {
+    Codex,
+    AnthropicOauth,
+    GitHubCopilot,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderMutation {
+    Login {
+        kind: ProviderKind,
+        name: String,
+    },
+    SetEnabled {
+        provider_id: String,
+        enabled: bool,
+    },
+    Remove {
+        provider_id: String,
+    },
+    Refresh {
+        provider_id: String,
+    },
+    UpsertConfig {
+        name: String,
+        kind: String,
+        api_key: String,
+        api_key_env: String,
+        base_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_tokens: Option<u32>,
+        reasoning_format: String,
+        enabled: bool,
+        create: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MutateProviderRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub mutation: ProviderMutation,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct CatalogDelta {
+    pub added: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ProviderStateChange {
+    pub auth_changed: bool,
+    pub live_changed: bool,
+    pub catalog_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderMutationResult {
+    Installed {
+        provider_id: String,
+        name: String,
+        kind: ProviderKind,
+        delta: CatalogDelta,
+    },
+    StateChanged {
+        provider_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        change: ProviderStateChange,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog: Option<CatalogDelta>,
+    },
+    Refreshed {
+        provider_id: String,
+        delta: CatalogDelta,
+    },
+    ConfigSaved {
+        name: String,
+        created: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpsertModelConfigRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_name: Option<String>,
+    pub name: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub context_budget: u64,
+    pub reasoning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct UpsertModelConfigResponse {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SwitchDefaultModelRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SwitchDefaultModelResponse {
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1399,6 +1528,27 @@ pub mod rpc {
         Command,
         ImportSessionMessagesRequest,
         ImportSessionMessagesResponse
+    );
+    method!(
+        MutateProvider,
+        methods::MUTATE_PROVIDER,
+        Command,
+        MutateProviderRequest,
+        ProviderMutationResult
+    );
+    method!(
+        UpsertModelConfig,
+        methods::UPSERT_MODEL_CONFIG,
+        Command,
+        UpsertModelConfigRequest,
+        UpsertModelConfigResponse
+    );
+    method!(
+        SwitchDefaultModel,
+        methods::SWITCH_DEFAULT_MODEL,
+        Command,
+        SwitchDefaultModelRequest,
+        SwitchDefaultModelResponse
     );
     method!(
         SendMessage,

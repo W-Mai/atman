@@ -46,6 +46,24 @@
       "$ref": "#/$defs/ImportSessionMessagesResponse"
     },
     {
+      "$ref": "#/$defs/MutateProviderRequest"
+    },
+    {
+      "$ref": "#/$defs/ProviderMutationResult"
+    },
+    {
+      "$ref": "#/$defs/UpsertModelConfigRequest"
+    },
+    {
+      "$ref": "#/$defs/UpsertModelConfigResponse"
+    },
+    {
+      "$ref": "#/$defs/SwitchDefaultModelRequest"
+    },
+    {
+      "$ref": "#/$defs/SwitchDefaultModelResponse"
+    },
+    {
       "$ref": "#/$defs/SendMessageRequest"
     },
     {
@@ -1146,6 +1164,33 @@
         "snapshot_schema_version": {
           "type": "integer",
           "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "CatalogDelta": {
+      "type": "object",
+      "required": [
+        "added",
+        "updated",
+        "removed",
+        "total"
+      ],
+      "properties": {
+        "added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated": {
+          "type": "integer",
           "minimum": 0
         }
       }
@@ -3286,6 +3331,27 @@
         }
       }
     },
+    "MutateProviderRequest": {
+      "type": "object",
+      "required": [
+        "mutation"
+      ],
+      "properties": {
+        "mutation": {
+          "$ref": "#/$defs/ProviderMutation"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        }
+      }
+    },
     "NameSource": {
       "type": "string",
       "enum": [
@@ -4191,6 +4257,288 @@
         "subscriber_buffer": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "ProviderKind": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "anthropic-oauth",
+        "git-hub-copilot",
+        "custom"
+      ]
+    },
+    "ProviderMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "name",
+            "type"
+          ],
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/ProviderKind"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "login"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "enabled",
+            "type"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "set_enabled"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "type"
+          ],
+          "properties": {
+            "provider_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "remove"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "type"
+          ],
+          "properties": {
+            "provider_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "refresh"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "kind",
+            "api_key",
+            "api_key_env",
+            "base_url",
+            "reasoning_format",
+            "enabled",
+            "create",
+            "type"
+          ],
+          "properties": {
+            "api_key": {
+              "type": "string"
+            },
+            "api_key_env": {
+              "type": "string"
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "create": {
+              "type": "boolean"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "max_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "reasoning_format": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "upsert_config"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ProviderMutationResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "name",
+            "kind",
+            "delta",
+            "type"
+          ],
+          "properties": {
+            "delta": {
+              "$ref": "#/$defs/CatalogDelta"
+            },
+            "kind": {
+              "$ref": "#/$defs/ProviderKind"
+            },
+            "name": {
+              "type": "string"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "installed"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "change",
+            "type"
+          ],
+          "properties": {
+            "catalog": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/CatalogDelta"
+                }
+              ]
+            },
+            "change": {
+              "$ref": "#/$defs/ProviderStateChange"
+            },
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "state_changed"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "delta",
+            "type"
+          ],
+          "properties": {
+            "delta": {
+              "$ref": "#/$defs/CatalogDelta"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "refreshed"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "created",
+            "type"
+          ],
+          "properties": {
+            "created": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "config_saved"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ProviderStateChange": {
+      "type": "object",
+      "required": [
+        "auth_changed",
+        "live_changed",
+        "catalog_changed"
+      ],
+      "properties": {
+        "auth_changed": {
+          "type": "boolean"
+        },
+        "catalog_changed": {
+          "type": "boolean"
+        },
+        "live_changed": {
+          "type": "boolean"
         }
       }
     },
@@ -5940,6 +6288,38 @@
         }
       ]
     },
+    "SwitchDefaultModelRequest": {
+      "type": "object",
+      "required": [
+        "model"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        }
+      }
+    },
+    "SwitchDefaultModelResponse": {
+      "type": "object",
+      "required": [
+        "model"
+      ],
+      "properties": {
+        "model": {
+          "type": "string"
+        }
+      }
+    },
     "TerminalResizeStatus": {
       "type": "string",
       "enum": [
@@ -6795,6 +7175,76 @@
         },
         "trust": {
           "$ref": "#/$defs/TrustProjection"
+        }
+      }
+    },
+    "UpsertModelConfigRequest": {
+      "type": "object",
+      "required": [
+        "name",
+        "model",
+        "context_budget",
+        "reasoning",
+        "enabled"
+      ],
+      "properties": {
+        "context_budget": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "minimum": 0
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "old_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        }
+      }
+    },
+    "UpsertModelConfigResponse": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
         }
       }
     },

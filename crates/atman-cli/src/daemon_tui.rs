@@ -14,7 +14,6 @@ enum NextSession {
 
 pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     crate::load_model_config_from_disk();
-    let provider_lifecycle = settings_provider_lifecycle().await?;
     let client = connect_local_daemon_as("atman-tui").await?;
     let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
     let first = match resume {
@@ -37,9 +36,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     };
     loop {
         let NextSession::Attached { session, intro } = current;
-        let Some(next) =
-            run_session(client.clone(), provider_lifecycle.clone(), session, intro).await?
-        else {
+        let Some(next) = run_session(client.clone(), session, intro).await? else {
             return Ok(());
         };
         current = next;
@@ -48,7 +45,6 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
 
 async fn run_session(
     client: Client,
-    provider_lifecycle: atman_runtime::ProviderLifecycle,
     session: SessionClient,
     intro: Option<atman_tui::app::StartupIntro>,
 ) -> Result<Option<NextSession>> {
@@ -305,12 +301,19 @@ async fn run_session(
                     }
                 }
                 TuiControl::MutateProvider(request) => {
-                    let result = crate::execute_provider_mutation(
-                        &provider_lifecycle,
-                        request.action.clone(),
-                    )
-                    .await
-                    .map_err(|error| format!("{error:#}"));
+                    let result = provider_mutation_to_proto(request.action.clone())
+                        .map_err(|error| error.to_string());
+                    let result = match result {
+                        Ok(mutation) => control_client
+                            .mutate_provider(mutation)
+                            .await
+                            .map(provider_mutation_from_proto)
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    if result.is_ok() {
+                        crate::load_model_config_from_disk();
+                    }
                     let _ = command_tx.send(TuiCommand::ProviderMutationResult { request, result });
                 }
                 TuiControl::UpsertConfigModel {
@@ -323,22 +326,21 @@ async fn run_session(
                     max_tokens,
                     enabled,
                 } => {
-                    let result = atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
-                        hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
-                            old_name: old_name.as_deref(),
-                            name: &name,
-                            model: &model,
-                            provider: provider.as_deref(),
+                    let result = control_client
+                        .upsert_model_config(atman_proto::UpsertModelConfigRequest {
+                            request_id: None,
+                            old_name,
+                            name: name.clone(),
+                            model,
+                            provider,
                             context_budget,
-                            reasoning,
-                            capabilities: None,
-                            image_detail: None,
+                            reasoning: reasoning.to_string(),
                             max_tokens,
                             enabled,
                         })
-                    });
+                        .await;
                     match result {
-                        Ok(()) => {
+                        Ok(_) => {
                             crate::load_model_config_from_disk();
                             let _ = command_tx.send(TuiCommand::ProviderCatalogChanged {
                                 added_provider: None,
@@ -353,7 +355,14 @@ async fn run_session(
                 }
                 TuiControl::OpenAliasManager { .. } => {}
                 TuiControl::SwitchModel { request_id, model } => {
-                    let result = switch_model(&provider_lifecycle, &model);
+                    let result = control_client
+                        .switch_default_model(model.clone())
+                        .await
+                        .map(|response| response.model)
+                        .map_err(|error| error.to_string());
+                    if result.is_ok() {
+                        crate::load_model_config_from_disk();
+                    }
                     let _ = command_tx.send(TuiCommand::ModelSwitchResult {
                         request_id,
                         model,
@@ -802,38 +811,125 @@ fn submitted_text(submission: &atman_runtime::form::FormSubmission) -> Option<&s
     Some(text)
 }
 
-async fn settings_provider_lifecycle() -> Result<atman_runtime::ProviderLifecycle> {
-    let lifecycle = atman_runtime::ProviderLifecycle::new(
-        atman_runtime::config_hub::ConfigHub::global()?,
-        atman_runtime::provider::ProviderRegistry::new(),
-    );
-    lifecycle.reload_config_providers()?;
-    atman_daemon::bootstrap::prepare_auth_provider_runtime(&lifecycle).await?;
-    Ok(lifecycle)
+fn provider_mutation_to_proto(
+    mutation: atman_tui::ProviderMutation,
+) -> Result<atman_proto::ProviderMutation> {
+    Ok(match mutation {
+        atman_tui::ProviderMutation::Login { kind, name } => atman_proto::ProviderMutation::Login {
+            kind: match kind {
+                atman_runtime::auth_store::ProviderKind::Codex => atman_proto::ProviderKind::Codex,
+                atman_runtime::auth_store::ProviderKind::AnthropicOauth => {
+                    atman_proto::ProviderKind::AnthropicOauth
+                }
+                atman_runtime::auth_store::ProviderKind::GitHubCopilot => {
+                    atman_proto::ProviderKind::GitHubCopilot
+                }
+                atman_runtime::auth_store::ProviderKind::Custom => {
+                    atman_proto::ProviderKind::Custom
+                }
+            },
+            name,
+        },
+        atman_tui::ProviderMutation::SetEnabled {
+            provider_id,
+            enabled,
+        } => atman_proto::ProviderMutation::SetEnabled {
+            provider_id,
+            enabled,
+        },
+        atman_tui::ProviderMutation::Remove { provider_id } => {
+            atman_proto::ProviderMutation::Remove { provider_id }
+        }
+        atman_tui::ProviderMutation::Refresh { provider_id } => {
+            atman_proto::ProviderMutation::Refresh { provider_id }
+        }
+        atman_tui::ProviderMutation::UpsertConfig {
+            name,
+            kind,
+            api_key,
+            api_key_env,
+            base_url,
+            max_tokens,
+            reasoning_format,
+            enabled,
+            create,
+        } => atman_proto::ProviderMutation::UpsertConfig {
+            name,
+            kind,
+            api_key,
+            api_key_env,
+            base_url,
+            max_tokens,
+            reasoning_format,
+            enabled,
+            create,
+        },
+        _ => bail!("provider mutation is not supported by this client"),
+    })
 }
 
-fn switch_model(
-    provider_lifecycle: &atman_runtime::ProviderLifecycle,
-    requested_model: &str,
-) -> Result<String, String> {
-    let info = atman_runtime::model_registry::model_info(requested_model);
-    if info.context_budget == 0 {
-        return Err("model or provider is disabled".into());
+fn provider_mutation_from_proto(
+    result: atman_proto::ProviderMutationResult,
+) -> atman_tui::ProviderMutationSuccess {
+    match result {
+        atman_proto::ProviderMutationResult::Installed {
+            provider_id,
+            name,
+            kind,
+            delta,
+        } => atman_tui::ProviderMutationSuccess::Installed {
+            provider_id,
+            name,
+            kind: match kind {
+                atman_proto::ProviderKind::Codex => atman_runtime::auth_store::ProviderKind::Codex,
+                atman_proto::ProviderKind::AnthropicOauth => {
+                    atman_runtime::auth_store::ProviderKind::AnthropicOauth
+                }
+                atman_proto::ProviderKind::GitHubCopilot => {
+                    atman_runtime::auth_store::ProviderKind::GitHubCopilot
+                }
+                atman_proto::ProviderKind::Custom => {
+                    atman_runtime::auth_store::ProviderKind::Custom
+                }
+            },
+            delta: runtime_catalog_delta(delta),
+        },
+        atman_proto::ProviderMutationResult::StateChanged {
+            provider_id,
+            enabled,
+            change,
+            catalog,
+        } => atman_tui::ProviderMutationSuccess::StateChanged {
+            provider_id,
+            enabled,
+            change: atman_runtime::provider_lifecycle::ProviderStateChange {
+                auth_changed: change.auth_changed,
+                live_changed: change.live_changed,
+                catalog_changed: change.catalog_changed,
+            },
+            catalog: catalog.map(runtime_catalog_delta),
+        },
+        atman_proto::ProviderMutationResult::Refreshed { provider_id, delta } => {
+            atman_tui::ProviderMutationSuccess::Refreshed {
+                provider_id,
+                delta: runtime_catalog_delta(delta),
+            }
+        }
+        atman_proto::ProviderMutationResult::ConfigSaved { name, created } => {
+            atman_tui::ProviderMutationSuccess::ConfigSaved { name, created }
+        }
     }
-    let active_model = info.name;
-    if provider_lifecycle
-        .provider_registry()
-        .resolve(&active_model)
-        .is_none()
-    {
-        return Err("provider is not available in this process".into());
+}
+
+fn runtime_catalog_delta(
+    delta: atman_proto::CatalogDelta,
+) -> atman_runtime::model_registry::CatalogDelta {
+    atman_runtime::model_registry::CatalogDelta {
+        added: delta.added,
+        updated: delta.updated,
+        removed: delta.removed,
+        total: delta.total,
     }
-    atman_runtime::config_hub::ConfigHub::global()
-        .map_err(|error| error.to_string())?
-        .update_alias(Some("smart"), "smart", &active_model)
-        .map_err(|error| error.to_string())?;
-    crate::load_model_config_from_disk();
-    Ok(active_model)
 }
 
 async fn test_mcp(name: &str) -> (String, bool) {

@@ -15,6 +15,12 @@ export type AtmanDaemonProtocolPayloads =
   | SanitizeSessionAttachmentsResponse
   | ImportSessionMessagesRequest
   | ImportSessionMessagesResponse
+  | MutateProviderRequest
+  | ProviderMutationResult
+  | UpsertModelConfigRequest
+  | UpsertModelConfigResponse
+  | SwitchDefaultModelRequest
+  | SwitchDefaultModelResponse
   | SendMessageRequest
   | SendMessageResponse
   | InterjectSessionRequest
@@ -503,6 +509,72 @@ export type WorkflowFanoutMode = 'all' | 'first'
 export type WorkflowNodeState = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type SessionCloseStatus = 'closed' | 'already_closed' | 'busy'
 export type SessionDeleteStatus = 'deleted' | 'not_found' | 'busy' | 'unsafe_resources'
+export type ProviderMutation =
+  | {
+      kind: ProviderKind
+      name: string
+      type: 'login'
+      [k: string]: unknown
+    }
+  | {
+      enabled: boolean
+      provider_id: string
+      type: 'set_enabled'
+      [k: string]: unknown
+    }
+  | {
+      provider_id: string
+      type: 'remove'
+      [k: string]: unknown
+    }
+  | {
+      provider_id: string
+      type: 'refresh'
+      [k: string]: unknown
+    }
+  | {
+      api_key: string
+      api_key_env: string
+      base_url: string
+      create: boolean
+      enabled: boolean
+      kind: string
+      max_tokens?: number | null
+      name: string
+      reasoning_format: string
+      type: 'upsert_config'
+      [k: string]: unknown
+    }
+export type ProviderKind = 'codex' | 'anthropic-oauth' | 'git-hub-copilot' | 'custom'
+export type ProviderMutationResult =
+  | {
+      delta: CatalogDelta
+      kind: ProviderKind
+      name: string
+      provider_id: string
+      type: 'installed'
+      [k: string]: unknown
+    }
+  | {
+      catalog?: null | CatalogDelta
+      change: ProviderStateChange
+      enabled?: boolean | null
+      provider_id: string
+      type: 'state_changed'
+      [k: string]: unknown
+    }
+  | {
+      delta: CatalogDelta
+      provider_id: string
+      type: 'refreshed'
+      [k: string]: unknown
+    }
+  | {
+      created: boolean
+      name: string
+      type: 'config_saved'
+      [k: string]: unknown
+    }
 export type SessionStatus = 'running' | 'finished' | 'pending'
 export type AutoNameSessionStatus = 'updated' | 'superseded'
 export type SuggestFlowStatus =
@@ -1296,6 +1368,49 @@ export interface ImportSessionMessagesResponse {
   imported: number
   revision: Revision
   session_id: SessionId
+  [k: string]: unknown
+}
+export interface MutateProviderRequest {
+  mutation: ProviderMutation
+  request_id?: null | RequestId
+  [k: string]: unknown
+}
+export interface CatalogDelta {
+  added: number
+  removed: number
+  total: number
+  updated: number
+  [k: string]: unknown
+}
+export interface ProviderStateChange {
+  auth_changed: boolean
+  catalog_changed: boolean
+  live_changed: boolean
+  [k: string]: unknown
+}
+export interface UpsertModelConfigRequest {
+  context_budget: number
+  enabled: boolean
+  max_tokens?: number | null
+  model: string
+  name: string
+  old_name?: string | null
+  provider?: string | null
+  reasoning: string
+  request_id?: null | RequestId
+  [k: string]: unknown
+}
+export interface UpsertModelConfigResponse {
+  name: string
+  [k: string]: unknown
+}
+export interface SwitchDefaultModelRequest {
+  model: string
+  request_id?: null | RequestId
+  [k: string]: unknown
+}
+export interface SwitchDefaultModelResponse {
+  model: string
   [k: string]: unknown
 }
 export interface SendMessageRequest {

@@ -15,10 +15,11 @@ use atman_proto::{
     CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor,
     GetEventsRequest, GetEventsResponse, ImportSessionMessagesRequest,
     ImportSessionMessagesResponse, ImportedMessage, JsonRpcRequest, JsonRpcResponse,
-    ListProjectsRequest, ListProjectsResponse, ListSessionsRequest, PROTOCOL_VERSION,
-    ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
-    SanitizeSessionAttachmentsRequest, SanitizeSessionAttachmentsResponse, SessionId,
-    SessionSummary, rpc,
+    ListProjectsRequest, ListProjectsResponse, ListSessionsRequest, MutateProviderRequest,
+    PROTOCOL_VERSION, ProjectionEventEnvelope, ProviderMutation, ProviderMutationResult, RequestId,
+    RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse, SanitizeSessionAttachmentsRequest,
+    SanitizeSessionAttachmentsResponse, SessionId, SessionSummary, SwitchDefaultModelRequest,
+    SwitchDefaultModelResponse, UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -312,6 +313,36 @@ impl Client {
             request_id: Some(RequestId::now()),
             session_id,
             messages,
+        })
+        .await
+    }
+
+    pub async fn mutate_provider(
+        &self,
+        mutation: ProviderMutation,
+    ) -> Result<ProviderMutationResult, ClientError> {
+        self.command::<rpc::MutateProvider>(&MutateProviderRequest {
+            request_id: Some(RequestId::now()),
+            mutation,
+        })
+        .await
+    }
+
+    pub async fn upsert_model_config(
+        &self,
+        mut request: UpsertModelConfigRequest,
+    ) -> Result<UpsertModelConfigResponse, ClientError> {
+        request.request_id = Some(RequestId::now());
+        self.command::<rpc::UpsertModelConfig>(&request).await
+    }
+
+    pub async fn switch_default_model(
+        &self,
+        model: impl Into<String>,
+    ) -> Result<SwitchDefaultModelResponse, ClientError> {
+        self.command::<rpc::SwitchDefaultModel>(&SwitchDefaultModelRequest {
+            request_id: Some(RequestId::now()),
+            model: model.into(),
         })
         .await
     }

@@ -146,6 +146,7 @@ pub mod project_registry;
 mod projection;
 mod projection_snapshot;
 pub mod prompt_bridge;
+pub mod provider_config;
 pub mod run;
 mod session_actor;
 pub mod state;
@@ -162,6 +163,9 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::DeleteSession>(),
     method_descriptor::<rpc::SanitizeSessionAttachments>(),
     method_descriptor::<rpc::ImportSessionMessages>(),
+    method_descriptor::<rpc::MutateProvider>(),
+    method_descriptor::<rpc::UpsertModelConfig>(),
+    method_descriptor::<rpc::SwitchDefaultModel>(),
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::UpdateSessionTrust>(),
@@ -441,6 +445,99 @@ async fn dispatch_as_inner(
                     id,
                     JsonRpcError::invalid_params("messages must not be empty"),
                 ),
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::MUTATE_PROVIDER => match parse_params::<rpc::MutateProvider>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_params = params.clone();
+                match execute_command::<rpc::MutateProvider, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let launcher = operation_state.launcher().ok_or_else(|| {
+                            JsonRpcError::application("daemon started without a run launcher")
+                        })?;
+                        let lifecycle = operation_state
+                            .provider_lifecycle_for(launcher.config_dir.as_deref())
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        lifecycle
+                            .reload_config_providers()
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        crate::provider_config::mutate(&lifecycle, operation_params.mutation)
+                            .await
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::MutateProvider>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::UPSERT_MODEL_CONFIG => match parse_params::<rpc::UpsertModelConfig>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_params = params.clone();
+                match execute_command::<rpc::UpsertModelConfig, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let launcher = operation_state.launcher().ok_or_else(|| {
+                            JsonRpcError::application("daemon started without a run launcher")
+                        })?;
+                        let lifecycle = operation_state
+                            .provider_lifecycle_for(launcher.config_dir.as_deref())
+                            .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                        crate::provider_config::upsert_model(&lifecycle, &operation_params)
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::UpsertModelConfig>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::SWITCH_DEFAULT_MODEL => {
+            match parse_params::<rpc::SwitchDefaultModel>(req.params) {
+                Ok(params) => {
+                    let operation_state = state.clone();
+                    let operation_params = params.clone();
+                    match execute_command::<rpc::SwitchDefaultModel, _>(
+                        &state,
+                        principal_id,
+                        params.request_id.clone(),
+                        &params,
+                        async move {
+                            let launcher = operation_state.launcher().ok_or_else(|| {
+                                JsonRpcError::application("daemon started without a run launcher")
+                            })?;
+                            let lifecycle = operation_state
+                                .provider_lifecycle_for(launcher.config_dir.as_deref())
+                                .map_err(|error| JsonRpcError::application(error.to_string()))?;
+                            crate::provider_config::switch_default_model(
+                                &lifecycle,
+                                &operation_params.model,
+                            )
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                        },
+                    )
+                    .await
+                    {
+                        Ok(response) => method_response::<rpc::SwitchDefaultModel>(id, response),
+                        Err(error) => JsonRpcResponse::err(id, error),
+                    }
+                }
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }

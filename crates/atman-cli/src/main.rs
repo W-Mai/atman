@@ -11,7 +11,6 @@ mod init;
 mod mcp_templates;
 mod migrate_source;
 mod monitor;
-mod oauth_login;
 mod repl_completer;
 mod sync;
 mod upgrade;
@@ -1273,123 +1272,6 @@ where
                 "provider catalog `{provider_id}` refresh failed: {error}"
             ),
         }
-    }
-}
-
-async fn execute_provider_mutation(
-    lifecycle: &atman_runtime::provider_lifecycle::ProviderLifecycle,
-    action: atman_tui::ProviderMutation,
-) -> Result<atman_tui::ProviderMutationSuccess> {
-    match action {
-        atman_tui::ProviderMutation::Login { kind, name } => {
-            if kind != atman_runtime::auth_store::ProviderKind::Codex {
-                bail!("OAuth login for {kind:?} is not supported");
-            }
-            let (provider, delta) = crate::oauth_login::oauth_login::<
-                atman_runtime::providers::codex::CodexProvider,
-            >(lifecycle, &name)
-            .await?;
-            Ok(atman_tui::ProviderMutationSuccess::Installed {
-                provider_id: provider.id,
-                name: provider.name,
-                kind: provider.kind,
-                delta,
-            })
-        }
-        atman_tui::ProviderMutation::SetEnabled {
-            provider_id,
-            enabled,
-        } => {
-            if !enabled {
-                let change = lifecycle.disable_provider(&provider_id)?;
-                return Ok(atman_tui::ProviderMutationSuccess::StateChanged {
-                    provider_id,
-                    enabled: Some(false),
-                    change,
-                    catalog: None,
-                });
-            }
-
-            let provider = lifecycle
-                .config_hub()
-                .load_auth()?
-                .providers
-                .into_iter()
-                .find(|provider| provider.id == provider_id)
-                .with_context(|| format!("auth provider `{provider_id}` does not exist"))?;
-            let expected_kind = provider.kind.clone();
-            let live = atman_runtime::oauth::create_supported_managed_oauth_provider(
-                &provider,
-                lifecycle.config_hub().clone(),
-            )?;
-            let outcome = lifecycle
-                .enable_provider(&provider_id, expected_kind, live)
-                .await?;
-            Ok(atman_tui::ProviderMutationSuccess::StateChanged {
-                provider_id,
-                enabled: Some(true),
-                change: outcome.state,
-                catalog: outcome.catalog,
-            })
-        }
-        atman_tui::ProviderMutation::Remove { provider_id } => {
-            let change = lifecycle.remove_provider(&provider_id)?;
-            Ok(atman_tui::ProviderMutationSuccess::StateChanged {
-                provider_id,
-                enabled: None,
-                change,
-                catalog: None,
-            })
-        }
-        atman_tui::ProviderMutation::Refresh { provider_id } => {
-            let delta = lifecycle.refresh_models(&provider_id).await?;
-            Ok(atman_tui::ProviderMutationSuccess::Refreshed { provider_id, delta })
-        }
-        atman_tui::ProviderMutation::UpsertConfig {
-            name,
-            kind,
-            api_key,
-            api_key_env,
-            base_url,
-            max_tokens,
-            reasoning_format,
-            enabled,
-            create,
-        } => {
-            if !atman_runtime::model_registry::config_provider_types().contains(&kind.as_str()) {
-                bail!("config provider kind `{kind}` is not supported");
-            }
-            let reasoning_format = if reasoning_format.trim().is_empty() {
-                None
-            } else {
-                Some(
-                    reasoning_format
-                        .parse()
-                        .map_err(|error: String| anyhow::anyhow!(error))?,
-                )
-            };
-            let update = atman_runtime::config_hub::ProviderConfigUpdate {
-                name: &name,
-                kind: &kind,
-                api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
-                api_key_env: (!api_key_env.is_empty()).then_some(api_key_env.as_str()),
-                base_url: (!base_url.is_empty()).then_some(base_url.as_str()),
-                max_tokens,
-                reasoning_format,
-                prompt_cache_key: None,
-                enabled,
-            };
-            if create {
-                lifecycle.create_config_provider(update)?
-            } else {
-                lifecycle.update_config_provider(update)?
-            }
-            Ok(atman_tui::ProviderMutationSuccess::ConfigSaved {
-                name,
-                created: create,
-            })
-        }
-        _ => bail!("provider mutation is not supported by this host"),
     }
 }
 
@@ -4250,10 +4132,10 @@ mod tests {
             .unwrap();
 
         let login_error = runtime
-            .block_on(execute_provider_mutation(
+            .block_on(atman_daemon::provider_config::mutate(
                 &lifecycle,
-                atman_tui::ProviderMutation::Login {
-                    kind: atman_runtime::auth_store::ProviderKind::GitHubCopilot,
+                atman_proto::ProviderMutation::Login {
+                    kind: atman_proto::ProviderKind::GitHubCopilot,
                     name: "Unsupported".into(),
                 },
             ))
@@ -4261,9 +4143,9 @@ mod tests {
         assert!(login_error.to_string().contains("not supported"));
 
         let enable_error = runtime
-            .block_on(execute_provider_mutation(
+            .block_on(atman_daemon::provider_config::mutate(
                 &lifecycle,
-                atman_tui::ProviderMutation::SetEnabled {
+                atman_proto::ProviderMutation::SetEnabled {
                     provider_id: "unsupported".into(),
                     enabled: true,
                 },
@@ -4275,9 +4157,9 @@ mod tests {
         assert!(!lifecycle.provider_registry().contains("unsupported"));
 
         let refresh_error = runtime
-            .block_on(execute_provider_mutation(
+            .block_on(atman_daemon::provider_config::mutate(
                 &lifecycle,
-                atman_tui::ProviderMutation::Refresh {
+                atman_proto::ProviderMutation::Refresh {
                     provider_id: "missing".into(),
                 },
             ))
@@ -4310,7 +4192,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let create = atman_tui::ProviderMutation::UpsertConfig {
+        let create = atman_proto::ProviderMutation::UpsertConfig {
             name: "gateway".into(),
             kind: "openai-compat".into(),
             api_key: "test-key".into(),
@@ -4323,9 +4205,12 @@ mod tests {
         };
         assert_eq!(
             runtime
-                .block_on(execute_provider_mutation(&lifecycle, create.clone()))
+                .block_on(atman_daemon::provider_config::mutate(
+                    &lifecycle,
+                    create.clone(),
+                ))
                 .unwrap(),
-            atman_tui::ProviderMutationSuccess::ConfigSaved {
+            atman_proto::ProviderMutationResult::ConfigSaved {
                 name: "gateway".into(),
                 created: true,
             }
@@ -4341,14 +4226,14 @@ mod tests {
         let before_duplicate = hub.read_config_toml().unwrap();
         assert!(
             runtime
-                .block_on(execute_provider_mutation(&lifecycle, create))
+                .block_on(atman_daemon::provider_config::mutate(&lifecycle, create))
                 .unwrap_err()
                 .to_string()
                 .contains("already exists")
         );
         assert_eq!(hub.read_config_toml().unwrap(), before_duplicate);
 
-        let disable = atman_tui::ProviderMutation::UpsertConfig {
+        let disable = atman_proto::ProviderMutation::UpsertConfig {
             name: "gateway".into(),
             kind: "openai-compat".into(),
             api_key: "test-key".into(),
@@ -4360,7 +4245,7 @@ mod tests {
             create: false,
         };
         runtime
-            .block_on(execute_provider_mutation(&lifecycle, disable))
+            .block_on(atman_daemon::provider_config::mutate(&lifecycle, disable))
             .unwrap();
         assert!(!lifecycle.provider_registry().contains("config:gateway"));
         assert_eq!(

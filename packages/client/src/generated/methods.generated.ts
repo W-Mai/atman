@@ -40,7 +40,9 @@ import type {
   ListSessionsResult,
   MoveSessionRequest,
   MoveSessionResponse,
+  MutateProviderRequest,
   PingResponse,
+  ProviderMutationResult,
   ReleaseResourceRequest,
   ReleaseResourceResponse,
   ReloadSessionMcpRequest,
@@ -72,12 +74,16 @@ import type {
   SubmitFormResponse,
   SuggestFlowRequest,
   SuggestFlowResponse,
+  SwitchDefaultModelRequest,
+  SwitchDefaultModelResponse,
   TerminateResourceRequest,
   TerminateResourceResponse,
   UpdateSessionTodosRequest,
   UpdateSessionTodosResponse,
   UpdateSessionTrustRequest,
   UpdateSessionTrustResponse,
+  UpsertModelConfigRequest,
+  UpsertModelConfigResponse,
 } from './types.generated'
 
 export const PROTOCOL_VERSION = 1 as const
@@ -126,6 +132,24 @@ export interface RpcMethodMap {
     revision: 1
     params: ImportSessionMessagesRequest
     result: ImportSessionMessagesResponse
+  }
+  'config.provider.mutate': {
+    kind: 'command'
+    revision: 1
+    params: MutateProviderRequest
+    result: ProviderMutationResult
+  }
+  'config.model.upsert': {
+    kind: 'command'
+    revision: 1
+    params: UpsertModelConfigRequest
+    result: UpsertModelConfigResponse
+  }
+  'config.model.switch_default': {
+    kind: 'command'
+    revision: 1
+    params: SwitchDefaultModelRequest
+    result: SwitchDefaultModelResponse
   }
   'session.send_message': {
     kind: 'command'
@@ -333,6 +357,9 @@ export const RPC_METHODS = {
   'session.delete': { kind: 'command', revision: 1 },
   'session.sanitize_attachments': { kind: 'command', revision: 1 },
   'session.import_messages': { kind: 'command', revision: 1 },
+  'config.provider.mutate': { kind: 'command', revision: 1 },
+  'config.model.upsert': { kind: 'command', revision: 1 },
+  'config.model.switch_default': { kind: 'command', revision: 1 },
   'session.send_message': { kind: 'command', revision: 1 },
   'session.interject': { kind: 'command', revision: 1 },
   'session.update_trust': { kind: 'command', revision: 1 },

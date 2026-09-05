@@ -237,6 +237,96 @@ async fn imported_messages_are_canonical_and_command_retries_are_idempotent() {
 }
 
 #[tokio::test]
+async fn provider_and_model_settings_are_committed_by_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root, Some(config_dir.clone()), None).unwrap(),
+    ));
+
+    let provider_request = atman_proto::MutateProviderRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        mutation: atman_proto::ProviderMutation::UpsertConfig {
+            name: "gateway".into(),
+            kind: "openai-compat".into(),
+            api_key: "test-key".into(),
+            api_key_env: String::new(),
+            base_url: "http://localhost/v1".into(),
+            max_tokens: Some(4096),
+            reasoning_format: String::new(),
+            enabled: true,
+            create: true,
+        },
+    };
+    for id in [1, 2] {
+        let response = dispatch(
+            state.clone(),
+            JsonRpcRequest::for_method::<atman_proto::rpc::MutateProvider>(id, &provider_request)
+                .unwrap(),
+        )
+        .await
+        .into_method_output::<atman_proto::rpc::MutateProvider>()
+        .unwrap();
+        assert_eq!(
+            response,
+            atman_proto::ProviderMutationResult::ConfigSaved {
+                name: "gateway".into(),
+                created: true,
+            }
+        );
+    }
+
+    let model = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::UpsertModelConfig>(
+            3,
+            &atman_proto::UpsertModelConfigRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                old_name: None,
+                name: "configured-model".into(),
+                model: "vendor/model".into(),
+                provider: Some("gateway".into()),
+                context_budget: 32_000,
+                reasoning: "off".into(),
+                max_tokens: Some(4096),
+                enabled: true,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::UpsertModelConfig>()
+    .unwrap();
+    assert_eq!(model.name, "configured-model");
+
+    let selected = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::SwitchDefaultModel>(
+            4,
+            &atman_proto::SwitchDefaultModelRequest {
+                request_id: Some(atman_proto::RequestId::now()),
+                model: "configured-model".into(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::SwitchDefaultModel>()
+    .unwrap();
+    assert_eq!(selected.model, "configured-model");
+
+    let config = atman_runtime::config_hub::ConfigHub::from_config_dir(&config_dir)
+        .model_config()
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.aliases["smart"].model, "configured-model");
+}
+
+#[tokio::test]
 async fn update_session_trust_persists_and_projects_the_complete_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");

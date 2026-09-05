@@ -123,6 +123,57 @@
       }
     },
     {
+      "name": "config.provider.mutate",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "MutateProviderRequest",
+        "schema": {
+          "$ref": "#/$defs/MutateProviderRequest"
+        }
+      },
+      "result": {
+        "rust_type": "ProviderMutationResult",
+        "schema": {
+          "$ref": "#/$defs/ProviderMutationResult"
+        }
+      }
+    },
+    {
+      "name": "config.model.upsert",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "UpsertModelConfigRequest",
+        "schema": {
+          "$ref": "#/$defs/UpsertModelConfigRequest"
+        }
+      },
+      "result": {
+        "rust_type": "UpsertModelConfigResponse",
+        "schema": {
+          "$ref": "#/$defs/UpsertModelConfigResponse"
+        }
+      }
+    },
+    {
+      "name": "config.model.switch_default",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "SwitchDefaultModelRequest",
+        "schema": {
+          "$ref": "#/$defs/SwitchDefaultModelRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SwitchDefaultModelResponse",
+        "schema": {
+          "$ref": "#/$defs/SwitchDefaultModelResponse"
+        }
+      }
+    },
+    {
       "name": "session.send_message",
       "kind": "command",
       "revision": 1,
