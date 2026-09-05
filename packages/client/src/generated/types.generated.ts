@@ -301,7 +301,7 @@ export type WorkflowNodeKind =
       [k: string]: unknown
     }
   | {
-      kind: string
+      kind: WorkflowStatementKind
       type: 'statement'
       [k: string]: unknown
     }
@@ -325,6 +325,54 @@ export type WorkflowNodeKind =
       type: 'fanout_branch'
       [k: string]: unknown
     }
+export type WorkflowStatementKind =
+  | {
+      model?: string | null
+      type: 'llm'
+      [k: string]: unknown
+    }
+  | {
+      path: string
+      type: 'tool_call'
+      [k: string]: unknown
+    }
+  | {
+      collect: WorkflowFanoutMode
+      type: 'fanout'
+      [k: string]: unknown
+    }
+  | {
+      type: 'user_confirm'
+      [k: string]: unknown
+    }
+  | {
+      name: string
+      type: 'subflow'
+      [k: string]: unknown
+    }
+  | {
+      role: string
+      type: 'message'
+      [k: string]: unknown
+    }
+  | {
+      type: 'fix_until_test'
+      [k: string]: unknown
+    }
+  | {
+      condition_preview: string
+      type: 'when'
+      [k: string]: unknown
+    }
+  | {
+      type: 'loop'
+      [k: string]: unknown
+    }
+  | {
+      type: 'return'
+      [k: string]: unknown
+    }
+export type WorkflowFanoutMode = 'all' | 'first'
 export type WorkflowNodeState = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type SessionCloseStatus = 'closed' | 'already_closed' | 'busy'
 export type SessionDeleteStatus = 'deleted' | 'not_found' | 'busy' | 'unsafe_resources'

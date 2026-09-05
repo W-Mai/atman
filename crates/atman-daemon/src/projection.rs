@@ -10,8 +10,9 @@ use atman_proto::{
     ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
     SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
     TodoState, TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
-    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection, WorkflowNodeKind,
-    WorkflowNodeProjection, WorkflowNodeState, WorkflowProjection,
+    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection,
+    WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
+    WorkflowProjection, WorkflowStatementKind,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -2029,7 +2030,7 @@ fn workflow_node(node: &atman_runtime::workflow::WorkflowNode) -> WorkflowNodePr
             }
             atman_runtime::workflow::WorkflowNodeKind::Stmt { node_kind } => {
                 WorkflowNodeKind::Statement {
-                    kind: format!("{node_kind:?}"),
+                    kind: workflow_statement_kind(node_kind),
                 }
             }
             atman_runtime::workflow::WorkflowNodeKind::ToolCall {
@@ -2102,6 +2103,38 @@ fn workflow_node(node: &atman_runtime::workflow::WorkflowNode) -> WorkflowNodePr
             ttft_ms: usage.ttft_ms,
             tokens_per_second: usage.tokens_per_second,
         }),
+    }
+}
+
+fn workflow_statement_kind(kind: &atman_runtime::nodegraph::NodeKind) -> WorkflowStatementKind {
+    match kind {
+        atman_runtime::nodegraph::NodeKind::Llm { model } => WorkflowStatementKind::Llm {
+            model: model.clone(),
+        },
+        atman_runtime::nodegraph::NodeKind::ToolCall { path } => {
+            WorkflowStatementKind::ToolCall { path: path.clone() }
+        }
+        atman_runtime::nodegraph::NodeKind::Fanout { collect } => WorkflowStatementKind::Fanout {
+            collect: match collect {
+                atman_runtime::nodegraph::FanoutMode::All => WorkflowFanoutMode::All,
+                atman_runtime::nodegraph::FanoutMode::First => WorkflowFanoutMode::First,
+            },
+        },
+        atman_runtime::nodegraph::NodeKind::UserConfirm => WorkflowStatementKind::UserConfirm,
+        atman_runtime::nodegraph::NodeKind::Subflow { name } => {
+            WorkflowStatementKind::Subflow { name: name.clone() }
+        }
+        atman_runtime::nodegraph::NodeKind::Message { role } => {
+            WorkflowStatementKind::Message { role: role.clone() }
+        }
+        atman_runtime::nodegraph::NodeKind::FixUntilTest => WorkflowStatementKind::FixUntilTest,
+        atman_runtime::nodegraph::NodeKind::When { condition_preview } => {
+            WorkflowStatementKind::When {
+                condition_preview: condition_preview.clone(),
+            }
+        }
+        atman_runtime::nodegraph::NodeKind::Loop => WorkflowStatementKind::Loop,
+        atman_runtime::nodegraph::NodeKind::Return => WorkflowStatementKind::Return,
     }
 }
 
@@ -3320,6 +3353,78 @@ mod tests {
         let usage = workflow_node(&node).llm_usage.unwrap();
         assert_eq!(usage.call_purpose, LlmCallPurpose::Classification);
         assert_eq!(usage.call_scope, LlmCallScope::Detached);
+    }
+
+    #[test]
+    fn workflow_statement_projection_is_structured_and_exhaustive() {
+        use atman_runtime::nodegraph::{FanoutMode, NodeKind};
+
+        let cases = [
+            (
+                NodeKind::Llm {
+                    model: Some("reasoning-model".into()),
+                },
+                WorkflowStatementKind::Llm {
+                    model: Some("reasoning-model".into()),
+                },
+            ),
+            (
+                NodeKind::ToolCall {
+                    path: "fs.read".into(),
+                },
+                WorkflowStatementKind::ToolCall {
+                    path: "fs.read".into(),
+                },
+            ),
+            (
+                NodeKind::Fanout {
+                    collect: FanoutMode::All,
+                },
+                WorkflowStatementKind::Fanout {
+                    collect: WorkflowFanoutMode::All,
+                },
+            ),
+            (
+                NodeKind::Fanout {
+                    collect: FanoutMode::First,
+                },
+                WorkflowStatementKind::Fanout {
+                    collect: WorkflowFanoutMode::First,
+                },
+            ),
+            (NodeKind::UserConfirm, WorkflowStatementKind::UserConfirm),
+            (
+                NodeKind::Subflow {
+                    name: "agent".into(),
+                },
+                WorkflowStatementKind::Subflow {
+                    name: "agent".into(),
+                },
+            ),
+            (
+                NodeKind::Message {
+                    role: "assistant".into(),
+                },
+                WorkflowStatementKind::Message {
+                    role: "assistant".into(),
+                },
+            ),
+            (NodeKind::FixUntilTest, WorkflowStatementKind::FixUntilTest),
+            (
+                NodeKind::When {
+                    condition_preview: "ready".into(),
+                },
+                WorkflowStatementKind::When {
+                    condition_preview: "ready".into(),
+                },
+            ),
+            (NodeKind::Loop, WorkflowStatementKind::Loop),
+            (NodeKind::Return, WorkflowStatementKind::Return),
+        ];
+
+        for (runtime, public) in cases {
+            assert_eq!(workflow_statement_kind(&runtime), public);
+        }
     }
 
     #[test]

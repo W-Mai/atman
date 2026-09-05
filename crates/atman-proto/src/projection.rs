@@ -399,7 +399,7 @@ pub enum WorkflowNodeKind {
         flow_name: String,
     },
     Statement {
-        kind: String,
+        kind: WorkflowStatementKind,
     },
     ToolCall {
         tool_use_id: String,
@@ -417,6 +417,41 @@ pub enum WorkflowNodeKind {
     FanoutBranch {
         branch_index: usize,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkflowStatementKind {
+    Llm {
+        #[serde(default)]
+        model: Option<String>,
+    },
+    ToolCall {
+        path: String,
+    },
+    Fanout {
+        collect: WorkflowFanoutMode,
+    },
+    UserConfirm,
+    Subflow {
+        name: String,
+    },
+    Message {
+        role: String,
+    },
+    FixUntilTest,
+    When {
+        condition_preview: String,
+    },
+    Loop,
+    Return,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowFanoutMode {
+    All,
+    First,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

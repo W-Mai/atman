@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Structured workflow statements** — session projections expose typed LLM, tool, fanout, confirmation, subflow, message, condition, loop, and return statements instead of debug-formatted labels.
+
 - **LLM context lane projection** — session projections retain per-purpose and per-scope usage buckets together with the latest latency and generation-rate measurements for attached clients.
 
 - **Remote session title management** — daemon clients can rename or clear session titles through one idempotent actor command, with metadata projection updates visible to every attached client.

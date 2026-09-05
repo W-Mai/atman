@@ -5516,6 +5516,13 @@
         }
       }
     },
+    "WorkflowFanoutMode": {
+      "type": "string",
+      "enum": [
+        "all",
+        "first"
+      ]
+    },
     "WorkflowNodeKind": {
       "oneOf": [
         {
@@ -5548,7 +5555,7 @@
           ],
           "properties": {
             "kind": {
-              "type": "string"
+              "$ref": "#/$defs/WorkflowStatementKind"
             },
             "type": {
               "type": "string",
@@ -5737,6 +5744,176 @@
           "$ref": "#/$defs/TurnId"
         }
       }
+    },
+    "WorkflowStatementKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "llm"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "type"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "collect",
+            "type"
+          ],
+          "properties": {
+            "collect": {
+              "$ref": "#/$defs/WorkflowFanoutMode"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "fanout"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "user_confirm"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "type"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "subflow"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "role",
+            "type"
+          ],
+          "properties": {
+            "role": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "message"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "fix_until_test"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "condition_preview",
+            "type"
+          ],
+          "properties": {
+            "condition_preview": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "when"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "loop"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "return"
+              ]
+            }
+          }
+        }
+      ]
     }
   }
 }
