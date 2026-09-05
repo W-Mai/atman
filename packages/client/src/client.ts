@@ -1,4 +1,5 @@
 import {
+  AtmanCompatibilityError,
   AtmanProtocolError,
   AtmanRpcError,
   AtmanTransportError,
@@ -227,24 +228,33 @@ function supports(capabilities: CapabilitiesResponse, method: RpcMethodName): bo
 
 function validateCapabilities(capabilities: CapabilitiesResponse): void {
   if (capabilities.protocol_version !== PROTOCOL_VERSION) {
-    throw new AtmanProtocolError(
-      `atman daemon protocol version ${capabilities.protocol_version} is incompatible with client version ${PROTOCOL_VERSION}`,
+    throw new AtmanCompatibilityError(
+      'protocol',
+      `atman client and daemon are incompatible: protocol client=${PROTOCOL_VERSION}, daemon=${capabilities.protocol_version}. Restart the daemon from the same atman installation as this client`,
+      { client: PROTOCOL_VERSION, daemon: capabilities.protocol_version },
     )
   }
   if (
     supportsMethod(capabilities.methods, 'session.get_snapshot') &&
     capabilities.snapshot_schema_version !== SNAPSHOT_SCHEMA_VERSION
   ) {
-    throw new AtmanProtocolError(
-      `atman daemon snapshot schema version ${String(capabilities.snapshot_schema_version)} is incompatible with client version ${SNAPSHOT_SCHEMA_VERSION}`,
+    throw new AtmanCompatibilityError(
+      'snapshot_schema',
+      `atman client and daemon are incompatible: snapshot schema client=${SNAPSHOT_SCHEMA_VERSION}, daemon=${String(capabilities.snapshot_schema_version)}. Restart the daemon from the same atman installation as this client`,
+      {
+        client: SNAPSHOT_SCHEMA_VERSION,
+        daemon: capabilities.snapshot_schema_version,
+      },
     )
   }
   if (
     supportsMethod(capabilities.methods, 'session.get_updates') &&
     capabilities.event_schema_version !== EVENT_SCHEMA_VERSION
   ) {
-    throw new AtmanProtocolError(
-      `atman daemon event schema version ${capabilities.event_schema_version} is incompatible with client version ${EVENT_SCHEMA_VERSION}`,
+    throw new AtmanCompatibilityError(
+      'event_schema',
+      `atman client and daemon are incompatible: event schema client=${EVENT_SCHEMA_VERSION}, daemon=${capabilities.event_schema_version}. Restart the daemon from the same atman installation as this client`,
+      { client: EVENT_SCHEMA_VERSION, daemon: capabilities.event_schema_version },
     )
   }
 }

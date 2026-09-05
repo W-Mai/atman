@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { AtmanClient } from './client'
 import {
+  AtmanCompatibilityError,
   AtmanProtocolError,
   AtmanRpcError,
   UnsupportedMethodError,
@@ -87,13 +88,17 @@ describe('AtmanClient', () => {
         capabilities({ protocol_version: PROTOCOL_VERSION + 1 }),
       ),
     )
-    await expect(
-      AtmanClient.connect(incompatible, {
-        id: 'client-id',
-        name: 'browser-test',
-        version: '1.0.0',
-      }),
-    ).rejects.toBeInstanceOf(AtmanProtocolError)
+    const incompatibleConnection = AtmanClient.connect(incompatible, {
+      id: 'client-id',
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    await expect(incompatibleConnection).rejects.toBeInstanceOf(
+      AtmanCompatibilityError,
+    )
+    await expect(incompatibleConnection).rejects.toMatchObject({
+      code: 'protocol',
+    })
 
     const mismatched = new MockTransport((request) => ({
       jsonrpc: '2.0',

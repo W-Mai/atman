@@ -93,19 +93,37 @@ pub enum ClientError {
     },
     #[error("daemon response correlation mismatch: expected {expected}, received {received}")]
     Correlation { expected: u64, received: String },
-    #[error("daemon protocol version {daemon} is incompatible with client version {client}")]
+    #[error(
+        "atman client and daemon are incompatible: protocol client={client}, daemon={daemon}. Restart the daemon from the same atman installation as this client"
+    )]
     ProtocolVersion { client: u32, daemon: u32 },
-    #[error("daemon snapshot schema version {daemon} is incompatible with client version {client}")]
+    #[error(
+        "atman client and daemon are incompatible: snapshot schema client={client}, daemon={daemon}. Restart the daemon from the same atman installation as this client"
+    )]
     SnapshotSchemaVersion { client: u32, daemon: u32 },
-    #[error("daemon event schema version {daemon} is incompatible with client version {client}")]
+    #[error(
+        "atman client and daemon are incompatible: event schema client={client}, daemon={daemon}. Restart the daemon from the same atman installation as this client"
+    )]
     EventSchemaVersion { client: u32, daemon: u32 },
-    #[error("daemon does not support {method} revision {revision}")]
+    #[error(
+        "atman client and daemon are incompatible: method {method} revision {revision} is unavailable. Restart or upgrade the daemon from the same atman installation as this client"
+    )]
     UnsupportedMethod { method: &'static str, revision: u32 },
 }
 
 impl ClientError {
     fn is_retryable(&self) -> bool {
         matches!(self, Self::Transport(error) if error.is_retryable())
+    }
+
+    pub fn is_compatibility_error(&self) -> bool {
+        matches!(
+            self,
+            Self::ProtocolVersion { .. }
+                | Self::SnapshotSchemaVersion { .. }
+                | Self::EventSchemaVersion { .. }
+                | Self::UnsupportedMethod { .. }
+        )
     }
 }
 
@@ -630,7 +648,9 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert!(matches!(error, ClientError::ProtocolVersion { .. }));
+        assert!(matches!(&error, ClientError::ProtocolVersion { .. }));
+        assert!(error.is_compatibility_error());
+        assert!(error.to_string().contains("Restart the daemon"));
     }
 
     #[tokio::test]
@@ -646,9 +666,10 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(
-            snapshot_error,
+            &snapshot_error,
             ClientError::SnapshotSchemaVersion { .. }
         ));
+        assert!(snapshot_error.is_compatibility_error());
 
         let event_error = Client::connect(
             FakeTransport {
@@ -661,9 +682,10 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(
-            event_error,
+            &event_error,
             ClientError::EventSchemaVersion { .. }
         ));
+        assert!(event_error.is_compatibility_error());
     }
 
     #[tokio::test]

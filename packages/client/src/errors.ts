@@ -47,14 +47,36 @@ export class AtmanProtocolError extends AtmanClientError {
   override readonly name: string = 'AtmanProtocolError'
 }
 
-export class UnsupportedMethodError extends AtmanProtocolError {
+export type CompatibilityErrorCode =
+  | 'protocol'
+  | 'snapshot_schema'
+  | 'event_schema'
+  | 'method'
+
+export class AtmanCompatibilityError extends AtmanProtocolError {
+  override readonly name: string = 'AtmanCompatibilityError'
+
+  constructor(
+    readonly code: CompatibilityErrorCode,
+    message: string,
+    readonly details: Readonly<Record<string, unknown>> = {},
+  ) {
+    super(message)
+  }
+}
+
+export class UnsupportedMethodError extends AtmanCompatibilityError {
   override readonly name: string = 'UnsupportedMethodError'
 
   constructor(
     readonly method: RpcMethodName,
     readonly revision: number,
   ) {
-    super(`atman daemon does not support ${method} revision ${revision}`)
+    super(
+      'method',
+      `atman client and daemon are incompatible: method ${method} revision ${revision} is unavailable. Restart or upgrade the daemon from the same atman installation as this client`,
+      { method, revision },
+    )
   }
 }
 
