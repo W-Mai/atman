@@ -2,16 +2,16 @@ use std::collections::HashMap;
 
 use atman_proto::{
     ApprovalGroupProjection, ApprovalRequestProjection, ApprovalState, ApprovalTarget,
-    CompactionOperationId, CompactionOutcome, CompactionProjection, ContextProjection, EventCursor,
-    FlowRunId, ImageDetail, InteractionProjection, InterjectionProjection, InterjectionSource,
-    LlmUsageProjection, McpServerProjection, MessageOrigin, MessagePart, MessageProjection,
-    MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange,
-    ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState, Revision,
-    RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
-    SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
-    TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
-    UsageProjection, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
-    WorkflowProjection,
+    CompactionOperationId, CompactionOutcome, CompactionProjection, ContextProjection,
+    ContextUsageBucketProjection, EventCursor, FlowRunId, ImageDetail, InteractionProjection,
+    InterjectionProjection, InterjectionSource, LlmCallPurpose, LlmCallScope, LlmUsageProjection,
+    McpServerProjection, MessageOrigin, MessagePart, MessageProjection, MessageRole, NameSource,
+    NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId,
+    ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
+    SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
+    TodoState, TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
+    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection, WorkflowNodeKind,
+    WorkflowNodeProjection, WorkflowNodeState, WorkflowProjection,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -2092,6 +2092,8 @@ fn workflow_node(node: &atman_runtime::workflow::WorkflowNode) -> WorkflowNodePr
         llm_usage: node.llm_stats.as_ref().map(|usage| LlmUsageProjection {
             model: usage.model.clone(),
             provider: usage.provider.clone(),
+            call_purpose: llm_call_purpose(usage.context_call_purpose),
+            call_scope: llm_call_scope(usage.context_call_scope),
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             cache_read_tokens: usage.cache_read,
@@ -2142,17 +2144,61 @@ fn context_projection(context: &atman_runtime::ContextSnapshot) -> ContextProjec
     ContextProjection {
         model: context.model.clone(),
         provider: context.provider.clone(),
+        input_tokens: context.tokens_in,
+        output_tokens: context.tokens_out,
         window_tokens: context.window_tokens,
         window_budget: context.window_budget,
         cost_usd: context.cost_usd,
         cache_read_tokens: context.cache_read,
         cache_write_tokens: context.cache_write,
+        last_ttft_ms: context.last_ttft_ms,
+        last_tokens_per_second: context.last_tokens_per_sec,
         memory_recent_count: context.memory_recent_count,
+        usage_buckets: context
+            .usage_buckets
+            .iter()
+            .map(|bucket| ContextUsageBucketProjection {
+                provider: bucket.provider.clone(),
+                model: bucket.model.clone(),
+                call_purpose: llm_call_purpose(bucket.call_purpose),
+                call_scope: llm_call_scope(bucket.call_scope),
+                calls: bucket.calls,
+                input_tokens: bucket.tokens_in,
+                output_tokens: bucket.tokens_out,
+                cache_read_tokens: bucket.cache_read,
+                cache_write_tokens: bucket.cache_write,
+            })
+            .collect(),
         mcp_servers: context
             .mcp_servers
             .iter()
             .map(mcp_server_projection)
             .collect(),
+    }
+}
+
+fn llm_call_purpose(purpose: atman_runtime::context_plan::ContextCallPurpose) -> LlmCallPurpose {
+    match purpose {
+        atman_runtime::context_plan::ContextCallPurpose::General => LlmCallPurpose::General,
+        atman_runtime::context_plan::ContextCallPurpose::Classification => {
+            LlmCallPurpose::Classification
+        }
+        atman_runtime::context_plan::ContextCallPurpose::Extraction => LlmCallPurpose::Extraction,
+        atman_runtime::context_plan::ContextCallPurpose::BranchGeneration => {
+            LlmCallPurpose::BranchGeneration
+        }
+        atman_runtime::context_plan::ContextCallPurpose::Compaction => LlmCallPurpose::Compaction,
+        atman_runtime::context_plan::ContextCallPurpose::InterjectionClassification => {
+            LlmCallPurpose::InterjectionClassification
+        }
+    }
+}
+
+fn llm_call_scope(scope: atman_runtime::context_plan::ContextCallScope) -> LlmCallScope {
+    match scope {
+        atman_runtime::context_plan::ContextCallScope::Root => LlmCallScope::Root,
+        atman_runtime::context_plan::ContextCallScope::Child => LlmCallScope::Child,
+        atman_runtime::context_plan::ContextCallScope::Detached => LlmCallScope::Detached,
     }
 }
 
@@ -3182,14 +3228,33 @@ mod tests {
             tokens_out: 5,
             cache_read: 4,
             cache_write: 0,
+            last_ttft_ms: 12,
+            last_tokens_per_sec: 34.5,
             usage_buckets: vec![atman_runtime::ContextUsageBucket {
                 provider: "openai-compatible".into(),
                 model: "reasoning-model".into(),
+                call_purpose: atman_runtime::context_plan::ContextCallPurpose::Extraction,
+                call_scope: atman_runtime::context_plan::ContextCallScope::Child,
                 calls: 1,
-                ..Default::default()
+                tokens_in: 14,
+                tokens_out: 5,
+                cache_read: 4,
+                cache_write: 0,
             }],
             ..Default::default()
         });
+        let context = &projector.projection().context;
+        assert_eq!(context.input_tokens, 14);
+        assert_eq!(context.output_tokens, 5);
+        assert_eq!(context.last_ttft_ms, 12);
+        assert_eq!(context.last_tokens_per_second, 34.5);
+        assert_eq!(context.usage_buckets.len(), 1);
+        assert_eq!(
+            context.usage_buckets[0].call_purpose,
+            LlmCallPurpose::Extraction
+        );
+        assert_eq!(context.usage_buckets[0].call_scope, LlmCallScope::Child);
+        assert_eq!(context.usage_buckets[0].input_tokens, 14);
         projector.apply_envelope(&envelope(
             1,
             chrono::Utc::now(),
@@ -3224,6 +3289,37 @@ mod tests {
         assert_eq!(projector.projection().usage.output_tokens, 5);
         assert_eq!(projector.projection().usage.cache_read_tokens, 4);
         assert_eq!(projector.projection().usage.llm_calls, 1);
+    }
+
+    #[test]
+    fn workflow_llm_usage_retains_call_identity() {
+        let node = atman_runtime::workflow::WorkflowNode {
+            id: "run".into(),
+            kind: atman_runtime::workflow::WorkflowNodeKind::Flow {
+                run_id: uuid::Uuid::now_v7().to_string(),
+                flow_name: "agent".into(),
+            },
+            label: "agent".into(),
+            status: atman_runtime::workflow::NodeStatus::Running,
+            started_at: None,
+            ended_at: None,
+            output_preview: None,
+            children: Vec::new(),
+            parallelism: atman_runtime::workflow::Parallelism::Serial,
+            approval: None,
+            llm_stats: Some(atman_runtime::workflow::LlmStats {
+                model: "helper".into(),
+                provider: "openai-compatible".into(),
+                context_call_purpose:
+                    atman_runtime::context_plan::ContextCallPurpose::Classification,
+                context_call_scope: atman_runtime::context_plan::ContextCallScope::Detached,
+                ..Default::default()
+            }),
+        };
+
+        let usage = workflow_node(&node).llm_usage.unwrap();
+        assert_eq!(usage.call_purpose, LlmCallPurpose::Classification);
+        assert_eq!(usage.call_scope, LlmCallScope::Detached);
     }
 
     #[test]

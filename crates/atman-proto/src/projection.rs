@@ -450,6 +450,10 @@ pub struct LlmUsageProjection {
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
+    pub call_purpose: LlmCallPurpose,
+    #[serde(default)]
+    pub call_scope: LlmCallScope,
+    #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
@@ -463,6 +467,27 @@ pub struct LlmUsageProjection {
     pub ttft_ms: u64,
     #[serde(default)]
     pub tokens_per_second: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmCallPurpose {
+    #[default]
+    General,
+    Classification,
+    Extraction,
+    BranchGeneration,
+    Compaction,
+    InterjectionClassification,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmCallScope {
+    Root,
+    Child,
+    #[default]
+    Detached,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -511,6 +536,10 @@ pub struct ContextProjection {
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
     pub window_tokens: u64,
     #[serde(default)]
     pub window_budget: u64,
@@ -521,9 +550,28 @@ pub struct ContextProjection {
     #[serde(default)]
     pub cache_write_tokens: u64,
     #[serde(default)]
+    pub last_ttft_ms: u64,
+    #[serde(default)]
+    pub last_tokens_per_second: f64,
+    #[serde(default)]
     pub memory_recent_count: u16,
     #[serde(default)]
+    pub usage_buckets: Vec<ContextUsageBucketProjection>,
+    #[serde(default)]
     pub mcp_servers: Vec<McpServerProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ContextUsageBucketProjection {
+    pub provider: String,
+    pub model: String,
+    pub call_purpose: LlmCallPurpose,
+    pub call_scope: LlmCallScope,
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

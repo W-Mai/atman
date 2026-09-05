@@ -73,6 +73,14 @@ export type EventCursor = number
 export type ContextId = string
 export type CompactionOperationId = string
 export type FlowRunId = string
+export type LlmCallPurpose =
+  | 'general'
+  | 'classification'
+  | 'extraction'
+  | 'branch_generation'
+  | 'compaction'
+  | 'interjection_classification'
+export type LlmCallScope = 'root' | 'child' | 'detached'
 export type ApprovalState = 'evaluating' | 'pending' | 'approved' | 'denied' | 'cancelled'
 export type ApprovalTarget =
   | {
@@ -721,10 +729,15 @@ export interface ContextProjection {
   cache_read_tokens?: number
   cache_write_tokens?: number
   cost_usd?: number
+  input_tokens?: number
+  last_tokens_per_second?: number
+  last_ttft_ms?: number
   mcp_servers?: McpServerProjection[]
   memory_recent_count?: number
   model?: string
+  output_tokens?: number
   provider?: string
+  usage_buckets?: ContextUsageBucketProjection[]
   window_budget?: number
   window_tokens?: number
   [k: string]: unknown
@@ -734,6 +747,18 @@ export interface McpServerProjection {
   state: string
   tool_count?: number
   transport: string
+  [k: string]: unknown
+}
+export interface ContextUsageBucketProjection {
+  cache_read_tokens: number
+  cache_write_tokens: number
+  call_purpose: LlmCallPurpose
+  call_scope: LlmCallScope
+  calls: number
+  input_tokens: number
+  model: string
+  output_tokens: number
+  provider: string
   [k: string]: unknown
 }
 export interface InteractionProjection {
@@ -937,6 +962,8 @@ export interface WorkflowNodeProjection {
 export interface LlmUsageProjection {
   cache_read_tokens?: number
   cache_write_tokens?: number
+  call_purpose?: LlmCallPurpose
+  call_scope?: LlmCallScope
   input_tokens?: number
   model?: string
   output_tokens?: number

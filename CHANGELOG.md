@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **LLM context lane projection** — session projections retain per-purpose and per-scope usage buckets together with the latest latency and generation-rate measurements for attached clients.
+
 - **Remote session title management** — daemon clients can rename or clear session titles through one idempotent actor command, with metadata projection updates visible to every attached client.
 
 - **Concurrent session runs** — one daemon-owned session can admit multiple root runs without sharing mutable context owners. Cancellation and interjection remain run-scoped, accepted submissions advance the durable context head in admission order, and the session projection stays active until every run is terminal.
