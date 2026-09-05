@@ -1095,6 +1095,7 @@ export interface RunProjection {
   flow_name?: string
   id: FlowRunId
   model?: string | null
+  output?: string | null
   parent_node_id?: string | null
   parent_run_id?: null | FlowRunId
   provider?: string | null

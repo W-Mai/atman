@@ -403,6 +403,7 @@ mod tests {
             started_at: Utc::now(),
             finished_at: None,
             error: None,
+            output: None,
         }
     }
 

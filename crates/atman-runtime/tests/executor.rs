@@ -31,7 +31,10 @@ async fn executor_runs_flow_and_emits_start_end() {
     assert!(matches!(events[0], Event::FlowStart { .. }));
     assert!(matches!(events[1], Event::FlowGraph { .. }));
     match events.last() {
-        Some(Event::FlowEnd { status, .. }) => assert!(matches!(status, FlowStatus::Ok)),
+        Some(Event::FlowEnd { status, output, .. }) => {
+            assert!(matches!(status, FlowStatus::Ok));
+            assert_eq!(output.as_deref(), Some("5"));
+        }
         other => panic!("expected FlowEnd last, got {other:?}"),
     }
 }

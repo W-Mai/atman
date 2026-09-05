@@ -2350,6 +2350,7 @@ mod tests {
                 started_at: now,
                 finished_at: None,
                 error: None,
+                output: None,
             },
             atman_proto::RunProjection {
                 id: child_run_id.clone(),
@@ -2363,6 +2364,7 @@ mod tests {
                 started_at: now,
                 finished_at: Some(now),
                 error: None,
+                output: None,
             },
         ];
         source.workflows[0].roots[0]
@@ -2568,6 +2570,7 @@ mod tests {
             started_at: now,
             finished_at: None,
             error: None,
+            output: None,
         });
         let resource_id = atman_proto::ResourceId::task(uuid::Uuid::now_v7());
         source.resources.push(atman_proto::ResourceProjection {

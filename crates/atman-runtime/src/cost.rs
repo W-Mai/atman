@@ -196,6 +196,7 @@ mod tests {
                 run_id,
                 flow_name: "t".into(),
                 status: FlowStatus::Ok,
+                output: None,
             },
         ];
         let t = total(&events);

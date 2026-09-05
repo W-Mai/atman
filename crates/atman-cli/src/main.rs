@@ -771,7 +771,7 @@ async fn cmd_run(
         flow_name.clone()
     } else {
         args.iter()
-            .map(|(k, v)| format!("{k}={}", render_value(v)))
+            .map(|(k, v)| format!("{k}={}", v.render_text()))
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -814,7 +814,7 @@ async fn cmd_run(
 
     match outcome {
         Ok(v) => {
-            println!("{}", render_value(&v));
+            println!("{}", v.render_text());
             Ok(())
         }
         Err(e) => {
@@ -1246,7 +1246,7 @@ async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
     let mut executor = executor.clone();
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
     let value = executor.run(&parsed, &flow_name, vec![]).await?;
-    let rendered = render_value(&value);
+    let rendered = value.render_text();
     if !rendered.is_empty() {
         // Route through Reporter so the boot flow's greeting lands as a
         // TUI system note (inside the alternate screen) instead of a
@@ -3307,7 +3307,7 @@ async fn run_turn_with_interjection(
     match result {
         Ok(v) => {
             if !(reporter.is_tui() && streamed) {
-                let rendered = render_value(&v);
+                let rendered = v.render_text();
                 if !rendered.is_empty() {
                     reporter.info(rendered);
                 }
@@ -6732,17 +6732,6 @@ fn parse_args(raw: &[String]) -> Result<Vec<(String, Value)>> {
     Ok(out)
 }
 
-fn render_value(v: &Value) -> String {
-    match v {
-        Value::Str(s) => s.clone(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Unit => String::new(),
-        other => format!("{other:?}"),
-    }
-}
-
 async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
     use std::io::Write as _;
     match action {
@@ -7189,6 +7178,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             finished_at: None,
             error: None,
+            output: None,
         }
     }
 

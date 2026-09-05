@@ -16,6 +16,7 @@ fn make_flow_end() -> Event {
         run_id: FlowRunId::now(),
         flow_name: "t".into(),
         status: FlowStatus::Ok,
+        output: None,
     }
 }
 

@@ -1455,6 +1455,7 @@ mod tests {
             run_id: rid.clone(),
             flow_name: "main".into(),
             status: FlowStatus::Ok,
+            output: None,
         });
         let scoped = scope_id(&rid.0.to_string(), "stmt_0");
         let stmt = g.find_node(&scoped).unwrap();
@@ -2310,11 +2311,13 @@ fn rebuild_workflow_tree_restores_root_and_subflow() {
             run_id: child.clone(),
             flow_name: "subagent".into(),
             status: crate::event::FlowStatus::Ok,
+            output: None,
         },
         Event::FlowEnd {
             run_id: root.clone(),
             flow_name: "agent".into(),
             status: crate::event::FlowStatus::Ok,
+            output: None,
         },
     ];
     let g = rebuild_workflow_tree(&events);

@@ -4721,6 +4721,12 @@
             "null"
           ]
         },
+        "output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "parent_node_id": {
           "type": [
             "string",

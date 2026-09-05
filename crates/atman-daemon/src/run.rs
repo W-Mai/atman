@@ -8,17 +8,6 @@ use atman_runtime::event::FlowRunId as RuntimeRunId;
 
 use crate::state::{DaemonState, LiveRun, LoadedSession};
 
-fn render_value(v: &atman_runtime::Value) -> String {
-    match v {
-        atman_runtime::Value::Str(s) => s.clone(),
-        atman_runtime::Value::Int(n) => n.to_string(),
-        atman_runtime::Value::Float(n) => n.to_string(),
-        atman_runtime::Value::Bool(b) => b.to_string(),
-        atman_runtime::Value::Unit => String::new(),
-        other => format!("{other:?}"),
-    }
-}
-
 #[derive(Clone)]
 pub struct RunLauncher {
     pub project_root: PathBuf,
@@ -177,7 +166,7 @@ fn prepare_user_message(
                 flow_name.to_owned()
             } else {
                 args.iter()
-                    .map(|(key, value)| format!("{key}={}", render_value(value)))
+                    .map(|(key, value)| format!("{key}={}", value.render_text()))
                     .collect::<Vec<_>>()
                     .join(" ")
             };
@@ -210,6 +199,7 @@ fn emit_pre_execution_failure(
             run_id: run_id.clone(),
             flow_name: flow_name.to_owned(),
             status: atman_runtime::event::FlowStatus::errored(error.to_string()),
+            output: None,
         });
     }
     let _ = session

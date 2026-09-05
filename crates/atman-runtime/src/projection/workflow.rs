@@ -2115,6 +2115,7 @@ mod tests {
                 run_id,
                 flow_name: "root".into(),
                 status: FlowStatus::Ok,
+                output: None,
             },
             finished_at,
         );

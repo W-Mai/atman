@@ -686,6 +686,7 @@ mod tests {
                     run_id,
                     flow_name: "agent".into(),
                     status: FlowStatus::Ok,
+                    output: None,
                 },
             ),
             EventEnvelope::new(5, Event::TurnEnd { turn_id }),

@@ -1971,6 +1971,7 @@ fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
             run_id: run_id.clone(),
             flow_name: "agent.sub".into(),
             status: status.clone(),
+            output: None,
         });
     }
     if let Some(tx) = &ctx.stream_tx {

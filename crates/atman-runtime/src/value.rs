@@ -28,6 +28,17 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn render_text(&self) -> String {
+        match self {
+            Self::Str(value) => value.clone(),
+            Self::Int(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+            Self::Bool(value) => value.to_string(),
+            Self::Unit => String::new(),
+            other => format!("{other:?}"),
+        }
+    }
+
     pub fn is_err(&self) -> bool {
         matches!(self, Value::Err(_))
     }

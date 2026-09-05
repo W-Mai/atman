@@ -1120,6 +1120,7 @@ mod tests {
                     status: FlowStatus::Errored {
                         message: "boom".into(),
                     },
+                    output: None,
                 },
             ))
             .unwrap();

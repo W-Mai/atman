@@ -131,6 +131,8 @@ pub struct RunProjection {
     pub finished_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

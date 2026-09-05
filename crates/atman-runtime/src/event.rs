@@ -206,6 +206,8 @@ pub enum Event {
         run_id: FlowRunId,
         flow_name: String,
         status: FlowStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     RunCancelRequested {
         run_id: FlowRunId,

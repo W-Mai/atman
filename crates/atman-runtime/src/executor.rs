@@ -428,6 +428,7 @@ impl Executor {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
             status: status.clone(),
+            output: result.as_ref().ok().map(Value::render_text),
         });
         if let Some(sess) = session.as_ref() {
             let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {

@@ -1504,6 +1504,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 | crate::exec::StmtOutcome::LoopBreak
                 | crate::exec::StmtOutcome::LoopContinue => Ok(Value::Unit),
             };
+            let output = result.as_ref().ok().map(Value::render_text);
             let status = crate::event::FlowStatus::for_result(&result);
             let result = result.unwrap_or_else(Value::Err);
             let ok = matches!(status, crate::event::FlowStatus::Ok);
@@ -1513,6 +1514,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     run_id: sub_run_id.clone(),
                     flow_name: name.name.clone(),
                     status,
+                    output,
                 });
             }
             if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {

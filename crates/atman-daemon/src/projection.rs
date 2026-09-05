@@ -356,6 +356,7 @@ impl SessionProjector {
             started_at,
             finished_at: None,
             error: None,
+            output: None,
         };
         self.upsert_run(run.clone());
         if self.projection.lifecycle != SessionLifecycle::Active {
@@ -480,6 +481,7 @@ impl SessionProjector {
                     started_at: envelope.ts,
                     finished_at: None,
                     error: None,
+                    output: None,
                 };
                 self.upsert_run(run.clone());
                 changes.push(ProjectionChange::RunUpsert { run });
@@ -490,7 +492,12 @@ impl SessionProjector {
                     });
                 }
             }
-            Event::FlowEnd { run_id, status, .. } => {
+            Event::FlowEnd {
+                run_id,
+                status,
+                output,
+                ..
+            } => {
                 let state = match status {
                     FlowStatus::Ok => RunLifecycle::Succeeded,
                     FlowStatus::Errored { .. } => RunLifecycle::Failed,
@@ -509,6 +516,7 @@ impl SessionProjector {
                     run.state = state;
                     run.finished_at = Some(envelope.ts);
                     run.error = error;
+                    run.output = output.clone();
                     run.clone()
                 } else {
                     let run = RunProjection {
@@ -523,6 +531,7 @@ impl SessionProjector {
                         started_at: envelope.ts,
                         finished_at: Some(envelope.ts),
                         error,
+                        output: output.clone(),
                     };
                     self.upsert_run(run.clone());
                     run
@@ -2728,6 +2737,7 @@ mod tests {
                 run_id: first_run.clone(),
                 flow_name: "first".into(),
                 status: FlowStatus::Ok,
+                output: None,
             },
             Event::TurnEnd {
                 turn_id: first_turn.clone(),
@@ -2901,6 +2911,7 @@ mod tests {
                     run_id,
                     flow_name: "agent".into(),
                     status: FlowStatus::Ok,
+                    output: Some("done".into()),
                 },
             ),
         ];
@@ -2910,6 +2921,7 @@ mod tests {
         assert_eq!(projection.lifecycle, SessionLifecycle::Idle);
         assert_eq!(projection.runs[0].started_at, started_at);
         assert_eq!(projection.runs[0].state, RunLifecycle::Succeeded);
+        assert_eq!(projection.runs[0].output.as_deref(), Some("done"));
         assert_eq!(
             projection.workflows[0].roots[0].started_at,
             Some(started_at)
