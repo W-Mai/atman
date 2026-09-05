@@ -187,6 +187,12 @@ pub enum RefreshOutcome {
     Reconnected,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionUpdate {
+    Event(ProjectionEventEnvelope),
+    Reset(Box<SessionState>),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionClientError {
     #[error(transparent)]
@@ -249,6 +255,7 @@ pub struct SessionClient {
     session_id: SessionId,
     state: watch::Sender<SessionState>,
     signals: broadcast::Sender<SessionSignal>,
+    updates: broadcast::Sender<SessionUpdate>,
     refresh_lock: Arc<Mutex<()>>,
 }
 
@@ -276,11 +283,13 @@ impl SessionClient {
         let state = SessionState::new(snapshot, &capabilities.daemon_generation)?;
         let (state, _) = watch::channel(state);
         let (signals, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
+        let (updates, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
         Ok(Self {
             client,
             session_id,
             state,
             signals,
+            updates,
             refresh_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -299,6 +308,10 @@ impl SessionClient {
 
     pub fn subscribe_signals(&self) -> broadcast::Receiver<SessionSignal> {
         self.signals.subscribe()
+    }
+
+    pub fn subscribe_updates(&self) -> broadcast::Receiver<SessionUpdate> {
+        self.updates.subscribe()
     }
 
     pub async fn refresh(&self) -> Result<RefreshOutcome, SessionClientError> {
@@ -341,6 +354,12 @@ impl SessionClient {
         let mut next = current.clone();
         match next.apply_updates(&response) {
             Ok(applied) => {
+                let applied_events = response
+                    .events
+                    .iter()
+                    .filter(|event| event.cursor > current.cursor())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let outcome = RefreshOutcome::Applied {
                     events: applied.applied,
                     signals: applied.signals.clone(),
@@ -351,6 +370,9 @@ impl SessionClient {
                 }
                 for signal in applied.signals {
                     let _ = self.signals.send(signal);
+                }
+                for event in applied_events {
+                    let _ = self.updates.send(SessionUpdate::Event(event));
                 }
                 Ok(outcome)
             }
@@ -371,7 +393,8 @@ impl SessionClient {
                 let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 next.transcript_revision = current.transcript_revision.wrapping_add(1);
                 next.resources_revision = current.resources_revision.wrapping_add(1);
-                self.state.send_replace(next);
+                self.state.send_replace(next.clone());
+                let _ = self.updates.send(SessionUpdate::Reset(Box::new(next)));
                 Ok(RefreshOutcome::Reconnected)
             }
             Err(error) if error.requires_resync() => {
@@ -385,7 +408,8 @@ impl SessionClient {
                 let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 next.transcript_revision = current.transcript_revision.wrapping_add(1);
                 next.resources_revision = current.resources_revision.wrapping_add(1);
-                self.state.send_replace(next);
+                self.state.send_replace(next.clone());
+                let _ = self.updates.send(SessionUpdate::Reset(Box::new(next)));
                 Ok(RefreshOutcome::Resynced)
             }
             Err(error) => Err(error.into()),
@@ -1623,6 +1647,7 @@ mod tests {
         );
         let transcript_revision = session.current().transcript_revision();
         let resources_revision = session.current().resources_revision();
+        let mut updates = session.subscribe_updates();
 
         assert_eq!(session.refresh().await.unwrap(), RefreshOutcome::Resynced);
         assert_eq!(
@@ -1637,6 +1662,10 @@ mod tests {
         assert_eq!(
             session.current().resources_revision(),
             resources_revision.wrapping_add(1)
+        );
+        assert_eq!(
+            updates.recv().await.unwrap(),
+            SessionUpdate::Reset(Box::new(session.current()))
         );
     }
 
@@ -1656,21 +1685,20 @@ mod tests {
         .await
         .unwrap();
         let session = client.attach_session(session_id).await.unwrap();
+        let mut updates = session.subscribe_updates();
         let current = session.current();
-        session
-            .apply_event(envelope(
-                &current,
-                2,
-                ProjectionDelta {
-                    base_revision: Revision(1),
-                    revision: Revision(2),
-                    changes: vec![ProjectionChange::GoalSet {
-                        goal: Some("streamed".into()),
-                    }],
-                },
-            ))
-            .await
-            .unwrap();
+        let projection_event = envelope(
+            &current,
+            2,
+            ProjectionDelta {
+                base_revision: Revision(1),
+                revision: Revision(2),
+                changes: vec![ProjectionChange::GoalSet {
+                    goal: Some("streamed".into()),
+                }],
+            },
+        );
+        session.apply_event(projection_event.clone()).await.unwrap();
         assert_eq!(
             session.current().projection().goal.as_deref(),
             Some("streamed")
@@ -1696,8 +1724,16 @@ mod tests {
         signal_event.event = ServerEvent::Signal {
             signal: signal.clone(),
         };
-        session.apply_event(signal_event).await.unwrap();
+        session.apply_event(signal_event.clone()).await.unwrap();
         assert_eq!(signals.recv().await.unwrap(), signal);
+        assert_eq!(
+            updates.recv().await.unwrap(),
+            SessionUpdate::Event(projection_event)
+        );
+        assert_eq!(
+            updates.recv().await.unwrap(),
+            SessionUpdate::Event(signal_event)
+        );
         assert_eq!(session.current().cursor(), EventCursor(3));
     }
 

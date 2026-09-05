@@ -21,7 +21,8 @@ use futures::{future::BoxFuture, stream::BoxStream};
 
 pub use http::HttpTransport;
 pub use session::{
-    AppliedUpdates, ReconcileError, RefreshOutcome, SessionClient, SessionClientError, SessionState,
+    AppliedUpdates, ReconcileError, RefreshOutcome, SessionClient, SessionClientError,
+    SessionState, SessionUpdate,
 };
 #[cfg(unix)]
 pub use unix::UnixTransport;
