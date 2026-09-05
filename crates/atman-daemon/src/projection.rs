@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 
 use atman_proto::{
-    ApprovalGroupProjection, ApprovalRequestProjection, ApprovalState, ApprovalTarget,
-    CompactionOperationId, CompactionOutcome, CompactionProjection, ContextProjection,
-    ContextUsageBucketProjection, EventCursor, FlowRunId, ImageDetail, InteractionProjection,
-    InterjectionProjection, InterjectionSource, LlmCallPurpose, LlmCallScope, LlmUsageProjection,
-    McpServerProjection, MessageOrigin, MessagePart, MessageProjection, MessageRole, NameSource,
-    NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId,
-    ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
-    SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
-    TodoState, TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
-    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection,
-    WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
-    WorkflowProjection, WorkflowStatementKind,
+    ApprovalActorProjection, ApprovalEscalationHopProjection, ApprovalExecutionBoundary,
+    ApprovalGroupOwnerProjection, ApprovalGroupProjection, ApprovalPolicyProjection,
+    ApprovalProvenanceProjection, ApprovalRequestProjection, ApprovalScopeProjection,
+    ApprovalState, ApprovalTarget, CompactionOperationId, CompactionOutcome, CompactionProjection,
+    ContextProjection, ContextUsageBucketProjection, EventCursor, FlowRunId, ImageDetail,
+    InteractionProjection, InterjectionProjection, InterjectionSource, LlmCallPurpose,
+    LlmCallScope, LlmUsageProjection, McpServerProjection, MessageOrigin, MessagePart,
+    MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection,
+    ProjectionChange, ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState,
+    Revision, RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
+    SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
+    TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
+    UsageProjection, WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection,
+    WorkflowNodeState, WorkflowProjection, WorkflowStatementKind,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -1036,12 +1038,8 @@ impl SessionProjector {
             Event::PermissionGroupCreated { payload }
             | Event::PermissionGroupUpdated { payload }
             | Event::PermissionGroupResolved { payload } => {
-                let group = ApprovalGroupProjection {
-                    id: payload.group_id.0,
-                    label: payload.label.clone(),
-                    request_ids: payload.request_ids.iter().map(|id| id.0).collect(),
-                    revision: payload.revision,
-                };
+                let resolved = matches!(&envelope.event, Event::PermissionGroupResolved { .. });
+                let group = approval_group_projection(payload, resolved);
                 self.projection
                     .interactions
                     .approval_groups
@@ -1386,26 +1384,8 @@ impl SessionProjector {
         state: ApprovalState,
         changes: &mut Vec<ProjectionChange>,
     ) {
-        let Some(request_id) = payload.request_id.as_ref() else {
+        let Some(approval) = approval_request_projection(payload, state) else {
             return;
-        };
-        let approval = ApprovalRequestProjection {
-            id: request_id.0,
-            run_id: FlowRunId(payload.requesting_run_id.0),
-            tool_name: payload.tool.clone(),
-            tier: tier_number(payload.tier),
-            state,
-            target: Some(match &payload.target {
-                atman_runtime::permission_audit::PermissionAuditTarget::Flow { run_id } => {
-                    ApprovalTarget::Flow {
-                        run_id: FlowRunId(run_id.0),
-                    }
-                }
-                atman_runtime::permission_audit::PermissionAuditTarget::User => {
-                    ApprovalTarget::User
-                }
-            }),
-            revision: payload.revision,
         };
         self.projection
             .interactions
@@ -1832,6 +1812,174 @@ fn interjection_projection(
                 kind: kind.clone(),
                 handle: handle.clone(),
             },
+        },
+    }
+}
+
+pub(crate) fn approval_request_projection(
+    payload: &atman_runtime::permission_audit::PermissionRequestAudit,
+    state: ApprovalState,
+) -> Option<ApprovalRequestProjection> {
+    Some(ApprovalRequestProjection {
+        id: payload.request_id.as_ref()?.0,
+        session_id: payload.session_id.clone(),
+        requesting_run_id: FlowRunId(payload.requesting_run_id.0),
+        parent_run_id: payload.parent_run_id.as_ref().map(|id| FlowRunId(id.0)),
+        root_run_id: FlowRunId(payload.root_run_id.0),
+        tool_use_id: payload.tool_use_id.clone(),
+        tool_name: payload.tool.clone(),
+        intent: payload
+            .call_intent
+            .as_ref()
+            .map(|intent| intent.as_str().to_owned()),
+        tier: tier_number(payload.tier),
+        execution_boundary: payload.execution_boundary.map(|boundary| match boundary {
+            atman_runtime::permission::ExecutionBoundary::Sandboxed => {
+                ApprovalExecutionBoundary::Sandboxed
+            }
+            atman_runtime::permission::ExecutionBoundary::Direct => {
+                ApprovalExecutionBoundary::Direct
+            }
+        }),
+        provenance: ApprovalProvenanceProjection {
+            cwd: payload.provenance.cwd.clone(),
+            path: payload.provenance.path.clone(),
+            path_origin: payload.provenance.path_origin.clone(),
+            workspace_id: payload.provenance.workspace_id.clone(),
+            workspace_root: payload.provenance.workspace_root.clone(),
+            repository_root: payload.provenance.repository_root.clone(),
+            network: payload.provenance.network,
+            risks: payload.provenance.risks.clone(),
+            targets: payload.provenance.targets.clone(),
+        },
+        state,
+        target: Some(approval_target(&payload.target)),
+        group_ids: payload.group_ids.iter().map(|id| id.0).collect(),
+        policy: ApprovalPolicyProjection {
+            snapshot_id: payload.policy.snapshot_id.clone(),
+            rule_id: payload.policy.rule_id.clone(),
+        },
+        escalation_path: payload
+            .escalation_path
+            .iter()
+            .map(|hop| ApprovalEscalationHopProjection {
+                target: approval_target(&hop.target),
+                actor: hop.actor.as_ref().map(approval_actor),
+                action: hop.action.clone(),
+                reason: hop.reason.clone(),
+                at: hop.at,
+            })
+            .collect(),
+        decision_id: payload.decision_id.clone(),
+        actor: payload.actor.as_ref().map(approval_actor),
+        scope: payload.scope.as_ref().map(approval_scope),
+        reason: payload.reason.clone(),
+        at: payload.at,
+        revision: payload.revision,
+    })
+}
+
+pub(crate) fn approval_group_projection(
+    payload: &atman_runtime::permission_audit::PermissionGroupAudit,
+    resolved: bool,
+) -> ApprovalGroupProjection {
+    ApprovalGroupProjection {
+        id: payload.group_id.0,
+        owner: match &payload.owner {
+            atman_runtime::permission_audit::PermissionGroupAuditOwner::Flow { run_id } => {
+                ApprovalGroupOwnerProjection::Flow {
+                    run_id: FlowRunId(run_id.0),
+                }
+            }
+            atman_runtime::permission_audit::PermissionGroupAuditOwner::User { session_id } => {
+                ApprovalGroupOwnerProjection::User {
+                    session_id: session_id.clone(),
+                }
+            }
+            atman_runtime::permission_audit::PermissionGroupAuditOwner::System => {
+                ApprovalGroupOwnerProjection::System
+            }
+        },
+        label: payload.label.clone(),
+        request_ids: payload.request_ids.iter().map(|id| id.0).collect(),
+        revision: payload.revision,
+        resolved,
+        at: payload.at,
+    }
+}
+
+fn approval_target(
+    target: &atman_runtime::permission_audit::PermissionAuditTarget,
+) -> ApprovalTarget {
+    match target {
+        atman_runtime::permission_audit::PermissionAuditTarget::Flow { run_id } => {
+            ApprovalTarget::Flow {
+                run_id: FlowRunId(run_id.0),
+            }
+        }
+        atman_runtime::permission_audit::PermissionAuditTarget::User => ApprovalTarget::User,
+    }
+}
+
+fn approval_actor(
+    actor: &atman_runtime::permission_audit::PermissionProjectionActor,
+) -> ApprovalActorProjection {
+    match actor {
+        atman_runtime::permission_audit::PermissionProjectionActor::Policy {
+            policy_version,
+            rule_id,
+        } => ApprovalActorProjection::Policy {
+            policy_version: policy_version.clone(),
+            rule_id: rule_id.clone(),
+        },
+        atman_runtime::permission_audit::PermissionProjectionActor::Flow { session_id, run_id } => {
+            ApprovalActorProjection::Flow {
+                session_id: session_id.clone(),
+                run_id: FlowRunId(run_id.0),
+            }
+        }
+        atman_runtime::permission_audit::PermissionProjectionActor::User {
+            session_id,
+            principal_id,
+        } => ApprovalActorProjection::User {
+            session_id: session_id.clone(),
+            principal_id: principal_id.clone(),
+        },
+        atman_runtime::permission_audit::PermissionProjectionActor::System { component } => {
+            ApprovalActorProjection::System {
+                component: component.clone(),
+            }
+        }
+        atman_runtime::permission_audit::PermissionProjectionActor::UnknownLegacy { label } => {
+            ApprovalActorProjection::UnknownLegacy {
+                label: label.clone(),
+            }
+        }
+    }
+}
+
+fn approval_scope(
+    scope: &atman_runtime::permission_audit::PermissionAuditScope,
+) -> ApprovalScopeProjection {
+    match scope {
+        atman_runtime::permission_audit::PermissionAuditScope::CurrentCall => {
+            ApprovalScopeProjection::CurrentCall
+        }
+        atman_runtime::permission_audit::PermissionAuditScope::ChildRunSameTool {
+            run_id,
+            tool_name,
+        } => ApprovalScopeProjection::ChildRunSameTool {
+            run_id: FlowRunId(run_id.0),
+            tool_name: tool_name.clone(),
+        },
+        atman_runtime::permission_audit::PermissionAuditScope::ChildRunSamePathRule {
+            run_id,
+            tool_name,
+            workspace_relative_path,
+        } => ApprovalScopeProjection::ChildRunSamePathRule {
+            run_id: FlowRunId(run_id.0),
+            tool_name: tool_name.clone(),
+            workspace_relative_path: workspace_relative_path.clone(),
         },
     }
 }
@@ -3425,6 +3573,130 @@ mod tests {
         for (runtime, public) in cases {
             assert_eq!(workflow_statement_kind(&runtime), public);
         }
+    }
+
+    #[test]
+    fn approval_projection_retains_the_complete_audit_record() {
+        use atman_runtime::permission::{
+            ExecutionBoundary, PermissionGroupId, PermissionRequestId,
+        };
+        use atman_runtime::permission_audit::{
+            PermissionAuditScope, PermissionAuditTarget, PermissionEscalationAuditHop,
+            PermissionGroupAudit, PermissionGroupAuditOwner, PermissionPolicyReference,
+            PermissionProjectionActor, PermissionProvenanceSummary, PermissionRequestAudit,
+        };
+        use atman_runtime::tool::Tier;
+
+        let request_id = PermissionRequestId::now();
+        let group_id = PermissionGroupId::now();
+        let requesting_run_id = RuntimeRunId::now();
+        let parent_run_id = RuntimeRunId::now();
+        let root_run_id = RuntimeRunId::now();
+        let at = chrono::Utc::now();
+        let payload = PermissionRequestAudit {
+            request_id: Some(request_id.clone()),
+            revision: 7,
+            session_id: "session".into(),
+            requesting_run_id: requesting_run_id.clone(),
+            parent_run_id: Some(parent_run_id.clone()),
+            root_run_id: root_run_id.clone(),
+            tool_use_id: "tool-use".into(),
+            tool: "bash.spawn".into(),
+            call_intent: Some(atman_runtime::message::ToolCallIntent::new("检查进程").unwrap()),
+            tier: Tier::Four,
+            execution_boundary: Some(ExecutionBoundary::Direct),
+            provenance: PermissionProvenanceSummary {
+                cwd: Some("/workspace".into()),
+                path: Some("/workspace/src/main.rs".into()),
+                path_origin: Some("ExplicitInside".into()),
+                workspace_id: Some("workspace".into()),
+                workspace_root: Some("/workspace".into()),
+                repository_root: Some("/workspace".into()),
+                network: true,
+                risks: ["ProcessSpawn".into()].into_iter().collect(),
+                targets: vec!["/workspace/src/main.rs".into()],
+            },
+            target: PermissionAuditTarget::Flow {
+                run_id: parent_run_id.clone(),
+            },
+            group_ids: vec![group_id.clone()],
+            policy: PermissionPolicyReference {
+                snapshot_id: "blake3:policy".into(),
+                rule_id: "mode=Eager".into(),
+            },
+            escalation_path: vec![PermissionEscalationAuditHop {
+                target: PermissionAuditTarget::User,
+                actor: Some(PermissionProjectionActor::Policy {
+                    policy_version: "blake3:policy".into(),
+                    rule_id: "mode=Eager".into(),
+                }),
+                action: Some("defer".into()),
+                reason: Some("user authority required".into()),
+                at,
+            }],
+            decision_id: Some("decision".into()),
+            actor: Some(PermissionProjectionActor::User {
+                session_id: "session".into(),
+                principal_id: Some("principal".into()),
+            }),
+            scope: Some(PermissionAuditScope::ChildRunSamePathRule {
+                run_id: requesting_run_id.clone(),
+                tool_name: "bash.spawn".into(),
+                workspace_relative_path: "src/main.rs".into(),
+            }),
+            reason: Some("approved by user".into()),
+            at,
+        };
+
+        let public = approval_request_projection(&payload, ApprovalState::Approved).unwrap();
+        assert_eq!(public.id, request_id.0);
+        assert_eq!(public.requesting_run_id.0, requesting_run_id.0);
+        assert_eq!(public.parent_run_id.unwrap().0, parent_run_id.0);
+        assert_eq!(public.root_run_id.0, root_run_id.0);
+        assert_eq!(public.tool_use_id, "tool-use");
+        assert_eq!(public.intent.as_deref(), Some("检查进程"));
+        assert_eq!(
+            public.execution_boundary,
+            Some(ApprovalExecutionBoundary::Direct)
+        );
+        assert!(public.provenance.risks.contains("ProcessSpawn"));
+        assert_eq!(public.group_ids, vec![group_id.0]);
+        assert_eq!(public.policy.snapshot_id, "blake3:policy");
+        assert!(matches!(
+            public.escalation_path[0].actor.as_ref(),
+            Some(ApprovalActorProjection::Policy { .. })
+        ));
+        assert!(matches!(
+            public.actor.as_ref(),
+            Some(ApprovalActorProjection::User { .. })
+        ));
+        assert!(matches!(
+            public.scope.as_ref(),
+            Some(ApprovalScopeProjection::ChildRunSamePathRule { .. })
+        ));
+        assert_eq!(public.reason.as_deref(), Some("approved by user"));
+        assert_eq!(public.at, at);
+        assert_eq!(public.revision, 7);
+
+        let group = approval_group_projection(
+            &PermissionGroupAudit {
+                group_id: group_id.clone(),
+                owner: PermissionGroupAuditOwner::User {
+                    session_id: "session".into(),
+                },
+                label: "process checks".into(),
+                request_ids: vec![request_id],
+                revision: 8,
+                at,
+            },
+            true,
+        );
+        assert!(group.resolved);
+        assert!(matches!(
+            group.owner,
+            ApprovalGroupOwnerProjection::User { .. }
+        ));
+        assert_eq!(group.revision, 8);
     }
 
     #[test]

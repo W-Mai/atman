@@ -745,13 +745,123 @@ pub enum InterjectionSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct ApprovalRequestProjection {
     pub id: Uuid,
-    pub run_id: FlowRunId,
+    pub session_id: String,
+    pub requesting_run_id: FlowRunId,
+    #[serde(default)]
+    pub parent_run_id: Option<FlowRunId>,
+    pub root_run_id: FlowRunId,
+    pub tool_use_id: String,
     pub tool_name: String,
+    #[serde(default)]
+    pub intent: Option<String>,
     pub tier: u8,
+    #[serde(default)]
+    pub execution_boundary: Option<ApprovalExecutionBoundary>,
+    pub provenance: ApprovalProvenanceProjection,
     pub state: ApprovalState,
     #[serde(default)]
     pub target: Option<ApprovalTarget>,
+    #[serde(default)]
+    pub group_ids: Vec<Uuid>,
+    pub policy: ApprovalPolicyProjection,
+    #[serde(default)]
+    pub escalation_path: Vec<ApprovalEscalationHopProjection>,
+    #[serde(default)]
+    pub decision_id: Option<String>,
+    #[serde(default)]
+    pub actor: Option<ApprovalActorProjection>,
+    #[serde(default)]
+    pub scope: Option<ApprovalScopeProjection>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub at: DateTime<Utc>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalExecutionBoundary {
+    Sandboxed,
+    Direct,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ApprovalProvenanceProjection {
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub path_origin: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub repository_root: Option<String>,
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub risks: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ApprovalPolicyProjection {
+    pub snapshot_id: String,
+    pub rule_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ApprovalEscalationHopProjection {
+    pub target: ApprovalTarget,
+    #[serde(default)]
+    pub actor: Option<ApprovalActorProjection>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApprovalActorProjection {
+    Policy {
+        policy_version: String,
+        rule_id: String,
+    },
+    Flow {
+        session_id: String,
+        run_id: FlowRunId,
+    },
+    User {
+        session_id: String,
+        #[serde(default)]
+        principal_id: Option<String>,
+    },
+    System {
+        component: String,
+    },
+    UnknownLegacy {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApprovalScopeProjection {
+    CurrentCall,
+    ChildRunSameTool {
+        run_id: FlowRunId,
+        tool_name: String,
+    },
+    ChildRunSamePathRule {
+        run_id: FlowRunId,
+        tool_name: String,
+        workspace_relative_path: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -774,9 +884,20 @@ pub enum ApprovalTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct ApprovalGroupProjection {
     pub id: Uuid,
+    pub owner: ApprovalGroupOwnerProjection,
     pub label: String,
     pub request_ids: Vec<Uuid>,
     pub revision: u64,
+    pub resolved: bool,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApprovalGroupOwnerProjection {
+    Flow { run_id: FlowRunId },
+    User { session_id: String },
+    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]

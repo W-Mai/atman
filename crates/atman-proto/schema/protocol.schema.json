@@ -197,21 +197,238 @@
     }
   ],
   "$defs": {
+    "ApprovalActorProjection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "policy_version",
+            "rule_id",
+            "type"
+          ],
+          "properties": {
+            "policy_version": {
+              "type": "string"
+            },
+            "rule_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "policy"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id",
+            "run_id",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "flow"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "properties": {
+            "principal_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "user"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "component",
+            "type"
+          ],
+          "properties": {
+            "component": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "system"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "label",
+            "type"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "unknown_legacy"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalEscalationHopProjection": {
+      "type": "object",
+      "required": [
+        "target",
+        "at"
+      ],
+      "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actor": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ApprovalActorProjection"
+            }
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/ApprovalTarget"
+        }
+      }
+    },
+    "ApprovalExecutionBoundary": {
+      "type": "string",
+      "enum": [
+        "sandboxed",
+        "direct"
+      ]
+    },
+    "ApprovalGroupOwnerProjection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "flow"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id",
+            "type"
+          ],
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "user"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "system"
+              ]
+            }
+          }
+        }
+      ]
+    },
     "ApprovalGroupProjection": {
       "type": "object",
       "required": [
         "id",
+        "owner",
         "label",
         "request_ids",
-        "revision"
+        "revision",
+        "resolved",
+        "at"
       ],
       "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "id": {
           "type": "string",
           "format": "uuid"
         },
         "label": {
           "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/ApprovalGroupOwnerProjection"
         },
         "request_ids": {
           "type": "array",
@@ -220,10 +437,28 @@
             "format": "uuid"
           }
         },
+        "resolved": {
+          "type": "boolean"
+        },
         "revision": {
           "type": "integer",
           "format": "int64",
           "minimum": 0
+        }
+      }
+    },
+    "ApprovalPolicyProjection": {
+      "type": "object",
+      "required": [
+        "snapshot_id",
+        "rule_id"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string"
+        },
+        "snapshot_id": {
+          "type": "string"
         }
       }
     },
@@ -287,28 +522,178 @@
         }
       ]
     },
+    "ApprovalProvenanceProjection": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path_origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workspace_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
     "ApprovalRequestProjection": {
       "type": "object",
       "required": [
         "id",
-        "run_id",
+        "session_id",
+        "requesting_run_id",
+        "root_run_id",
+        "tool_use_id",
         "tool_name",
         "tier",
+        "provenance",
         "state",
+        "policy",
+        "at",
         "revision"
       ],
       "properties": {
+        "actor": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ApprovalActorProjection"
+            }
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "escalation_path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApprovalEscalationHopProjection"
+          }
+        },
+        "execution_boundary": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ApprovalExecutionBoundary"
+            }
+          ]
+        },
+        "group_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
         "id": {
           "type": "string",
           "format": "uuid"
+        },
+        "intent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_run_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FlowRunId"
+            }
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/ApprovalPolicyProjection"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ApprovalProvenanceProjection"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requesting_run_id": {
+          "$ref": "#/$defs/FlowRunId"
         },
         "revision": {
           "type": "integer",
           "format": "int64",
           "minimum": 0
         },
-        "run_id": {
+        "root_run_id": {
           "$ref": "#/$defs/FlowRunId"
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ApprovalScopeProjection"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
         },
         "state": {
           "$ref": "#/$defs/ApprovalState"
@@ -330,8 +715,77 @@
         },
         "tool_name": {
           "type": "string"
+        },
+        "tool_use_id": {
+          "type": "string"
         }
       }
+    },
+    "ApprovalScopeProjection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "current_call"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "tool_name",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "tool_name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "child_run_same_tool"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "run_id",
+            "tool_name",
+            "workspace_relative_path",
+            "type"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/FlowRunId"
+            },
+            "tool_name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "child_run_same_path_rule"
+              ]
+            },
+            "workspace_relative_path": {
+              "type": "string"
+            }
+          }
+        }
+      ]
     },
     "ApprovalState": {
       "type": "string",
@@ -1808,13 +2262,13 @@
         "groups": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/PermissionGroupView"
+            "$ref": "#/$defs/ApprovalGroupProjection"
           }
         },
         "requests": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/PermissionRequestView"
+            "$ref": "#/$defs/ApprovalRequestProjection"
           }
         },
         "revision": {
@@ -2584,78 +3038,6 @@
         },
         "payload": {
           "type": "object"
-        }
-      }
-    },
-    "PermissionGroupView": {
-      "type": "object",
-      "required": [
-        "group_id",
-        "label",
-        "request_ids",
-        "revision"
-      ],
-      "properties": {
-        "group_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "label": {
-          "type": "string"
-        },
-        "request_ids": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "format": "uuid"
-          }
-        },
-        "revision": {
-          "type": "integer",
-          "format": "int64",
-          "minimum": 0
-        }
-      }
-    },
-    "PermissionRequestView": {
-      "type": "object",
-      "required": [
-        "request_id",
-        "session_id",
-        "requesting_run_id",
-        "tool",
-        "tier",
-        "state",
-        "target",
-        "revision"
-      ],
-      "properties": {
-        "request_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "requesting_run_id": {
-          "$ref": "#/$defs/FlowRunId"
-        },
-        "revision": {
-          "type": "integer",
-          "format": "int64",
-          "minimum": 0
-        },
-        "session_id": {
-          "type": "string"
-        },
-        "state": {
-          "type": "string"
-        },
-        "target": {
-          "type": "string"
-        },
-        "tier": {
-          "type": "string"
-        },
-        "tool": {
-          "type": "string"
         }
       }
     },

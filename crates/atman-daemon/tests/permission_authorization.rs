@@ -308,13 +308,13 @@ async fn permission_rpc_real_pending_requests_support_groups_revisions_and_once(
         listed
             .requests
             .iter()
-            .any(|request| request.request_id == group_pending.request.request_id.0)
+            .any(|request| request.id == group_pending.request.request_id.0)
     );
     assert!(
         listed
             .requests
             .iter()
-            .any(|request| request.request_id == request_pending.request.request_id.0)
+            .any(|request| request.id == request_pending.request.request_id.0)
     );
 
     let create_request_id = atman_proto::RequestId::now();

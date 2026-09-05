@@ -8,12 +8,11 @@ use atman_proto::{
     CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus,
     FormSubmission, GetSessionUpdatesResponse, ListPermissionRequestsResponse,
     NotificationLifecycle, NotificationLocation, NotificationStack,
-    PROJECTION_EVENT_SCHEMA_VERSION, PermissionGroupView, PermissionRequestView,
-    PermissionResolutionView, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    PromptResolutionStatus, ResolvePermissionRequestsResponse, ResourceId, ResourceKind,
-    ResourceState, ResourceTerminationStatus, ResyncRequired, RunCancellationStatus, ServerEvent,
-    SessionId, SessionNotification, SessionProjection, SessionSignal, SessionSummary,
-    TerminalResizeStatus, TrustProjection,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionResolutionView, ProjectionDelta,
+    ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
+    ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
+    RunCancellationStatus, ServerEvent, SessionId, SessionNotification, SessionProjection,
+    SessionSignal, SessionSummary, TerminalResizeStatus, TrustProjection,
 };
 use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -2114,36 +2113,56 @@ impl SessionActor {
     }
 
     fn list_permissions(&self) -> ListPermissionRequestsResponse {
-        let (requests, groups) = self
-            .session
-            .permission_broker()
-            .user_list(&self.session_id.to_string());
+        let session_id = self.session_id.to_string();
+        let (requests, groups) = self.session.permission_broker().user_list(&session_id);
+        let mut memberships = HashMap::new();
+        for group in &groups {
+            for request_id in &group.request_ids {
+                memberships
+                    .entry(request_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(group.group_id.clone());
+            }
+        }
         ListPermissionRequestsResponse {
             session_id: self.session_id.clone(),
             requests: requests
                 .into_iter()
-                .map(|request| PermissionRequestView {
-                    request_id: request.request_id.0,
-                    session_id: request.session_id,
-                    requesting_run_id: FlowRunId(request.requesting_run_id.0),
-                    tool: request.intent.tool_name,
-                    tier: format!("{:?}", request.intent.tier),
-                    state: format!("{:?}", request.state),
-                    target: request
+                .filter_map(|request| {
+                    debug_assert!(matches!(
+                        &request.state,
+                        atman_runtime::permission::PermissionRequestState::Pending {
+                            target: atman_runtime::permission::ApprovalTarget::User
+                        }
+                    ));
+                    let at = request
                         .escalation_path
                         .last()
-                        .map(|hop| format!("{:?}", hop.target))
-                        .unwrap_or_default(),
-                    revision: request.revision,
+                        .map_or(request.requested_at, |hop| hop.at);
+                    let request_id = request.request_id.clone();
+                    let audit =
+                        atman_runtime::permission_audit::PermissionRequestAudit::from_request(
+                            &request,
+                            memberships.remove(&request_id).unwrap_or_default(),
+                            None,
+                            at,
+                        );
+                    crate::projection::approval_request_projection(
+                        &audit,
+                        atman_proto::ApprovalState::Pending,
+                    )
                 })
                 .collect(),
             groups: groups
                 .into_iter()
-                .map(|group| PermissionGroupView {
-                    group_id: group.group_id.0,
-                    label: group.label,
-                    request_ids: group.request_ids.into_iter().map(|id| id.0).collect(),
-                    revision: group.revision,
+                .map(|group| {
+                    let at = group.created_at;
+                    let audit = atman_runtime::permission_audit::PermissionGroupAudit::from_group(
+                        &group,
+                        &session_id,
+                        at,
+                    );
+                    crate::projection::approval_group_projection(&audit, false)
                 })
                 .collect(),
             revision: self.projection.projection().revision,

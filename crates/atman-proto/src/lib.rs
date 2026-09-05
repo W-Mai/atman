@@ -941,31 +941,11 @@ pub struct ResolvePermissionRequestsRequest {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
-pub struct PermissionRequestView {
-    pub request_id: Uuid,
-    pub session_id: String,
-    pub requesting_run_id: FlowRunId,
-    pub tool: String,
-    pub tier: String,
-    pub state: String,
-    pub target: String,
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
-pub struct PermissionGroupView {
-    pub group_id: Uuid,
-    pub label: String,
-    pub request_ids: Vec<Uuid>,
-    pub revision: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ListPermissionRequestsResponse {
     pub session_id: SessionId,
-    pub requests: Vec<PermissionRequestView>,
-    pub groups: Vec<PermissionGroupView>,
+    pub requests: Vec<ApprovalRequestProjection>,
+    pub groups: Vec<ApprovalGroupProjection>,
     pub revision: Revision,
     pub cursor: EventCursor,
 }

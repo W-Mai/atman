@@ -81,7 +81,50 @@ export type LlmCallPurpose =
   | 'compaction'
   | 'interjection_classification'
 export type LlmCallScope = 'root' | 'child' | 'detached'
-export type ApprovalState = 'evaluating' | 'pending' | 'approved' | 'denied' | 'cancelled'
+export type ApprovalGroupOwnerProjection =
+  | {
+      run_id: FlowRunId
+      type: 'flow'
+      [k: string]: unknown
+    }
+  | {
+      session_id: string
+      type: 'user'
+      [k: string]: unknown
+    }
+  | {
+      type: 'system'
+      [k: string]: unknown
+    }
+export type ApprovalActorProjection =
+  | {
+      policy_version: string
+      rule_id: string
+      type: 'policy'
+      [k: string]: unknown
+    }
+  | {
+      run_id: FlowRunId
+      session_id: string
+      type: 'flow'
+      [k: string]: unknown
+    }
+  | {
+      principal_id?: string | null
+      session_id: string
+      type: 'user'
+      [k: string]: unknown
+    }
+  | {
+      component: string
+      type: 'system'
+      [k: string]: unknown
+    }
+  | {
+      label: string
+      type: 'unknown_legacy'
+      [k: string]: unknown
+    }
 export type ApprovalTarget =
   | {
       run_id: FlowRunId
@@ -92,6 +135,26 @@ export type ApprovalTarget =
       type: 'user'
       [k: string]: unknown
     }
+export type ApprovalExecutionBoundary = 'sandboxed' | 'direct'
+export type ApprovalScopeProjection =
+  | {
+      type: 'current_call'
+      [k: string]: unknown
+    }
+  | {
+      run_id: FlowRunId
+      tool_name: string
+      type: 'child_run_same_tool'
+      [k: string]: unknown
+    }
+  | {
+      run_id: FlowRunId
+      tool_name: string
+      type: 'child_run_same_path_rule'
+      workspace_relative_path: string
+      [k: string]: unknown
+    }
+export type ApprovalState = 'evaluating' | 'pending' | 'approved' | 'denied' | 'cancelled'
 export type FormQuestionKind = 'confirm' | 'single_select' | 'multi_select' | 'text'
 export type InterjectionLevel = 'nudge' | 'course_correct' | 'redirect' | 'hard_stop'
 export type InterjectionSource =
@@ -819,20 +882,63 @@ export interface InteractionProjection {
   [k: string]: unknown
 }
 export interface ApprovalGroupProjection {
+  at: string
   id: string
   label: string
+  owner: ApprovalGroupOwnerProjection
   request_ids: string[]
+  resolved: boolean
   revision: number
   [k: string]: unknown
 }
 export interface ApprovalRequestProjection {
+  actor?: null | ApprovalActorProjection
+  at: string
+  decision_id?: string | null
+  escalation_path?: ApprovalEscalationHopProjection[]
+  execution_boundary?: null | ApprovalExecutionBoundary
+  group_ids?: string[]
   id: string
+  intent?: string | null
+  parent_run_id?: null | FlowRunId
+  policy: ApprovalPolicyProjection
+  provenance: ApprovalProvenanceProjection
+  reason?: string | null
+  requesting_run_id: FlowRunId
   revision: number
-  run_id: FlowRunId
+  root_run_id: FlowRunId
+  scope?: null | ApprovalScopeProjection
+  session_id: string
   state: ApprovalState
   target?: null | ApprovalTarget
   tier: number
   tool_name: string
+  tool_use_id: string
+  [k: string]: unknown
+}
+export interface ApprovalEscalationHopProjection {
+  action?: string | null
+  actor?: null | ApprovalActorProjection
+  at: string
+  reason?: string | null
+  target: ApprovalTarget
+  [k: string]: unknown
+}
+export interface ApprovalPolicyProjection {
+  rule_id: string
+  snapshot_id: string
+  [k: string]: unknown
+}
+export interface ApprovalProvenanceProjection {
+  cwd?: string | null
+  network?: boolean
+  path?: string | null
+  path_origin?: string | null
+  repository_root?: string | null
+  risks?: string[]
+  targets?: string[]
+  workspace_id?: string | null
+  workspace_root?: string | null
   [k: string]: unknown
 }
 export interface CompactReviewProjection {
@@ -1326,28 +1432,10 @@ export interface ListPermissionRequestsRequest {
 }
 export interface ListPermissionRequestsResponse {
   cursor: EventCursor
-  groups: PermissionGroupView[]
-  requests: PermissionRequestView[]
+  groups: ApprovalGroupProjection[]
+  requests: ApprovalRequestProjection[]
   revision: Revision
   session_id: SessionId
-  [k: string]: unknown
-}
-export interface PermissionGroupView {
-  group_id: string
-  label: string
-  request_ids: string[]
-  revision: number
-  [k: string]: unknown
-}
-export interface PermissionRequestView {
-  request_id: string
-  requesting_run_id: FlowRunId
-  revision: number
-  session_id: string
-  state: string
-  target: string
-  tier: string
-  tool: string
   [k: string]: unknown
 }
 export interface CreatePermissionGroupRequest {

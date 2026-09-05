@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Auditable permission projections** — approval streams and list responses share one typed request model retaining intent, tool-use identity, provenance, policy, escalation, actor, scope, execution boundary, and decision reason.
+
 - **Structured workflow statements** — session projections expose typed LLM, tool, fanout, confirmation, subflow, message, condition, loop, and return statements instead of debug-formatted labels.
 
 - **LLM context lane projection** — session projections retain per-purpose and per-scope usage buckets together with the latest latency and generation-rate measurements for attached clients.
