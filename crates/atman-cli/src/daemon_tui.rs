@@ -14,7 +14,9 @@ enum NextSession {
 
 pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     crate::load_model_config_from_disk();
+    let mut onboarding_recommended = atman_runtime::model_registry::is_first_run();
     let client = connect_local_daemon_as("atman-tui").await?;
+    crate::load_model_config_from_disk();
     let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
     let first = match resume {
         Some(prefix) => {
@@ -36,9 +38,12 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     };
     loop {
         let NextSession::Attached { session, intro } = current;
-        let Some(next) = run_session(client.clone(), session, intro).await? else {
+        let Some(next) =
+            run_session(client.clone(), session, intro, onboarding_recommended).await?
+        else {
             return Ok(());
         };
+        onboarding_recommended = false;
         current = next;
     }
 }
@@ -47,6 +52,7 @@ async fn run_session(
     client: Client,
     session: SessionClient,
     intro: Option<atman_tui::app::StartupIntro>,
+    onboarding_recommended: bool,
 ) -> Result<Option<NextSession>> {
     let (control_tx, mut control_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -474,7 +480,7 @@ async fn run_session(
     handle.shutdown_rx = Some(shutdown_rx);
     handle.flow_names = crate::discover_flow_names();
     handle.startup_intro = intro;
-    handle.onboarding_recommended = atman_runtime::model_registry::is_first_run();
+    handle.onboarding_recommended = onboarding_recommended;
     let result = atman_tui::run_tui(handle).await;
 
     sync_task.abort();

@@ -1344,19 +1344,13 @@ pub fn load_model_config_from_disk() {
     let Ok(hub) = atman_runtime::config_hub::ConfigHub::global() else {
         return;
     };
-    match hub.migrate_and_reload_models() {
-        Ok(atman_runtime::model_registry::ModelMigrationOutcome::Migrated { backup }) => {
-            atman_runtime::notify!(
-                info,
-                "config.toml migrated to v2 format (backup at {})",
-                backup.display()
-            );
+    match hub.model_config() {
+        Ok(config) => {
+            atman_runtime::model_registry::set_provider_config(config.unwrap_or_default())
         }
-        Ok(atman_runtime::model_registry::ModelMigrationOutcome::NotNeeded) => {}
-        Err(error) => atman_runtime::notify!(
-            error,
-            "config.toml migration/reload failed; disk migration may already be committed: {error}"
-        ),
+        Err(error) => {
+            atman_runtime::notify!(error, "config.toml reload failed: {error}");
+        }
     }
 }
 
