@@ -84,6 +84,7 @@ impl ReconcileError {
 pub struct SessionState {
     snapshot: SessionSnapshot,
     transcript_revision: u64,
+    resources_revision: u64,
 }
 
 impl SessionState {
@@ -96,6 +97,7 @@ impl SessionState {
         Ok(Self {
             snapshot,
             transcript_revision,
+            resources_revision: transcript_revision,
         })
     }
 
@@ -113,6 +115,10 @@ impl SessionState {
 
     pub fn transcript_revision(&self) -> u64 {
         self.transcript_revision
+    }
+
+    pub fn resources_revision(&self) -> u64 {
+        self.resources_revision
     }
 
     pub fn apply_updates(
@@ -136,8 +142,12 @@ impl SessionState {
             if envelope.cursor <= next.snapshot.cursor {
                 continue;
             }
-            if apply_envelope(&mut next.snapshot, envelope, &mut signals)? {
+            let changes = apply_envelope(&mut next.snapshot, envelope, &mut signals)?;
+            if changes.transcript {
                 next.transcript_revision = next.transcript_revision.wrapping_add(1);
+            }
+            if changes.resources {
+                next.resources_revision = next.resources_revision.wrapping_add(1);
             }
             applied += 1;
         }
@@ -360,6 +370,7 @@ impl SessionClient {
                 validate_session(&snapshot, &self.session_id)?;
                 let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 next.transcript_revision = current.transcript_revision.wrapping_add(1);
+                next.resources_revision = current.resources_revision.wrapping_add(1);
                 self.state.send_replace(next);
                 Ok(RefreshOutcome::Reconnected)
             }
@@ -373,6 +384,7 @@ impl SessionClient {
                 validate_session(&snapshot, &self.session_id)?;
                 let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 next.transcript_revision = current.transcript_revision.wrapping_add(1);
+                next.resources_revision = current.resources_revision.wrapping_add(1);
                 self.state.send_replace(next);
                 Ok(RefreshOutcome::Resynced)
             }
@@ -936,7 +948,7 @@ fn apply_envelope(
     snapshot: &mut SessionSnapshot,
     envelope: &ProjectionEventEnvelope,
     signals: &mut Vec<SessionSignal>,
-) -> Result<bool, ReconcileError> {
+) -> Result<SliceChanges, ReconcileError> {
     if envelope.schema_version != PROJECTION_EVENT_SCHEMA_VERSION {
         return Err(ReconcileError::EventSchema {
             expected: PROJECTION_EVENT_SCHEMA_VERSION,
@@ -965,31 +977,46 @@ fn apply_envelope(
             received: envelope.cursor,
         });
     }
-    let transcript_changed = match &envelope.event {
+    let changes = match &envelope.event {
         ServerEvent::ProjectionDelta { delta } => {
             apply_delta(&mut snapshot.projection, delta)?;
-            delta.changes.iter().any(|change| {
-                matches!(
-                    change,
-                    ProjectionChange::RunUpsert { .. }
-                        | ProjectionChange::RunRemove { .. }
-                        | ProjectionChange::TranscriptAppend { .. }
-                        | ProjectionChange::TranscriptReplace { .. }
-                        | ProjectionChange::WorkflowsReplace { .. }
-                        | ProjectionChange::CompactionsReplace { .. }
-                        | ProjectionChange::InteractionsSet { .. }
-                )
-            })
+            SliceChanges {
+                transcript: delta.changes.iter().any(|change| {
+                    matches!(
+                        change,
+                        ProjectionChange::RunUpsert { .. }
+                            | ProjectionChange::RunRemove { .. }
+                            | ProjectionChange::TranscriptAppend { .. }
+                            | ProjectionChange::TranscriptReplace { .. }
+                            | ProjectionChange::WorkflowsReplace { .. }
+                            | ProjectionChange::CompactionsReplace { .. }
+                            | ProjectionChange::InteractionsSet { .. }
+                    )
+                }),
+                resources: delta.changes.iter().any(|change| {
+                    matches!(
+                        change,
+                        ProjectionChange::ResourceUpsert { .. }
+                            | ProjectionChange::ResourceRemove { .. }
+                    )
+                }),
+            }
         }
         ServerEvent::Signal { signal } => {
             signals.push(signal.clone());
-            false
+            SliceChanges::default()
         }
         ServerEvent::ResyncRequired { .. } => unreachable!("handled before cursor validation"),
-        ServerEvent::Heartbeat => false,
+        ServerEvent::Heartbeat => SliceChanges::default(),
     };
     snapshot.cursor = envelope.cursor;
-    Ok(transcript_changed)
+    Ok(changes)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SliceChanges {
+    transcript: bool,
+    resources: bool,
 }
 
 fn apply_delta(
@@ -1181,6 +1208,7 @@ mod tests {
     fn transcript_revision_only_advances_for_document_changes() {
         let mut state = state();
         let initial = state.transcript_revision();
+        let initial_resources = state.resources_revision();
         let metadata = GetSessionUpdatesResponse {
             daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![envelope(
@@ -1200,6 +1228,7 @@ mod tests {
         };
         state.apply_updates(&metadata).unwrap();
         assert_eq!(state.transcript_revision(), initial);
+        assert_eq!(state.resources_revision(), initial_resources);
 
         let document = GetSessionUpdatesResponse {
             daemon_generation: state.snapshot.daemon_generation.clone(),
@@ -1225,12 +1254,37 @@ mod tests {
         };
         state.apply_updates(&document).unwrap();
         assert_eq!(state.transcript_revision(), initial.wrapping_add(1));
+        assert_eq!(state.resources_revision(), initial_resources);
+
+        let resources = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            events: vec![envelope(
+                &state,
+                10,
+                ProjectionDelta {
+                    base_revision: Revision(5),
+                    revision: Revision(6),
+                    changes: vec![ProjectionChange::ResourceUpsert {
+                        resource: test_resource(),
+                    }],
+                },
+            )],
+            next_cursor: EventCursor(10),
+            has_more: false,
+            resync_required: None,
+        };
+        state.apply_updates(&resources).unwrap();
+        assert_eq!(state.transcript_revision(), initial.wrapping_add(1));
+        assert_eq!(
+            state.resources_revision(),
+            initial_resources.wrapping_add(1)
+        );
 
         let heartbeat = ProjectionEventEnvelope {
             schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
             daemon_generation: state.snapshot.daemon_generation.clone(),
             session_id: state.snapshot.projection.metadata.id.clone(),
-            cursor: EventCursor(10),
+            cursor: EventCursor(11),
             ts: chrono::Utc::now(),
             event: ServerEvent::Heartbeat,
         };
@@ -1238,12 +1292,16 @@ mod tests {
             .apply_updates(&GetSessionUpdatesResponse {
                 daemon_generation: state.snapshot.daemon_generation.clone(),
                 events: vec![heartbeat],
-                next_cursor: EventCursor(10),
+                next_cursor: EventCursor(11),
                 has_more: false,
                 resync_required: None,
             })
             .unwrap();
         assert_eq!(state.transcript_revision(), initial.wrapping_add(1));
+        assert_eq!(
+            state.resources_revision(),
+            initial_resources.wrapping_add(1)
+        );
     }
 
     #[test]
@@ -1564,6 +1622,7 @@ mod tests {
             Some("before")
         );
         let transcript_revision = session.current().transcript_revision();
+        let resources_revision = session.current().resources_revision();
 
         assert_eq!(session.refresh().await.unwrap(), RefreshOutcome::Resynced);
         assert_eq!(
@@ -1574,6 +1633,10 @@ mod tests {
         assert_eq!(
             session.current().transcript_revision(),
             transcript_revision.wrapping_add(1)
+        );
+        assert_eq!(
+            session.current().resources_revision(),
+            resources_revision.wrapping_add(1)
         );
     }
 
@@ -1808,6 +1871,7 @@ mod tests {
         let session = client.attach_session(session_id).await.unwrap();
         assert_eq!(client.capabilities().daemon_generation.0, "generation-a");
         let transcript_revision = session.current().transcript_revision();
+        let resources_revision = session.current().resources_revision();
 
         assert_eq!(
             session.refresh().await.unwrap(),
@@ -1822,6 +1886,10 @@ mod tests {
         assert_eq!(
             session.current().transcript_revision(),
             transcript_revision.wrapping_add(1)
+        );
+        assert_eq!(
+            session.current().resources_revision(),
+            resources_revision.wrapping_add(1)
         );
     }
 

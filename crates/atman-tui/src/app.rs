@@ -861,7 +861,9 @@ pub struct AppState {
     pub session_name: Option<String>,
     pub project_root: Option<String>,
     pub daemon_revision: Option<u64>,
+    pub(crate) daemon_generation: Option<String>,
     daemon_transcript_revision: Option<u64>,
+    daemon_resources_revision: Option<u64>,
     daemon_item_count: usize,
     pub latest_release: Option<String>,
     pub attach_count: usize,
@@ -2167,6 +2169,52 @@ impl AppState {
 
     pub(crate) fn daemon_transcript_revision(&self) -> Option<u64> {
         self.daemon_transcript_revision
+    }
+
+    pub(crate) fn daemon_generation(&self) -> Option<&str> {
+        self.daemon_generation.as_deref()
+    }
+
+    pub(crate) fn reset_daemon_projection_slices(&mut self) {
+        self.daemon_transcript_revision = None;
+        self.daemon_resources_revision = None;
+    }
+
+    pub(crate) fn reconcile_daemon_tasks(
+        &mut self,
+        snapshots: Vec<atman_runtime::TaskSnapshot>,
+        revision: u64,
+    ) {
+        if self.daemon_resources_revision == Some(revision) {
+            return;
+        }
+        self.task_id_index.clear();
+        self.task_handle_index.clear();
+        for (index, snapshot) in snapshots.iter().enumerate() {
+            self.task_id_index.insert(snapshot.id.clone(), index);
+            self.task_handle_index
+                .insert(snapshot.source_handle.clone(), index);
+        }
+        self.task_snapshots = snapshots;
+        self.hovered_task_id = self
+            .hovered_task_id
+            .take()
+            .filter(|id| self.task_id_index.contains_key(id));
+        self.hovered_kill_id = self
+            .hovered_kill_id
+            .take()
+            .filter(|id| self.task_id_index.contains_key(id));
+        self.kill_armed_id = self
+            .kill_armed_id
+            .take()
+            .filter(|id| self.task_id_index.contains_key(id));
+        self.task_snapshots_revision = self.task_snapshots_revision.wrapping_add(1);
+        self.daemon_resources_revision = Some(revision);
+        self.mark_visual_dirty();
+    }
+
+    pub(crate) fn daemon_resources_revision(&self) -> Option<u64> {
+        self.daemon_resources_revision
     }
 
     pub fn remove_item(&mut self, index: usize) -> Option<OutputItem> {

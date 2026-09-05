@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-backed task panels** — terminal clients derive background process and terminal task rows from durable resource projections, preserving command, owner, workspace, lifecycle, timing, and termination details across reconnects without rebuilding task state for unrelated session updates.
+
 - **Durable turn activity summaries** — daemon projections retain per-turn and cumulative tool and file-edit totals, including affected file identities, so attached clients restore the same turn coda after reconnecting.
 
 - **Daemon-backed TUI transcript projection** — attached terminal clients render durable messages, tool groups and details, workflow state, sub-agent output, compaction progress, notices, diagrams, image references, edit metrics, and restored tool durations through the existing document-flow components. SDK-maintained transcript revisions avoid rebuilding large histories for unrelated projection updates.
@@ -78,6 +80,8 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Generation-aware terminal reconciliation** — attached terminal clients replace shared state after daemon restart or snapshot resynchronization even when the incoming projection revision is equal to or lower than the previously observed revision.
 
 - **Durable daemon recovery** — reopening an interrupted session records one generation reconciliation event. Active runs become lost, live resources become orphaned, interrupted compactions become abandoned, and pending interactions are cancelled with the same result in live state and complete event replay. Workspace reconciliation reasons enter the owning session projection, and dirty worktrees are excluded from orphan pruning.
 

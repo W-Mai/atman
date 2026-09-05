@@ -29,7 +29,11 @@ pub(crate) async fn run_frames(
         .daemon_state_rx
         .as_ref()
         .map(|rx| {
-            crate::projection_adapter::TuiSessionProjection::try_from_state(&rx.borrow(), None)
+            crate::projection_adapter::TuiSessionProjection::try_from_state(
+                &rx.borrow(),
+                None,
+                None,
+            )
         })
         .transpose()?;
     if let Some(projected) = daemon_projection.as_ref() {
@@ -1325,18 +1329,26 @@ pub(crate) async fn run_frames(
             _ = wait_daemon_state_change(handle.daemon_state_rx.as_mut()) => {
                 if let Some(rx) = handle.daemon_state_rx.as_mut() {
                     let transcript_revision = app.app.daemon_transcript_revision();
+                    let resources_revision = app.app.daemon_resources_revision();
                     let projected = {
                         let state = rx.borrow();
                         if app
                             .app
                             .daemon_revision
                             .is_some_and(|revision| revision >= state.projection().revision.0)
+                            && app.app.daemon_generation()
+                                == Some(state.snapshot().daemon_generation.0.as_str())
+                            && transcript_revision
+                                .is_some_and(|revision| revision >= state.transcript_revision())
+                            && resources_revision
+                                .is_some_and(|revision| revision >= state.resources_revision())
                         {
                             Ok(None)
                         } else {
                             crate::projection_adapter::TuiSessionProjection::try_from_state(
                                 &state,
                                 transcript_revision,
+                                resources_revision,
                             )
                             .map(Some)
                         }
@@ -1706,10 +1718,29 @@ fn apply_daemon_projection(
     app: &mut UiState,
     mut projected: crate::projection_adapter::TuiSessionProjection,
 ) {
-    if app
-        .app
-        .daemon_revision
-        .is_some_and(|revision| revision >= projected.revision)
+    let generation_changed = projected
+        .daemon_generation
+        .as_deref()
+        .is_some_and(|generation| app.app.daemon_generation() != Some(generation));
+    let generation_matches = projected
+        .daemon_generation
+        .as_deref()
+        .is_none_or(|generation| app.app.daemon_generation() == Some(generation));
+    if generation_matches
+        && app
+            .app
+            .daemon_revision
+            .is_some_and(|revision| revision >= projected.revision)
+        && projected.transcript.as_ref().is_none_or(|_| {
+            app.app
+                .daemon_transcript_revision()
+                .is_some_and(|revision| revision >= projected.transcript_revision)
+        })
+        && projected.task_snapshots.as_ref().is_none_or(|_| {
+            app.app
+                .daemon_resources_revision()
+                .is_some_and(|revision| revision >= projected.resources_revision)
+        })
     {
         return;
     }
@@ -1731,6 +1762,12 @@ fn apply_daemon_projection(
         app.app.selected_permission_group = None;
     }
 
+    if generation_changed {
+        app.app.reset_daemon_projection_slices();
+    }
+    if let Some(generation) = projected.daemon_generation {
+        app.app.daemon_generation = Some(generation);
+    }
     app.app.daemon_revision = Some(projected.revision);
     app.app.session_name = projected.session_name;
     app.app.project_root = projected.project_root;
@@ -1751,6 +1788,10 @@ fn apply_daemon_projection(
     if let Some(transcript) = projected.transcript {
         app.app
             .reconcile_daemon_transcript(transcript, projected.transcript_revision);
+    }
+    if let Some(task_snapshots) = projected.task_snapshots {
+        app.app
+            .reconcile_daemon_tasks(task_snapshots, projected.resources_revision);
     }
     app.wm.modals.form_modal.reconcile(&projected.pending_forms);
     crate::compact_review_modal::CompactReviewModal::reconcile(
@@ -1935,6 +1976,7 @@ mod tests {
         };
         let workflow = graph.into();
         crate::projection_adapter::TuiSessionProjection {
+            daemon_generation: Some("generation-a".into()),
             revision,
             session_name: Some("remote".into()),
             project_root: Some("/workspace".into()),
@@ -1963,6 +2005,8 @@ mod tests {
                 cancelled: matches!(status, atman_runtime::workflow::NodeStatus::Cancelled),
             }]),
             transcript_revision: revision,
+            task_snapshots: Some(Vec::new()),
+            resources_revision: revision,
         }
     }
 
@@ -1971,15 +2015,32 @@ mod tests {
         let mut app = UiState::new(AppState::new("session".into(), None));
         app.app.input = "unsent draft".into();
         app.app.trust.theme = atman_runtime::trust::Theme::Wuxia;
+        let task_id = atman_runtime::TaskId::now();
+        let mut initial =
+            projected_session(2, "current", atman_runtime::workflow::NodeStatus::Running);
+        initial.task_snapshots = Some(vec![atman_runtime::TaskSnapshot {
+            id: task_id.clone(),
+            kind: atman_runtime::TaskKind::Terminal,
+            label: "Run server".into(),
+            command: Some("cargo run".into()),
+            status: atman_runtime::TaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+            source_handle: "term-1".into(),
+            session_id: "session".into(),
+            workspace_id: None,
+            flow_run_id: None,
+            termination: None,
+        }]);
 
-        apply_daemon_projection(
-            &mut app,
-            projected_session(2, "current", atman_runtime::workflow::NodeStatus::Running),
-        );
+        apply_daemon_projection(&mut app, initial);
         assert_eq!(app.app.goal.as_deref(), Some("current"));
         assert_eq!(app.app.input, "unsent draft");
         assert_eq!(app.app.trust.theme, atman_runtime::trust::Theme::Wuxia);
         assert_eq!(app.app.daemon_revision, Some(2));
+        assert_eq!(app.app.task_snapshots.len(), 1);
+        assert_eq!(app.app.task_id_index.get(&task_id), Some(&0));
+        assert_eq!(app.app.task_handle_index.get("term-1"), Some(&0));
         assert!(matches!(
             &*app.app.items,
             [app::OutputItem::WorkflowPanel { ended_at: None, .. }]
@@ -1995,8 +2056,12 @@ mod tests {
         let mut metadata_only =
             projected_session(3, "metadata", atman_runtime::workflow::NodeStatus::Running);
         metadata_only.transcript_revision = 2;
+        metadata_only.transcript = None;
+        metadata_only.resources_revision = 2;
+        metadata_only.task_snapshots = None;
         apply_daemon_projection(&mut app, metadata_only);
         assert_eq!(app.app.goal.as_deref(), Some("metadata"));
+        assert_eq!(app.app.task_snapshots.len(), 1);
         assert!(app.app.items.iter().any(|item| matches!(
             item,
             app::OutputItem::AssistantMd { md, .. } if md == "ephemeral"
@@ -2009,6 +2074,7 @@ mod tests {
         assert_eq!(app.app.goal.as_deref(), Some("metadata"));
 
         let mut terminal = projected_session(4, "done", atman_runtime::workflow::NodeStatus::Ok);
+        terminal.task_snapshots = Some(Vec::new());
         if let app::OutputItem::WorkflowPanel { graph, .. } =
             &mut terminal.transcript.as_mut().unwrap()[0]
         {
@@ -2021,6 +2087,9 @@ mod tests {
         }
         apply_daemon_projection(&mut app, terminal);
         assert_eq!(app.app.goal.as_deref(), Some("done"));
+        assert!(app.app.task_snapshots.is_empty());
+        assert!(app.app.task_id_index.is_empty());
+        assert!(app.app.task_handle_index.is_empty());
         assert!(matches!(
             app.app.items.first(),
             Some(app::OutputItem::WorkflowPanel {
@@ -2038,6 +2107,50 @@ mod tests {
             Some(app::OutputItem::SystemNote { text, level: app::NoteLevel::Warn })
                 if text == "local diagnostic"
         ));
+    }
+
+    #[test]
+    fn daemon_generation_change_replaces_equal_or_lower_projection_revisions() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        let mut before = projected_session(
+            5,
+            "before restart",
+            atman_runtime::workflow::NodeStatus::Running,
+        );
+        before.daemon_generation = Some("generation-a".into());
+        apply_daemon_projection(&mut app, before);
+
+        let mut after =
+            projected_session(1, "after restart", atman_runtime::workflow::NodeStatus::Ok);
+        after.daemon_generation = Some("generation-b".into());
+        after.transcript_revision = 5;
+        after.resources_revision = 5;
+        apply_daemon_projection(&mut app, after);
+
+        assert_eq!(app.app.daemon_generation(), Some("generation-b"));
+        assert_eq!(app.app.daemon_revision, Some(1));
+        assert_eq!(app.app.goal.as_deref(), Some("after restart"));
+        assert!(matches!(
+            app.app.items.first(),
+            Some(app::OutputItem::WorkflowPanel {
+                ended_at: Some(_),
+                ..
+            })
+        ));
+
+        let mut resynced = projected_session(
+            1,
+            "after resync",
+            atman_runtime::workflow::NodeStatus::Running,
+        );
+        resynced.daemon_generation = Some("generation-b".into());
+        resynced.transcript_revision = 6;
+        resynced.resources_revision = 6;
+        apply_daemon_projection(&mut app, resynced);
+        assert_eq!(app.app.daemon_revision, Some(1));
+        assert_eq!(app.app.goal.as_deref(), Some("after resync"));
+        assert_eq!(app.app.daemon_transcript_revision(), Some(6));
+        assert_eq!(app.app.daemon_resources_revision(), Some(6));
     }
 
     #[test]

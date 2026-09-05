@@ -38,6 +38,7 @@ use crate::history::ToolDisplayMeta;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TuiSessionProjection {
+    pub(crate) daemon_generation: Option<String>,
     pub(crate) revision: u64,
     pub(crate) session_name: Option<String>,
     pub(crate) project_root: Option<String>,
@@ -53,24 +54,33 @@ pub(crate) struct TuiSessionProjection {
     pub(crate) pending_injections: Vec<Injection>,
     pub(crate) transcript: Option<Vec<OutputItem>>,
     pub(crate) transcript_revision: u64,
+    pub(crate) task_snapshots: Option<Vec<atman_runtime::TaskSnapshot>>,
+    pub(crate) resources_revision: u64,
 }
 
 impl TuiSessionProjection {
     pub(crate) fn try_from_state(
         state: &atman_client::SessionState,
         current_transcript_revision: Option<u64>,
+        current_resources_revision: Option<u64>,
     ) -> Result<Self> {
         Self::convert(
             state.projection(),
+            Some(state.snapshot().daemon_generation.0.clone()),
             state.transcript_revision(),
+            state.resources_revision(),
             current_transcript_revision != Some(state.transcript_revision()),
+            current_resources_revision != Some(state.resources_revision()),
         )
     }
 
     fn convert(
         projection: &SessionProjection,
+        daemon_generation: Option<String>,
         transcript_revision: u64,
+        resources_revision: u64,
         include_transcript: bool,
+        include_resources: bool,
     ) -> Result<Self> {
         let audits = projection
             .interactions
@@ -139,8 +149,12 @@ impl TuiSessionProjection {
         } else {
             None
         };
+        let task_snapshots = include_resources
+            .then(|| task_snapshots(projection))
+            .transpose()?;
 
         Ok(Self {
+            daemon_generation,
             revision: projection.revision.0,
             session_name: (!projection.metadata.title.is_empty())
                 .then(|| projection.metadata.title.clone()),
@@ -179,6 +193,8 @@ impl TuiSessionProjection {
                 .collect(),
             transcript,
             transcript_revision,
+            task_snapshots,
+            resources_revision,
         })
     }
 }
@@ -187,8 +203,132 @@ impl TryFrom<&SessionProjection> for TuiSessionProjection {
     type Error = anyhow::Error;
 
     fn try_from(projection: &SessionProjection) -> Result<Self> {
-        Self::convert(projection, projection.revision.0, true)
+        Self::convert(
+            projection,
+            None,
+            projection.revision.0,
+            projection.revision.0,
+            true,
+            true,
+        )
     }
+}
+
+fn task_snapshots(projection: &SessionProjection) -> Result<Vec<atman_runtime::TaskSnapshot>> {
+    let wall_now = chrono::Utc::now();
+    let monotonic_now = Instant::now();
+    let snapshots = projection
+        .resources
+        .iter()
+        .filter(|resource| {
+            matches!(
+                resource.kind,
+                atman_proto::ResourceKind::Terminal | atman_proto::ResourceKind::BackgroundProcess
+            )
+        })
+        .map(|resource| {
+            let task_id = resource.id.task_id().with_context(|| {
+                format!("task resource `{}` has an invalid identity", resource.id.0)
+            })?;
+            let source_handle = resource
+                .details
+                .get("source_handle")
+                .filter(|handle| !handle.is_empty())
+                .with_context(|| format!("task resource `{}` has no source handle", resource.id.0))?
+                .clone();
+            let status = match resource.state {
+                atman_proto::ResourceState::Starting | atman_proto::ResourceState::Running => {
+                    atman_runtime::TaskStatus::Running
+                }
+                atman_proto::ResourceState::Terminating => atman_runtime::TaskStatus::Killing,
+                atman_proto::ResourceState::Exited => atman_runtime::TaskStatus::Ok,
+                atman_proto::ResourceState::Failed
+                | atman_proto::ResourceState::Lost
+                | atman_proto::ResourceState::Orphaned => atman_runtime::TaskStatus::Err,
+                atman_proto::ResourceState::Released => atman_runtime::TaskStatus::Killed,
+                atman_proto::ResourceState::Dirty | atman_proto::ResourceState::Retained => {
+                    bail!(
+                        "task resource `{}` has workspace-only state `{:?}`",
+                        resource.id.0,
+                        resource.state
+                    )
+                }
+            };
+            let started_at = resource
+                .started_at
+                .with_context(|| format!("task resource `{}` has no start time", resource.id.0))?;
+            let ended_at = resource
+                .finished_at
+                .map(|finished_at| instant_at(finished_at, wall_now, monotonic_now));
+            anyhow::ensure!(
+                status.is_terminal() == ended_at.is_some(),
+                "task resource `{}` terminal state and finish time disagree",
+                resource.id.0
+            );
+            let termination = resource
+                .details
+                .get("termination")
+                .map(|termination| match termination.as_str() {
+                    "killed" => Ok(atman_runtime::task_registry::TaskTermination::Killed),
+                    "suicide" => Ok(atman_runtime::task_registry::TaskTermination::Suicide),
+                    other => bail!(
+                        "task resource `{}` has unknown termination `{other}`",
+                        resource.id.0
+                    ),
+                })
+                .transpose()?;
+            Ok(atman_runtime::TaskSnapshot {
+                id: atman_runtime::TaskId(task_id),
+                kind: match resource.kind {
+                    atman_proto::ResourceKind::Terminal => atman_runtime::TaskKind::Terminal,
+                    atman_proto::ResourceKind::BackgroundProcess => atman_runtime::TaskKind::Bash,
+                    atman_proto::ResourceKind::Workspace | atman_proto::ResourceKind::Artifact => {
+                        unreachable!("filtered above")
+                    }
+                },
+                label: if resource.label.is_empty() {
+                    source_handle.clone()
+                } else {
+                    resource.label.clone()
+                },
+                command: resource.details.get("command").cloned(),
+                status,
+                started_at: instant_at(started_at, wall_now, monotonic_now),
+                ended_at,
+                source_handle,
+                session_id: projection.metadata.id.to_string(),
+                workspace_id: resource.details.get("workspace_id").cloned(),
+                flow_run_id: Some(FlowRunId(resource.owner_run_id.0)),
+                termination,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut ids = HashSet::new();
+    let mut handles = HashSet::new();
+    for snapshot in &snapshots {
+        anyhow::ensure!(
+            ids.insert(snapshot.id.clone()),
+            "daemon projection contains duplicate task identities"
+        );
+        anyhow::ensure!(
+            handles.insert(snapshot.source_handle.clone()),
+            "daemon projection contains duplicate task handles"
+        );
+    }
+    Ok(snapshots)
+}
+
+fn instant_at(
+    timestamp: chrono::DateTime<chrono::Utc>,
+    wall_now: chrono::DateTime<chrono::Utc>,
+    monotonic_now: Instant,
+) -> Instant {
+    wall_now
+        .signed_duration_since(timestamp)
+        .to_std()
+        .ok()
+        .and_then(|elapsed| monotonic_now.checked_sub(elapsed))
+        .unwrap_or(monotonic_now)
 }
 
 fn transcript(
@@ -2150,6 +2290,82 @@ mod tests {
         assert!(transcript.iter().all(|item| {
             !matches!(item, OutputItem::AssistantMd { md, .. } if md == "Implemented")
         }));
+    }
+
+    #[test]
+    fn converts_daemon_task_resources_into_existing_task_snapshots() {
+        let mut source = projection();
+        let now = chrono::Utc::now();
+        let owner_run_id = match &source.workflows[0].roots[0].kind {
+            WorkflowNodeKind::Flow { run_id, .. } => run_id.clone(),
+            _ => unreachable!(),
+        };
+        let terminal_id = uuid::Uuid::now_v7();
+        let bash_id = uuid::Uuid::now_v7();
+        source.resources = vec![
+            atman_proto::ResourceProjection {
+                id: atman_proto::ResourceId::task(terminal_id),
+                kind: atman_proto::ResourceKind::Terminal,
+                state: atman_proto::ResourceState::Running,
+                owner_run_id: owner_run_id.clone(),
+                tool_use_id: Some("terminal-call".into()),
+                label: "Run server".into(),
+                started_at: Some(now - chrono::Duration::seconds(2)),
+                finished_at: None,
+                details: BTreeMap::from([
+                    ("source_handle".into(), "term-1".into()),
+                    ("command".into(), "cargo run".into()),
+                    ("workspace_id".into(), "workspace-1".into()),
+                ]),
+            },
+            atman_proto::ResourceProjection {
+                id: atman_proto::ResourceId::task(bash_id),
+                kind: atman_proto::ResourceKind::BackgroundProcess,
+                state: atman_proto::ResourceState::Exited,
+                owner_run_id: owner_run_id.clone(),
+                tool_use_id: Some("bash-call".into()),
+                label: "Inspect files".into(),
+                started_at: Some(now - chrono::Duration::seconds(3)),
+                finished_at: Some(now - chrono::Duration::seconds(1)),
+                details: BTreeMap::from([
+                    ("source_handle".into(), "bash-1".into()),
+                    ("command".into(), "rg --files".into()),
+                ]),
+            },
+            atman_proto::ResourceProjection {
+                id: atman_proto::ResourceId("workspace:one".into()),
+                kind: atman_proto::ResourceKind::Workspace,
+                state: atman_proto::ResourceState::Dirty,
+                owner_run_id,
+                tool_use_id: None,
+                label: "/tmp/worktree".into(),
+                started_at: Some(now),
+                finished_at: None,
+                details: BTreeMap::new(),
+            },
+        ];
+
+        let converted = TuiSessionProjection::try_from(&source).unwrap();
+        let snapshots = converted.task_snapshots.as_deref().unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(converted.resources_revision, source.revision.0);
+        let terminal = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == atman_runtime::TaskId(terminal_id))
+            .unwrap();
+        assert_eq!(terminal.kind, atman_runtime::TaskKind::Terminal);
+        assert_eq!(terminal.status, atman_runtime::TaskStatus::Running);
+        assert_eq!(terminal.source_handle, "term-1");
+        assert_eq!(terminal.command.as_deref(), Some("cargo run"));
+        assert_eq!(terminal.workspace_id.as_deref(), Some("workspace-1"));
+        assert!(terminal.ended_at.is_none());
+        let bash = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == atman_runtime::TaskId(bash_id))
+            .unwrap();
+        assert_eq!(bash.kind, atman_runtime::TaskKind::Bash);
+        assert_eq!(bash.status, atman_runtime::TaskStatus::Ok);
+        assert!(bash.ended_at.is_some());
     }
 
     #[test]
