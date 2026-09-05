@@ -17,6 +17,8 @@ export type AtmanDaemonProtocolPayloads =
   | ImportSessionMessagesResponse
   | MutateProviderRequest
   | ProviderMutationResult
+  | InitializeConfigRequest
+  | InitializeConfigResponse
   | UpsertModelConfigRequest
   | UpsertModelConfigResponse
   | SwitchDefaultModelRequest
@@ -1391,6 +1393,18 @@ export interface ProviderStateChange {
   auth_changed: boolean
   catalog_changed: boolean
   live_changed: boolean
+  [k: string]: unknown
+}
+export interface InitializeConfigRequest {
+  fs_access?: string | null
+  request_id?: null | RequestId
+  [k: string]: unknown
+}
+export interface InitializeConfigResponse {
+  config_dir: string
+  managed: string[]
+  skipped: string[]
+  written: string[]
   [k: string]: unknown
 }
 export interface UpsertModelConfigRequest {

@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use atman_proto::{
-    CatalogDelta, ProbeProviderRequest, ProbeResponse, ProviderKind, ProviderMutation,
-    ProviderMutationResult, ProviderStateChange, SwitchDefaultModelResponse,
-    UpsertModelConfigRequest, UpsertModelConfigResponse,
+    CatalogDelta, InitializeConfigRequest, InitializeConfigResponse, ProbeProviderRequest,
+    ProbeResponse, ProviderKind, ProviderMutation, ProviderMutationResult, ProviderStateChange,
+    SwitchDefaultModelResponse, UpsertModelConfigRequest, UpsertModelConfigResponse,
 };
 use atman_runtime::auth_store::StoredProvider;
 use atman_runtime::oauth::{OAuthProvider, TokenResult};
@@ -14,6 +14,41 @@ use atman_runtime::provider_lifecycle::ProviderLifecycle;
 
 const CALLBACK_PORT: u16 = 1455;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub fn initialize(
+    state: &crate::state::DaemonState,
+    launcher: &crate::run::RunLauncher,
+    request: &InitializeConfigRequest,
+) -> Result<InitializeConfigResponse> {
+    let fs_access = request
+        .fs_access
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|error: String| anyhow::anyhow!(error))?;
+    let config_dir = launcher
+        .config_dir
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(atman_runtime::storage::config_dir)?;
+    let report = atman_runtime::config_init::init_config_dir_with_mode(&config_dir, fs_access)?;
+    let lifecycle = state.provider_lifecycle_for(Some(&config_dir))?;
+    lifecycle.config_hub().migrate_and_reload_models()?;
+    lifecycle.reload_config_providers()?;
+    Ok(InitializeConfigResponse {
+        config_dir: report.config_dir.to_string_lossy().into_owned(),
+        written: display_paths(report.written),
+        skipped: display_paths(report.skipped),
+        managed: display_paths(report.managed),
+    })
+}
+
+fn display_paths(paths: Vec<std::path::PathBuf>) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
 
 pub async fn mutate(
     lifecycle: &ProviderLifecycle,

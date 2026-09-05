@@ -323,6 +323,7 @@ pub mod methods {
     pub const SANITIZE_SESSION_ATTACHMENTS: &str = "session.sanitize_attachments";
     pub const IMPORT_SESSION_MESSAGES: &str = "session.import_messages";
     pub const MUTATE_PROVIDER: &str = "config.provider.mutate";
+    pub const INITIALIZE_CONFIG: &str = "config.initialize";
     pub const UPSERT_MODEL_CONFIG: &str = "config.model.upsert";
     pub const SWITCH_DEFAULT_MODEL: &str = "config.model.switch_default";
     pub const PROBE_PROVIDER: &str = "config.provider.probe";
@@ -369,6 +370,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::SanitizeSessionAttachments>(),
         super::method_descriptor::<super::rpc::ImportSessionMessages>(),
         super::method_descriptor::<super::rpc::MutateProvider>(),
+        super::method_descriptor::<super::rpc::InitializeConfig>(),
         super::method_descriptor::<super::rpc::UpsertModelConfig>(),
         super::method_descriptor::<super::rpc::SwitchDefaultModel>(),
         super::method_descriptor::<super::rpc::ProbeProvider>(),
@@ -746,6 +748,22 @@ pub struct ProbeProviderRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<bool>,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InitializeConfigRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_access: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InitializeConfigResponse {
+    pub config_dir: String,
+    pub written: Vec<String>,
+    pub skipped: Vec<String>,
+    pub managed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -1609,6 +1627,13 @@ pub mod rpc {
         Command,
         MutateProviderRequest,
         ProviderMutationResult
+    );
+    method!(
+        InitializeConfig,
+        methods::INITIALIZE_CONFIG,
+        Command,
+        InitializeConfigRequest,
+        InitializeConfigResponse
     );
     method!(
         UpsertModelConfig,

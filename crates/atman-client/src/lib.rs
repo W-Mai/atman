@@ -14,14 +14,14 @@ use atman_proto::{
     CapabilitiesRequest, CapabilitiesResponse, ClientId, CloseSessionRequest, CloseSessionResponse,
     CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor,
     GetEventsRequest, GetEventsResponse, ImportSessionMessagesRequest,
-    ImportSessionMessagesResponse, ImportedMessage, JsonRpcRequest, JsonRpcResponse,
-    ListMcpPromptsResponse, ListMcpResourcesResponse, ListProjectsRequest, ListProjectsResponse,
-    ListSessionsRequest, McpServerRequest, MutateProviderRequest, PROTOCOL_VERSION,
-    ProbeProviderRequest, ProbeResponse, ProjectionEventEnvelope, ProviderMutation,
-    ProviderMutationResult, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
-    SanitizeSessionAttachmentsRequest, SanitizeSessionAttachmentsResponse, SessionId,
-    SessionSummary, SwitchDefaultModelRequest, SwitchDefaultModelResponse,
-    UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
+    ImportSessionMessagesResponse, ImportedMessage, InitializeConfigRequest,
+    InitializeConfigResponse, JsonRpcRequest, JsonRpcResponse, ListMcpPromptsResponse,
+    ListMcpResourcesResponse, ListProjectsRequest, ListProjectsResponse, ListSessionsRequest,
+    McpServerRequest, MutateProviderRequest, PROTOCOL_VERSION, ProbeProviderRequest, ProbeResponse,
+    ProjectionEventEnvelope, ProviderMutation, ProviderMutationResult, RequestId, RpcKind,
+    RpcMethod, RunFlowRequest, RunFlowResponse, SanitizeSessionAttachmentsRequest,
+    SanitizeSessionAttachmentsResponse, SessionId, SessionSummary, SwitchDefaultModelRequest,
+    SwitchDefaultModelResponse, UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -326,6 +326,17 @@ impl Client {
         self.command::<rpc::MutateProvider>(&MutateProviderRequest {
             request_id: Some(RequestId::now()),
             mutation,
+        })
+        .await
+    }
+
+    pub async fn initialize_config(
+        &self,
+        fs_access: Option<String>,
+    ) -> Result<InitializeConfigResponse, ClientError> {
+        self.command::<rpc::InitializeConfig>(&InitializeConfigRequest {
+            request_id: Some(RequestId::now()),
+            fs_access,
         })
         .await
     }

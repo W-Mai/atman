@@ -294,12 +294,16 @@ async fn run_session(
                         },
                     ));
                 }
-                TuiControl::OnboardingInit => {
-                    if let Ok(config_dir) = atman_runtime::storage::config_dir() {
-                        let _ = crate::init::init_config_dir_with_mode(&config_dir, None);
+                TuiControl::OnboardingInit => match control_client.initialize_config(None).await {
+                    Ok(_) => {
                         crate::load_model_config_from_disk();
                     }
-                }
+                    Err(error) => {
+                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                            "could not initialize configuration: {error}"
+                        )));
+                    }
+                },
                 TuiControl::MutateProvider(request) => {
                     let result = provider_mutation_to_proto(request.action.clone())
                         .map_err(|error| error.to_string());

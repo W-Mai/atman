@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use atman_runtime::templates::{
+use crate::templates::{
     AGENT_AT, LOOP_ACTION_MD, LOOP_CONTINUATION_MD, LOOP_DISPOSITION_MD, SYSTEM_MD,
     write_managed_template,
 };
+use anyhow::{Context, Result};
 
 pub struct InitReport {
     pub config_dir: PathBuf,
@@ -20,7 +20,7 @@ pub fn init_config_dir(config_dir: &Path) -> Result<InitReport> {
 
 pub fn init_config_dir_with_mode(
     config_dir: &Path,
-    fs_access: Option<atman_runtime::fs_access::FsAccessMode>,
+    fs_access: Option<crate::fs_access::FsAccessMode>,
 ) -> Result<InitReport> {
     std::fs::create_dir_all(config_dir)
         .with_context(|| format!("mkdir {}", config_dir.display()))?;
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn init_with_explicit_mode_persists_uncommented_section() {
-        use atman_runtime::fs_access::FsAccessMode;
+        use crate::fs_access::FsAccessMode;
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("atman");
         init_config_dir_with_mode(&cfg, Some(FsAccessMode::ReadOnly)).unwrap();

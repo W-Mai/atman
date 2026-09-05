@@ -237,6 +237,42 @@ async fn imported_messages_are_canonical_and_command_retries_are_idempotent() {
 }
 
 #[tokio::test]
+async fn config_initialization_is_committed_once_by_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("project");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().join("data")));
+    state.set_launcher(Arc::new(
+        atman_daemon::run::RunLauncher::new(project_root, Some(config_dir.clone()), None).unwrap(),
+    ));
+    let request = atman_proto::InitializeConfigRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        fs_access: Some("read-only".into()),
+    };
+
+    let first = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::InitializeConfig>(1, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::InitializeConfig>()
+    .unwrap();
+    let repeated = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::InitializeConfig>(2, &request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::InitializeConfig>()
+    .unwrap();
+
+    assert_eq!(first, repeated);
+    assert_eq!(first.written.len(), 9);
+    let config = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+    assert!(config.contains("mode = \"read-only\""));
+}
+
+#[tokio::test]
 async fn provider_and_model_settings_are_committed_by_the_daemon() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");

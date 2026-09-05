@@ -140,6 +140,23 @@
       }
     },
     {
+      "name": "config.initialize",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "InitializeConfigRequest",
+        "schema": {
+          "$ref": "#/$defs/InitializeConfigRequest"
+        }
+      },
+      "result": {
+        "rust_type": "InitializeConfigResponse",
+        "schema": {
+          "$ref": "#/$defs/InitializeConfigResponse"
+        }
+      }
+    },
+    {
       "name": "config.model.upsert",
       "kind": "command",
       "revision": 1,

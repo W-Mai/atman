@@ -24,6 +24,8 @@ import type {
   GetSessionUpdatesResponse,
   ImportSessionMessagesRequest,
   ImportSessionMessagesResponse,
+  InitializeConfigRequest,
+  InitializeConfigResponse,
   InspectResourceRequest,
   InspectResourceResponse,
   InstallSuggestedFlowRequest,
@@ -143,6 +145,12 @@ export interface RpcMethodMap {
     revision: 1
     params: MutateProviderRequest
     result: ProviderMutationResult
+  }
+  'config.initialize': {
+    kind: 'command'
+    revision: 1
+    params: InitializeConfigRequest
+    result: InitializeConfigResponse
   }
   'config.model.upsert': {
     kind: 'command'
@@ -387,6 +395,7 @@ export const RPC_METHODS = {
   'session.sanitize_attachments': { kind: 'command', revision: 1 },
   'session.import_messages': { kind: 'command', revision: 1 },
   'config.provider.mutate': { kind: 'command', revision: 1 },
+  'config.initialize': { kind: 'command', revision: 1 },
   'config.model.upsert': { kind: 'command', revision: 1 },
   'config.model.switch_default': { kind: 'command', revision: 1 },
   'config.provider.probe': { kind: 'query', revision: 1 },

@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 
 mod daemon_repl;
 mod daemon_tui;
-mod init;
 mod mcp_templates;
 mod migrate_source;
 mod monitor;
@@ -1605,7 +1604,7 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
         ),
         None => None,
     };
-    let rep = init::init_config_dir_with_mode(&cfg, fs_access)?;
+    let rep = atman_runtime::config_init::init_config_dir_with_mode(&cfg, fs_access)?;
     if rep.written.is_empty() && rep.skipped.len() == 4 {
         println!(
             "[atman] init: {} already fully populated ({} file(s) preserved)",
@@ -2529,7 +2528,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     let cfg_file = cfg.join("config.toml");
     if cfg.exists() && !cfg_file.exists() {
         if fix {
-            match std::fs::write(&cfg_file, init::CONFIG_TOML) {
+            match std::fs::write(&cfg_file, atman_runtime::config_init::CONFIG_TOML) {
                 Ok(()) => {
                     println!("  [fixed] wrote default {}", cfg_file.display());
                     fixes_applied += 1;

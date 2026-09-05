@@ -165,6 +165,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::SanitizeSessionAttachments>(),
     method_descriptor::<rpc::ImportSessionMessages>(),
     method_descriptor::<rpc::MutateProvider>(),
+    method_descriptor::<rpc::InitializeConfig>(),
     method_descriptor::<rpc::UpsertModelConfig>(),
     method_descriptor::<rpc::SwitchDefaultModel>(),
     method_descriptor::<rpc::ProbeProvider>(),
@@ -480,6 +481,35 @@ async fn dispatch_as_inner(
                 .await
                 {
                     Ok(response) => method_response::<rpc::MutateProvider>(id, response),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::INITIALIZE_CONFIG => match parse_params::<rpc::InitializeConfig>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_params = params.clone();
+                match execute_command::<rpc::InitializeConfig, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        let launcher = operation_state.launcher().ok_or_else(|| {
+                            JsonRpcError::application("daemon started without a run launcher")
+                        })?;
+                        crate::provider_config::initialize(
+                            &operation_state,
+                            &launcher,
+                            &operation_params,
+                        )
+                        .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await
+                {
+                    Ok(response) => method_response::<rpc::InitializeConfig>(id, response),
                     Err(error) => JsonRpcResponse::err(id, error),
                 }
             }

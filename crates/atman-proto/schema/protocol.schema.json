@@ -52,6 +52,12 @@
       "$ref": "#/$defs/ProviderMutationResult"
     },
     {
+      "$ref": "#/$defs/InitializeConfigRequest"
+    },
+    {
+      "$ref": "#/$defs/InitializeConfigResponse"
+    },
+    {
       "$ref": "#/$defs/UpsertModelConfigRequest"
     },
     {
@@ -2199,6 +2205,59 @@
         },
         "text": {
           "type": "string"
+        }
+      }
+    },
+    "InitializeConfigRequest": {
+      "type": "object",
+      "properties": {
+        "fs_access": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        }
+      }
+    },
+    "InitializeConfigResponse": {
+      "type": "object",
+      "required": [
+        "config_dir",
+        "written",
+        "skipped",
+        "managed"
+      ],
+      "properties": {
+        "config_dir": {
+          "type": "string"
+        },
+        "managed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "written": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
