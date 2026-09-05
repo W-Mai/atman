@@ -1995,7 +1995,9 @@ mod tests {
                         serde_json::to_value(vec![atman_proto::SessionSummary {
                             id: self.session_id.clone(),
                             event_count: 1,
+                            message_count: 1,
                             first_ts: None,
+                            updated_at: None,
                             status: atman_proto::SessionStatus::Running,
                             title: "Session".into(),
                             goal: None,
@@ -2087,7 +2089,9 @@ mod tests {
                             session: atman_proto::SessionSummary {
                                 id: self.session_id.clone(),
                                 event_count: 1,
+                                message_count: 1,
                                 first_ts: None,
+                                updated_at: None,
                                 status: atman_proto::SessionStatus::Running,
                                 title: params["title"]
                                     .as_str()

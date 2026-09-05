@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Parag
 
 use tokio::sync::mpsc;
 
-use crate::key_handler::{enumerate_session_rows, request_session_switch};
+use crate::key_handler::{request_session_rows, request_session_switch};
 use crate::keys::KeyAction;
 use crate::{SessionPickerRow, TuiControl};
 
@@ -627,7 +627,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             KeyAction::HistoryDown | KeyAction::CursorRight => self.move_down(),
             KeyAction::Tab => {
                 let new_scope = self.scope.toggle();
-                let rows = enumerate_session_rows(app, new_scope);
+                let rows = request_session_rows(app, tx, new_scope);
                 self.scope = new_scope;
                 self.set_rows(rows);
             }

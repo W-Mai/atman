@@ -2370,11 +2370,19 @@ pub(crate) fn session_summary<'a>(
     let started_at = runs.map(|run| run.started_at).min();
     let stats =
         atman_runtime::session_meta::SessionStats::load_or_rebuild(session_dir).unwrap_or_default();
+    let updated_at = std::fs::metadata(session_dir.join("events.jsonl"))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from)
+        .or(stats.first_ts)
+        .or(started_at);
     let meta = atman_runtime::session_meta::SessionMeta::load(session_dir);
     Ok(SessionSummary {
         id: session_id,
         event_count: stats.event_count as usize,
+        message_count: stats.message_count as usize,
         first_ts: stats.first_ts.or(started_at),
+        updated_at,
         status: if started_at.is_some() {
             atman_proto::SessionStatus::Running
         } else {

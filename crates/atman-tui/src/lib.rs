@@ -107,6 +107,9 @@ pub enum TuiControl {
         intro: app::StartupIntro,
     },
     NewSession,
+    ListSessions {
+        scope: session_switcher::SessionScope,
+    },
     MoveSession,
     MutateProvider(ProviderMutationRequest),
     UpsertConfigModel {
@@ -234,6 +237,10 @@ pub enum TuiCommand {
     },
     McpReloaded,
     SessionNameUpdated(String),
+    SessionListUpdated {
+        scope: session_switcher::SessionScope,
+        rows: Vec<SessionPickerRow>,
+    },
     McpResourcesResult {
         name: String,
         resources: Vec<atman_runtime::mcp::McpResource>,
@@ -331,7 +338,7 @@ pub struct TuiHandle {
     pub session_name: Option<String>,
     pub project_root: Option<String>,
     pub goal: Option<String>,
-    pub stream_rx: broadcast::Receiver<StreamFrame>,
+    pub stream_rx: Option<broadcast::Receiver<StreamFrame>>,
     pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
     pub submit_tx: Option<mpsc::UnboundedSender<TuiSubmission>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
@@ -374,7 +381,7 @@ impl TuiHandle {
                 .and_then(|meta| meta.project_root)
                 .map(|path| path.display().to_string()),
             goal: session.goal(),
-            stream_rx: session.stream_subscribe(),
+            stream_rx: Some(session.stream_subscribe()),
             task_event_rx: None,
             submit_tx: None,
             note_rx: None,
@@ -400,6 +407,46 @@ impl TuiHandle {
             trust: atman_runtime::trust::TrustConfig::default(),
             task_registry: None,
             permission_client: Some(permission_client),
+            boot_toasts: Vec::new(),
+        }
+    }
+
+    pub fn from_daemon(session: &atman_client::SessionClient) -> Self {
+        let state = session.current();
+        let projection = state.projection();
+        Self {
+            session_id: session.session_id().to_string(),
+            session_dir: String::new(),
+            session_name: (!projection.metadata.title.is_empty())
+                .then(|| projection.metadata.title.clone()),
+            project_root: projection.metadata.project_root.clone(),
+            goal: projection.goal.clone(),
+            stream_rx: None,
+            task_event_rx: None,
+            submit_tx: None,
+            note_rx: None,
+            shutdown_rx: None,
+            control_tx: None,
+            cmd_rx: None,
+            initial_items: Vec::new(),
+            goal_rx: None,
+            context_rx: None,
+            attach_rx: None,
+            todos_rx: None,
+            plans_rx: None,
+            trust_rx: None,
+            compact_review_rx: None,
+            form_rx: None,
+            injection_rx: None,
+            daemon_state_rx: Some(session.subscribe()),
+            daemon_updates_rx: Some(session.subscribe_updates()),
+            flow_names: Vec::new(),
+            session: None,
+            startup_intro: None,
+            onboarding_recommended: false,
+            trust: atman_runtime::trust::TrustConfig::default(),
+            task_registry: None,
+            permission_client: None,
             boot_toasts: Vec::new(),
         }
     }

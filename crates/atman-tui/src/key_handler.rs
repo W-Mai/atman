@@ -84,7 +84,15 @@ pub(crate) fn enumerate_session_rows(
     scope: crate::session_switcher::SessionScope,
 ) -> Vec<crate::SessionPickerRow> {
     let Some(session) = &app.session else {
-        return Vec::new();
+        return app
+            .session_rows
+            .iter()
+            .filter(|row| {
+                scope == crate::session_switcher::SessionScope::All
+                    || row.project.as_deref() == app.project_root.as_deref()
+            })
+            .cloned()
+            .collect();
     };
     let session_dir = session.dir();
     let Some(sessions_root) = session_dir.parent() else {
@@ -160,6 +168,19 @@ pub(crate) fn enumerate_session_rows(
     rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     rows.truncate(200);
     rows
+}
+
+pub(crate) fn request_session_rows(
+    app: &AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    scope: crate::session_switcher::SessionScope,
+) -> Vec<crate::SessionPickerRow> {
+    if app.session.is_none()
+        && let Some(tx) = control_tx
+    {
+        let _ = tx.send(TuiControl::ListSessions { scope });
+    }
+    enumerate_session_rows(app, scope)
 }
 
 pub(crate) fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
@@ -1511,6 +1532,54 @@ mod tests {
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
         state.wm.modals.theme_picker_open = true;
         assert!(!input_has_focus(&state));
+    }
+
+    #[test]
+    fn daemon_session_rows_are_cached_locally_and_refreshed_by_scope() {
+        let mut app = AppState::new("current".into(), None);
+        app.project_root = Some("/workspace".into());
+        app.session_rows = vec![
+            crate::SessionPickerRow {
+                id: "current".into(),
+                is_current: true,
+                name: None,
+                project: Some("/workspace".into()),
+                message_count: 2,
+                updated_at: "2026-09-05T00:00:00Z".into(),
+                goal: None,
+            },
+            crate::SessionPickerRow {
+                id: "other".into(),
+                is_current: false,
+                name: None,
+                project: Some("/other".into()),
+                message_count: 1,
+                updated_at: "2026-09-04T00:00:00Z".into(),
+                goal: None,
+            },
+        ];
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+
+        let project = request_session_rows(
+            &app,
+            Some(&control_tx),
+            crate::session_switcher::SessionScope::Project,
+        );
+        assert_eq!(project.len(), 1);
+        assert_eq!(project[0].id, "current");
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(TuiControl::ListSessions {
+                scope: crate::session_switcher::SessionScope::Project
+            })
+        ));
+
+        let all = request_session_rows(
+            &app,
+            Some(&control_tx),
+            crate::session_switcher::SessionScope::All,
+        );
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

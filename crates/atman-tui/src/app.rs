@@ -860,6 +860,7 @@ pub struct AppState {
     pub session_dir: String,
     pub session_name: Option<String>,
     pub project_root: Option<String>,
+    pub session_rows: Vec<crate::SessionPickerRow>,
     pub daemon_revision: Option<u64>,
     pub(crate) daemon_generation: Option<String>,
     daemon_transcript_revision: Option<u64>,

@@ -149,9 +149,8 @@ pub(crate) async fn run_frames(
     // frame_tx (per-FlowRun frames). Forwarders are spawned on SubAgentStarted
     // / root FlowStart so the TUI receives every frame through one channel.
     let (merge_tx, mut merge_rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
-    {
+    if let Some(mut srx) = handle.stream_rx.take() {
         let fwd_tx = merge_tx.clone();
-        let mut srx = handle.stream_rx;
         tokio::spawn(async move {
             while let Ok(f) = srx.recv().await {
                 let _ = fwd_tx.send(f);
@@ -1498,14 +1497,30 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::OpenSessionSwitcher => {
                             let scope = crate::session_switcher::SessionScope::Project;
-                            let rows = key_handler::enumerate_session_rows(&app, scope);
+                            let rows = key_handler::request_session_rows(
+                                &app,
+                                handle.control_tx.as_ref(),
+                                scope,
+                            );
                             app.wm.modals.session_switcher.open_with(rows, scope);
+                        }
+                        TuiCommand::SessionListUpdated { scope, rows } => {
+                            app.app.session_rows = rows.clone();
+                            if app.wm.modals.session_switcher.open
+                                && app.wm.modals.session_switcher.scope == scope
+                            {
+                                app.wm.modals.session_switcher.set_rows(rows);
+                            }
                         }
                         TuiCommand::SessionNameUpdated(name) => {
                             app.app.session_name = Some(name);
                             if app.wm.modals.session_switcher.open {
                                 let scope = app.wm.modals.session_switcher.scope;
-                                let rows = key_handler::enumerate_session_rows(&app, scope);
+                                let rows = key_handler::request_session_rows(
+                                    &app,
+                                    handle.control_tx.as_ref(),
+                                    scope,
+                                );
                                 app.wm.modals.session_switcher.set_rows(rows);
                             }
                         }

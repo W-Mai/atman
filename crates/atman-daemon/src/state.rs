@@ -1186,6 +1186,11 @@ impl DaemonState {
                 let stats =
                     atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
                         .unwrap_or_default();
+                let updated_at = std::fs::metadata(entry.path().join("events.jsonl"))
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .map(chrono::DateTime::<chrono::Utc>::from)
+                    .or(stats.first_ts);
                 let status = if live_ids.contains_key(&sid) {
                     SessionStatus::Running
                 } else {
@@ -1195,7 +1200,9 @@ impl DaemonState {
                 out.push(SessionSummary {
                     id: sid.clone(),
                     event_count: stats.event_count as usize,
+                    message_count: stats.message_count as usize,
                     first_ts: stats.first_ts,
+                    updated_at,
                     status,
                     title: meta
                         .as_ref()
@@ -1229,7 +1236,9 @@ impl DaemonState {
                 out.push(SessionSummary {
                     id: sid.clone(),
                     event_count: 0,
+                    message_count: 0,
                     first_ts: Some(*started_at),
+                    updated_at: Some(*started_at),
                     status: SessionStatus::Running,
                     title: "Untitled session".into(),
                     goal: None,

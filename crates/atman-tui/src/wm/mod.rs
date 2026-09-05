@@ -644,7 +644,7 @@ impl WindowManager {
             }
             PaletteEntryId::SwitchSession => {
                 let scope = crate::session_switcher::SessionScope::Project;
-                let rows = crate::key_handler::enumerate_session_rows(app, scope);
+                let rows = crate::key_handler::request_session_rows(app, control_tx, scope);
                 self.modals.session_switcher.open_with(rows, scope);
             }
             PaletteEntryId::NewSession => {
@@ -659,7 +659,7 @@ impl WindowManager {
             }
             PaletteEntryId::DeleteSession => {
                 let scope = crate::session_switcher::SessionScope::Project;
-                let rows = crate::key_handler::enumerate_session_rows(app, scope);
+                let rows = crate::key_handler::request_session_rows(app, control_tx, scope);
                 self.modals.session_switcher.open_with(rows, scope);
             }
             PaletteEntryId::SearchHistory => {

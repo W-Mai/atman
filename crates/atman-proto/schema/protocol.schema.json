@@ -2439,6 +2439,7 @@
         "required": [
           "id",
           "event_count",
+          "message_count",
           "status"
         ],
         "properties": {
@@ -2462,6 +2463,10 @@
           "id": {
             "$ref": "#/$defs/SessionId"
           },
+          "message_count": {
+            "type": "integer",
+            "minimum": 0
+          },
           "name_source": {
             "$ref": "#/$defs/NameSource"
           },
@@ -2476,6 +2481,13 @@
           },
           "title": {
             "type": "string"
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         }
       }
@@ -5187,6 +5199,7 @@
       "required": [
         "id",
         "event_count",
+        "message_count",
         "status"
       ],
       "properties": {
@@ -5210,6 +5223,10 @@
         "id": {
           "$ref": "#/$defs/SessionId"
         },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        },
         "name_source": {
           "$ref": "#/$defs/NameSource"
         },
@@ -5224,6 +5241,13 @@
         },
         "title": {
           "type": "string"
+        },
+        "updated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       }
     },

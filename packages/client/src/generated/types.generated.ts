@@ -492,10 +492,12 @@ export type ListSessionsResult = {
   first_ts?: string | null
   goal?: string | null
   id: SessionId
+  message_count: number
   name_source?: NameSource
   project_root?: string | null
   status: SessionStatus
   title?: string
+  updated_at?: string | null
   [k: string]: unknown
 }[]
 export type RunCancellationStatus = 'accepted' | 'already_requested' | 'not_found'
@@ -1302,10 +1304,12 @@ export interface SessionSummary {
   first_ts?: string | null
   goal?: string | null
   id: SessionId
+  message_count: number
   name_source?: NameSource
   project_root?: string | null
   status: SessionStatus
   title?: string
+  updated_at?: string | null
   [k: string]: unknown
 }
 export interface StartRunRequest {

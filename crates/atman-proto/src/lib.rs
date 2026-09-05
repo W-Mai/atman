@@ -833,7 +833,9 @@ pub struct CancelRunRequest {
 pub struct SessionSummary {
     pub id: SessionId,
     pub event_count: usize,
+    pub message_count: usize,
     pub first_ts: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub status: SessionStatus,
     #[serde(default)]
     pub title: String,

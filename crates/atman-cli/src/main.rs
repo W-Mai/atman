@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+mod daemon_tui;
 mod init;
 mod mcp_templates;
 mod migrate_source;
@@ -355,6 +356,7 @@ async fn async_main() -> Result<()> {
     // Probe theme before raw mode so OSC 11 reply can't leak into KeyEvents.
     let _ = atman_tui::theme::theme();
     match cli.cmd {
+        None if tui_mode_requested() => daemon_tui::run(cli.r#continue).await,
         None => cmd_repl(cli.r#continue).await,
         Some(Cmd::Version) => {
             println!("atman v{}", env!("CARGO_PKG_VERSION"));
@@ -2268,7 +2270,7 @@ async fn cmd_repl_once(
                 .project_root
                 .map(|path| path.display().to_string()),
             goal: session.goal(),
-            stream_rx: session.stream_subscribe(),
+            stream_rx: Some(session.stream_subscribe()),
             task_event_rx: executor
                 .tool_ctx
                 .task_registry
