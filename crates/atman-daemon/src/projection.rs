@@ -164,6 +164,7 @@ impl SessionProjector {
                     outcome: CompactionOutcome::Abandoned,
                     range_start: compaction.range_start,
                     range_end: compaction.range_end,
+                    compacted_count: compaction.compacted_count,
                     before_tokens: compaction.before_tokens,
                     after_tokens: compaction.before_tokens,
                     summary: "compaction interrupted before completion".into(),
@@ -618,13 +619,14 @@ impl SessionProjector {
             }
             Event::CompactionSummary {
                 operation_id,
+                session_id: _,
                 flow_run_id,
                 range_start,
                 range_end,
+                compacted_count,
                 before_tokens,
                 after_tokens,
                 summary,
-                ..
             } => {
                 if let Some(operation_id) = operation_id {
                     let before = self.projection.compactions.len();
@@ -650,6 +652,7 @@ impl SessionProjector {
                         outcome: CompactionOutcome::Finished,
                         range_start: *range_start,
                         range_end: *range_end,
+                        compacted_count: *compacted_count as u64,
                         before_tokens: *before_tokens,
                         after_tokens: *after_tokens,
                         summary: summary.clone(),
@@ -662,7 +665,7 @@ impl SessionProjector {
                 flow_run_id,
                 range_start,
                 range_end,
-                compacted_count: _,
+                compacted_count,
                 before_tokens,
                 reason,
             } => {
@@ -685,6 +688,7 @@ impl SessionProjector {
                         outcome: CompactionOutcome::Failed,
                         range_start: *range_start,
                         range_end: *range_end,
+                        compacted_count: *compacted_count as u64,
                         before_tokens: *before_tokens,
                         after_tokens: *before_tokens,
                         summary: reason.clone(),
@@ -3299,6 +3303,7 @@ mod tests {
             TranscriptItem::Compaction {
                 operation_id: Some(id),
                 outcome: CompactionOutcome::Abandoned,
+                compacted_count: 4,
                 ..
             } if id.0 == operation_id.0
         )));
@@ -3389,6 +3394,7 @@ mod tests {
                     TranscriptItem::Compaction {
                         operation_id: Some(operation_id),
                         outcome: CompactionOutcome::Finished,
+                        compacted_count: 7,
                         ..
                     } if operation_id.0 == first.0
                 ))
@@ -3403,6 +3409,7 @@ mod tests {
                     TranscriptItem::Compaction {
                         operation_id: Some(operation_id),
                         outcome: CompactionOutcome::Abandoned,
+                        compacted_count: 7,
                         ..
                     } if operation_id.0 == second.0
                 ))

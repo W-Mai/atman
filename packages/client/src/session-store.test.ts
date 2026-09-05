@@ -106,6 +106,7 @@ describe('SessionStore', () => {
           outcome: 'finished',
           range_start: 2,
           range_end: 8,
+          compacted_count: 7,
           before_tokens: 10_000,
           after_tokens: 2_000,
           summary: 'complete',
@@ -117,6 +118,7 @@ describe('SessionStore', () => {
       type: 'compaction',
       operation_id: active.id,
       outcome: 'finished',
+      compacted_count: 7,
     })
   })
 

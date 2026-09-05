@@ -274,6 +274,7 @@ export type TranscriptItem =
   | {
       after_tokens: number
       before_tokens: number
+      compacted_count: number
       context_id?: null | ContextId
       operation_id?: null | CompactionOperationId
       outcome?: CompactionOutcome

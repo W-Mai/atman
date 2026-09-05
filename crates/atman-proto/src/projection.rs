@@ -204,6 +204,7 @@ pub enum TranscriptItem {
         outcome: CompactionOutcome,
         range_start: u64,
         range_end: u64,
+        compacted_count: u64,
         before_tokens: u64,
         after_tokens: u64,
         summary: String,

@@ -5602,6 +5602,7 @@
             "ts",
             "range_start",
             "range_end",
+            "compacted_count",
             "before_tokens",
             "after_tokens",
             "summary",
@@ -5614,6 +5615,11 @@
               "minimum": 0
             },
             "before_tokens": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "compacted_count": {
               "type": "integer",
               "format": "int64",
               "minimum": 0
