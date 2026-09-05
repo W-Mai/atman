@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Live daemon TUI signals** — terminal clients feed streamed assistant text, thinking, tool drafts, terminal bytes, process output, progress, and notifications through the existing document-flow state machine while durable projection events remain the recovery source.
+
 - **Ordered session client updates** — Rust SDK consumers receive projection events and snapshot resets through one cursor-ordered stream, preserving the causal order between durable state and ephemeral output during live delivery, polling, and reconnects.
 
 - **Daemon-backed task panels** — terminal clients derive background process and terminal task rows from durable resource projections, preserving command, owner, workspace, lifecycle, timing, and termination details across reconnects without rebuilding task state for unrelated session updates.

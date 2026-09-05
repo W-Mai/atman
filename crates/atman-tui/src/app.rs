@@ -2360,6 +2360,10 @@ impl AppState {
         self.status_notes.insert(key.into(), text.into());
     }
 
+    pub fn remove_status(&mut self, key: &str) {
+        self.status_notes.remove(key);
+    }
+
     pub fn tick_toasts(&mut self) {
         let now = std::time::Instant::now();
         let fade_duration = std::time::Duration::from_millis(400);

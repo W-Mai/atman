@@ -25,17 +25,17 @@ pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
 ) -> Result<()> {
-    let daemon_projection = handle
+    let mut daemon_state = handle
         .daemon_state_rx
         .as_ref()
-        .map(|rx| {
-            crate::projection_adapter::TuiSessionProjection::try_from_state(
-                &rx.borrow(),
-                None,
-                None,
-            )
+        .map(|rx| rx.borrow().clone());
+    let daemon_projection = daemon_state
+        .as_ref()
+        .map(|state| {
+            crate::projection_adapter::TuiSessionProjection::try_from_state(state, None, None)
         })
         .transpose()?;
+    let ordered_daemon_updates = handle.daemon_updates_rx.is_some();
     if let Some(projected) = daemon_projection.as_ref() {
         handle.session_name = projected.session_name.clone();
         handle.project_root = projected.project_root.clone();
@@ -1326,7 +1326,40 @@ pub(crate) async fn run_frames(
                     app.app.push_note(text, level);
                 }
             }
-            _ = wait_daemon_state_change(handle.daemon_state_rx.as_mut()) => {
+            update = recv_daemon_update(handle.daemon_updates_rx.as_mut()) => {
+                match update {
+                    Some(Ok(update)) => {
+                        if let Err(error) = apply_daemon_update(&mut app, &mut daemon_state, update) {
+                            app.app.push_note(
+                                format!("daemon update rejected: {error}"),
+                                app::NoteLevel::Error,
+                            );
+                        }
+                    }
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        if let Some(rx) = handle.daemon_state_rx.as_ref() {
+                            let latest = rx.borrow().clone();
+                            match crate::projection_adapter::TuiSessionProjection::try_from_state(
+                                &latest, None, None,
+                            ) {
+                                Ok(projected) => {
+                                    daemon_state = Some(latest);
+                                    apply_daemon_projection(&mut app, projected);
+                                }
+                                Err(error) => app.app.push_note(
+                                    format!("daemon resync rejected: {error}"),
+                                    app::NoteLevel::Error,
+                                ),
+                            }
+                        }
+                    }
+                    Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        handle.daemon_updates_rx = None;
+                    }
+                    None => {}
+                }
+            }
+            _ = wait_daemon_state_change(handle.daemon_state_rx.as_mut(), !ordered_daemon_updates) => {
                 if let Some(rx) = handle.daemon_state_rx.as_mut() {
                     let transcript_revision = app.app.daemon_transcript_revision();
                     let resources_revision = app.app.daemon_resources_revision();
@@ -1354,7 +1387,10 @@ pub(crate) async fn run_frames(
                         }
                     };
                     match projected {
-                        Ok(Some(projected)) => apply_daemon_projection(&mut app, projected),
+                        Ok(Some(projected)) => {
+                            daemon_state = Some(rx.borrow().clone());
+                            apply_daemon_projection(&mut app, projected);
+                        }
                         Ok(None) => {}
                         Err(error) => app.app.push_note(
                             format!("daemon projection rejected: {error}"),
@@ -1803,14 +1839,96 @@ fn apply_daemon_projection(
     }
 }
 
+fn apply_daemon_update(
+    app: &mut UiState,
+    state: &mut Option<atman_client::SessionState>,
+    update: atman_client::SessionUpdate,
+) -> Result<()> {
+    match update {
+        atman_client::SessionUpdate::Reset(next) => {
+            let next = *next;
+            let projected =
+                crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
+            *state = Some(next);
+            apply_daemon_projection(app, projected);
+        }
+        atman_client::SessionUpdate::Event(event) => {
+            let state = state
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("daemon event arrived before its snapshot"))?;
+            let response = atman_proto::GetSessionUpdatesResponse {
+                daemon_generation: event.daemon_generation.clone(),
+                next_cursor: event.cursor,
+                events: vec![event],
+                has_more: false,
+                resync_required: None,
+            };
+            let applied = state.apply_updates(&response)?;
+            if applied.signals.is_empty() {
+                let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
+                    state,
+                    app.app.daemon_transcript_revision(),
+                    app.app.daemon_resources_revision(),
+                )?;
+                apply_daemon_projection(app, projected);
+            } else {
+                for signal in applied.signals {
+                    apply_daemon_signal(app, signal, state.projection())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_daemon_signal(
+    app: &mut UiState,
+    signal: atman_proto::SessionSignal,
+    projection: &atman_proto::SessionProjection,
+) -> Result<()> {
+    match crate::projection_adapter::daemon_signal(signal, projection)? {
+        crate::projection_adapter::TuiDaemonSignal::Frame(frame) => {
+            app.app.apply_stream_frame(*frame);
+        }
+        crate::projection_adapter::TuiDaemonSignal::Progress { run_id, label } => {
+            app.app.push_status(daemon_progress_key(&run_id), label);
+        }
+        crate::projection_adapter::TuiDaemonSignal::LlmDone {
+            run_id,
+            total_tokens,
+        } => {
+            app.app.remove_status(&daemon_progress_key(&run_id));
+            app.app.apply_stream_frame(StreamFrame::LlmDone {
+                total_tokens,
+                run_id: Some(run_id),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn daemon_progress_key(run_id: &str) -> String {
+    format!("daemon-progress:{run_id}")
+}
+
+pub(crate) async fn recv_daemon_update(
+    rx: Option<&mut tokio::sync::broadcast::Receiver<atman_client::SessionUpdate>>,
+) -> Option<Result<atman_client::SessionUpdate, tokio::sync::broadcast::error::RecvError>> {
+    match rx {
+        Some(rx) => Some(rx.recv().await),
+        None => std::future::pending().await,
+    }
+}
+
 pub(crate) async fn wait_daemon_state_change(
     rx: Option<&mut tokio::sync::watch::Receiver<atman_client::SessionState>>,
+    enabled: bool,
 ) {
-    match rx {
-        Some(rx) => {
+    match (rx, enabled) {
+        (Some(rx), true) => {
             let _ = rx.changed().await;
         }
-        None => std::future::pending().await,
+        _ => std::future::pending().await,
     }
 }
 

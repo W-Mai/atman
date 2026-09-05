@@ -36,6 +36,186 @@ use crate::app::{
 };
 use crate::history::ToolDisplayMeta;
 
+pub(crate) enum TuiDaemonSignal {
+    Frame(Box<atman_runtime::stream::StreamFrame>),
+    Progress { run_id: String, label: String },
+    LlmDone { run_id: String, total_tokens: u64 },
+}
+
+pub(crate) fn daemon_signal(
+    signal: atman_proto::SessionSignal,
+    projection: &SessionProjection,
+) -> Result<TuiDaemonSignal> {
+    use atman_proto::SessionSignal;
+    use atman_runtime::stream::StreamFrame;
+
+    Ok(match signal {
+        SessionSignal::LlmText { run_id, text } => {
+            let model = projection
+                .runs
+                .iter()
+                .find(|run| run.id == run_id)
+                .and_then(|run| run.model.clone())
+                .unwrap_or_default();
+            TuiDaemonSignal::Frame(Box::new(StreamFrame::LlmChunk {
+                text,
+                model,
+                run_id: Some(run_id.0.to_string()),
+            }))
+        }
+        SessionSignal::Thinking { run_id, text } => {
+            TuiDaemonSignal::Frame(Box::new(StreamFrame::ThinkingChunk {
+                text,
+                run_id: Some(run_id.0.to_string()),
+            }))
+        }
+        SessionSignal::ToolCallDraft {
+            run_id,
+            index,
+            call_id,
+            name,
+            arguments_delta,
+        } => TuiDaemonSignal::Frame(Box::new(StreamFrame::ToolCallDraft {
+            index,
+            call_id,
+            name,
+            arguments_delta,
+            run_id: Some(run_id.0.to_string()),
+        })),
+        SessionSignal::LlmDone {
+            run_id,
+            total_tokens,
+        } => TuiDaemonSignal::LlmDone {
+            run_id: run_id.0.to_string(),
+            total_tokens,
+        },
+        SessionSignal::LlmRetry { run_id } => {
+            TuiDaemonSignal::Frame(Box::new(StreamFrame::LlmRetry {
+                run_id: Some(run_id.0.to_string()),
+            }))
+        }
+        SessionSignal::Notification { notification } => TuiDaemonSignal::Frame(Box::new(
+            StreamFrame::Notification(notification_frame(notification)),
+        )),
+        SessionSignal::TerminalBytes { resource_id, bytes } => {
+            let resource = signal_resource(projection, &resource_id)?;
+            anyhow::ensure!(
+                matches!(resource.kind, atman_proto::ResourceKind::Terminal),
+                "terminal signal references non-terminal resource `{}`",
+                resource_id.0
+            );
+            TuiDaemonSignal::Frame(Box::new(StreamFrame::TerminalChunk {
+                handle: resource_handle(resource)?,
+                tool_use_id: resource.tool_use_id.clone(),
+                bytes,
+                screen: None,
+                state: atman_runtime::tools::term::TermStateSnapshot::Running,
+                call_intent: None,
+                run_id: Some(resource.owner_run_id.0.to_string()),
+            }))
+        }
+        SessionSignal::ProcessLine {
+            resource_id,
+            stream,
+            line,
+        } => {
+            let resource = signal_resource(projection, &resource_id)?;
+            anyhow::ensure!(
+                matches!(resource.kind, atman_proto::ResourceKind::BackgroundProcess),
+                "process signal references non-process resource `{}`",
+                resource_id.0
+            );
+            TuiDaemonSignal::Frame(Box::new(StreamFrame::BashChunk {
+                handle: resource_handle(resource)?,
+                tool_use_id: resource.tool_use_id.clone(),
+                kind: stream,
+                line,
+                call_intent: None,
+                run_id: Some(resource.owner_run_id.0.to_string()),
+            }))
+        }
+        SessionSignal::Progress { run_id, label } => TuiDaemonSignal::Progress {
+            run_id: run_id.0.to_string(),
+            label,
+        },
+    })
+}
+
+fn signal_resource<'a>(
+    projection: &'a SessionProjection,
+    resource_id: &atman_proto::ResourceId,
+) -> Result<&'a atman_proto::ResourceProjection> {
+    projection
+        .resources
+        .iter()
+        .find(|resource| resource.id == *resource_id)
+        .with_context(|| {
+            format!(
+                "session signal references unknown resource `{}`",
+                resource_id.0
+            )
+        })
+}
+
+fn resource_handle(resource: &atman_proto::ResourceProjection) -> Result<String> {
+    resource
+        .details
+        .get("source_handle")
+        .filter(|handle| !handle.is_empty())
+        .cloned()
+        .with_context(|| format!("task resource `{}` has no source handle", resource.id.0))
+}
+
+fn notification_frame(
+    notification: atman_proto::SessionNotification,
+) -> atman_runtime::stream::NotificationFrame {
+    use atman_proto::{
+        NoticeLevel, NotificationLifecycle, NotificationLocation, NotificationStack,
+    };
+    use atman_runtime::notify::{NotifyLevel, NotifyLifecycle, NotifyLocation, NotifyStack};
+
+    atman_runtime::stream::NotificationFrame {
+        run_id: notification.run_id.map(|run_id| run_id.0.to_string()),
+        level: match notification.level {
+            NoticeLevel::Debug => NotifyLevel::Debug,
+            NoticeLevel::Info => NotifyLevel::Info,
+            NoticeLevel::Success => NotifyLevel::Success,
+            NoticeLevel::Warning => NotifyLevel::Warn,
+            NoticeLevel::Error => NotifyLevel::Error,
+        },
+        location: match notification.location {
+            NotificationLocation::Inline => NotifyLocation::Inline,
+            NotificationLocation::Toast => NotifyLocation::Toast,
+            NotificationLocation::Status => NotifyLocation::Status,
+            NotificationLocation::Modal => NotifyLocation::Modal,
+            NotificationLocation::Stdout => NotifyLocation::Stdout,
+            NotificationLocation::Stderr => NotifyLocation::Stderr,
+        },
+        lifecycle: match notification.lifecycle {
+            NotificationLifecycle::Persistent => NotifyLifecycle::Persistent,
+            NotificationLifecycle::Ttl { duration_ms } => {
+                NotifyLifecycle::Ttl(Duration::from_millis(duration_ms))
+            }
+            NotificationLifecycle::Dismissible => NotifyLifecycle::Dismissible,
+            NotificationLifecycle::UntilReplaced => NotifyLifecycle::UntilReplaced,
+        },
+        stack: match notification.stack {
+            NotificationStack::Append => NotifyStack::Append,
+            NotificationStack::Replace { key } => NotifyStack::Replace { key },
+            NotificationStack::Dedupe { key, window_ms } => NotifyStack::Dedupe {
+                key,
+                window: Duration::from_millis(window_ms),
+            },
+            NotificationStack::MergeCount { key, window_ms } => NotifyStack::MergeCount {
+                key,
+                window: Duration::from_millis(window_ms),
+            },
+            NotificationStack::Coalesce { key } => NotifyStack::Coalesce { key },
+        },
+        message: notification.message,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TuiSessionProjection {
     pub(crate) daemon_generation: Option<String>,
@@ -2366,6 +2546,86 @@ mod tests {
         assert_eq!(bash.kind, atman_runtime::TaskKind::Bash);
         assert_eq!(bash.status, atman_runtime::TaskStatus::Ok);
         assert!(bash.ended_at.is_some());
+    }
+
+    #[test]
+    fn converts_daemon_signals_with_run_and_resource_identity() {
+        let mut source = projection();
+        let now = chrono::Utc::now();
+        let run_id = match &source.workflows[0].roots[0].kind {
+            WorkflowNodeKind::Flow { run_id, .. } => run_id.clone(),
+            _ => unreachable!(),
+        };
+        source.runs.push(atman_proto::RunProjection {
+            id: run_id.clone(),
+            turn_id: None,
+            flow_name: "agent".into(),
+            model: Some("reasoning-model".into()),
+            provider: Some("openai-compatible".into()),
+            parent_run_id: None,
+            parent_node_id: None,
+            state: atman_proto::RunLifecycle::Running,
+            started_at: now,
+            finished_at: None,
+            error: None,
+        });
+        let resource_id = atman_proto::ResourceId::task(uuid::Uuid::now_v7());
+        source.resources.push(atman_proto::ResourceProjection {
+            id: resource_id.clone(),
+            kind: atman_proto::ResourceKind::Terminal,
+            state: atman_proto::ResourceState::Running,
+            owner_run_id: run_id.clone(),
+            tool_use_id: Some("terminal-call".into()),
+            label: "Run server".into(),
+            started_at: Some(now),
+            finished_at: None,
+            details: BTreeMap::from([("source_handle".into(), "term-1".into())]),
+        });
+
+        let text = daemon_signal(
+            atman_proto::SessionSignal::LlmText {
+                run_id: run_id.clone(),
+                text: "hello".into(),
+            },
+            &source,
+        )
+        .unwrap();
+        let TuiDaemonSignal::Frame(text) = text else {
+            panic!("expected stream frame");
+        };
+        assert!(matches!(
+            *text,
+            atman_runtime::stream::StreamFrame::LlmChunk {
+                text,
+                model,
+                run_id: Some(id),
+            } if text == "hello" && model == "reasoning-model" && id == run_id.0.to_string()
+        ));
+
+        let terminal = daemon_signal(
+            atman_proto::SessionSignal::TerminalBytes {
+                resource_id,
+                bytes: b"ready".to_vec(),
+            },
+            &source,
+        )
+        .unwrap();
+        let TuiDaemonSignal::Frame(terminal) = terminal else {
+            panic!("expected stream frame");
+        };
+        assert!(matches!(
+            *terminal,
+            atman_runtime::stream::StreamFrame::TerminalChunk {
+                handle,
+                tool_use_id: Some(tool_use_id),
+                bytes,
+                run_id: Some(id),
+                ..
+            } if handle == "term-1"
+                && tool_use_id == "terminal-call"
+                && bytes == b"ready"
+                && id == run_id.0.to_string()
+        ));
     }
 
     #[test]
