@@ -223,6 +223,8 @@ pub enum Event {
         state: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cleanup_error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reconciliation_reason: Option<String>,
     },
     TaskLifecycle {
         task_id: crate::task_registry::TaskId,

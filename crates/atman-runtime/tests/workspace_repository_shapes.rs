@@ -223,11 +223,15 @@ async fn orphan_prune_is_dry_run_first_and_never_forces_dirty_or_retained_work()
         )
         .await
         .unwrap();
-    assert!(matches!(dry_run, Value::List(ref records) if records.len() == 1));
+    assert!(matches!(dry_run, Value::List(ref records) if records.is_empty()));
     assert!(orphan.worktree_path.exists());
     assert!(retained.worktree_path.exists());
+    assert_eq!(
+        manager.get("orphan").unwrap().lifecycle_state(),
+        atman_runtime::git_workspace::WorkspaceState::Dirty
+    );
 
-    let error = GitWorkspacePrune
+    let pruned = GitWorkspacePrune
         .call(
             ToolArgs {
                 positional: Vec::new(),
@@ -236,8 +240,8 @@ async fn orphan_prune_is_dry_run_first_and_never_forces_dirty_or_retained_work()
             &ctx,
         )
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("changes") || error.to_string().contains("dirty"));
+        .unwrap();
+    assert!(matches!(pruned, Value::List(ref records) if records.is_empty()));
     assert_eq!(
         std::fs::read_to_string(orphan.worktree_path.join("dirty.txt")).unwrap(),
         "preserve me\n"
@@ -245,7 +249,7 @@ async fn orphan_prune_is_dry_run_first_and_never_forces_dirty_or_retained_work()
     assert!(retained.worktree_path.exists());
     assert_eq!(
         manager.get("orphan").unwrap().lifecycle_state(),
-        WorkspaceState::Orphaned
+        WorkspaceState::Dirty
     );
     assert_eq!(
         manager.get("retained").unwrap().lifecycle_state(),

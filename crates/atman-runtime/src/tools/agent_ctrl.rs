@@ -996,6 +996,7 @@ fn finalize_workspace(
             path: binding.path.display().to_string(),
             state: state.as_str().into(),
             cleanup_error,
+            reconciliation_reason: None,
         });
     }
 }

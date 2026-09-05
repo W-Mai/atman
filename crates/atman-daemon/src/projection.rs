@@ -798,6 +798,7 @@ impl SessionProjector {
                 path,
                 state,
                 cleanup_error,
+                reconciliation_reason,
             } => {
                 let id = ResourceId(format!("workspace:{workspace_id}"));
                 let started_at = self
@@ -819,6 +820,11 @@ impl SessionProjector {
                     details: cleanup_error
                         .iter()
                         .map(|error| ("cleanup_error".into(), error.clone()))
+                        .chain(
+                            reconciliation_reason
+                                .iter()
+                                .map(|reason| ("reconciliation_reason".into(), reason.clone())),
+                        )
                         .collect(),
                 };
                 self.upsert_resource(resource.clone());
@@ -2226,7 +2232,7 @@ fn tier_number(tier: atman_runtime::tool::Tier) -> u8 {
     }
 }
 
-fn workspace_state(state: &str) -> ResourceState {
+pub(crate) fn workspace_state(state: &str) -> ResourceState {
     match state {
         "starting" | "allocating" => ResourceState::Starting,
         "active" | "running" => ResourceState::Running,
@@ -2765,6 +2771,7 @@ mod tests {
                 path: "/tmp/flow-workspace".into(),
                 state: "dirty".into(),
                 cleanup_error: None,
+                reconciliation_reason: None,
             },
         ));
 

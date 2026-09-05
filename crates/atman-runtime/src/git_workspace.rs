@@ -517,6 +517,16 @@ impl WorkspaceManager {
                             "allocation from older daemon generation {} left no path or Git registration",
                             previous_generation
                         ));
+                    } else if path_exists
+                        && registered
+                        && crate::git::has_changes(&item.worktree_path)?
+                    {
+                        item.state = WorkspaceState::Dirty.as_str().into();
+                        item.lease = None;
+                        item.reconciliation_reason = Some(format!(
+                            "allocation from older daemon generation {} contains uncommitted changes",
+                            previous_generation
+                        ));
                     } else {
                         item.state = WorkspaceState::Orphaned.as_str().into();
                         item.reconciliation_reason = Some(format!(
@@ -527,12 +537,32 @@ impl WorkspaceManager {
                     changed.push(item.clone());
                 }
                 WorkspaceState::Active => {
-                    item.state = WorkspaceState::Orphaned.as_str().into();
+                    let path_exists = item.worktree_path.exists();
+                    let registered = worktrees.iter().any(|worktree| {
+                        canonicalize(&worktree.path) == canonicalize(&item.worktree_path)
+                    });
+                    let dirty =
+                        path_exists && registered && crate::git::has_changes(&item.worktree_path)?;
+                    item.state = if dirty {
+                        item.lease = None;
+                        WorkspaceState::Dirty
+                    } else {
+                        WorkspaceState::Orphaned
+                    }
+                    .as_str()
+                    .into();
                     item.reconciled_at = Some(reconciled_at);
-                    item.reconciliation_reason = Some(format!(
-                        "active lease belongs to older daemon generation {}",
-                        previous_generation
-                    ));
+                    item.reconciliation_reason = Some(if dirty {
+                        format!(
+                            "active lease from older daemon generation {} contains uncommitted changes",
+                            previous_generation
+                        )
+                    } else {
+                        format!(
+                            "active lease belongs to older daemon generation {}",
+                            previous_generation
+                        )
+                    });
                     changed.push(item.clone());
                 }
                 _ => {}
@@ -677,7 +707,6 @@ impl WorkspaceManager {
         if dry_run {
             return Ok(candidates);
         }
-
         for item in &candidates {
             let path_exists = item.worktree_path.exists();
             let registered = worktrees
@@ -696,7 +725,30 @@ impl WorkspaceManager {
             }
         }
 
-        for item in &candidates {
+        let mut prunable = Vec::new();
+        let mut dirty = Vec::new();
+        for item in candidates {
+            if item.worktree_path.exists() && crate::git::has_changes(&item.worktree_path)? {
+                dirty.push(item);
+            } else {
+                prunable.push(item);
+            }
+        }
+        if !dirty.is_empty() {
+            let reconciled_at = chrono::Utc::now();
+            for item in dirty {
+                if let Some(found) = registry.workspaces.iter_mut().find(|w| w.id == item.id) {
+                    found.state = WorkspaceState::Dirty.as_str().into();
+                    found.lease = None;
+                    found.reconciled_at = Some(reconciled_at);
+                    found.reconciliation_reason =
+                        Some("orphan prune preserved uncommitted changes".into());
+                }
+            }
+            self.save(&registry)?;
+        }
+
+        for item in &prunable {
             if item.worktree_path.exists() {
                 GitCli::at(&self.repository_root).worktree_remove(&item.worktree_path, false)?;
             }
@@ -719,7 +771,7 @@ impl WorkspaceManager {
             }
         }
         self.save(&registry)?;
-        Ok(candidates)
+        Ok(prunable)
     }
 
     fn lock_registry(&self) -> Result<fs::File, WorkspaceError> {
@@ -933,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_reconciliation_only_orphans_active_older_generation_leases() {
+    fn restart_reconciliation_preserves_current_retained_and_dirty_workspaces() {
         let tmp = repo();
         let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
         let stale = manager
@@ -990,10 +1042,30 @@ mod tests {
             .unwrap()
             .state = WorkspaceState::Dirty.as_str().into();
         manager.save(&registry).unwrap();
+        let dirty_active = manager
+            .create_managed(
+                "dirty-active",
+                "session",
+                "dirty-active",
+                "old-generation",
+                false,
+                &GitCli::at(tmp.path()).head_oid().unwrap(),
+            )
+            .unwrap();
+        fs::write(
+            dirty_active.worktree_path.join("uncommitted.txt"),
+            "preserve me\n",
+        )
+        .unwrap();
 
         let changed = manager.reconcile_generation("new-generation").unwrap();
-        assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0].id, "stale");
+        assert_eq!(
+            changed
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stale", "dirty-active"]
+        );
         assert!(stale.worktree_path.exists());
         let orphaned = manager.get("stale").unwrap();
         assert_eq!(orphaned.lifecycle_state(), WorkspaceState::Orphaned);
@@ -1017,6 +1089,13 @@ mod tests {
         assert_eq!(
             manager.get("dirty").unwrap().lifecycle_state(),
             WorkspaceState::Dirty
+        );
+        let recovered_dirty = manager.get("dirty-active").unwrap();
+        assert_eq!(recovered_dirty.lifecycle_state(), WorkspaceState::Dirty);
+        assert!(recovered_dirty.lease.is_none());
+        assert_eq!(
+            fs::read_to_string(dirty_active.worktree_path.join("uncommitted.txt")).unwrap(),
+            "preserve me\n"
         );
 
         assert!(
@@ -1574,6 +1653,39 @@ mod tests {
         );
         assert_eq!(manager.get("missing").unwrap().state, "released");
         assert_eq!(manager.get("active").unwrap().state, "active");
+    }
+
+    #[test]
+    fn prune_excludes_dirty_orphans_and_records_why_they_were_preserved() {
+        let tmp = repo();
+        let manager = WorkspaceManager::at(tmp.path(), None).unwrap();
+        let dirty = manager
+            .create("dirty-orphan", None, None, false, None, None)
+            .unwrap();
+        fs::write(dirty.worktree_path.join("uncommitted.txt"), "preserve me\n").unwrap();
+        let mut registry = manager.load().unwrap();
+        registry.workspaces[0].state = WorkspaceState::Orphaned.as_str().into();
+        manager.save(&registry).unwrap();
+
+        let dry_run = manager.prune(true).unwrap();
+        assert_eq!(dry_run.len(), 1);
+        assert_eq!(dry_run[0].id, dirty.id);
+        assert_eq!(
+            manager.get(&dirty.id).unwrap().lifecycle_state(),
+            WorkspaceState::Orphaned
+        );
+        assert!(manager.prune(false).unwrap().is_empty());
+        let preserved = manager.get(&dirty.id).unwrap();
+        assert_eq!(preserved.lifecycle_state(), WorkspaceState::Dirty);
+        assert!(preserved.lease.is_none());
+        assert_eq!(
+            preserved.reconciliation_reason.as_deref(),
+            Some("orphan prune preserved uncommitted changes")
+        );
+        assert_eq!(
+            fs::read_to_string(dirty.worktree_path.join("uncommitted.txt")).unwrap(),
+            "preserve me\n"
+        );
     }
 
     #[test]

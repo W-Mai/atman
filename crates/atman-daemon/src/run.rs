@@ -489,6 +489,12 @@ impl RunLauncher {
             let envelope = restored.session.sink().emit_returning_envelope(event);
             projection.apply_envelope(&envelope);
         }
+        self.append_workspace_reconciliation_events(
+            &restored.session,
+            &mut projection,
+            session_id,
+            &project_root,
+        )?;
         projection.reconcile_disconnected();
         event_cursor.0 = event_cursor.0.saturating_add(
             projection
@@ -504,6 +510,72 @@ impl RunLauncher {
                 event_cursor,
             },
         })
+    }
+
+    fn append_workspace_reconciliation_events(
+        &self,
+        session: &atman_runtime::Session,
+        projection: &mut crate::projection::SessionProjector,
+        session_id: &ProtoSessionId,
+        project_root: &Path,
+    ) -> Result<()> {
+        match atman_runtime::git::discover_repository(project_root) {
+            Ok(repository) if repository.bare => return Ok(()),
+            Ok(_) => {}
+            Err(atman_runtime::git::GitError::NotARepo(_)) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        let Some(manager) =
+            atman_runtime::git_workspace::WorkspaceManager::open_existing(project_root, None)?
+        else {
+            return Ok(());
+        };
+        let session_owner = session_id.to_string();
+        for record in manager.list()? {
+            if record.owner_session.as_deref() != Some(session_owner.as_str())
+                || record.reconciliation_reason.is_none()
+            {
+                continue;
+            }
+            let Some(owner_run_id) = record
+                .owner_flow
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .map(atman_runtime::event::FlowRunId)
+            else {
+                continue;
+            };
+            let resource_id = atman_proto::ResourceId(format!("workspace:{}", record.id));
+            let expected_state = crate::projection::workspace_state(&record.state);
+            let expected_path = record.worktree_path.display().to_string();
+            let already_durable = projection
+                .projection()
+                .resources
+                .iter()
+                .find(|resource| resource.id == resource_id)
+                .is_some_and(|resource| {
+                    resource.state == expected_state
+                        && resource.owner_run_id.0 == owner_run_id.0
+                        && resource.label == expected_path
+                        && resource.details.get("reconciliation_reason")
+                            == record.reconciliation_reason.as_ref()
+                });
+            if already_durable {
+                continue;
+            }
+            let envelope = session.sink().emit_returning_envelope(
+                atman_runtime::event::Event::WorkspaceLifecycle {
+                    run_id: owner_run_id,
+                    workspace_id: record.id,
+                    path: expected_path,
+                    state: record.state,
+                    cleanup_error: None,
+                    reconciliation_reason: record.reconciliation_reason,
+                },
+            );
+            projection.apply_envelope(&envelope);
+        }
+        Ok(())
     }
 
     pub async fn spawn(
@@ -1107,6 +1179,25 @@ mod tests {
         let run_id = atman_runtime::event::FlowRunId::now();
         let turn_id = atman_runtime::event::TurnId::now();
         let task_id = atman_runtime::TaskId::now();
+        let workspace_manager =
+            atman_runtime::git_workspace::WorkspaceManager::at(repository.path(), None).unwrap();
+        let workspace = workspace_manager
+            .create_managed(
+                &format!("flow-{run_id}"),
+                &session_id.to_string(),
+                &run_id.to_string(),
+                "generation-a",
+                false,
+                &atman_runtime::git::GitCli::at(repository.path())
+                    .head_oid()
+                    .unwrap(),
+            )
+            .unwrap();
+        std::fs::write(
+            workspace.worktree_path.join("uncommitted.txt"),
+            "preserve me\n",
+        )
+        .unwrap();
         session.sink().emit(atman_runtime::event::Event::TurnStart {
             turn_id: turn_id.clone(),
         });
@@ -1131,8 +1222,24 @@ mod tests {
                 status: atman_runtime::TaskStatus::Running,
                 termination: None,
             });
+        session
+            .sink()
+            .emit(atman_runtime::event::Event::WorkspaceLifecycle {
+                run_id: run_id.clone(),
+                workspace_id: workspace.id.clone(),
+                path: workspace.worktree_path.display().to_string(),
+                state: "active".into(),
+                cleanup_error: None,
+                reconciliation_reason: None,
+            });
         let session_dir = session.dir().to_path_buf();
         session.shutdown().await;
+        let reconciled = reconcile_workspaces(repository.path(), "generation-b").unwrap();
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(
+            reconciled[0].lifecycle_state(),
+            atman_runtime::git_workspace::WorkspaceState::Dirty
+        );
 
         let launcher = RunLauncher::new(
             repository.path().to_path_buf(),
@@ -1161,6 +1268,22 @@ mod tests {
                 .map(String::as_str),
             Some("generation-b")
         );
+        let workspace_resource = loaded
+            .projection
+            .projector
+            .projection()
+            .resources
+            .iter()
+            .find(|item| item.id.0 == format!("workspace:{}", workspace.id))
+            .unwrap();
+        assert_eq!(workspace_resource.state, atman_proto::ResourceState::Dirty);
+        assert_eq!(
+            workspace_resource
+                .details
+                .get("reconciliation_reason")
+                .map(String::as_str),
+            reconciled[0].reconciliation_reason.as_deref()
+        );
         loaded.session.shutdown().await;
 
         let events_path = session_dir.join("events.jsonl");
@@ -1172,6 +1295,20 @@ mod tests {
                 .filter(|envelope| matches!(
                     envelope.event,
                     atman_runtime::event::Event::GenerationReconciled { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            recovered
+                .iter()
+                .filter(|envelope| matches!(
+                    &envelope.event,
+                    atman_runtime::event::Event::WorkspaceLifecycle {
+                        workspace_id,
+                        reconciliation_reason: Some(_),
+                        ..
+                    } if workspace_id == &workspace.id
                 ))
                 .count(),
             1
@@ -1194,6 +1331,20 @@ mod tests {
                 .filter(|envelope| matches!(
                     envelope.event,
                     atman_runtime::event::Event::GenerationReconciled { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            reopened_events
+                .iter()
+                .filter(|envelope| matches!(
+                    &envelope.event,
+                    atman_runtime::event::Event::WorkspaceLifecycle {
+                        workspace_id,
+                        reconciliation_reason: Some(_),
+                        ..
+                    } if workspace_id == &workspace.id
                 ))
                 .count(),
             1

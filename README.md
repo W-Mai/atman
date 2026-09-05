@@ -155,7 +155,7 @@ The policies are:
 
 For managed children, Git, filesystem, Bash, terminal, and other process-backed tools use the worktree as their default working directory. This binding is local to the child execution context and never changes the parent flow's or process's working directory. Runtime-generated session and child-flow identities own the workspace; caller-supplied owner fields are not trusted.
 
-Bare repositories require a configured, policy-approved external workspace root. The daemon does not currently configure one, so managed child allocation from a bare repository fails clearly instead of choosing an arbitrary path. After a daemon restart, workspaces with active leases from an older daemon generation are marked `orphaned` for inspection; they are never deleted automatically. Orphan pruning remains an explicit, dry-run-first operation.
+Bare repositories require a configured, policy-approved external workspace root. The daemon does not currently configure one, so managed child allocation from a bare repository fails clearly instead of choosing an arbitrary path. After a daemon restart, clean workspaces with active leases from an older daemon generation are marked `orphaned`, while workspaces with uncommitted changes are marked `dirty` and detached from the old lease. The reconciliation reason is persisted in the owning session when it is next loaded. Nothing is deleted automatically. Orphan pruning remains dry-run-first for inspection and rechecks every candidate before physical deletion, preserving dirty workspaces.
 
 ### An approval-gated edit-and-test loop
 

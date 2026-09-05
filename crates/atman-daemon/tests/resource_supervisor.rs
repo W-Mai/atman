@@ -305,6 +305,7 @@ fn emit_workspace(
             path: binding.path.display().to_string(),
             state: state.into(),
             cleanup_error: None,
+            reconciliation_reason: None,
         });
 }
 

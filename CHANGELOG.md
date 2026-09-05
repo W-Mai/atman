@@ -59,7 +59,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
-- **Durable daemon recovery** — reopening an interrupted session records one generation reconciliation event. Active runs become lost, live resources become orphaned, interrupted compactions become abandoned, and pending interactions are cancelled with the same result in live state and complete event replay.
+- **Durable daemon recovery** — reopening an interrupted session records one generation reconciliation event. Active runs become lost, live resources become orphaned, interrupted compactions become abandoned, and pending interactions are cancelled with the same result in live state and complete event replay. Workspace reconciliation reasons enter the owning session projection, and dirty worktrees are excluded from orphan pruning.
 
 - **Durable run admission** — daemon run acceptance records the user message and selected context head before executor bootstrap. Each invocation keeps that captured history owner through provider work, and bootstrap failures publish a terminal run fact.
 

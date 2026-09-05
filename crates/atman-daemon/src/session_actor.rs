@@ -2000,6 +2000,7 @@ impl SessionActor {
                 path: record.worktree_path.display().to_string(),
                 state,
                 cleanup_error: None,
+                reconciliation_reason: record.reconciliation_reason,
             },
         );
         self.catch_up_through(event.seq)?;
