@@ -1,9 +1,16 @@
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+use common::spawn_test_daemon;
+
 fn atman_bin() -> &'static str {
     env!("CARGO_BIN_EXE_atman")
 }
+
+const SID_A: &str = "0198feed-0000-7000-8000-000000000001";
+const SID_B: &str = "0198feed-0000-7000-8000-000000000002";
+const SID_C: &str = "0198feed-0000-7000-8000-000000000003";
 
 fn seed_session(root: &Path, sid: &str, model: &str, input: u64, output: u64, wall: u64) {
     let dir = root.join("sessions").join(sid);
@@ -32,9 +39,10 @@ fn cost_all_aggregates_across_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("atman_data");
     std::fs::create_dir_all(&data).unwrap();
-    seed_session(&data, "ses_a", "gpt-4o-mini", 100, 50, 900);
-    seed_session(&data, "ses_b", "gpt-4o-mini", 200, 80, 1200);
-    seed_session(&data, "ses_c", "claude-3-5-sonnet", 500, 300, 4000);
+    seed_session(&data, SID_A, "gpt-4o-mini", 100, 50, 900);
+    seed_session(&data, SID_B, "gpt-4o-mini", 200, 80, 1200);
+    seed_session(&data, SID_C, "claude-3-5-sonnet", 500, 300, 4000);
+    let _daemon = spawn_test_daemon(&data);
 
     let (out, err, code) = run_cost(&data, &["cost", "--all"]);
     assert_eq!(code, 0, "cost --all exit: stderr={err}\nstdout={out}");
@@ -65,27 +73,28 @@ fn cost_all_aggregates_across_sessions() {
 
     let a_line = out
         .lines()
-        .find(|l| l.trim_start().starts_with("ses_a"))
-        .expect("want per-session ses_a row");
-    assert!(a_line.contains("900"), "ses_a wall_ms=900: {a_line}");
+        .find(|l| l.trim_start().starts_with(SID_A))
+        .expect("want first per-session row");
+    assert!(a_line.contains("900"), "first wall_ms=900: {a_line}");
     let b_line = out
         .lines()
-        .find(|l| l.trim_start().starts_with("ses_b"))
+        .find(|l| l.trim_start().starts_with(SID_B))
         .unwrap();
-    assert!(b_line.contains("1200"), "ses_b wall_ms=1200: {b_line}");
+    assert!(b_line.contains("1200"), "second wall_ms=1200: {b_line}");
 }
 
 #[test]
 fn cost_all_reports_empty_when_no_llm_calls() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("atman_data");
-    std::fs::create_dir_all(data.join("sessions/ses_empty")).unwrap();
+    std::fs::create_dir_all(data.join("sessions").join(SID_A)).unwrap();
     std::fs::write(
-        data.join("sessions/ses_empty/events.jsonl"),
+        data.join("sessions").join(SID_A).join("events.jsonl"),
         r#"{"type":"turn_start","seq":1,"turn_id":{"raw":"t1"},"ts":"2026-07-05T12:00:00Z"}
 "#,
     )
     .unwrap();
+    let _daemon = spawn_test_daemon(&data);
     let (out, err, code) = run_cost(&data, &["cost", "--all"]);
     assert_eq!(code, 0, "cost --all exit: stderr={err}");
     assert!(out.contains("no llm_call events"), "want empty hint: {out}");
@@ -109,9 +118,13 @@ fn cost_single_session_still_works_without_all_flag() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("atman_data");
     std::fs::create_dir_all(&data).unwrap();
-    seed_session(&data, "ses_a", "gpt-4o-mini", 42, 8, 100);
-    let (out, err, code) = run_cost(&data, &["cost", "ses_a"]);
+    seed_session(&data, SID_A, "gpt-4o-mini", 42, 8, 100);
+    let _daemon = spawn_test_daemon(&data);
+    let (out, err, code) = run_cost(&data, &["cost", SID_A]);
     assert_eq!(code, 0, "cost single: stderr={err}");
-    assert!(out.contains("session ses_a"), "want session heading: {out}");
+    assert!(
+        out.contains(&format!("session {SID_A}")),
+        "want session heading: {out}"
+    );
     assert!(out.contains("total llm_calls: 1"), "want 1 call: {out}");
 }

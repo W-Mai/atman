@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-backed event CLI** — log tailing and cost reports query durable event pages through the Rust client, and log follow mode streams newly committed events instead of stopping after the initial tail.
+
 - **Daemon-backed session CLI** — session listing, inspection, creation, and project moves use the local daemon client instead of opening or editing session storage directly.
 
 - **Live daemon MCP runtimes** — daemon-owned runs load configured MCP tools and accept session-scoped hot reload commands. Reloads replace removed tool namespaces, update every active run, publish connection state to all attached clients, and report when configuration will take effect on the next run.

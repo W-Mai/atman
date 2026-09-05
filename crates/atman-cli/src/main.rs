@@ -972,25 +972,18 @@ async fn cmd_session_show(sid: String) -> Result<()> {
     let mut flow_start = 0;
     let mut flow_end = 0;
     let mut llm_call = 0;
-    let mut cursor = None;
-    loop {
-        let page = client.get_events(session_id.clone(), cursor).await?;
-        for envelope in &page.events {
-            match envelope
-                .event
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("flow_start") => flow_start += 1,
-                Some("flow_end") => flow_end += 1,
-                Some("llm_call") => llm_call += 1,
-                _ => {}
-            }
+    let events = get_all_session_events(&client, &session_id).await?;
+    for envelope in &events {
+        match envelope
+            .event
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("flow_start") => flow_start += 1,
+            Some("flow_end") => flow_end += 1,
+            Some("llm_call") => llm_call += 1,
+            _ => {}
         }
-        if !page.has_more {
-            break;
-        }
-        cursor = Some(page.next_cursor.0);
     }
     println!("session_id: {session_id}");
     println!("title:      {}", projection.metadata.title);
@@ -4340,49 +4333,25 @@ fn select_suggest_model(configured: Option<String>) -> String {
 }
 
 async fn cmd_cost(session_id: Option<String>, all: bool) -> Result<()> {
-    let root = data_dir()?;
+    let client = daemon_tui::connect_local_daemon().await?;
     if all {
-        return cmd_cost_all(&root).await;
+        return cmd_cost_all(&client).await;
     }
-    let sid = match session_id {
-        Some(s) => s,
-        None => latest_session(&root)?
-            .with_context(|| format!("no sessions found under {}", root.display()))?,
-    };
-    let path = root.join("sessions").join(&sid).join("events.jsonl");
-    if !path.exists() {
-        bail!("events file not found: {}", path.display());
-    }
-    let contents = tokio::fs::read_to_string(&path).await?;
-    let summary = aggregate_cost(&contents);
+    let sid = resolve_daemon_session(&client, session_id).await?;
+    let events = get_all_session_events(&client, &sid).await?;
+    let summary = aggregate_cost_events(events.iter().map(|event| &event.event));
     print_cost_summary(&format!("session {sid}"), &summary);
     Ok(())
 }
 
-async fn cmd_cost_all(root: &Path) -> Result<()> {
-    let sessions_dir = root.join("sessions");
-    if !sessions_dir.exists() {
-        bail!("no sessions under {}", sessions_dir.display());
-    }
+async fn cmd_cost_all(client: &atman_client::Client) -> Result<()> {
     let mut per_session: Vec<(String, CostSummary)> = Vec::new();
     let mut combined = CostSummary::default();
     let mut sessions_walked = 0u64;
-    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&sessions_dir)
-        .with_context(|| format!("read_dir {}", sessions_dir.display()))?
-        .filter_map(|e| e.ok())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let sid = entry.file_name().to_string_lossy().to_string();
-        let events = entry.path().join("events.jsonl");
-        if !events.exists() {
-            continue;
-        }
-        let contents = match tokio::fs::read_to_string(&events).await {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let summary = aggregate_cost(&contents);
+    for session in client.list_sessions(None, None, None).await? {
+        let sid = session.id.to_string();
+        let events = get_all_session_events(client, &session.id).await?;
+        let summary = aggregate_cost_events(events.iter().map(|event| &event.event));
         if summary.total_calls == 0 {
             continue;
         }
@@ -4391,10 +4360,7 @@ async fn cmd_cost_all(root: &Path) -> Result<()> {
         per_session.push((sid, summary));
     }
     if per_session.is_empty() {
-        println!(
-            "[atman] cost --all: no llm_call events found under {}",
-            sessions_dir.display()
-        );
+        println!("[atman] cost --all: no llm_call events found");
         return Ok(());
     }
     println!("[atman] cost across {sessions_walked} session(s)");
@@ -4460,13 +4426,11 @@ impl CostSummary {
     }
 }
 
-fn aggregate_cost(events_jsonl: &str) -> CostSummary {
+fn aggregate_cost_events<'a>(
+    events: impl IntoIterator<Item = &'a serde_json::Value>,
+) -> CostSummary {
     let mut summary = CostSummary::default();
-    for line in events_jsonl.lines() {
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    for v in events {
         if v["type"] != "llm_call" {
             continue;
         }
@@ -6683,28 +6647,64 @@ async fn cmd_logs_stream(
 }
 
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {
-    let root = data_dir()?;
-    let sid = match session_id {
-        Some(s) => s,
-        None => latest_session(&root)?
-            .with_context(|| format!("no sessions found under {}", root.display()))?,
-    };
-    let path = root.join("sessions").join(&sid).join("events.jsonl");
-    if !path.exists() {
-        bail!("events file not found: {}", path.display());
+    let client = daemon_tui::connect_local_daemon().await?;
+    let sid = resolve_daemon_session(&client, session_id).await?;
+    let events = get_all_session_events(&client, &sid).await?;
+    let start = events.len().saturating_sub(n);
+    for event in &events[start..] {
+        println!("{}", serde_json::to_string(&event.event)?);
     }
 
-    let contents = tokio::fs::read_to_string(&path).await?;
-    let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    for line in &lines[start..] {
-        println!("{line}");
-    }
-
+    let mut cursor = events.last().map(|event| event.cursor.0).unwrap_or(0);
     if follow {
-        atman_runtime::notify!(warn, "--follow not yet implemented");
+        loop {
+            let page = client.get_events(sid.clone(), Some(cursor)).await?;
+            if page.events.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+            for event in page.events {
+                cursor = event.cursor.0;
+                println!("{}", serde_json::to_string(&event.event)?);
+            }
+        }
     }
     Ok(())
+}
+
+async fn resolve_daemon_session(
+    client: &atman_client::Client,
+    session_id: Option<String>,
+) -> Result<atman_proto::SessionId> {
+    match session_id {
+        Some(session_id) => daemon_tui::resolve_session_prefix(client, &session_id).await,
+        None => client
+            .list_sessions(None, None, Some(1))
+            .await?
+            .into_iter()
+            .next()
+            .map(|session| session.id)
+            .context("no sessions found"),
+    }
+}
+
+async fn get_all_session_events(
+    client: &atman_client::Client,
+    session_id: &atman_proto::SessionId,
+) -> Result<Vec<atman_proto::ServerEventEnvelope>> {
+    let mut events = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = client.get_events(session_id.clone(), Some(cursor)).await?;
+        if page.has_more && page.next_cursor.0 <= cursor {
+            bail!("daemon event page did not advance beyond cursor {cursor}");
+        }
+        cursor = page.next_cursor.0;
+        events.extend(page.events);
+        if !page.has_more {
+            return Ok(events);
+        }
+    }
 }
 
 fn data_dir() -> Result<PathBuf> {

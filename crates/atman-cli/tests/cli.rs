@@ -1,47 +1,10 @@
 use std::process::Command;
 
+mod common;
+use common::spawn_test_daemon;
+
 fn atman_binary() -> String {
     env!("CARGO_BIN_EXE_atman").to_string()
-}
-
-struct TestDaemon {
-    child: std::process::Child,
-    _config: tempfile::TempDir,
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn spawn_test_daemon(data_dir: &std::path::Path) -> TestDaemon {
-    let config = tempfile::tempdir().unwrap();
-    let child = Command::new(atman_binary())
-        .env("ATMAN_CONFIG_DIR", config.path())
-        .env("ATMAN_DATA_DIR", data_dir)
-        .env("ATMAN_DAEMON_PORT", "0")
-        .args(["daemon", "serve"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn test daemon");
-    let socket_path = data_dir.join("run/atman.sock");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !socket_path.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "test daemon did not create {}",
-            socket_path.display()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    TestDaemon {
-        child,
-        _config: config,
-    }
 }
 
 #[test]
@@ -115,6 +78,8 @@ fn run_persists_events_and_logs_tail_reads_them() {
         .collect();
     assert_eq!(dirs.len(), 1);
     let sid = dirs[0].file_name().into_string().unwrap();
+
+    let _daemon = spawn_test_daemon(data.path());
 
     let tail = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -228,6 +193,8 @@ fn cost_aggregates_llm_calls_from_session() {
         .arg("q=hi")
         .output()
         .unwrap();
+
+    let _daemon = spawn_test_daemon(data.path());
 
     let out = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -557,6 +524,8 @@ fn logs_tail_without_session_id_uses_latest() {
         .arg(&flow_path)
         .output()
         .expect("run");
+
+    let _daemon = spawn_test_daemon(data.path());
 
     let tail = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
