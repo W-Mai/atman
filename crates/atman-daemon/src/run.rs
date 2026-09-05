@@ -548,7 +548,6 @@ impl RunLauncher {
             args,
             owner_principal,
             options,
-            false,
         )
         .await
     }
@@ -589,7 +588,6 @@ impl RunLauncher {
             args,
             owner_principal,
             options,
-            true,
         )
         .await
     }
@@ -676,7 +674,6 @@ impl RunLauncher {
         args: Vec<(String, atman_runtime::Value)>,
         owner_principal: &str,
         options: RunOptions,
-        require_idle: bool,
     ) -> Result<SpawnedRun> {
         let path = PathBuf::from(flow_path);
         let RunOptions {
@@ -711,11 +708,6 @@ impl RunLauncher {
             cancel: cancel.clone(),
             started_at: chrono::Utc::now(),
         };
-        let admission = if require_idle {
-            crate::session_actor::RunAdmission::IdleSession
-        } else {
-            crate::session_actor::RunAdmission::Concurrent
-        };
         let context = state
             .admit_session_run(
                 sid_proto.clone(),
@@ -723,7 +715,6 @@ impl RunLauncher {
                 live_run,
                 user_message,
                 owner_principal,
-                admission,
             )
             .await?;
         let config_dir = self.config_dir.clone();
@@ -1385,7 +1376,6 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                true,
             )
             .await
             .unwrap();

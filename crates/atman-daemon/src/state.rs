@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::idempotency::IdempotencyRegistry;
 use crate::project_registry::{ProjectRecord, ProjectRegistry};
 use crate::projection::RestoredProjection;
-use crate::session_actor::{RunAdmission, SessionActorHandle, SessionActorLease};
+use crate::session_actor::{SessionActorHandle, SessionActorLease};
 
 pub struct DaemonState {
     data_dir: PathBuf,
@@ -230,33 +230,8 @@ impl DaemonState {
         run: LiveRun,
         owner_principal: impl Into<String>,
     ) -> Result<()> {
-        self.register_session_with_runs(
-            id,
-            session,
-            vec![run],
-            owner_principal.into(),
-            RunAdmission::Concurrent,
-            None,
-        )
-        .await
-    }
-
-    pub async fn register_session_root_run(
-        &self,
-        id: SessionId,
-        session: std::sync::Arc<atman_runtime::Session>,
-        run: LiveRun,
-        owner_principal: impl Into<String>,
-    ) -> Result<()> {
-        self.register_session_with_runs(
-            id,
-            session,
-            vec![run],
-            owner_principal.into(),
-            RunAdmission::IdleSession,
-            None,
-        )
-        .await
+        self.register_session_with_runs(id, session, vec![run], owner_principal.into(), None)
+            .await
     }
 
     pub async fn register_session(
@@ -265,15 +240,8 @@ impl DaemonState {
         session: std::sync::Arc<atman_runtime::Session>,
         owner_principal: impl Into<String>,
     ) -> Result<()> {
-        self.register_session_with_runs(
-            id,
-            session,
-            Vec::new(),
-            owner_principal.into(),
-            RunAdmission::Concurrent,
-            None,
-        )
-        .await
+        self.register_session_with_runs(id, session, Vec::new(), owner_principal.into(), None)
+            .await
     }
 
     pub(crate) async fn admit_session_run(
@@ -283,7 +251,6 @@ impl DaemonState {
         run: LiveRun,
         user_message: atman_runtime::message::Message,
         owner_principal: impl Into<String>,
-        admission: RunAdmission,
     ) -> Result<std::sync::Arc<atman_runtime::context_state::ContextState>> {
         let owner_principal = owner_principal.into();
         self.register_session(id.clone(), session.clone(), owner_principal.clone())
@@ -295,7 +262,7 @@ impl DaemonState {
             actor.owns_session(&session),
             "session {id} is already registered with another runtime"
         );
-        actor.lease()?.admit_run(run, admission, user_message).await
+        actor.lease()?.admit_run(run, user_message).await
     }
 
     async fn register_session_with_runs(
@@ -304,7 +271,6 @@ impl DaemonState {
         session: std::sync::Arc<atman_runtime::Session>,
         initial_runs: Vec<LiveRun>,
         owner_principal: String,
-        admission: RunAdmission,
         restored_projection: Option<RestoredProjection>,
     ) -> Result<()> {
         let existing = {
@@ -340,7 +306,7 @@ impl DaemonState {
             );
             let entry = entry.lease()?;
             for run in initial_runs {
-                entry.add_run(run, admission).await?;
+                entry.add_run(run).await?;
             }
         }
         Ok(())
@@ -399,7 +365,6 @@ impl DaemonState {
             session.clone(),
             Vec::new(),
             principal.to_owned(),
-            RunAdmission::Concurrent,
             Some(restored.projection),
         )
         .await?;
@@ -1363,47 +1328,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_admission_selects_the_head_before_registering_the_run() {
+    async fn concurrent_root_admission_isolates_context_and_cancellation() {
         let state = DaemonState::new(tempfile::tempdir().unwrap().path().to_path_buf());
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let session_id = SessionId(session.id().0);
         let first = live_run("first");
+        let first_id = first.run_id.clone();
         let first_turn = first.turn_id.clone();
-        let context = state
+        let first_cancel = first.cancel.clone();
+        let first_context = state
             .admit_session_run(
                 session_id.clone(),
                 session.clone(),
                 first,
-                atman_runtime::message::Message::user_text(first_turn, "accepted"),
+                atman_runtime::message::Message::user_text(first_turn, "first message"),
                 "owner",
-                RunAdmission::IdleSession,
             )
             .await
             .unwrap();
-        assert!(Arc::ptr_eq(&context, &session.context()));
-        assert_eq!(session.messages()[0].text_concat(), "accepted");
-        assert!(state.has_live_runs(&session_id));
-
-        let selected_head = context.context_id().cloned();
-        let rejected = live_run("second");
-        let rejected_turn = rejected.turn_id.clone();
-        let error = match state
+        let second = live_run("second");
+        let second_id = second.run_id.clone();
+        let second_turn = second.turn_id.clone();
+        let second_cancel = second.cancel.clone();
+        let second_context = state
             .admit_session_run(
                 session_id.clone(),
                 session.clone(),
-                rejected,
-                atman_runtime::message::Message::user_text(rejected_turn, "rejected"),
+                second,
+                atman_runtime::message::Message::user_text(second_turn, "second message"),
                 "owner",
-                RunAdmission::IdleSession,
             )
             .await
-        {
-            Ok(_) => panic!("idle admission must reject a second active run"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("already has an active root run"));
-        assert_eq!(session.context().context_id(), selected_head.as_ref());
-        assert_eq!(session.messages().len(), 1);
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&first_context, &second_context));
+        assert!(Arc::ptr_eq(&second_context, &session.context()));
+        assert_eq!(first_context.messages()[0].text_concat(), "first message");
+        assert_eq!(first_context.messages().len(), 1);
+        assert_eq!(second_context.messages()[0].text_concat(), "first message");
+        assert_eq!(second_context.messages()[1].text_concat(), "second message");
+
+        let cancellation = state
+            .cancel_run(&session_id, &first_id, "owner")
+            .await
+            .unwrap();
+        assert_eq!(
+            cancellation.status,
+            atman_proto::RunCancellationStatus::Accepted
+        );
+        assert!(first_cancel.is_cancelled());
+        assert!(!second_cancel.is_cancelled());
+
+        let snapshot = state.session_snapshot(&session_id, "owner").await.unwrap();
+        assert_eq!(snapshot.projection.runs.len(), 2);
+        assert_eq!(
+            snapshot
+                .projection
+                .runs
+                .iter()
+                .find(|run| run.id == first_id)
+                .unwrap()
+                .state,
+            atman_proto::RunLifecycle::Cancelling
+        );
+        assert_eq!(
+            snapshot
+                .projection
+                .runs
+                .iter()
+                .find(|run| run.id == second_id)
+                .unwrap()
+                .state,
+            atman_proto::RunLifecycle::Starting
+        );
         assert_eq!(
             session
                 .sink()
@@ -1414,7 +1411,7 @@ mod tests {
                     atman_runtime::event::Event::ContextHeadSelected { .. }
                 ))
                 .count(),
-            1
+            2
         );
     }
 

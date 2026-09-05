@@ -155,7 +155,7 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
+async fn concurrent_runs_share_the_session_and_cancel_independently() {
     let tmp = tempfile::tempdir().unwrap();
     let project_root = tmp.path().join("project");
     let config_dir = tmp.path().join("config");
@@ -221,14 +221,15 @@ async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
         request_id: Some(atman_proto::RequestId::now()),
         ..start.clone()
     };
-    let error = dispatch(
+    let second = dispatch(
         state.clone(),
         JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(4, &concurrent).unwrap(),
     )
     .await
     .into_method_output::<atman_proto::rpc::StartRun>()
-    .unwrap_err();
-    assert!(error.message.contains("active root run"));
+    .unwrap();
+    assert_ne!(second.run_id, running.run_id);
+    assert_eq!(second.session_id, running.session_id);
 
     let cancelled = dispatch(
         state.clone(),
@@ -248,9 +249,36 @@ async fn start_run_reuses_the_session_and_cancels_the_registered_turn() {
     assert!(cancelled.cancelled);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while state.has_live_runs(&running.session_id) {
-        assert!(std::time::Instant::now() < deadline, "run did not cancel");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "concurrent runs did not finish"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let snapshot = state
+        .session_snapshot(&running.session_id, "local-daemon")
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .projection
+            .runs
+            .iter()
+            .find(|run| run.id == running.run_id)
+            .unwrap()
+            .state,
+        atman_proto::RunLifecycle::Cancelled
+    );
+    assert_eq!(
+        snapshot
+            .projection
+            .runs
+            .iter()
+            .find(|run| run.id == second.run_id)
+            .unwrap()
+            .state,
+        atman_proto::RunLifecycle::Succeeded
+    );
     let events = std::fs::read_to_string(
         state
             .sessions_root()
@@ -321,6 +349,22 @@ async fn interjection_targets_one_run_and_retries_without_duplication() {
     .await
     .into_method_output::<atman_proto::rpc::StartRun>()
     .unwrap();
+    let second_request = atman_proto::StartRunRequest {
+        request_id: Some(atman_proto::RequestId::now()),
+        session_id: session_id.clone(),
+        flow_path: flow_path.to_string_lossy().into_owned(),
+        args: serde_json::Map::new(),
+        reasoning: None,
+        images: Vec::new(),
+    };
+    let second = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::StartRun>(3, &second_request).unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::StartRun>()
+    .unwrap();
+    assert_ne!(running.run_id, second.run_id);
     let events_path = state
         .sessions_root()
         .join(session_id.to_string())
@@ -350,14 +394,14 @@ async fn interjection_targets_one_run_and_retries_without_duplication() {
     };
     let committed = dispatch(
         state.clone(),
-        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(3, &request).unwrap(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(4, &request).unwrap(),
     )
     .await
     .into_method_output::<atman_proto::rpc::InterjectSession>()
     .unwrap();
     let retried = dispatch(
         state.clone(),
-        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(4, &request).unwrap(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::InterjectSession>(5, &request).unwrap(),
     )
     .await
     .into_method_output::<atman_proto::rpc::InterjectSession>()
@@ -401,6 +445,27 @@ async fn interjection_targets_one_run_and_retries_without_duplication() {
                 if message.role == atman_proto::MessageRole::User
         )
     }));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = state
+            .session_snapshot(&session_id, "local-daemon")
+            .await
+            .unwrap();
+        let second_state = snapshot
+            .projection
+            .runs
+            .iter()
+            .find(|run| run.id == second.run_id)
+            .map(|run| run.state);
+        if second_state == Some(atman_proto::RunLifecycle::Succeeded) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "untargeted concurrent run did not succeed: {second_state:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

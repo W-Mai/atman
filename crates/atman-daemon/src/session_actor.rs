@@ -29,12 +29,6 @@ const COMPACT_REVIEW_TERMINAL_RETENTION: usize = 256;
 const LEASES_CLOSING: usize = 1 << (usize::BITS - 1);
 const LEASE_COUNT_MASK: usize = !LEASES_CLOSING;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunAdmission {
-    Concurrent,
-    IdleSession,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionActorView {
     pub revision: u64,
@@ -326,24 +320,17 @@ impl SessionActorHandle {
         self.view.borrow().clone()
     }
 
-    pub async fn add_run(&self, run: LiveRun, admission: RunAdmission) -> Result<()> {
-        request(&self.tx, |reply| Command::AddRun {
-            run,
-            admission,
-            reply,
-        })
-        .await?
+    pub async fn add_run(&self, run: LiveRun) -> Result<()> {
+        request(&self.tx, |reply| Command::AddRun { run, reply }).await?
     }
 
     pub async fn admit_run(
         &self,
         run: LiveRun,
-        admission: RunAdmission,
         user_message: atman_runtime::message::Message,
     ) -> Result<Arc<atman_runtime::context_state::ContextState>> {
         request(&self.tx, |reply| Command::AdmitRun {
             run,
-            admission,
             user_message,
             reply,
         })
@@ -623,12 +610,10 @@ async fn request<T>(
 enum Command {
     AddRun {
         run: LiveRun,
-        admission: RunAdmission,
         reply: oneshot::Sender<Result<()>>,
     },
     AdmitRun {
         run: LiveRun,
-        admission: RunAdmission,
         user_message: atman_runtime::message::Message,
         reply: oneshot::Sender<Result<Arc<atman_runtime::context_state::ContextState>>>,
     },
@@ -871,16 +856,11 @@ impl SessionActor {
         }
     }
 
-    fn validate_run_admission(&self, run: &LiveRun, admission: RunAdmission) -> Result<()> {
+    fn validate_run_admission(&self, run: &LiveRun) -> Result<()> {
         anyhow::ensure!(
             !self.runs.contains_key(&run.run_id),
             "run {} is already registered",
             run.run_id
-        );
-        anyhow::ensure!(
-            admission != RunAdmission::IdleSession || self.runs.is_empty(),
-            "session {} already has an active root run",
-            self.session_id
         );
         Ok(())
     }
@@ -902,23 +882,18 @@ impl SessionActor {
 
     fn handle_command(&mut self, command: Command) {
         match command {
-            Command::AddRun {
-                run,
-                admission,
-                reply,
-            } => {
-                let result = self.validate_run_admission(&run, admission).map(|()| {
+            Command::AddRun { run, reply } => {
+                let result = self.validate_run_admission(&run).map(|()| {
                     self.register_live_run(run);
                 });
                 let _ = reply.send(result);
             }
             Command::AdmitRun {
                 run,
-                admission,
                 user_message,
                 reply,
             } => {
-                let result = self.validate_run_admission(&run, admission).and_then(|()| {
+                let result = self.validate_run_admission(&run).and_then(|()| {
                     let context = self
                         .session
                         .admit_turn_with_cancel(user_message, run.cancel.clone())?;

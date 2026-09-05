@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Concurrent session runs** — one daemon-owned session can admit multiple root runs without sharing mutable context owners. Cancellation and interjection remain run-scoped, accepted submissions advance the durable context head in admission order, and the session projection stays active until every run is terminal.
+
 - **Context head journals** — accepted-turn head records select one ancestry for default-context replay. Late branch output cannot change that selection; metadata can use the same bounded membership, and malformed typed records are rejected before transcript publication.
 - **Journal-backed context forks** — `ContextState::fork` captures an owner's active window, raw history, checkpoint epoch, and bounded usage and prefix observations. Creation records only the source boundary and inheritance policy; later parent output and child rewrites remain isolated, including after restoring a session.
 - **Live context views** — `MessageStream::from_context` initializes a validated branch window and raw history, then applies only that context's new events. Unrelated branches preserve the cached views without rebuilding their contents.
@@ -57,7 +59,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
-- **Durable run admission** — daemon run acceptance records the user message and selected context head before executor bootstrap. Each invocation keeps that captured history owner through provider work, rejected idle-session starts leave the head unchanged, and bootstrap failures publish a terminal run fact.
+- **Durable run admission** — daemon run acceptance records the user message and selected context head before executor bootstrap. Each invocation keeps that captured history owner through provider work, and bootstrap failures publish a terminal run fact.
 
 - **Attachment sanitizer replay** — session sanitization applies existing attachment patches before checking raw history and materialized windows, repairs checkpoint-only images by stable part identity, preserves root and child context ownership, and produces no duplicate repair events on repeated runs.
 

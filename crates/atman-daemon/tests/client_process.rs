@@ -4,9 +4,7 @@ use std::process::{Child, Command, Stdio};
 
 use std::os::unix::fs::FileTypeExt;
 
-use atman_client::{
-    Client, ClientError, ClientIdentity, HttpTransport, SessionClientError, UnixTransport,
-};
+use atman_client::{Client, ClientIdentity, HttpTransport, UnixTransport};
 use atman_proto::{FlowRunId, FormAnswer, FormSubmission, RunLifecycle, StartRunResponse};
 use futures::StreamExt;
 
@@ -115,33 +113,19 @@ async fn wait_for_no_forms(session: &atman_client::SessionClient) {
     .expect("resolved forms did not leave the public session projection");
 }
 
-async fn start_when_idle(
+async fn start_run(
     session: &atman_client::SessionClient,
     flow_path: &std::path::Path,
 ) -> StartRunResponse {
-    tokio::time::timeout(WAIT_TIMEOUT, async {
-        loop {
-            match session
-                .start_run(
-                    flow_path.to_string_lossy().into_owned(),
-                    serde_json::Map::new(),
-                    None,
-                    Vec::new(),
-                )
-                .await
-            {
-                Ok(response) => return response,
-                Err(SessionClientError::Client(ClientError::Rpc(error)))
-                    if error.message.contains("active root run") =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                Err(error) => panic!("failed to start flow after the session became idle: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("session actor did not release its completed root run")
+    session
+        .start_run(
+            flow_path.to_string_lossy().into_owned(),
+            serde_json::Map::new(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .expect("failed to start flow")
 }
 
 #[tokio::test]
@@ -233,7 +217,7 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
         RunLifecycle::Succeeded
     );
 
-    let prompted = start_when_idle(&session, &wait_flow).await;
+    let prompted = start_run(&session, &wait_flow).await;
     let form = wait_for_form(&session).await;
     assert_eq!(form.run_id, prompted.run_id);
     let unix_client = Client::connect(
@@ -279,7 +263,7 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
             })
     );
 
-    let cancellable = start_when_idle(&session, &wait_flow).await;
+    let cancellable = start_run(&session, &wait_flow).await;
     wait_for_form(&session).await;
     let cancelled = session
         .cancel_run(cancellable.run_id.clone())

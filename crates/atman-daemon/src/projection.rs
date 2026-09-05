@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SessionProjector {
     projection: SessionProjection,
-    current_turn: Option<atman_runtime::event::TurnId>,
+    active_turns: Vec<atman_runtime::event::TurnId>,
     run_turns: HashMap<atman_runtime::event::FlowRunId, atman_runtime::event::TurnId>,
     workflows: Vec<(atman_runtime::event::TurnId, RuntimeWorkflowProjection)>,
     event_usage: UsageProjection,
@@ -64,7 +64,7 @@ impl SessionProjector {
                 resources: Vec::new(),
                 usage: UsageProjection::default(),
             },
-            current_turn: None,
+            active_turns: Vec::new(),
             run_turns: HashMap::new(),
             workflows: Vec::new(),
             event_usage: UsageProjection::default(),
@@ -297,11 +297,13 @@ impl SessionProjector {
         }
 
         match &envelope.event {
-            Event::TurnStart { turn_id } => self.current_turn = Some(turn_id.clone()),
-            Event::TurnEnd { turn_id } => {
-                if self.current_turn.as_ref() == Some(turn_id) {
-                    self.current_turn = None;
+            Event::TurnStart { turn_id } => {
+                if !self.active_turns.contains(turn_id) {
+                    self.active_turns.push(turn_id.clone());
                 }
+            }
+            Event::TurnEnd { turn_id } => {
+                self.active_turns.retain(|active| active != turn_id);
             }
             Event::FlowStart {
                 run_id,
@@ -320,7 +322,7 @@ impl SessionProjector {
                             .and_then(|parent| self.run_turns.get(parent))
                             .cloned()
                     })
-                    .or_else(|| self.current_turn.clone());
+                    .or_else(|| self.unique_active_turn());
                 if let Some(turn_id) = &turn_id {
                     self.run_turns.insert(run_id.clone(), turn_id.clone());
                 }
@@ -1306,7 +1308,7 @@ impl SessionProjector {
             .run_turns
             .get(run_id)
             .cloned()
-            .or_else(|| self.current_turn.clone())
+            .or_else(|| self.unique_active_turn())
             .unwrap_or_else(orphan_turn_id);
         self.run_turns
             .entry(run_id.clone())
@@ -1325,6 +1327,13 @@ impl SessionProjector {
         workflow
             .apply_event_at(&envelope.event, envelope.ts)
             .changed()
+    }
+
+    fn unique_active_turn(&self) -> Option<atman_runtime::event::TurnId> {
+        if self.active_turns.len() != 1 {
+            return None;
+        }
+        self.active_turns.first().cloned()
     }
 }
 
