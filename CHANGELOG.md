@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon TUI settings controls** — provider authentication and configuration, model aliases, endpoint checks, and MCP resource inspection remain available after interactive sessions move to the daemon client path. Model selection changes the submission default without injecting an effort or model override into unrelated LLM calls.
+
 - **Daemon-first terminal sessions** — interactive terminal sessions connect to the local daemon through the Rust SDK, auto-start it when needed, reconcile ordered session updates, and use typed commands for messages, session switching, approvals, forms, compaction, cancellation, trust, and terminal resize. Session listings retain message counts and last-updated timestamps without opening local writers.
 
 - **Live daemon TUI signals** — terminal clients feed streamed assistant text, thinking, tool drafts, terminal bytes, process output, progress, and notifications through the existing document-flow state machine while durable projection events remain the recovery source.

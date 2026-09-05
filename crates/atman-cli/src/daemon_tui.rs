@@ -14,6 +14,7 @@ enum NextSession {
 
 pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     crate::load_model_config_from_disk();
+    let provider_lifecycle = settings_provider_lifecycle().await?;
     let client = connect_local_daemon().await?;
     let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
     let first = match resume {
@@ -36,7 +37,9 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     };
     loop {
         let NextSession::Attached { session, intro } = current;
-        let Some(next) = run_session(client.clone(), session, intro).await? else {
+        let Some(next) =
+            run_session(client.clone(), provider_lifecycle.clone(), session, intro).await?
+        else {
             return Ok(());
         };
         current = next;
@@ -45,6 +48,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
 
 async fn run_session(
     client: Client,
+    provider_lifecycle: atman_runtime::ProviderLifecycle,
     session: SessionClient,
     intro: Option<atman_tui::app::StartupIntro>,
 ) -> Result<Option<NextSession>> {
@@ -163,6 +167,84 @@ async fn run_session(
                         crate::load_model_config_from_disk();
                     }
                 }
+                TuiControl::MutateProvider(request) => {
+                    let result = crate::execute_provider_mutation(
+                        &provider_lifecycle,
+                        request.action.clone(),
+                    )
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                    let _ = command_tx.send(TuiCommand::ProviderMutationResult { request, result });
+                }
+                TuiControl::UpsertConfigModel {
+                    old_name,
+                    name,
+                    model,
+                    provider,
+                    context_budget,
+                    reasoning,
+                    max_tokens,
+                    enabled,
+                } => {
+                    let result = atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
+                        hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
+                            old_name: old_name.as_deref(),
+                            name: &name,
+                            model: &model,
+                            provider: provider.as_deref(),
+                            context_budget,
+                            reasoning,
+                            capabilities: None,
+                            image_detail: None,
+                            max_tokens,
+                            enabled,
+                        })
+                    });
+                    match result {
+                        Ok(()) => {
+                            crate::load_model_config_from_disk();
+                            let _ = command_tx.send(TuiCommand::ProviderCatalogChanged {
+                                added_provider: None,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = control_note_tx.send(TuiNote::Error(format!(
+                                "Model \"{name}\" save failed: {error}"
+                            )));
+                        }
+                    }
+                }
+                TuiControl::OpenAliasManager { .. } => {}
+                TuiControl::SwitchModel { request_id, model } => {
+                    let result = switch_model(&provider_lifecycle, &model);
+                    let _ = command_tx.send(TuiCommand::ModelSwitchResult {
+                        request_id,
+                        model,
+                        result,
+                    });
+                }
+                TuiControl::TestProvider { name, entry } => {
+                    let result = crate::test_provider_endpoint(&name, &entry).await;
+                    let _ = command_tx.send(TuiCommand::ProviderTestResult(result));
+                }
+                TuiControl::McpTest { name } => {
+                    let (message, ok) = test_mcp(&name).await;
+                    let _ = command_tx.send(TuiCommand::McpTestResult { name, message, ok });
+                }
+                TuiControl::McpListResources { name } => {
+                    let resources = match connect_mcp(&name).await {
+                        Ok(client) => client.list_resources().await.unwrap_or_default(),
+                        Err(_) => Vec::new(),
+                    };
+                    let _ = command_tx.send(TuiCommand::McpResourcesResult { name, resources });
+                }
+                TuiControl::McpListPrompts { name } => {
+                    let prompts = match connect_mcp(&name).await {
+                        Ok(client) => client.list_prompts().await.unwrap_or_default(),
+                        Err(_) => Vec::new(),
+                    };
+                    let _ = command_tx.send(TuiCommand::McpPromptsResult { name, prompts });
+                }
                 _ => {
                     let _ = control_note_tx.send(TuiNote::Warn(
                         "this control is not available through the daemon yet".into(),
@@ -186,6 +268,88 @@ async fn run_session(
     control_task.await.context("join daemon TUI control task")?;
     result?;
     Ok(next_rx.try_recv().ok())
+}
+
+async fn settings_provider_lifecycle() -> Result<atman_runtime::ProviderLifecycle> {
+    let lifecycle = atman_runtime::ProviderLifecycle::new(
+        atman_runtime::config_hub::ConfigHub::global()?,
+        atman_runtime::provider::ProviderRegistry::new(),
+    );
+    lifecycle.reload_config_providers()?;
+    atman_daemon::bootstrap::prepare_auth_provider_runtime(&lifecycle).await?;
+    Ok(lifecycle)
+}
+
+fn switch_model(
+    provider_lifecycle: &atman_runtime::ProviderLifecycle,
+    requested_model: &str,
+) -> Result<String, String> {
+    let info = atman_runtime::model_registry::model_info(requested_model);
+    if info.context_budget == 0 {
+        return Err("model or provider is disabled".into());
+    }
+    let active_model = info.name;
+    if provider_lifecycle
+        .provider_registry()
+        .resolve(&active_model)
+        .is_none()
+    {
+        return Err("provider is not available in this process".into());
+    }
+    atman_runtime::config_hub::ConfigHub::global()
+        .map_err(|error| error.to_string())?
+        .update_alias(Some("smart"), "smart", &active_model)
+        .map_err(|error| error.to_string())?;
+    crate::load_model_config_from_disk();
+    Ok(active_model)
+}
+
+async fn test_mcp(name: &str) -> (String, bool) {
+    let Some(config) = crate::load_mcp_configs()
+        .into_iter()
+        .find(|config| config.name == name)
+    else {
+        return ("not found in config".into(), false);
+    };
+    let registry = atman_runtime::ToolRegistry::new();
+    let mut results = atman_runtime::mcp::register_from_configs(&registry, &[config]).await;
+    match results.pop() {
+        Some(Ok(status)) => (format!("{} tools discovered", status.tool_count), true),
+        Some(Err(error)) => (error.error.to_string(), false),
+        None => ("MCP probe returned no result".into(), false),
+    }
+}
+
+async fn connect_mcp(name: &str) -> Result<atman_runtime::mcp::McpClient> {
+    let config = crate::load_mcp_configs()
+        .into_iter()
+        .find(|config| config.name == name)
+        .with_context(|| format!("MCP server `{name}` is not configured"))?;
+    match config.transport {
+        atman_runtime::mcp::TransportKind::Stdio => atman_runtime::mcp::McpClient::connect_stdio(
+            &config.name,
+            &config.command,
+            &config.args,
+            &config.env,
+            config.timeout_ms,
+        )
+        .await
+        .map_err(anyhow::Error::from),
+        _ => {
+            let url = config
+                .url
+                .as_deref()
+                .with_context(|| format!("MCP server `{name}` requires a URL"))?;
+            atman_runtime::mcp::McpClient::connect_http(
+                &config.name,
+                url,
+                config.auth_token,
+                config.timeout_ms,
+            )
+            .await
+            .map_err(anyhow::Error::from)
+        }
+    }
 }
 
 fn session_row(

@@ -550,7 +550,7 @@ async fn register_providers(
     prepare_auth_provider_runtime(&lifecycle).await
 }
 
-pub(crate) async fn prepare_auth_provider_runtime(
+pub async fn prepare_auth_provider_runtime(
     lifecycle: &atman_runtime::ProviderLifecycle,
 ) -> Result<Vec<String>> {
     lifecycle.reconcile_inactive_providers()?;
