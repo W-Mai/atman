@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Revision-driven TUI session reconciliation** — daemon projection updates replace shared domain state by revision while preserving unsent input, local themes, approval disclosure, modal drafts, workflow disclosure, and other client-local presentation state.
+
 - **Daemon-backed TUI projection adapter** — one checked conversion preserves context usage, MCP details, trust, todo and plan state, forms, compaction reviews, interjections, permission audit data, and workflow structure for attached terminal clients.
 
 - **Complete MCP session projections** — attached clients receive typed transports, discovered tool names and descriptions, and connection failure details from the daemon session snapshot.

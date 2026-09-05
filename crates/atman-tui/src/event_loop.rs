@@ -36,42 +36,6 @@ pub(crate) async fn run_frames(
         handle.session_name = projected.session_name.clone();
         handle.project_root = projected.project_root.clone();
         handle.goal = projected.goal.clone();
-        let first_turn_index = handle
-            .initial_items
-            .iter()
-            .filter(|item| matches!(item, app::OutputItem::WorkflowPanel { .. }))
-            .count();
-        handle
-            .initial_items
-            .extend(
-                projected
-                    .workflows
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(index, graph)| {
-                        let terminal = !graph.graph().root.is_empty()
-                            && graph.graph().root.iter().all(|node| {
-                                !matches!(
-                                    node.status,
-                                    atman_runtime::workflow::NodeStatus::Pending
-                                        | atman_runtime::workflow::NodeStatus::Running
-                                )
-                            });
-                        let cancelled = graph.graph().root.iter().any(|node| {
-                            matches!(node.status, atman_runtime::workflow::NodeStatus::Cancelled)
-                        });
-                        app::OutputItem::WorkflowPanel {
-                            turn_index: first_turn_index + index,
-                            graph,
-                            expanded_nodes: std::collections::HashSet::new(),
-                            panel_expanded: true,
-                            started_at: std::time::Instant::now(),
-                            ended_at: terminal.then(std::time::Instant::now),
-                            cancelled,
-                        }
-                    }),
-            );
     }
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
@@ -80,30 +44,15 @@ pub(crate) async fn run_frames(
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
-    if let Some(projected) = daemon_projection.as_ref() {
-        app.daemon_revision = Some(projected.revision);
-        app.session_name = projected.session_name.clone();
-        app.project_root = projected.project_root.clone();
-        app.goal = projected.goal.clone();
-        app.replace_context_snapshot(projected.context.clone());
-        app.todos = projected.todos.clone();
-        app.plans = projected.plans.clone();
-        app.trust = projected.trust.clone();
-        app.pending_permissions = projected.pending_permissions.clone();
-        app.pending_permission_groups = projected.pending_permission_groups.clone();
-        app.grouped_permission_request_ids = projected
-            .pending_permission_groups
-            .values()
-            .flat_map(|group| group.payload.request_ids.iter().cloned())
-            .collect();
-        app.pending_injections = projected.pending_injections.clone();
-    }
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
     let mut app = UiState::new(app);
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app.app);
+    if let Some(projected) = daemon_projection {
+        apply_daemon_projection(&mut app, projected);
+    }
     if handle.onboarding_recommended && !app.app.onboarding_skipped {
         app.wm.modals.onboarding_open = true;
         if let Some(tx) = handle.control_tx.as_ref() {
@@ -143,18 +92,11 @@ pub(crate) async fn run_frames(
     }
     if let Some(rx) = handle.form_rx.as_ref() {
         app.wm.modals.form_modal.reconcile(&rx.borrow());
-    } else if let Some(projected) = daemon_projection.as_ref() {
-        app.wm.modals.form_modal.reconcile(&projected.pending_forms);
     }
     if let Some(rx) = handle.compact_review_rx.as_ref() {
         crate::compact_review_modal::CompactReviewModal::reconcile(
             &mut app.wm.modals.compact_review,
             &rx.borrow(),
-        );
-    } else if let Some(projected) = daemon_projection.as_ref() {
-        crate::compact_review_modal::CompactReviewModal::reconcile(
-            &mut app.wm.modals.compact_review,
-            &projected.pending_compact_reviews,
         );
     }
     if let Some(rx) = handle.trust_rx.as_ref() {
@@ -1380,6 +1322,21 @@ pub(crate) async fn run_frames(
                     app.app.push_note(text, level);
                 }
             }
+            _ = wait_daemon_state_change(handle.daemon_state_rx.as_mut()) => {
+                if let Some(rx) = handle.daemon_state_rx.as_mut() {
+                    let projected = {
+                        let state = rx.borrow();
+                        crate::projection_adapter::TuiSessionProjection::try_from(state.projection())
+                    };
+                    match projected {
+                        Ok(projected) => apply_daemon_projection(&mut app, projected),
+                        Err(error) => app.app.push_note(
+                            format!("daemon projection rejected: {error}"),
+                            app::NoteLevel::Error,
+                        ),
+                    }
+                }
+            }
             _ = wait_goal_change(handle.goal_rx.as_mut()) => {
                 if let Some(rx) = handle.goal_rx.as_mut() {
                     app.app.goal = rx.borrow().clone();
@@ -1731,6 +1688,74 @@ fn apply_context_snapshot(
     }
 }
 
+fn apply_daemon_projection(
+    app: &mut UiState,
+    mut projected: crate::projection_adapter::TuiSessionProjection,
+) {
+    if app
+        .app
+        .daemon_revision
+        .is_some_and(|revision| revision >= projected.revision)
+    {
+        return;
+    }
+    let theme = app.app.trust.theme;
+    projected.trust.theme = theme;
+    for (group_id, group) in &mut projected.pending_permission_groups {
+        group.expanded = app
+            .app
+            .pending_permission_groups
+            .get(group_id)
+            .is_some_and(|existing| existing.expanded);
+    }
+    if app
+        .app
+        .selected_permission_group
+        .as_ref()
+        .is_some_and(|id| !projected.pending_permission_groups.contains_key(id))
+    {
+        app.app.selected_permission_group = None;
+    }
+
+    app.app.daemon_revision = Some(projected.revision);
+    app.app.session_name = projected.session_name;
+    app.app.project_root = projected.project_root;
+    app.app.goal = projected.goal;
+    app.app.replace_context_snapshot(projected.context);
+    app.app.todos = projected.todos;
+    app.app.plans = projected.plans;
+    app.app.trust = projected.trust;
+    app.app.pending_permissions = projected.pending_permissions;
+    app.app.pending_permission_groups = projected.pending_permission_groups;
+    app.app.grouped_permission_request_ids = app
+        .app
+        .pending_permission_groups
+        .values()
+        .flat_map(|group| group.payload.request_ids.iter().cloned())
+        .collect();
+    app.app.pending_injections = projected.pending_injections;
+    app.app.reconcile_daemon_workflows(&projected.workflows);
+    app.wm.modals.form_modal.reconcile(&projected.pending_forms);
+    crate::compact_review_modal::CompactReviewModal::reconcile(
+        &mut app.wm.modals.compact_review,
+        &projected.pending_compact_reviews,
+    );
+    if app.app.reconcile_input_reasoning() {
+        app.app.save_ui_state();
+    }
+}
+
+pub(crate) async fn wait_daemon_state_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<atman_client::SessionState>>,
+) {
+    match rx {
+        Some(rx) => {
+            let _ = rx.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 pub(crate) async fn wait_goal_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Option<String>>>,
 ) {
@@ -1862,6 +1887,97 @@ pub(crate) async fn poll_update_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn projected_session(
+        revision: u64,
+        goal: &str,
+        status: atman_runtime::workflow::NodeStatus,
+    ) -> crate::projection_adapter::TuiSessionProjection {
+        let turn_id = atman_runtime::event::TurnId::now();
+        let graph = atman_runtime::workflow::WorkflowGraph {
+            turn_id,
+            root: vec![atman_runtime::workflow::WorkflowNode {
+                id: "run".into(),
+                kind: atman_runtime::workflow::WorkflowNodeKind::Flow {
+                    run_id: "run".into(),
+                    flow_name: "agent".into(),
+                },
+                label: "agent".into(),
+                status,
+                started_at: Some(chrono::Utc::now()),
+                ended_at: None,
+                output_preview: None,
+                children: Vec::new(),
+                parallelism: atman_runtime::workflow::Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }],
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        crate::projection_adapter::TuiSessionProjection {
+            revision,
+            session_name: Some("remote".into()),
+            project_root: Some("/workspace".into()),
+            goal: Some(goal.into()),
+            context: Default::default(),
+            todos: Vec::new(),
+            plans: Vec::new(),
+            trust: Default::default(),
+            pending_permissions: Default::default(),
+            pending_permission_groups: Default::default(),
+            pending_forms: Vec::new(),
+            pending_compact_reviews: Vec::new(),
+            pending_injections: Vec::new(),
+            workflows: vec![graph.into()],
+        }
+    }
+
+    #[test]
+    fn daemon_revision_reconciles_domain_state_without_overwriting_local_ui_state() {
+        let mut app = UiState::new(AppState::new("session".into(), None));
+        app.app.input = "unsent draft".into();
+        app.app.trust.theme = atman_runtime::trust::Theme::Wuxia;
+
+        apply_daemon_projection(
+            &mut app,
+            projected_session(2, "current", atman_runtime::workflow::NodeStatus::Running),
+        );
+        assert_eq!(app.app.goal.as_deref(), Some("current"));
+        assert_eq!(app.app.input, "unsent draft");
+        assert_eq!(app.app.trust.theme, atman_runtime::trust::Theme::Wuxia);
+        assert_eq!(app.app.daemon_revision, Some(2));
+        assert!(matches!(
+            &*app.app.items,
+            [app::OutputItem::WorkflowPanel { ended_at: None, .. }]
+        ));
+
+        apply_daemon_projection(
+            &mut app,
+            projected_session(1, "stale", atman_runtime::workflow::NodeStatus::Ok),
+        );
+        assert_eq!(app.app.goal.as_deref(), Some("current"));
+
+        let mut terminal = projected_session(3, "done", atman_runtime::workflow::NodeStatus::Ok);
+        terminal.workflows[0] = {
+            let mut graph = terminal.workflows[0].clone().into_graph();
+            graph.turn_id = match &app.app.items[0] {
+                app::OutputItem::WorkflowPanel { graph, .. } => graph.graph().turn_id.clone(),
+                _ => unreachable!(),
+            };
+            graph.into()
+        };
+        apply_daemon_projection(&mut app, terminal);
+        assert_eq!(app.app.goal.as_deref(), Some("done"));
+        assert!(matches!(
+            &*app.app.items,
+            [app::OutputItem::WorkflowPanel {
+                ended_at: Some(_),
+                ..
+            }]
+        ));
+    }
 
     #[test]
     fn pending_model_switch_defers_context_model_and_reasoning_changes() {

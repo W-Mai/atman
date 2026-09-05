@@ -1971,6 +1971,124 @@ impl AppState {
         self.reset_lag_state();
     }
 
+    pub(crate) fn reconcile_daemon_workflows(
+        &mut self,
+        workflows: &[atman_runtime::projection::workflow::WorkflowProjection],
+    ) {
+        let projected_turns = workflows
+            .iter()
+            .map(|workflow| workflow.graph().turn_id.0)
+            .collect::<std::collections::HashSet<_>>();
+        let removals = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item {
+                OutputItem::WorkflowPanel { graph, .. }
+                    if !projected_turns.contains(&graph.graph().turn_id.0) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for index in removals.into_iter().rev() {
+            self.remove_item(index);
+        }
+
+        for (turn_index, projected) in workflows.iter().enumerate() {
+            let terminal = !projected.graph().root.is_empty()
+                && projected.graph().root.iter().all(|node| {
+                    !matches!(
+                        node.status,
+                        atman_runtime::workflow::NodeStatus::Pending
+                            | atman_runtime::workflow::NodeStatus::Running
+                    )
+                });
+            let cancelled =
+                projected.graph().root.iter().any(|node| {
+                    matches!(node.status, atman_runtime::workflow::NodeStatus::Cancelled)
+                });
+            let existing = self.items.iter().position(|item| {
+                matches!(
+                    item,
+                    OutputItem::WorkflowPanel { graph, .. }
+                        if graph.graph().turn_id == projected.graph().turn_id
+                )
+            });
+            if let Some(index) = existing {
+                self.mutate_item(index, OutputMutation::Semantic, |item| {
+                    let OutputItem::WorkflowPanel {
+                        turn_index: current_turn_index,
+                        graph,
+                        ended_at,
+                        cancelled: current_cancelled,
+                        ..
+                    } = item
+                    else {
+                        return false;
+                    };
+                    let next_ended_at = if terminal {
+                        ended_at.or_else(|| Some(std::time::Instant::now()))
+                    } else {
+                        None
+                    };
+                    let changed = *current_turn_index != turn_index
+                        || graph != projected
+                        || *ended_at != next_ended_at
+                        || *current_cancelled != cancelled;
+                    if changed {
+                        *current_turn_index = turn_index;
+                        *graph = projected.clone();
+                        *ended_at = next_ended_at;
+                        *current_cancelled = cancelled;
+                    }
+                    changed
+                });
+            } else {
+                self.push_item(OutputItem::WorkflowPanel {
+                    turn_index,
+                    graph: projected.clone(),
+                    expanded_nodes: HashSet::new(),
+                    panel_expanded: true,
+                    started_at: std::time::Instant::now(),
+                    ended_at: terminal.then(std::time::Instant::now),
+                    cancelled,
+                });
+            }
+        }
+
+        let mut routes = std::collections::HashMap::new();
+        let mut top_level = std::collections::HashSet::new();
+        for (index, item) in self.items.iter().enumerate() {
+            let OutputItem::WorkflowPanel { graph, .. } = item else {
+                continue;
+            };
+            let mut nodes = graph.graph().root.iter().collect::<Vec<_>>();
+            while let Some(node) = nodes.pop() {
+                match &node.kind {
+                    atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } => {
+                        routes.insert(run_id.clone(), index);
+                        if graph.graph().root.iter().any(|root| root.id == node.id) {
+                            top_level.insert(run_id.clone());
+                        }
+                    }
+                    atman_runtime::workflow::WorkflowNodeKind::Subflow { run_id, .. } => {
+                        routes.insert(run_id.clone(), index);
+                    }
+                    _ => {}
+                }
+                nodes.extend(&node.children);
+            }
+        }
+        self.workflow_run_to_panel = routes;
+        self.top_level_run_ids = top_level;
+        self.last_workflow_panel_idx = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, OutputItem::WorkflowPanel { ended_at: None, .. }));
+    }
+
     pub fn remove_item(&mut self, index: usize) -> Option<OutputItem> {
         let structure_revision = self.items.structure_revision();
         let removed = self.items.remove(index)?;
