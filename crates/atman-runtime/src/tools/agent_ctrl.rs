@@ -690,12 +690,45 @@ impl FlowRegistry {
         })
     }
 
-    pub(crate) fn entry_for_run(&self, run_id: &FlowRunId) -> Option<Arc<FlowEntry>> {
+    pub fn entry_for_run(&self, run_id: &FlowRunId) -> Option<Arc<FlowEntry>> {
         self.entries_by_run
             .lock()
             .unwrap()
             .get(run_id)
             .and_then(std::sync::Weak::upgrade)
+    }
+
+    pub fn root_entry_for_turn(&self, turn_id: &crate::event::TurnId) -> Option<Arc<FlowEntry>> {
+        let entries = self.entries_by_run.lock().unwrap();
+        let mut matching = entries
+            .values()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter(|entry| {
+                entry.turn_id == *turn_id
+                    && entry.identity.invocation == crate::flow_authority::InvocationKind::Root
+                    && !matches!(
+                        entry.identity.execution_state(),
+                        crate::flow_authority::FlowExecutionState::Terminal
+                    )
+            });
+        let entry = matching.next()?;
+        matching.next().is_none().then_some(entry)
+    }
+
+    pub fn resolve_handle(
+        &self,
+        handle: &str,
+        root_run_id: Option<&FlowRunId>,
+    ) -> Result<Arc<FlowEntry>, RuntimeError> {
+        if handle != "root" {
+            return self.lookup(handle);
+        }
+        let run_id = root_run_id.ok_or_else(|| {
+            RuntimeError::ToolFailed("agent: root alias requires an execution identity".into())
+        })?;
+        self.entry_for_run(run_id).ok_or_else(|| {
+            RuntimeError::ToolFailed(format!("agent: root run '{run_id}' is not active"))
+        })
     }
 
     pub fn interject(
@@ -718,7 +751,12 @@ impl FlowRegistry {
     }
 
     pub fn remove(&self, handle: &str) {
-        self.entries.lock().unwrap().remove(handle);
+        if let Some(entry) = self.entries.lock().unwrap().remove(handle) {
+            self.entries_by_run
+                .lock()
+                .unwrap()
+                .remove(&entry.child_run_id);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1314,6 +1352,20 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 }
 
 pub struct AgentStatus;
+
+fn resolve_flow_entry(
+    registry: &FlowRegistry,
+    ctx: &ToolCtx,
+    handle: &str,
+) -> Result<Arc<FlowEntry>, RuntimeError> {
+    registry.resolve_handle(
+        handle,
+        ctx.flow_identity
+            .as_ref()
+            .map(|identity| &identity.root_run_id),
+    )
+}
+
 impl Tool for AgentStatus {
     fn name(&self) -> &str {
         "flow.status"
@@ -1338,7 +1390,7 @@ impl Tool for AgentStatus {
                 .flow_registry
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.status: no agent registry".into()))?;
-            let entry = reg.lookup(&handle)?;
+            let entry = resolve_flow_entry(&reg, ctx, &handle)?;
             let st = entry.status.lock().unwrap().clone();
             let goal = entry.goal.clone();
             let mut fields = vec![
@@ -1421,7 +1473,7 @@ impl Tool for AgentOutput {
                 .flow_registry
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.output: no agent registry".into()))?;
-            let entry = reg.lookup(&handle)?;
+            let entry = resolve_flow_entry(&reg, ctx, &handle)?;
             let output = entry.output.lock().unwrap().clone();
             let chunk = output.chars().skip(cursor).take(limit).collect::<String>();
             let next_cursor = cursor + chunk.chars().count();
@@ -1462,7 +1514,7 @@ impl Tool for AgentKill {
                 .flow_registry
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.kill: no agent registry".into()))?;
-            let entry = reg.lookup(&handle)?;
+            let entry = resolve_flow_entry(&reg, ctx, &handle)?;
             entry.cancel.cancel();
             Ok(Value::Unit)
         })
@@ -1532,7 +1584,7 @@ impl Tool for FlowInterject {
             let reg = ctx.flow_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("flow.interject: no agent registry".into())
             })?;
-            reg.interject(&handle, text, level, redirect_target)?;
+            resolve_flow_entry(&reg, ctx, &handle)?.interject(text, level, redirect_target)?;
             Ok(Value::Unit)
         })
     }

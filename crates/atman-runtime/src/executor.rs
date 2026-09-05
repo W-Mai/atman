@@ -291,6 +291,28 @@ impl Executor {
             )
         });
         let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
+        let root_entry = if let Some(session) = session.as_ref() {
+            let context = context
+                .clone()
+                .expect("session-backed invocation has a context");
+            Some(session.flow_registry.create_entry(
+                run_id.to_string(),
+                session.goal().unwrap_or_else(|| flow.name.name.clone()),
+                String::new(),
+                run_id.clone(),
+                crate::tools::agent_ctrl::FlowEntryOptions {
+                    cancel: flow_cancel.clone(),
+                    turn_id: turn_id.clone(),
+                    context: Some(crate::tools::agent_ctrl::FlowEntryContext {
+                        state: context,
+                        injections: session.injection_queue(),
+                    }),
+                    ..Default::default()
+                },
+            )?)
+        } else {
+            None
+        };
         self.events.emit(Event::FlowStart {
             run_id: run_id.clone(),
             turn_id: turn_id.clone(),
@@ -335,32 +357,13 @@ impl Executor {
         tool_ctx.flow_identity = Some(identity);
         tool_ctx.flow_run_id = Some(run_id.clone());
         tool_ctx.session_id = Some(session_id);
-        let mut root_entry = None;
         if let Some(sess) = session.as_ref() {
             let context = context
                 .clone()
                 .expect("session-backed invocation has a context");
             tool_ctx.stream_tx = Some(sess.stream_tx());
-            tool_ctx = tool_ctx.with_session_context(sess.clone(), context.clone());
-            // Root controls and context share the session's canonical storage.
-            let entry = sess.flow_registry.create_entry(
-                "root".to_string(),
-                sess.goal().unwrap_or_else(|| flow.name.name.clone()),
-                String::new(),
-                run_id.clone(),
-                crate::tools::agent_ctrl::FlowEntryOptions {
-                    cancel: flow_cancel.clone(),
-                    turn_id: turn_id.clone(),
-                    context: Some(crate::tools::agent_ctrl::FlowEntryContext {
-                        state: context,
-                        injections: sess.injection_queue(),
-                    }),
-                    ..Default::default()
-                },
-            )?;
-            tool_ctx.agent_entry = Some(std::sync::Arc::clone(&entry));
-            root_entry = Some(entry);
-            sess.set_current_root("root".to_string());
+            tool_ctx = tool_ctx.with_session_context(sess.clone(), context);
+            tool_ctx.agent_entry = root_entry.clone();
         }
         let exec_fut = exec_flow_with_siblings(
             flow,
@@ -397,7 +400,7 @@ impl Executor {
         } else {
             result
         };
-        if let Some(entry) = root_entry {
+        if let Some(entry) = root_entry.as_ref() {
             entry.finish(&result);
         }
         let status = FlowStatus::for_result(&result);
@@ -418,6 +421,9 @@ impl Executor {
             tr.finish(tid, ts);
         }
         drop(_lifecycle_guard);
+        if let Some(entry) = root_entry {
+            flow_registry.remove(&entry.handle);
+        }
         self.events.emit(Event::FlowEnd {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),

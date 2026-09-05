@@ -218,6 +218,7 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
 
         let calls = Arc::new(Mutex::new(0usize));
         let cancel_session = session.clone();
+        let cancel_turn = turn_id.clone();
         let executor = Executor::new();
         executor
             .providers
@@ -228,8 +229,8 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
                     if through_entry {
                         cancel_session
                             .flow_registry
-                            .lookup("root")
-                            .unwrap()
+                            .root_entry_for_turn(&cancel_turn)
+                            .expect("root flow must be active")
                             .cancel
                             .cancel();
                     } else {
@@ -257,15 +258,12 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
             1,
             "second llm call must be skipped by cancel-poll at eval_node entry"
         );
-        assert!(matches!(
-            *session
-                .flow_registry
-                .lookup("root")
-                .unwrap()
-                .status
-                .lock()
-                .unwrap(),
-            atman_runtime::tools::agent_ctrl::FlowRunStatus::Killed { .. }
-        ));
+        assert!(executor.events.snapshot().iter().any(|event| matches!(
+            event,
+            atman_runtime::event::Event::FlowEnd {
+                status: atman_runtime::event::FlowStatus::Cancelled,
+                ..
+            }
+        )));
     }
 }

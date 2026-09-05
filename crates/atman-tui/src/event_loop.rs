@@ -1263,8 +1263,8 @@ pub(crate) async fn run_frames(
                 if let Some(frame) = frame {
                     // Spawn per-FlowRun frame_tx forwarders when new FlowRuns appear.
                     let new_handle: Option<String> = match &frame {
-                        StreamFrame::FlowStart { parent_run_id: None, .. } => {
-                            session_for_sub.as_ref().and_then(|s| s.current_root())
+                        StreamFrame::FlowStart { run_id, parent_run_id: None, .. } => {
+                            Some(run_id.clone())
                         }
                         StreamFrame::SubAgentStarted { handle, .. } => Some(handle.clone()),
                         _ => None,

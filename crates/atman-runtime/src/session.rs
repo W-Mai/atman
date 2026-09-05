@@ -128,7 +128,6 @@ pub struct Session {
     trust: watch::Sender<crate::trust::TrustConfig>,
     trust_update_lock: std::sync::Mutex<()>,
     /// Handle of the current root FlowRun; set per turn.
-    current_root: std::sync::Mutex<Option<String>>,
     successful_flow_count: std::sync::atomic::AtomicU64,
     pub interactions: InteractionServices,
     injection_queue: std::sync::Arc<crate::injection::InjectionQueue>,
@@ -1008,7 +1007,6 @@ impl Session {
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
             trust_update_lock: std::sync::Mutex::new(()),
-            current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             interactions,
             injection_queue,
@@ -1281,7 +1279,6 @@ impl Session {
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
             trust_update_lock: std::sync::Mutex::new(()),
-            current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             interactions,
             injection_queue,
@@ -1337,7 +1334,6 @@ impl Session {
             permission_broker,
             trust: watch::channel(crate::trust::TrustConfig::default()).0,
             trust_update_lock: std::sync::Mutex::new(()),
-            current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             interactions,
             injection_queue,
@@ -1441,18 +1437,6 @@ impl Session {
 
     pub fn stream_tx(&self) -> broadcast::Sender<StreamFrame> {
         self.watch.stream_tx.clone()
-    }
-
-    pub fn set_current_root(&self, handle: String) {
-        *self.current_root.lock().unwrap() = Some(handle);
-    }
-
-    pub fn current_root(&self) -> Option<String> {
-        self.current_root.lock().unwrap().clone()
-    }
-
-    pub fn clear_current_root(&self) {
-        *self.current_root.lock().unwrap() = None;
     }
 
     pub fn record_successful_flow(&self) -> Option<u64> {
@@ -2473,22 +2457,34 @@ impl Session {
         };
         self.flow_registry.with_lifecycle_arbitration(|| {
             let entry = match flow_run_id.as_ref() {
-                Some(run_id) => {
-                    if matches!(
-                        self.flow_registry.execution_state(run_id),
-                        Some(crate::flow_authority::FlowExecutionState::Terminal)
-                    ) {
+                Some(run_id) => match self.flow_registry.lookup_run(run_id) {
+                    Some(identity)
+                        if identity.invocation == crate::flow_authority::InvocationKind::Root =>
+                    {
+                        match self.flow_registry.root_entry_for_turn(&turn_id) {
+                            Some(entry) => Some(entry),
+                            None if matches!(
+                                identity.execution_state(),
+                                crate::flow_authority::FlowExecutionState::Terminal
+                            ) =>
+                            {
+                                return Err(EnqueueError::InactiveRun(run_id.clone()));
+                            }
+                            None => None,
+                        }
+                    }
+                    Some(identity)
+                        if matches!(
+                            identity.execution_state(),
+                            crate::flow_authority::FlowExecutionState::Terminal
+                        ) =>
+                    {
                         return Err(EnqueueError::InactiveRun(run_id.clone()));
                     }
-                    self.flow_registry.entry_for_run(run_id)
-                }
-                None => self.flow_registry.lookup("root").ok().filter(|entry| {
-                    entry.turn_id == turn_id
-                        && !matches!(
-                            self.flow_registry.execution_state(&entry.child_run_id),
-                            Some(crate::flow_authority::FlowExecutionState::Terminal)
-                        )
-                }),
+                    Some(_) => self.flow_registry.entry_for_run(run_id),
+                    None => self.flow_registry.entry_for_run(run_id),
+                },
+                None => self.flow_registry.root_entry_for_turn(&turn_id),
             };
             let envelope = if let Some(entry) = entry {
                 if entry.turn_id != turn_id {

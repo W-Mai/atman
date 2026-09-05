@@ -370,7 +370,18 @@ impl Tool for Watch {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let handle = extract_string(&args, "handle", 0)?;
+            let handle = match extract_string(&args, "handle", 0)? {
+                handle if handle == "root" => ctx
+                    .flow_identity
+                    .as_ref()
+                    .map(|identity| identity.root_run_id.to_string())
+                    .ok_or_else(|| {
+                        RuntimeError::ToolFailed(
+                            "watch: root alias requires an execution identity".into(),
+                        )
+                    })?,
+                handle => handle,
+            };
             let pattern = extract_string(&args, "pattern", 1)?;
             let mode = match extract_optional_string(&args, "mode").as_deref() {
                 Some("persist") => WatchMode::Persist,

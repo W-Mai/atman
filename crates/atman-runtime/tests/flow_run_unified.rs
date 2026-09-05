@@ -1,21 +1,20 @@
 //! Root FlowRun unification tests.
 //!
-//! Verifies that when a flow runs with a session, the root is registered in
-//! the flow_registry (so flow.output("root") / flow.interject("root") work)
-//! and the session's current_root pointer is set.
+//! Verifies that root controls are scoped by execution identity and completed
+//! entries release their context while durable run identities remain.
 
 mod common;
 
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
-use atman_runtime::event::FlowRunId;
+use atman_runtime::event::{FlowRunId, TurnId};
 use atman_runtime::flow_authority::{
     ChildWorkspaceAuthority, EffectiveAuthority, FlowExecutionState, InvocationKind,
 };
 use atman_runtime::session::Session;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
-use atman_runtime::tools::agent_ctrl::{FlowInterject, FlowRegistry};
+use atman_runtime::tools::agent_ctrl::{FlowEntryOptions, FlowInterject, FlowRegistry};
 use atman_runtime::{Executor, Value, tools};
 
 static CONFIG_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -49,7 +48,7 @@ const SIMPLE_FLOW: &str = r#"flow t(n: Int) -> Int {
 "#;
 
 #[tokio::test]
-async fn root_flow_run_registered_in_flow_registry() {
+async fn completed_root_releases_entry_but_keeps_run_identity() {
     let file = parse_file(SIMPLE_FLOW).unwrap();
     let session = Arc::new(Session::open_ephemeral());
     let ex = Executor::with_events(session.sink().clone());
@@ -67,18 +66,24 @@ async fn root_flow_run_registered_in_flow_registry() {
         .unwrap();
     assert!(matches!(out, Value::Int(5)));
 
-    // Root should be in flow_registry.
-    let root = session.flow_registry.lookup("root");
-    assert!(root.is_ok(), "root should be in flow_registry");
-    let root = root.unwrap();
-    assert_eq!(root.handle, "root");
-    assert!(matches!(
-        *root.status.lock().unwrap(),
-        atman_runtime::tools::agent_ctrl::FlowRunStatus::Ok { .. }
-    ));
-
-    // current_root pointer should point at "root".
-    assert_eq!(session.current_root(), Some("root".to_string()));
+    let run_id = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .find_map(|event| match event {
+            atman_runtime::event::Event::FlowStart {
+                run_id,
+                parent_run_id: None,
+                ..
+            } => Some(run_id),
+            _ => None,
+        })
+        .expect("root flow start event");
+    assert_eq!(
+        session.flow_registry.execution_state(&run_id),
+        Some(FlowExecutionState::Terminal)
+    );
+    assert!(session.flow_registry.entry_for_run(&run_id).is_none());
 }
 
 #[test]
@@ -301,13 +306,12 @@ fn duplicate_descendant_guards_are_reference_counted() {
 }
 
 #[tokio::test]
-async fn current_root_cleared_and_reset_across_turns() {
+async fn completed_root_runs_keep_distinct_identities() {
     let file = parse_file(SIMPLE_FLOW).unwrap();
     let session = Arc::new(Session::open_ephemeral());
     let ex = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&ex.tools);
 
-    // Turn 1
     ex.run_in_turn(
         &file,
         "t",
@@ -317,9 +321,7 @@ async fn current_root_cleared_and_reset_across_turns() {
     )
     .await
     .unwrap();
-    assert_eq!(session.current_root(), Some("root".to_string()));
 
-    // Turn 2 — root entry is overwritten (same handle "root")
     ex.run_in_turn(
         &file,
         "t",
@@ -329,9 +331,28 @@ async fn current_root_cleared_and_reset_across_turns() {
     )
     .await
     .unwrap();
-    assert_eq!(session.current_root(), Some("root".to_string()));
-    // Still only one "root" entry.
-    assert!(session.flow_registry.lookup("root").is_ok());
+    let run_ids = session
+        .sink()
+        .snapshot()
+        .into_iter()
+        .filter_map(|event| match event {
+            atman_runtime::event::Event::FlowStart {
+                run_id,
+                parent_run_id: None,
+                ..
+            } => Some(run_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(run_ids.len(), 2);
+    assert_ne!(run_ids[0], run_ids[1]);
+    for run_id in run_ids {
+        assert_eq!(
+            session.flow_registry.execution_state(&run_id),
+            Some(FlowExecutionState::Terminal)
+        );
+        assert!(session.flow_registry.entry_for_run(&run_id).is_none());
+    }
 }
 
 #[tokio::test]
@@ -346,8 +367,7 @@ async fn no_session_no_root_registration() {
         .await
         .unwrap();
     assert!(matches!(out, Value::Int(5)));
-    // No session → no current_root pointer to check, but flow_registry on
-    // the executor's tool_ctx is None, so no root entry created.
+    // The executor has no session registry in which to create a root entry.
 }
 
 #[tokio::test]
@@ -379,6 +399,153 @@ async fn flow_interject_delivers_to_target_entry_channel() {
     let pending = entry.pending_injections();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].text, "wake up");
+}
+
+#[tokio::test]
+async fn root_alias_resolves_within_the_callers_execution_tree() {
+    let registry = Arc::new(FlowRegistry::new());
+    let first_run = FlowRunId::now();
+    let second_run = FlowRunId::now();
+    let first_turn = TurnId::now();
+    let second_turn = TurnId::now();
+    let first_identity = registry
+        .register_root(
+            "session".into(),
+            first_run.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let second_identity = registry
+        .register_root(
+            "session".into(),
+            second_run.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let first_entry = registry
+        .create_entry(
+            first_run.to_string(),
+            "first".into(),
+            "model".into(),
+            first_run,
+            FlowEntryOptions {
+                turn_id: Some(first_turn.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let second_entry = registry
+        .create_entry(
+            second_run.to_string(),
+            "second".into(),
+            "model".into(),
+            second_run,
+            FlowEntryOptions {
+                turn_id: Some(second_turn.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    for (identity, expected, text) in [
+        (first_identity, &first_entry, "first correction"),
+        (second_identity, &second_entry, "second correction"),
+    ] {
+        let mut ctx = ToolCtx::new().with_flow_registry(registry.clone());
+        ctx.flow_identity = Some(identity);
+        FlowInterject
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Str("root".into()), Value::Str(text.into())],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(expected.pending_injections().last().unwrap().text, text);
+    }
+    assert_eq!(first_entry.pending_injections().len(), 1);
+    assert_eq!(second_entry.pending_injections().len(), 1);
+    assert!(Arc::ptr_eq(
+        &registry.root_entry_for_turn(&first_turn).unwrap(),
+        &first_entry
+    ));
+    assert!(Arc::ptr_eq(
+        &registry.root_entry_for_turn(&second_turn).unwrap(),
+        &second_entry
+    ));
+}
+
+#[test]
+fn logical_root_target_follows_the_active_redirect_segment() {
+    let session = Session::open_ephemeral();
+    let turn = session.begin_turn(atman_runtime::message::Message::user_text(
+        TurnId::now(),
+        "task",
+    ));
+    let first_run = FlowRunId::now();
+    session
+        .flow_registry
+        .register_root(
+            session.id().to_string(),
+            first_run.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let first_entry = session
+        .flow_registry
+        .create_entry(
+            first_run.to_string(),
+            "first".into(),
+            "model".into(),
+            first_run.clone(),
+            FlowEntryOptions {
+                turn_id: Some(turn.clone()),
+                events: Some(session.sink().clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    session.flow_registry.mark_terminal(&first_run);
+    session.flow_registry.remove(&first_entry.handle);
+
+    let redirected_run = FlowRunId::now();
+    session
+        .flow_registry
+        .register_root(
+            session.id().to_string(),
+            redirected_run.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let redirected_entry = session
+        .flow_registry
+        .create_entry(
+            redirected_run.to_string(),
+            "redirected".into(),
+            "model".into(),
+            redirected_run,
+            FlowEntryOptions {
+                turn_id: Some(turn.clone()),
+                events: Some(session.sink().clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    session
+        .enqueue_injection_for_run(
+            "redirect correction",
+            atman_runtime::injection::InjectionLevel::L2CourseCorrect,
+            None,
+            Some((&turn, first_run)),
+        )
+        .unwrap();
+    assert_eq!(
+        redirected_entry.pending_injections()[0].text,
+        "redirect correction"
+    );
 }
 
 #[tokio::test]

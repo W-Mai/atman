@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### ⚠️ Breaking Changes
 
+- **Scoped root flow controls** — active root entries use their run identities instead of a shared handle. The `root` alias resolves within the caller's execution tree, completed entries release their context state, and the session-wide `current_root` pointer API is removed.
+
 - **Compaction progress protocol** — compaction stream frames carry an operation identity and optional context and run anchors. Daemon clients receive active compactions through `SessionProjection` and `compactions_replace` deltas instead of ephemeral compaction signals; terminal transcript entries include their outcome.
 
 - **Compaction execution options** — context compaction accepts `CompactionOptions` for its budget, forced mode, review service, and progress channel. Compaction diagnostics no longer require a Session warning method.

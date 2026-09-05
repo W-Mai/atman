@@ -85,14 +85,14 @@ impl Provider for CorrectingProvider {
                         )
                         .unwrap();
                 } else {
+                    let turn_id = session
+                        .current_turn()
+                        .expect("correction test has one active turn");
                     session
                         .flow_registry
-                        .interject(
-                            "root",
-                            "same correction",
-                            InjectionLevel::L2CourseCorrect,
-                            None,
-                        )
+                        .root_entry_for_turn(&turn_id)
+                        .expect("root flow must be active")
+                        .interject("same correction", InjectionLevel::L2CourseCorrect, None)
                         .unwrap();
                 }
                 request_cancel.cancelled().await;
@@ -206,14 +206,19 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
                     assert_eq!(&request.messages[..previous.len()], previous);
                 }
             }
-            let entry = session.flow_registry.lookup("root").unwrap();
-            assert!(Arc::ptr_eq(&entry.context, &session.context()));
-            assert!(Arc::ptr_eq(
-                entry.context.compact_lock(),
-                &session.compact_lock_handle()
-            ));
-            assert!(entry.pending_injections().is_empty());
             let events = session.sink().snapshot();
+            let root_run_id = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::FlowStart {
+                        run_id,
+                        parent_run_id: None,
+                        ..
+                    } => Some(run_id.clone()),
+                    _ => None,
+                })
+                .expect("root flow start event");
+            assert!(session.flow_registry.entry_for_run(&root_run_id).is_none());
             let consumed: Vec<_> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -227,7 +232,7 @@ async fn corrections_rebuild_canonical_context_without_a_restart_limit_or_duplic
                 .collect();
             assert_eq!(consumed.len(), 4);
             for (injection, message) in consumed {
-                assert_eq!(injection.flow_run_id.as_ref(), Some(&entry.child_run_id));
+                assert_eq!(injection.flow_run_id.as_ref(), Some(&root_run_id));
                 assert_eq!(message.turn_id, turn);
             }
             let expected = session.messages().to_vec();
