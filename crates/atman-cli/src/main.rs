@@ -875,51 +875,15 @@ async fn cmd_run(
 }
 
 async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
-    let root = data_dir()?;
-    let sessions = root.join("sessions");
-    if !sessions.exists() {
-        return Ok(());
-    }
     let filter = resolve_session_list_filter(all, project.as_deref())?;
-    let query = match &filter {
-        SessionListFilter::All => {
-            atman_runtime::session_meta::SessionDiscoveryQuery::all_projects()
-        }
+    let project_root = match &filter {
+        SessionListFilter::All => None,
         SessionListFilter::Project { canonical_root, .. } => {
-            atman_runtime::session_meta::SessionDiscoveryQuery::current_project(canonical_root)
-                .with_legacy(false)
+            Some(canonical_root.to_string_lossy().into_owned())
         }
     };
-    let mut rows: Vec<(std::time::SystemTime, String, u64, usize, String)> = Vec::new();
-    for entry in std::fs::read_dir(&sessions)? {
-        let entry = entry?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let sid = entry.file_name().to_string_lossy().to_string();
-        let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        if !query.matches_meta(meta.as_ref()) {
-            continue;
-        }
-        let where_label = meta
-            .as_ref()
-            .and_then(|m| m.start_path.as_deref().or(m.project_root.as_deref()))
-            .map(short_project_path)
-            .unwrap_or_else(|| "-".into());
-        let events_path = entry.path().join("events.jsonl");
-        let bytes = std::fs::metadata(&events_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let events = atman_runtime::session_meta::SessionStats::load_or_rebuild(&entry.path())
-            .map(|stats| stats.event_count as usize)
-            .unwrap_or(0);
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        rows.push((modified, sid, bytes, events, where_label));
-    }
-    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+    let client = daemon_tui::connect_local_daemon().await?;
+    let rows = client.list_sessions(project_root, None, None).await?;
     match &filter {
         SessionListFilter::All => {}
         SessionListFilter::Project { .. } if rows.is_empty() => {
@@ -930,11 +894,27 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
     }
     let header_sid = "session_id";
     let header_events = "events";
-    let header_bytes = "bytes";
+    let header_messages = "messages";
+    let header_status = "status";
     let header_where = "where";
-    println!("{header_sid:<38} {header_events:>8} {header_bytes:>10} {header_where}");
-    for (_, sid, bytes, events, where_label) in rows {
-        println!("{sid:<38} {events:>8} {bytes:>10} {where_label}");
+    println!(
+        "{header_sid:<38} {header_events:>8} {header_messages:>9} {header_status:<9} {header_where}"
+    );
+    for summary in rows {
+        let where_label = summary
+            .project_root
+            .as_deref()
+            .map(Path::new)
+            .map(short_project_path)
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{:<38} {:>8} {:>9} {:<9} {}",
+            summary.id,
+            summary.event_count,
+            summary.message_count,
+            format!("{:?}", summary.status).to_lowercase(),
+            where_label
+        );
     }
     Ok(())
 }
@@ -979,34 +959,53 @@ fn short_project_path(path: &Path) -> String {
 }
 
 async fn cmd_session_show(sid: String) -> Result<()> {
-    let root = data_dir()?;
-    let dir = root.join("sessions").join(&sid);
-    if !dir.is_dir() {
-        bail!("session not found: {}", dir.display());
-    }
-    let events_path = dir.join("events.jsonl");
-    let mut flow_start = 0usize;
-    let mut flow_end = 0usize;
-    let mut llm_call = 0usize;
-    if events_path.exists() {
-        let contents = tokio::fs::read_to_string(&events_path).await?;
-        for line in contents.lines() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                match v["type"].as_str() {
-                    Some("flow_start") => flow_start += 1,
-                    Some("flow_end") => flow_end += 1,
-                    Some("llm_call") => llm_call += 1,
-                    _ => {}
-                }
+    let client = daemon_tui::connect_local_daemon().await?;
+    let session_id = daemon_tui::resolve_session_prefix(&client, &sid).await?;
+    let session = client.attach_session(session_id.clone()).await?;
+    let state = session.current();
+    let projection = state.projection();
+    let summary = client
+        .list_sessions(None, Some(session_id.to_string()), None)
+        .await?
+        .into_iter()
+        .find(|summary| summary.id == session_id);
+    let mut flow_start = 0;
+    let mut flow_end = 0;
+    let mut llm_call = 0;
+    let mut cursor = None;
+    loop {
+        let page = client.get_events(session_id.clone(), cursor).await?;
+        for envelope in &page.events {
+            match envelope
+                .event
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("flow_start") => flow_start += 1,
+                Some("flow_end") => flow_end += 1,
+                Some("llm_call") => llm_call += 1,
+                _ => {}
             }
         }
+        if !page.has_more {
+            break;
+        }
+        cursor = Some(page.next_cursor.0);
     }
-    let size = std::fs::metadata(&events_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    println!("session_id: {sid}");
-    println!("dir:        {}", dir.display());
-    println!("events:     {} bytes", size);
+    println!("session_id: {session_id}");
+    println!("title:      {}", projection.metadata.title);
+    println!(
+        "project:    {}",
+        projection.metadata.project_root.as_deref().unwrap_or("-")
+    );
+    println!("revision:   {}", projection.revision.0);
+    println!("cursor:     {}", state.cursor().0);
+    println!("messages:   {}", projection.transcript.len());
+    println!("runs:       {}", projection.runs.len());
+    println!("resources:  {}", projection.resources.len());
+    if let Some(summary) = summary {
+        println!("events:     {}", summary.event_count);
+    }
     println!("flow_start: {flow_start}");
     println!("flow_end:   {flow_end}");
     println!("llm_call:   {llm_call}");
@@ -1014,15 +1013,10 @@ async fn cmd_session_show(sid: String) -> Result<()> {
 }
 
 async fn cmd_session_new() -> Result<()> {
-    let root = data_dir()?;
-    let sessions = root.join("sessions");
-    std::fs::create_dir_all(&sessions)?;
-    let id = uuid::Uuid::new_v4();
-    let dir = sessions.join(id.to_string());
-    std::fs::create_dir_all(&dir)?;
-    let meta = atman_runtime::session_meta::SessionMeta::from_cwd();
-    meta.save(&dir)?;
-    println!("{}", id);
+    let client = daemon_tui::connect_local_daemon().await?;
+    let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
+    let session = client.create_session(Some(project_root), None).await?;
+    println!("{}", session.session_id());
     Ok(())
 }
 
@@ -1033,19 +1027,17 @@ async fn cmd_session_move(sid: &str, new_cwd: &Path) -> Result<()> {
     let abs_cwd = new_cwd
         .canonicalize()
         .with_context(|| format!("resolve path {}", new_cwd.display()))?;
-    let root = data_dir()?;
-    let resolved = resolve_session_prefix(&root, sid)?;
-    let dir = root.join("sessions").join(&resolved);
-    if !dir.is_dir() {
-        bail!("session not found: {}", dir.display());
-    }
-    let mut meta = atman_runtime::session_meta::SessionMeta::load(&dir).unwrap_or_default();
-    meta.rebase(&abs_cwd);
-    meta.save(&dir)?;
-    println!("session {} moved to {}", resolved, abs_cwd.display());
-    if let Some(ref pr) = meta.project_root {
-        println!("  project_root: {}", pr.display());
-    }
+    let client = daemon_tui::connect_local_daemon().await?;
+    let session_id = daemon_tui::resolve_session_prefix(&client, sid).await?;
+    let session = client.attach_session(session_id.clone()).await?;
+    let moved = session
+        .move_to(abs_cwd.to_string_lossy().into_owned())
+        .await?;
+    println!(
+        "session {} moved to {}",
+        session_id,
+        moved.session.project_root.as_deref().unwrap_or("-")
+    );
     Ok(())
 }
 

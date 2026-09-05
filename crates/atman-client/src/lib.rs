@@ -12,10 +12,10 @@ use std::sync::{
 
 use atman_proto::{
     CapabilitiesRequest, CapabilitiesResponse, ClientId, CloseSessionRequest, CloseSessionResponse,
-    CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor, JsonRpcRequest,
-    JsonRpcResponse, ListProjectsRequest, ListProjectsResponse, ListSessionsRequest,
-    PROTOCOL_VERSION, ProjectionEventEnvelope, RequestId, RpcKind, RpcMethod, RunFlowRequest,
-    RunFlowResponse, SessionId, SessionSummary, rpc,
+    CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor,
+    GetEventsRequest, GetEventsResponse, JsonRpcRequest, JsonRpcResponse, ListProjectsRequest,
+    ListProjectsResponse, ListSessionsRequest, PROTOCOL_VERSION, ProjectionEventEnvelope,
+    RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse, SessionId, SessionSummary, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -251,6 +251,18 @@ impl Client {
     ) -> Result<ListProjectsResponse, ClientError> {
         self.call::<rpc::ListProjects>(&ListProjectsRequest { search, limit })
             .await
+    }
+
+    pub async fn get_events(
+        &self,
+        session_id: SessionId,
+        since_seq: Option<u64>,
+    ) -> Result<GetEventsResponse, ClientError> {
+        self.call::<rpc::GetEvents>(&GetEventsRequest {
+            session_id,
+            since_seq,
+        })
+        .await
     }
 
     pub async fn close_session(

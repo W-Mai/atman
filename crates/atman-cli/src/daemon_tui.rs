@@ -465,7 +465,10 @@ fn session_row(
     }
 }
 
-async fn resolve_session_prefix(client: &Client, prefix: &str) -> Result<atman_proto::SessionId> {
+pub(crate) async fn resolve_session_prefix(
+    client: &Client,
+    prefix: &str,
+) -> Result<atman_proto::SessionId> {
     if let Ok(id) = uuid::Uuid::parse_str(prefix) {
         return Ok(atman_proto::SessionId(id));
     }
@@ -486,7 +489,7 @@ async fn resolve_session_prefix(client: &Client, prefix: &str) -> Result<atman_p
     }
 }
 
-async fn connect_local_daemon() -> Result<Client> {
+pub(crate) async fn connect_local_daemon() -> Result<Client> {
     let socket_path = atman_runtime::storage::data_dir()?
         .join("run")
         .join("atman.sock");

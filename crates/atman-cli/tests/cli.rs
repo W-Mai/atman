@@ -4,6 +4,46 @@ fn atman_binary() -> String {
     env!("CARGO_BIN_EXE_atman").to_string()
 }
 
+struct TestDaemon {
+    child: std::process::Child,
+    _config: tempfile::TempDir,
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_test_daemon(data_dir: &std::path::Path) -> TestDaemon {
+    let config = tempfile::tempdir().unwrap();
+    let child = Command::new(atman_binary())
+        .env("ATMAN_CONFIG_DIR", config.path())
+        .env("ATMAN_DATA_DIR", data_dir)
+        .env("ATMAN_DAEMON_PORT", "0")
+        .args(["daemon", "serve"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn test daemon");
+    let socket_path = data_dir.join("run/atman.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !socket_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test daemon did not create {}",
+            socket_path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    TestDaemon {
+        child,
+        _config: config,
+    }
+}
+
 #[test]
 fn version_subcommand_prints_semver() {
     let out = Command::new(atman_binary())
@@ -117,6 +157,8 @@ fn session_list_prints_rows_sorted_by_mtime() {
             .unwrap();
     }
 
+    let _daemon = spawn_test_daemon(data.path());
+
     let out = Command::new(atman_binary())
         .current_dir(flow_dir.path())
         .env("ATMAN_DATA_DIR", data.path())
@@ -151,6 +193,8 @@ fn session_show_prints_event_counts() {
         .file_name()
         .into_string()
         .unwrap();
+
+    let _daemon = spawn_test_daemon(data.path());
 
     let out = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())

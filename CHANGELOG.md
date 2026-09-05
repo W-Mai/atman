@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-backed session CLI** — session listing, inspection, creation, and project moves use the local daemon client instead of opening or editing session storage directly.
+
 - **Live daemon MCP runtimes** — daemon-owned runs load configured MCP tools and accept session-scoped hot reload commands. Reloads replace removed tool namespaces, update every active run, publish connection state to all attached clients, and report when configuration will take effect on the next run.
 - **Daemon-owned session maintenance** — daemon clients can generate session names and move idle sessions between project roots without opening a second local session writer.
 
