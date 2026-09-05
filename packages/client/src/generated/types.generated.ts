@@ -19,6 +19,10 @@ export type AtmanDaemonProtocolPayloads =
   | UpdateSessionTrustResponse
   | ReloadSessionMcpRequest
   | ReloadSessionMcpResponse
+  | AutoNameSessionRequest
+  | AutoNameSessionResponse
+  | MoveSessionRequest
+  | MoveSessionResponse
   | ListProjectsRequest
   | ListProjectsResponse
   | ListSessionsRequest
@@ -487,8 +491,9 @@ export type WorkflowFanoutMode = 'all' | 'first'
 export type WorkflowNodeState = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type SessionCloseStatus = 'closed' | 'already_closed' | 'busy'
 export type SessionDeleteStatus = 'deleted' | 'not_found' | 'busy' | 'unsafe_resources'
-export type ProjectId = string
 export type SessionStatus = 'running' | 'finished' | 'pending'
+export type AutoNameSessionStatus = 'updated' | 'superseded'
+export type ProjectId = string
 export type ListSessionsResult = {
   event_count: number
   first_ts?: string | null
@@ -1276,6 +1281,43 @@ export interface ReloadSessionMcpResponse {
   session_id: SessionId
   [k: string]: unknown
 }
+export interface AutoNameSessionRequest {
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface AutoNameSessionResponse {
+  cursor: EventCursor
+  revision: Revision
+  session: SessionSummary
+  status: AutoNameSessionStatus
+  [k: string]: unknown
+}
+export interface SessionSummary {
+  event_count: number
+  first_ts?: string | null
+  goal?: string | null
+  id: SessionId
+  message_count: number
+  name_source?: NameSource
+  project_root?: string | null
+  status: SessionStatus
+  title?: string
+  updated_at?: string | null
+  [k: string]: unknown
+}
+export interface MoveSessionRequest {
+  project_root: string
+  request_id?: null | RequestId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface MoveSessionResponse {
+  cursor: EventCursor
+  revision: Revision
+  session: SessionSummary
+  [k: string]: unknown
+}
 export interface ListProjectsRequest {
   limit?: number | null
   search?: string | null
@@ -1311,19 +1353,6 @@ export interface RenameSessionResponse {
   cursor: EventCursor
   revision: Revision
   session: SessionSummary
-  [k: string]: unknown
-}
-export interface SessionSummary {
-  event_count: number
-  first_ts?: string | null
-  goal?: string | null
-  id: SessionId
-  message_count: number
-  name_source?: NameSource
-  project_root?: string | null
-  status: SessionStatus
-  title?: string
-  updated_at?: string | null
   [k: string]: unknown
 }
 export interface StartRunRequest {

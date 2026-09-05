@@ -324,6 +324,8 @@ pub mod methods {
     pub const INTERJECT_SESSION: &str = "session.interject";
     pub const UPDATE_SESSION_TRUST: &str = "session.update_trust";
     pub const RELOAD_SESSION_MCP: &str = "session.reload_mcp";
+    pub const AUTO_NAME_SESSION: &str = "session.auto_name";
+    pub const MOVE_SESSION: &str = "session.move";
     pub const LIST_PROJECTS: &str = "project.list";
     pub const LIST_SESSIONS: &str = "list_sessions";
     pub const RENAME_SESSION: &str = "rename_session";
@@ -355,6 +357,8 @@ pub mod methods {
         super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::UpdateSessionTrust>(),
         super::method_descriptor::<super::rpc::ReloadSessionMcp>(),
+        super::method_descriptor::<super::rpc::AutoNameSession>(),
+        super::method_descriptor::<super::rpc::MoveSession>(),
         super::method_descriptor::<super::rpc::ListProjects>(),
         super::method_descriptor::<super::rpc::ListSessions>(),
         super::method_descriptor::<super::rpc::RenameSession>(),
@@ -539,6 +543,43 @@ pub struct RenameSessionRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RenameSessionResponse {
+    pub session: SessionSummary,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AutoNameSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoNameSessionStatus {
+    Updated,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AutoNameSessionResponse {
+    pub session: SessionSummary,
+    pub status: AutoNameSessionStatus,
+    pub revision: Revision,
+    pub cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MoveSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RequestId>,
+    pub session_id: SessionId,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MoveSessionResponse {
     pub session: SessionSummary,
     pub revision: Revision,
     pub cursor: EventCursor,
@@ -1218,6 +1259,20 @@ pub mod rpc {
         Command,
         ReloadSessionMcpRequest,
         ReloadSessionMcpResponse
+    );
+    method!(
+        AutoNameSession,
+        methods::AUTO_NAME_SESSION,
+        Command,
+        AutoNameSessionRequest,
+        AutoNameSessionResponse
+    );
+    method!(
+        MoveSession,
+        methods::MOVE_SESSION,
+        Command,
+        MoveSessionRequest,
+        MoveSessionResponse
     );
     method!(
         ListSessions,

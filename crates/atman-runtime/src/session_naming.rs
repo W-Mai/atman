@@ -28,6 +28,18 @@ async fn generate_session_name(
     if !force && meta.name_source == crate::session_meta::NameSource::User {
         return Ok(false);
     }
+    let title = generate_session_title(executor, session).await?;
+    Ok(crate::session_meta::SessionMeta::set_auto_title_with_force(
+        session.dir(),
+        title,
+        force,
+    )?)
+}
+
+pub async fn generate_session_title(
+    executor: &Executor,
+    session: &Arc<Session>,
+) -> anyhow::Result<String> {
     let flow = atman_dsl::parse::parse_file(crate::templates::SESSION_NAME_AT)
         .map_err(|error| anyhow::anyhow!("parsing built-in session name flow: {error}"))?;
     let input = naming_input(session);
@@ -47,11 +59,7 @@ async fn generate_session_name(
     let Value::Str(title) = value else {
         anyhow::bail!("session name flow did not return a string");
     };
-    Ok(crate::session_meta::SessionMeta::set_auto_title_with_force(
-        session.dir(),
-        title,
-        force,
-    )?)
+    Ok(title)
 }
 
 fn naming_input(session: &Session) -> String {

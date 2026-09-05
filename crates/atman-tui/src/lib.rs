@@ -238,6 +238,8 @@ pub enum TuiCommand {
     McpReloaded {
         active_runs: Option<usize>,
     },
+    OpenSessionMoveForm(atman_runtime::form::PendingForm),
+    CloseSessionMoveForm(String),
     SessionNameUpdated(String),
     SessionListUpdated {
         scope: session_switcher::SessionScope,

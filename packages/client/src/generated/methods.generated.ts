@@ -1,6 +1,8 @@
 // Generated from atman-proto. Do not edit.
 
 import type {
+  AutoNameSessionRequest,
+  AutoNameSessionResponse,
   CancelRunRequest,
   CancelRunResponse,
   CapabilitiesRequest,
@@ -32,6 +34,8 @@ import type {
   ListResourcesResponse,
   ListSessionsRequest,
   ListSessionsResult,
+  MoveSessionRequest,
+  MoveSessionResponse,
   PingResponse,
   ReleaseResourceRequest,
   ReleaseResourceResponse,
@@ -122,6 +126,18 @@ export interface RpcMethodMap {
     revision: 1
     params: ReloadSessionMcpRequest
     result: ReloadSessionMcpResponse
+  }
+  'session.auto_name': {
+    kind: 'command'
+    revision: 1
+    params: AutoNameSessionRequest
+    result: AutoNameSessionResponse
+  }
+  'session.move': {
+    kind: 'command'
+    revision: 1
+    params: MoveSessionRequest
+    result: MoveSessionResponse
   }
   'project.list': {
     kind: 'query'
@@ -271,6 +287,8 @@ export const RPC_METHODS = {
   'session.interject': { kind: 'command', revision: 1 },
   'session.update_trust': { kind: 'command', revision: 1 },
   'session.reload_mcp': { kind: 'command', revision: 1 },
+  'session.auto_name': { kind: 'command', revision: 1 },
+  'session.move': { kind: 'command', revision: 1 },
   'project.list': { kind: 'query', revision: 1 },
   'list_sessions': { kind: 'query', revision: 1 },
   'rename_session': { kind: 'command', revision: 2 },

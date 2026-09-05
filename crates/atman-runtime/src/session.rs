@@ -136,7 +136,7 @@ pub struct Session {
     output_store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
     tool_output_budget: Mutex<crate::tools::tool_output::ToolOutputBudget>,
     fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
-    project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    project_index: std::sync::RwLock<Option<std::sync::Arc<crate::index::AnchorIndex>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1015,7 +1015,7 @@ impl Session {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             fs_access_mode: Mutex::new(None),
-            project_index,
+            project_index: std::sync::RwLock::new(project_index),
         })
     }
 
@@ -1287,7 +1287,7 @@ impl Session {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             fs_access_mode: Mutex::new(None),
-            project_index,
+            project_index: std::sync::RwLock::new(project_index),
         };
         Ok(RestoredSession { session, events })
     }
@@ -1342,12 +1342,16 @@ impl Session {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             fs_access_mode: Mutex::new(None),
-            project_index: None,
+            project_index: std::sync::RwLock::new(None),
         }
     }
 
     pub fn project_index(&self) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {
-        self.project_index.clone()
+        self.project_index.read().unwrap().clone()
+    }
+
+    pub fn set_project_index(&self, index: Option<std::sync::Arc<crate::index::AnchorIndex>>) {
+        *self.project_index.write().unwrap() = index;
     }
 
     pub fn approval(&self) -> std::sync::Arc<ApprovalRegistry> {

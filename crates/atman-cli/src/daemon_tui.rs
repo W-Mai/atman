@@ -76,6 +76,43 @@ async fn run_session(
         let mut shutdown_tx = Some(shutdown_tx);
         while let Some(control) = control_rx.recv().await {
             match control {
+                TuiControl::Domain(atman_tui::TuiDomainCommand::FormSubmit {
+                    form_id,
+                    submission,
+                }) if form_id.starts_with("session_move_path:") => {
+                    if matches!(submission, atman_runtime::form::FormSubmission::Rejected) {
+                        let _ = command_tx.send(TuiCommand::CloseSessionMoveForm(form_id));
+                        continue;
+                    }
+                    let result = submitted_text(&submission)
+                        .ok_or_else(|| anyhow::anyhow!("a working directory is required"))
+                        .and_then(|path| {
+                            if path.trim().is_empty() {
+                                Err(anyhow::anyhow!("a working directory is required"))
+                            } else {
+                                Ok(path.to_owned())
+                            }
+                        });
+                    match result {
+                        Ok(path) => match control_session.move_to(path).await {
+                            Ok(response) => {
+                                let _ = command_tx.send(TuiCommand::CloseSessionMoveForm(form_id));
+                                let _ = control_note_tx.send(TuiNote::Info(format!(
+                                    "session moved to {}",
+                                    response.session.project_root.unwrap_or_default()
+                                )));
+                            }
+                            Err(error) => {
+                                let _ = control_note_tx.send(TuiNote::Error(format!(
+                                    "could not move session: {error}"
+                                )));
+                            }
+                        },
+                        Err(error) => {
+                            let _ = control_note_tx.send(TuiNote::Error(error.to_string()));
+                        }
+                    }
+                }
                 TuiControl::Domain(command) => match adapter.dispatch(command).await {
                     Ok(DaemonCommandOutcome::Applied) => {}
                     Ok(DaemonCommandOutcome::SessionRenamed {
@@ -160,6 +197,42 @@ async fn run_session(
                             let _ = control_note_tx.send(TuiNote::Error(error.to_string()));
                         }
                     }
+                }
+                TuiControl::AutoNameSession => match control_session.auto_name().await {
+                    Ok(response) => {
+                        let _ =
+                            command_tx.send(TuiCommand::SessionNameUpdated(response.session.title));
+                        let _ =
+                            control_note_tx.send(TuiNote::Info("session name generated".into()));
+                    }
+                    Err(error) => {
+                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                            "could not generate session name: {error}"
+                        )));
+                    }
+                },
+                TuiControl::MoveSession => {
+                    let kind = atman_runtime::form::FormKind::Text {
+                        prompt: "New working directory:".into(),
+                        placeholder: Some("/path/to/project".into()),
+                        multiline: false,
+                    };
+                    let form_id = format!("session_move_path:{}", uuid::Uuid::now_v7());
+                    let _ = command_tx.send(TuiCommand::OpenSessionMoveForm(
+                        atman_runtime::form::PendingForm {
+                            form_id,
+                            run_id: atman_runtime::event::FlowRunId::now(),
+                            tool_use_id: "session_move_path".into(),
+                            kind: kind.clone(),
+                            form: atman_runtime::form::CompositeForm {
+                                questions: vec![atman_runtime::form::FormQuestion {
+                                    id: "question".into(),
+                                    kind,
+                                }],
+                            },
+                            emitted_at: chrono::Utc::now(),
+                        },
+                    ));
                 }
                 TuiControl::OnboardingInit => {
                     if let Ok(config_dir) = atman_runtime::storage::config_dir() {
@@ -280,6 +353,16 @@ async fn run_session(
     control_task.await.context("join daemon TUI control task")?;
     result?;
     Ok(next_rx.try_recv().ok())
+}
+
+fn submitted_text(submission: &atman_runtime::form::FormSubmission) -> Option<&str> {
+    let atman_runtime::form::FormSubmission::Submitted { answers } = submission else {
+        return None;
+    };
+    let atman_runtime::form::FormAnswer::TextEntered { text } = answers.first()? else {
+        return None;
+    };
+    Some(text)
 }
 
 async fn settings_provider_lifecycle() -> Result<atman_runtime::ProviderLifecycle> {

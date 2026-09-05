@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
 use atman_proto::{
-    CancelRunRequest, CancelRunResponse, CompactReviewDecision, CompactSessionRequest,
-    CompactSessionResponse, CreatePermissionGroupRequest, CreatePermissionGroupResponse,
-    DaemonGeneration, EventCursor, FlowRunId, FormSubmission, GetSessionSnapshotRequest,
-    GetSessionUpdatesRequest, GetSessionUpdatesResponse, InlineImage, InspectResourceRequest,
-    InspectResourceResponse, InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
+    AutoNameSessionRequest, AutoNameSessionResponse, CancelRunRequest, CancelRunResponse,
+    CompactReviewDecision, CompactSessionRequest, CompactSessionResponse,
+    CreatePermissionGroupRequest, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
+    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
+    GetSessionUpdatesResponse, InlineImage, InspectResourceRequest, InspectResourceResponse,
+    InterjectSessionRequest, InterjectSessionResponse, InterjectionLevel,
     ListPermissionRequestsRequest, ListPermissionRequestsResponse, ListResourcesRequest,
-    ListResourcesResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
-    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
-    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
-    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
-    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
-    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    ListResourcesResponse, MoveSessionRequest, MoveSessionResponse,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
+    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
+    ReleaseResourceRequest, ReleaseResourceResponse, ReloadSessionMcpRequest,
+    ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse, RequestId,
+    ResizeTerminalResourceRequest, ResizeTerminalResourceResponse, ResolveCompactReviewRequest,
+    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
@@ -501,6 +503,36 @@ impl SessionClient {
 
     pub async fn clear_title(&self) -> Result<RenameSessionResponse, SessionClientError> {
         self.set_title(None).await
+    }
+
+    pub async fn auto_name(&self) -> Result<AutoNameSessionResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::AutoNameSession>(&AutoNameSessionRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+            })
+            .await?;
+        self.validate_command_session(&response.session.id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
+    }
+
+    pub async fn move_to(
+        &self,
+        project_root: impl Into<String>,
+    ) -> Result<MoveSessionResponse, SessionClientError> {
+        let response = self
+            .client
+            .command::<rpc::MoveSession>(&MoveSessionRequest {
+                request_id: Some(RequestId::now()),
+                session_id: self.session_id.clone(),
+                project_root: project_root.into(),
+            })
+            .await?;
+        self.validate_command_session(&response.session.id)?;
+        self.refresh_through(response.cursor).await?;
+        Ok(response)
     }
 
     async fn set_title(

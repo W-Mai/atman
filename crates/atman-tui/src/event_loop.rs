@@ -1524,6 +1524,16 @@ pub(crate) async fn run_frames(
                                 app.wm.modals.session_switcher.set_rows(rows);
                             }
                         }
+                        TuiCommand::OpenSessionMoveForm(form) => {
+                            app.wm.modals.form_modal.attach(form);
+                            app.app.mark_visual_dirty();
+                        }
+                        TuiCommand::CloseSessionMoveForm(form_id) => {
+                            if app.wm.modals.form_modal.pending.as_ref().is_some_and(|form| form.form_id == form_id) {
+                                app.wm.modals.form_modal.reconcile(&[]);
+                                app.app.mark_visual_dirty();
+                            }
+                        }
                         TuiCommand::OpenTrustModePicker => {
                             app.wm.modals.open_trust_mode_picker(&mut app.app);
                         }

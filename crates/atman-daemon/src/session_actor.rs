@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use atman_proto::{
-    CompactReviewDecision, CompactReviewResolutionStatus, CompactionRequestStatus,
-    CreatePermissionGroupResponse, DaemonGeneration, EventCursor, FlowRunId, FormResolutionStatus,
-    FormSubmission, GetSessionUpdatesResponse, ListPermissionRequestsResponse,
-    NotificationLifecycle, NotificationLocation, NotificationStack,
+    AutoNameSessionStatus, CompactReviewDecision, CompactReviewResolutionStatus,
+    CompactionRequestStatus, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
+    FlowRunId, FormResolutionStatus, FormSubmission, GetSessionUpdatesResponse,
+    ListPermissionRequestsResponse, NotificationLifecycle, NotificationLocation, NotificationStack,
     PROJECTION_EVENT_SCHEMA_VERSION, PermissionResolutionView, ProjectionDelta,
     ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
     ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
@@ -80,6 +80,19 @@ pub(crate) struct CompactionRequestCommit {
 }
 
 pub struct RenameSessionCommit {
+    pub session: SessionSummary,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct AutoNameSessionCommit {
+    pub session: SessionSummary,
+    pub status: AutoNameSessionStatus,
+    pub revision: atman_proto::Revision,
+    pub cursor: EventCursor,
+}
+
+pub(crate) struct MoveSessionCommit {
     pub session: SessionSummary,
     pub revision: atman_proto::Revision,
     pub cursor: EventCursor,
@@ -268,6 +281,7 @@ impl SessionActorHandle {
             task_registry,
             workspace_service,
             workspace_mutations: HashSet::new(),
+            title_generation: 0,
             leases: leases.clone(),
             command_tx: tx.clone(),
             _permission_client: session.permission_broker().register_client(),
@@ -470,6 +484,36 @@ impl SessionActorHandle {
 
     pub async fn rename(&self, title: Option<String>) -> Result<RenameSessionCommit> {
         request(&self.tx, |reply| Command::Rename { title, reply }).await?
+    }
+
+    pub(crate) async fn begin_auto_name(&self, force: bool) -> Result<Option<u64>> {
+        request(&self.tx, |reply| Command::BeginAutoName { force, reply }).await?
+    }
+
+    pub(crate) async fn finish_auto_name(
+        &self,
+        generation: u64,
+        title: String,
+    ) -> Result<AutoNameSessionCommit> {
+        request(&self.tx, |reply| Command::FinishAutoName {
+            generation,
+            title,
+            reply,
+        })
+        .await?
+    }
+
+    pub(crate) async fn move_session(
+        &self,
+        project_root: std::path::PathBuf,
+        project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
+    ) -> Result<MoveSessionCommit> {
+        request(&self.tx, |reply| Command::MoveSession {
+            project_root,
+            project_index,
+            reply,
+        })
+        .await?
     }
 
     pub async fn update_trust(
@@ -700,6 +744,20 @@ enum Command {
         title: Option<String>,
         reply: oneshot::Sender<Result<RenameSessionCommit>>,
     },
+    BeginAutoName {
+        force: bool,
+        reply: oneshot::Sender<Result<Option<u64>>>,
+    },
+    FinishAutoName {
+        generation: u64,
+        title: String,
+        reply: oneshot::Sender<Result<AutoNameSessionCommit>>,
+    },
+    MoveSession {
+        project_root: std::path::PathBuf,
+        project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
+        reply: oneshot::Sender<Result<MoveSessionCommit>>,
+    },
     UpdateTrust {
         trust: TrustProjection,
         launcher: Arc<crate::run::RunLauncher>,
@@ -814,6 +872,7 @@ struct SessionActor {
     task_registry: atman_runtime::TaskRegistry,
     workspace_service: Option<atman_runtime::flow_workspace::FlowWorkspaceService>,
     workspace_mutations: HashSet<ResourceId>,
+    title_generation: u64,
     leases: Arc<AtomicUsize>,
     command_tx: mpsc::UnboundedSender<Command>,
     _permission_client: atman_runtime::permission::PermissionClientGuard,
@@ -1047,6 +1106,26 @@ impl SessionActor {
             }
             Command::Rename { title, reply } => {
                 let result = self.rename(title);
+                let _ = reply.send(result);
+            }
+            Command::BeginAutoName { force, reply } => {
+                let result = self.begin_auto_name(force);
+                let _ = reply.send(result);
+            }
+            Command::FinishAutoName {
+                generation,
+                title,
+                reply,
+            } => {
+                let result = self.finish_auto_name(generation, title);
+                let _ = reply.send(result);
+            }
+            Command::MoveSession {
+                project_root,
+                project_index,
+                reply,
+            } => {
+                let result = self.move_session(project_root, project_index);
                 let _ = reply.send(result);
             }
             Command::UpdateTrust {
@@ -1802,6 +1881,7 @@ impl SessionActor {
     }
 
     fn rename(&mut self, title: Option<String>) -> Result<RenameSessionCommit> {
+        self.title_generation = self.title_generation.wrapping_add(1);
         atman_runtime::session_meta::SessionMeta::set_title(self.session.dir(), title)
             .with_context(|| format!("rename session {}", self.session_id))?;
         let session = session_summary(
@@ -1814,6 +1894,100 @@ impl SessionActor {
         }
         Ok(RenameSessionCommit {
             session,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn begin_auto_name(&mut self, force: bool) -> Result<Option<u64>> {
+        if !force
+            && self.session.meta().is_some_and(|meta| {
+                meta.name_source == atman_runtime::session_meta::NameSource::User
+            })
+        {
+            return Ok(None);
+        }
+        self.title_generation = self.title_generation.wrapping_add(1);
+        Ok(Some(self.title_generation))
+    }
+
+    fn finish_auto_name(
+        &mut self,
+        generation: u64,
+        title: String,
+    ) -> Result<AutoNameSessionCommit> {
+        let status = if generation == self.title_generation {
+            anyhow::ensure!(
+                atman_runtime::session_meta::SessionMeta::set_auto_title_with_force(
+                    self.session.dir(),
+                    title,
+                    true,
+                )?,
+                "generated session name is empty"
+            );
+            if let Some(delta) = self.projection.set_metadata(self.session.meta()) {
+                self.publish_projection_delta(delta);
+            }
+            AutoNameSessionStatus::Updated
+        } else {
+            AutoNameSessionStatus::Superseded
+        };
+        Ok(AutoNameSessionCommit {
+            session: session_summary(
+                self.session.dir(),
+                self.session_id.clone(),
+                self.runs.values(),
+            )?,
+            status,
+            revision: self.projection.projection().revision,
+            cursor: self.event_cursor,
+        })
+    }
+
+    fn move_session(
+        &mut self,
+        project_root: std::path::PathBuf,
+        project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
+    ) -> Result<MoveSessionCommit> {
+        anyhow::ensure!(
+            self.runs.is_empty(),
+            "cannot move a session while a run is active"
+        );
+        anyhow::ensure!(
+            !self
+                .task_registry
+                .has_running_in_session(&self.session_id.to_string()),
+            "cannot move a session while a task is active"
+        );
+        anyhow::ensure!(
+            self.projection
+                .projection()
+                .resources
+                .iter()
+                .all(|resource| !crate::state::resource_blocks_session_detach(resource.state)),
+            "release retained, dirty, or orphaned resources before moving the session"
+        );
+        let workspace_service = atman_runtime::flow_workspace::FlowWorkspaceService::new(
+            &project_root,
+            None,
+            &self.daemon_generation.0,
+        )?;
+        let mut metadata = self.session.meta().unwrap_or_default();
+        metadata.rebase(&project_root);
+        metadata
+            .save(self.session.dir())
+            .with_context(|| format!("move session {}", self.session_id))?;
+        self.session.set_project_index(project_index);
+        self.workspace_service = Some(workspace_service);
+        if let Some(delta) = self.projection.set_metadata(Some(metadata)) {
+            self.publish_projection_delta(delta);
+        }
+        Ok(MoveSessionCommit {
+            session: session_summary(
+                self.session.dir(),
+                self.session_id.clone(),
+                self.runs.values(),
+            )?,
             revision: self.projection.projection().revision,
             cursor: self.event_cursor,
         })
@@ -2474,4 +2648,77 @@ pub(crate) fn session_summary<'a>(
             atman_runtime::session_meta::NameSource::User => atman_proto::NameSource::User,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actor_at(
+        data_dir: &std::path::Path,
+        project_root: &std::path::Path,
+    ) -> (Arc<atman_runtime::Session>, SessionActorHandle) {
+        let session = Arc::new(atman_runtime::Session::open(data_dir).unwrap());
+        let mut metadata = session.meta().unwrap_or_default();
+        metadata.rebase(project_root);
+        metadata.save(session.dir()).unwrap();
+        let handle = SessionActorHandle::spawn(
+            SessionId(session.id().0),
+            session.clone(),
+            Vec::new(),
+            "test-owner".into(),
+            DaemonGeneration(uuid::Uuid::now_v7().to_string()),
+            None,
+            atman_runtime::TaskRegistry::default(),
+        );
+        (session, handle)
+    }
+
+    #[tokio::test]
+    async fn manual_rename_supersedes_in_flight_auto_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (session, actor) = actor_at(temp.path(), project.path());
+
+        let generation = actor.begin_auto_name(true).await.unwrap().unwrap();
+        actor.rename(Some("Manual title".into())).await.unwrap();
+        let completion = actor
+            .finish_auto_name(generation, "Generated title".into())
+            .await
+            .unwrap();
+
+        assert_eq!(completion.status, AutoNameSessionStatus::Superseded);
+        assert_eq!(completion.session.title, "Manual title");
+        assert_eq!(
+            session.meta().unwrap().title.as_deref(),
+            Some("Manual title")
+        );
+        actor.force_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn moving_idle_session_rebinds_project_state_and_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_project = tempfile::tempdir().unwrap();
+        let new_project = tempfile::tempdir().unwrap();
+        let (session, actor) = actor_at(temp.path(), old_project.path());
+
+        let moved = actor
+            .move_session(new_project.path().to_path_buf(), None)
+            .await
+            .unwrap();
+
+        let expected = new_project.path().canonicalize().unwrap();
+        assert_eq!(
+            session.meta().unwrap().project_root.as_deref(),
+            Some(expected.as_path())
+        );
+        assert_eq!(moved.session.project_root.as_deref(), expected.to_str());
+        let (_, projection) = actor.snapshot().await.unwrap();
+        assert_eq!(
+            projection.metadata.project_root.as_deref(),
+            expected.to_str()
+        );
+        actor.force_shutdown().await.unwrap();
+    }
 }

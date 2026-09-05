@@ -624,7 +624,7 @@ impl DaemonState {
             .projection
             .resources
             .into_iter()
-            .filter(|resource| resource_blocks_session_deletion(resource.state))
+            .filter(|resource| resource_blocks_session_detach(resource.state))
             .map(|resource| resource.id)
             .collect::<Vec<_>>();
         if !blocking_resources.is_empty() {
@@ -896,6 +896,67 @@ impl DaemonState {
     ) -> Result<crate::RenameSessionCommit> {
         let actor = self.get_or_load_actor(sid, principal).await?;
         actor.rename(title).await
+    }
+
+    pub(crate) async fn auto_name_session(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        principal: &str,
+    ) -> Result<crate::session_actor::AutoNameSessionCommit> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        let actor = self.get_or_load_actor(session_id, principal).await?;
+        let generation = actor
+            .begin_auto_name(true)
+            .await?
+            .expect("forced session naming always starts");
+        let executor = launcher.naming_executor(self).await?;
+        let title = atman_runtime::session_naming::generate_session_title(
+            &executor,
+            &actor.runtime_session(),
+        )
+        .await?;
+        actor.finish_auto_name(generation, title).await
+    }
+
+    pub(crate) async fn maybe_auto_name_session(
+        &self,
+        session: &std::sync::Arc<atman_runtime::Session>,
+        executor: &atman_runtime::Executor,
+    ) -> Result<Option<crate::session_actor::AutoNameSessionCommit>> {
+        let session_id = SessionId(session.id().0);
+        let actor = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .filter(|actor| actor.owns_session(session))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("session actor is unavailable"))?
+            .lease()?;
+        let Some(generation) = actor.begin_auto_name(false).await? else {
+            return Ok(None);
+        };
+        let title =
+            atman_runtime::session_naming::generate_session_title(executor, session).await?;
+        actor.finish_auto_name(generation, title).await.map(Some)
+    }
+
+    pub(crate) async fn move_session(
+        self: &std::sync::Arc<Self>,
+        session_id: &SessionId,
+        project_root: &std::path::Path,
+        principal: &str,
+    ) -> Result<crate::session_actor::MoveSessionCommit> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("daemon started without a session launcher"))?;
+        let (project_root, project_index) = launcher.session_rebase_context(self, project_root)?;
+        self.get_or_load_actor(session_id, principal)
+            .await?
+            .move_session(project_root, project_index)
+            .await
     }
 
     pub(crate) async fn update_session_trust(
@@ -1302,7 +1363,7 @@ async fn remove_session_tree(path: PathBuf) -> Result<()> {
     .context("join session deletion task")?
 }
 
-fn resource_blocks_session_deletion(state: ResourceState) -> bool {
+pub(crate) fn resource_blocks_session_detach(state: ResourceState) -> bool {
     match state {
         ResourceState::Starting
         | ResourceState::Running
@@ -1353,7 +1414,7 @@ mod tests {
             ResourceState::Retained,
             ResourceState::Orphaned,
         ] {
-            assert!(resource_blocks_session_deletion(state));
+            assert!(resource_blocks_session_detach(state));
         }
         for state in [
             ResourceState::Exited,
@@ -1361,7 +1422,7 @@ mod tests {
             ResourceState::Released,
             ResourceState::Lost,
         ] {
-            assert!(!resource_blocks_session_deletion(state));
+            assert!(!resource_blocks_session_detach(state));
         }
     }
 

@@ -418,6 +418,64 @@ describe('SessionClient', () => {
     expect(session.current.projection.metadata.title).toBe('Untitled session')
   })
 
+  test('auto-names and moves a session through typed maintenance commands', async () => {
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(
+            request,
+            capabilities('generation-1', [
+              { name: 'session.auto_name', kind: 'command', revision: 1 },
+              { name: 'session.move', kind: 'command', revision: 1 },
+            ]),
+          )
+        case 'session.get_snapshot':
+          return result(request, snapshot('generation-1'))
+        case 'session.auto_name':
+          return result(request, {
+            session: {
+              id: sessionId,
+              event_count: 0,
+              status: 'finished',
+              title: 'Generated title',
+            },
+            status: 'updated',
+            revision: 0,
+            cursor: 0,
+          })
+        case 'session.move':
+          return result(request, {
+            session: {
+              id: sessionId,
+              event_count: 0,
+              status: 'finished',
+              title: 'Generated title',
+              project_root: request.params.project_root,
+            },
+            revision: 0,
+            cursor: 0,
+          })
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    expect((await session.autoName()).session.title).toBe('Generated title')
+    expect((await session.moveTo('/workspace/new')).session.project_root).toBe(
+      '/workspace/new',
+    )
+    expect(
+      transport.requests.find(
+        (request) => request.method === 'session.move',
+      )?.params.project_root,
+    ).toBe('/workspace/new')
+  })
+
   test('updates trust through one command and reconciles the committed projection', async () => {
     const trust: TrustProjection = {
       mode: 'eager',

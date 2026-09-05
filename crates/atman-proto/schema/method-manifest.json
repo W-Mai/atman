@@ -157,6 +157,40 @@
       }
     },
     {
+      "name": "session.auto_name",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "AutoNameSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/AutoNameSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "AutoNameSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/AutoNameSessionResponse"
+        }
+      }
+    },
+    {
+      "name": "session.move",
+      "kind": "command",
+      "revision": 1,
+      "params": {
+        "rust_type": "MoveSessionRequest",
+        "schema": {
+          "$ref": "#/$defs/MoveSessionRequest"
+        }
+      },
+      "result": {
+        "rust_type": "MoveSessionResponse",
+        "schema": {
+          "$ref": "#/$defs/MoveSessionResponse"
+        }
+      }
+    },
+    {
       "name": "project.list",
       "kind": "query",
       "revision": 1,

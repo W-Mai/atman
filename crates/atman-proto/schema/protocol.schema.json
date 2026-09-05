@@ -58,6 +58,18 @@
       "$ref": "#/$defs/ReloadSessionMcpResponse"
     },
     {
+      "$ref": "#/$defs/AutoNameSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/AutoNameSessionResponse"
+    },
+    {
+      "$ref": "#/$defs/MoveSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/MoveSessionResponse"
+    },
+    {
       "$ref": "#/$defs/ListProjectsRequest"
     },
     {
@@ -892,6 +904,57 @@
             }
           }
         }
+      ]
+    },
+    "AutoNameSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "AutoNameSessionResponse": {
+      "type": "object",
+      "required": [
+        "session",
+        "status",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionSummary"
+        },
+        "status": {
+          "$ref": "#/$defs/AutoNameSessionStatus"
+        }
+      }
+    },
+    "AutoNameSessionStatus": {
+      "type": "string",
+      "enum": [
+        "updated",
+        "superseded"
       ]
     },
     "CancelRunRequest": {
@@ -3006,6 +3069,50 @@
           "type": "integer",
           "format": "int32",
           "minimum": 0
+        }
+      }
+    },
+    "MoveSessionRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "project_root"
+      ],
+      "properties": {
+        "project_root": {
+          "type": "string"
+        },
+        "request_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RequestId"
+            }
+          ]
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "MoveSessionResponse": {
+      "type": "object",
+      "required": [
+        "session",
+        "revision",
+        "cursor"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionSummary"
         }
       }
     },

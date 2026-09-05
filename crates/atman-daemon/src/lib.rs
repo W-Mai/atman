@@ -1,14 +1,15 @@
 use atman_proto::{
-    CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse, CompactSessionResponse,
-    DaemonGeneration, EventCursor, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
-    InspectResourceResponse, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, ListProjectsRequest, ListResourcesResponse, ListSessionsRequest,
-    MethodCapability, PermissionRpcAction, PermissionRpcScope, PingResponse, ProtocolLimits,
-    ReleaseResourceResponse, ReloadSessionMcpResponse, RenameSessionResponse, RequestId,
-    ResizeTerminalResourceResponse, ResolveCompactReviewResponse, ResolvePromptResponse,
-    RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse, SendMessageResponse,
-    StartRunResponse, SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse,
-    method_descriptor, methods, rpc,
+    AutoNameSessionResponse, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
+    CompactSessionResponse, DaemonGeneration, EventCursor, GetSessionSnapshotRequest,
+    GetSessionUpdatesRequest, InspectResourceResponse, InterjectSessionResponse, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, ListProjectsRequest, ListResourcesResponse,
+    ListSessionsRequest, MethodCapability, MoveSessionResponse, PermissionRpcAction,
+    PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
+    ReloadSessionMcpResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
+    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
+    RpcMethodDescriptor, RunFlowResponse, SendMessageResponse, StartRunResponse,
+    SubmitFormResponse, TerminateResourceResponse, UpdateSessionTrustResponse, method_descriptor,
+    methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -161,6 +162,8 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::UpdateSessionTrust>(),
     method_descriptor::<rpc::ReloadSessionMcp>(),
+    method_descriptor::<rpc::AutoNameSession>(),
+    method_descriptor::<rpc::MoveSession>(),
     method_descriptor::<rpc::ListProjects>(),
     method_descriptor::<rpc::ListSessions>(),
     method_descriptor::<rpc::RenameSession>(),
@@ -580,6 +583,75 @@ pub async fn dispatch_as(
                     Err(error) => JsonRpcResponse::err(id, error),
                 }
             }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::AUTO_NAME_SESSION => match parse_params::<rpc::AutoNameSession>(req.params) {
+            Ok(params) => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::AutoNameSession, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .auto_name_session(&operation_params.session_id, &operation_principal)
+                            .await
+                            .map(|commit| AutoNameSessionResponse {
+                                session: commit.session,
+                                status: commit.status,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(result) => method_response::<rpc::AutoNameSession>(id, result),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::MOVE_SESSION => match parse_params::<rpc::MoveSession>(req.params) {
+            Ok(params) if !params.project_root.trim().is_empty() => {
+                let operation_state = state.clone();
+                let operation_principal = principal_id.to_owned();
+                let operation_params = params.clone();
+                let outcome = execute_command::<rpc::MoveSession, _>(
+                    &state,
+                    principal_id,
+                    params.request_id.clone(),
+                    &params,
+                    async move {
+                        operation_state
+                            .move_session(
+                                &operation_params.session_id,
+                                std::path::Path::new(&operation_params.project_root),
+                                &operation_principal,
+                            )
+                            .await
+                            .map(|commit| MoveSessionResponse {
+                                session: commit.session,
+                                revision: commit.revision,
+                                cursor: commit.cursor,
+                            })
+                            .map_err(|error| JsonRpcError::application(error.to_string()))
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(result) => method_response::<rpc::MoveSession>(id, result),
+                    Err(error) => JsonRpcResponse::err(id, error),
+                }
+            }
+            Ok(_) => JsonRpcResponse::err(
+                id,
+                JsonRpcError::invalid_params("project_root must not be empty"),
+            ),
             Err(error) => JsonRpcResponse::err(id, error),
         },
         methods::CANCEL_RUN => match parse_params::<rpc::CancelRun>(req.params) {

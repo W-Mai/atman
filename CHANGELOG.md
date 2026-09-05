@@ -43,6 +43,7 @@ All notable changes to atman are documented in this file.
 ### ✨ Features
 
 - **Live daemon MCP runtimes** — daemon-owned runs load configured MCP tools and accept session-scoped hot reload commands. Reloads replace removed tool namespaces, update every active run, publish connection state to all attached clients, and report when configuration will take effect on the next run.
+- **Daemon-owned session maintenance** — daemon clients can generate session names and move idle sessions between project roots without opening a second local session writer.
 
 - **Daemon TUI settings controls** — provider authentication and configuration, model aliases, endpoint checks, and MCP resource inspection remain available after interactive sessions move to the daemon client path. Model selection changes the submission default without injecting an effort or model override into unrelated LLM calls.
 

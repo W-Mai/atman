@@ -355,6 +355,26 @@ impl RunLauncher {
             .clone())
     }
 
+    pub(crate) async fn naming_executor(
+        &self,
+        state: &DaemonState,
+    ) -> Result<atman_runtime::Executor> {
+        let lifecycle = self.prepare_provider_lifecycle(state).await?;
+        let mut executor = atman_runtime::Executor::new();
+        executor.providers = lifecycle.provider_registry().clone();
+        Ok(executor)
+    }
+
+    pub(crate) fn session_rebase_context(
+        &self,
+        state: &DaemonState,
+        requested_root: &Path,
+    ) -> Result<(PathBuf, Option<Arc<atman_runtime::index::AnchorIndex>>)> {
+        let project = state.resolve_project(requested_root)?;
+        let (_, project_index, _) = self.session_context(state, &project.root)?;
+        Ok((project.root, project_index))
+    }
+
     async fn prepare_provider_lifecycle(
         &self,
         state: &DaemonState,
@@ -1030,7 +1050,7 @@ async fn run_flow_inner(
         session.todos_watch().clone(),
         session.plans_watch().clone(),
     );
-    if let Some(state) = daemon_state {
+    if let Some(state) = daemon_state.clone() {
         executor.tool_ctx.prompt_resolver =
             Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
                 state,
@@ -1086,8 +1106,12 @@ async fn run_flow_inner(
         .await;
     session.end_turn(&turn_id);
     if result.is_ok() && session.record_successful_flow().is_some() {
-        let _ =
-            atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
+        if let Some(state) = daemon_state {
+            let _ = state.maybe_auto_name_session(&session, &executor).await;
+        } else {
+            let _ = atman_runtime::session_naming::maybe_generate_session_name(&executor, &session)
+                .await;
+        }
     }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)

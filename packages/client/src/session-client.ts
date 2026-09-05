@@ -4,6 +4,7 @@ import {
   SessionReconcileError,
 } from './errors'
 import type {
+  AutoNameSessionResponse,
   CancelRunResponse,
   CompactReviewDecision,
   CompactSessionResponse,
@@ -19,6 +20,7 @@ import type {
   InterjectSessionResponse,
   ListPermissionRequestsResponse,
   ListResourcesResponse,
+  MoveSessionResponse,
   PermissionRpcAction,
   PermissionRpcScope,
   PermissionRpcSelector,
@@ -218,6 +220,40 @@ export class SessionClient {
         request_id: crypto.randomUUID(),
         session_id: this.#sessionId,
         title,
+      },
+      options,
+    )
+    this.#validateSession(response.session.id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async autoName(
+    options: TransportRequestOptions = {},
+  ): Promise<AutoNameSessionResponse> {
+    const response = await this.#client.command(
+      'session.auto_name',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+      },
+      options,
+    )
+    this.#validateSession(response.session.id)
+    await this.#refreshThrough(response.cursor, options)
+    return response
+  }
+
+  async moveTo(
+    projectRoot: string,
+    options: TransportRequestOptions = {},
+  ): Promise<MoveSessionResponse> {
+    const response = await this.#client.command(
+      'session.move',
+      {
+        request_id: crypto.randomUUID(),
+        session_id: this.#sessionId,
+        project_root: projectRoot,
       },
       options,
     )
