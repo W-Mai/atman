@@ -37,6 +37,7 @@ pub mod markdown;
 pub mod mermaid;
 pub mod output;
 pub mod palette;
+mod projection_adapter;
 pub mod prompt_resolver;
 pub mod provider_manager;
 pub mod render;
@@ -348,6 +349,7 @@ pub struct TuiHandle {
         Option<tokio::sync::watch::Receiver<Vec<atman_runtime::PendingCompactReview>>>,
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
     pub injection_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::injection::Injection>>,
+    pub daemon_state_rx: Option<tokio::sync::watch::Receiver<atman_client::SessionState>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
@@ -388,6 +390,7 @@ impl TuiHandle {
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
             injection_rx: Some(session.subscribe_injections()),
+            daemon_state_rx: None,
             flow_names: Vec::new(),
             session: Some(session),
             startup_intro: None,

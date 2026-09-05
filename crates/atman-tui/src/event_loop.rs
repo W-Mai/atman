@@ -25,6 +25,54 @@ pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
 ) -> Result<()> {
+    let daemon_projection = handle
+        .daemon_state_rx
+        .as_ref()
+        .map(|rx| {
+            crate::projection_adapter::TuiSessionProjection::try_from(rx.borrow().projection())
+        })
+        .transpose()?;
+    if let Some(projected) = daemon_projection.as_ref() {
+        handle.session_name = projected.session_name.clone();
+        handle.project_root = projected.project_root.clone();
+        handle.goal = projected.goal.clone();
+        let first_turn_index = handle
+            .initial_items
+            .iter()
+            .filter(|item| matches!(item, app::OutputItem::WorkflowPanel { .. }))
+            .count();
+        handle
+            .initial_items
+            .extend(
+                projected
+                    .workflows
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, graph)| {
+                        let terminal = !graph.graph().root.is_empty()
+                            && graph.graph().root.iter().all(|node| {
+                                !matches!(
+                                    node.status,
+                                    atman_runtime::workflow::NodeStatus::Pending
+                                        | atman_runtime::workflow::NodeStatus::Running
+                                )
+                            });
+                        let cancelled = graph.graph().root.iter().any(|node| {
+                            matches!(node.status, atman_runtime::workflow::NodeStatus::Cancelled)
+                        });
+                        app::OutputItem::WorkflowPanel {
+                            turn_index: first_turn_index + index,
+                            graph,
+                            expanded_nodes: std::collections::HashSet::new(),
+                            panel_expanded: true,
+                            started_at: std::time::Instant::now(),
+                            ended_at: terminal.then(std::time::Instant::now),
+                            cancelled,
+                        }
+                    }),
+            );
+    }
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
@@ -32,6 +80,24 @@ pub(crate) async fn run_frames(
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
+    if let Some(projected) = daemon_projection.as_ref() {
+        app.daemon_revision = Some(projected.revision);
+        app.session_name = projected.session_name.clone();
+        app.project_root = projected.project_root.clone();
+        app.goal = projected.goal.clone();
+        app.replace_context_snapshot(projected.context.clone());
+        app.todos = projected.todos.clone();
+        app.plans = projected.plans.clone();
+        app.trust = projected.trust.clone();
+        app.pending_permissions = projected.pending_permissions.clone();
+        app.pending_permission_groups = projected.pending_permission_groups.clone();
+        app.grouped_permission_request_ids = projected
+            .pending_permission_groups
+            .values()
+            .flat_map(|group| group.payload.request_ids.iter().cloned())
+            .collect();
+        app.pending_injections = projected.pending_injections.clone();
+    }
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
@@ -77,11 +143,18 @@ pub(crate) async fn run_frames(
     }
     if let Some(rx) = handle.form_rx.as_ref() {
         app.wm.modals.form_modal.reconcile(&rx.borrow());
+    } else if let Some(projected) = daemon_projection.as_ref() {
+        app.wm.modals.form_modal.reconcile(&projected.pending_forms);
     }
     if let Some(rx) = handle.compact_review_rx.as_ref() {
         crate::compact_review_modal::CompactReviewModal::reconcile(
             &mut app.wm.modals.compact_review,
             &rx.borrow(),
+        );
+    } else if let Some(projected) = daemon_projection.as_ref() {
+        crate::compact_review_modal::CompactReviewModal::reconcile(
+            &mut app.wm.modals.compact_review,
+            &projected.pending_compact_reviews,
         );
     }
     if let Some(rx) = handle.trust_rx.as_ref() {

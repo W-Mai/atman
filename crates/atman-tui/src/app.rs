@@ -706,6 +706,7 @@ pub struct AppState {
     pub session_dir: String,
     pub session_name: Option<String>,
     pub project_root: Option<String>,
+    pub daemon_revision: Option<u64>,
     pub latest_release: Option<String>,
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,

@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-backed TUI projection adapter** — one checked conversion preserves context usage, MCP details, trust, todo and plan state, forms, compaction reviews, interjections, permission audit data, and workflow structure for attached terminal clients.
+
 - **Complete MCP session projections** — attached clients receive typed transports, discovered tool names and descriptions, and connection failure details from the daemon session snapshot.
 
 - **Auditable permission projections** — approval streams and list responses share one typed request model retaining intent, tool-use identity, provenance, policy, escalation, actor, scope, execution boundary, and decision reason.
