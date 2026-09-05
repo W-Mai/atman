@@ -272,6 +272,17 @@ export type TranscriptItem =
       [k: string]: unknown
     }
   | {
+      seq: number
+      session: ActivityTotalsProjection
+      session_files: string[]
+      ts: string
+      turn: ActivityTotalsProjection
+      turn_files: string[]
+      turn_id: TurnId
+      type: 'activity_summary'
+      [k: string]: unknown
+    }
+  | {
       after_tokens: number
       before_tokens: number
       compacted_count: number
@@ -1097,6 +1108,17 @@ export interface MessageProjection {
   parts: MessagePart[]
   role: MessageRole
   turn_id: TurnId
+  [k: string]: unknown
+}
+export interface ActivityTotalsProjection {
+  applied_edits: number
+  attempted_calls: number
+  completed_calls: number
+  deletions: number
+  failed_calls: number
+  files: number
+  hunks: number
+  insertions: number
   [k: string]: unknown
 }
 export interface TrustProjection {

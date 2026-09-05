@@ -197,6 +197,61 @@
     }
   ],
   "$defs": {
+    "ActivityTotalsProjection": {
+      "type": "object",
+      "required": [
+        "attempted_calls",
+        "completed_calls",
+        "failed_calls",
+        "applied_edits",
+        "files",
+        "hunks",
+        "insertions",
+        "deletions"
+      ],
+      "properties": {
+        "applied_edits": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "attempted_calls": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "completed_calls": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "failed_calls": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "files": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "hunks": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "insertions": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
     "ApprovalActorProjection": {
       "oneOf": [
         {
@@ -5591,6 +5646,57 @@
               "type": "string",
               "enum": [
                 "file_edit"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "seq",
+            "ts",
+            "turn_id",
+            "turn",
+            "session",
+            "turn_files",
+            "session_files",
+            "type"
+          ],
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "session": {
+              "$ref": "#/$defs/ActivityTotalsProjection"
+            },
+            "session_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "turn": {
+              "$ref": "#/$defs/ActivityTotalsProjection"
+            },
+            "turn_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "activity_summary"
               ]
             }
           }

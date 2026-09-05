@@ -1,21 +1,22 @@
 use std::collections::HashMap;
 
 use atman_proto::{
-    ApprovalActorProjection, ApprovalEscalationHopProjection, ApprovalExecutionBoundary,
-    ApprovalGroupOwnerProjection, ApprovalGroupProjection, ApprovalPolicyProjection,
-    ApprovalProvenanceProjection, ApprovalRequestProjection, ApprovalScopeProjection,
-    ApprovalState, ApprovalTarget, CompactionOperationId, CompactionOutcome, CompactionProjection,
-    ContextProjection, ContextUsageBucketProjection, EventCursor, FlowRunId, ImageDetail,
-    InteractionProjection, InterjectionProjection, InterjectionSource, LlmCallPurpose,
-    LlmCallScope, LlmUsageProjection, McpServerProjection, McpServerStateProjection,
-    McpToolProjection, McpTransportProjection, MessageOrigin, MessagePart, MessageProjection,
-    MessageRole, NameSource, NoticeLevel, PlanProjection, PlanStepProjection, ProjectionChange,
-    ProjectionDelta, ResourceId, ResourceKind, ResourceProjection, ResourceState, Revision,
-    RunLifecycle, RunProjection, SessionId, SessionLifecycle, SessionMetadataProjection,
-    SessionProjection, TodoProjection, TodoState, TranscriptItem, TrustEscalation, TrustMode,
-    TrustPolicyAction, TrustProjection, TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId,
-    UsageProjection, WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection,
-    WorkflowNodeState, WorkflowProjection, WorkflowStatementKind,
+    ActivityTotalsProjection, ApprovalActorProjection, ApprovalEscalationHopProjection,
+    ApprovalExecutionBoundary, ApprovalGroupOwnerProjection, ApprovalGroupProjection,
+    ApprovalPolicyProjection, ApprovalProvenanceProjection, ApprovalRequestProjection,
+    ApprovalScopeProjection, ApprovalState, ApprovalTarget, CompactionOperationId,
+    CompactionOutcome, CompactionProjection, ContextProjection, ContextUsageBucketProjection,
+    EventCursor, FlowRunId, ImageDetail, InteractionProjection, InterjectionProjection,
+    InterjectionSource, LlmCallPurpose, LlmCallScope, LlmUsageProjection, McpServerProjection,
+    McpServerStateProjection, McpToolProjection, McpTransportProjection, MessageOrigin,
+    MessagePart, MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection,
+    PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId, ResourceKind,
+    ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection, SessionId,
+    SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection, TodoState,
+    TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
+    TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection,
+    WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
+    WorkflowProjection, WorkflowStatementKind,
 };
 use atman_runtime::event::{Event, EventEnvelope, FlowStatus};
 use atman_runtime::message::ImageData;
@@ -31,6 +32,9 @@ pub(crate) struct SessionProjector {
     workflows: Vec<(atman_runtime::event::TurnId, RuntimeWorkflowProjection)>,
     event_usage: UsageProjection,
     watch_usage: UsageProjection,
+    session_activity: atman_runtime::activity::ActivityAccumulator,
+    turn_activity:
+        HashMap<atman_runtime::event::TurnId, atman_runtime::activity::ActivityAccumulator>,
     last_runtime_seq: u64,
     ownership: FlowOwnership,
 }
@@ -73,6 +77,8 @@ impl SessionProjector {
             workflows: Vec::new(),
             event_usage: UsageProjection::default(),
             watch_usage: UsageProjection::default(),
+            session_activity: atman_runtime::activity::ActivityAccumulator::default(),
+            turn_activity: HashMap::new(),
             last_runtime_seq: 0,
             ownership: FlowOwnership::default(),
         }
@@ -391,6 +397,13 @@ impl SessionProjector {
         self.ownership.observe(&envelope.event);
         let mut changes = Vec::new();
 
+        if !matches!(
+            &envelope.event,
+            Event::TurnStart { .. } | Event::TurnEnd { .. }
+        ) {
+            self.observe_activity(&envelope.event);
+        }
+
         if let Some((message, run_id)) = envelope.event.context_message() {
             self.append_transcript(
                 TranscriptItem::Message {
@@ -413,9 +426,26 @@ impl SessionProjector {
                 if !self.active_turns.contains(turn_id) {
                     self.active_turns.push(turn_id.clone());
                 }
+                self.turn_activity.entry(turn_id.clone()).or_default();
             }
             Event::TurnEnd { turn_id } => {
                 self.active_turns.retain(|active| active != turn_id);
+                let turn = self.turn_activity.remove(turn_id).unwrap_or_default();
+                let turn_summary = turn.summary();
+                if turn_summary.attempted_calls > 0 || turn_summary.applied_edits > 0 {
+                    self.append_transcript(
+                        TranscriptItem::ActivitySummary {
+                            seq: envelope.seq,
+                            ts: envelope.ts,
+                            turn_id: TurnId(turn_id.0),
+                            turn: activity_totals(&turn_summary),
+                            session: activity_totals(&self.session_activity.summary()),
+                            turn_files: turn.file_paths(),
+                            session_files: self.session_activity.file_paths(),
+                        },
+                        &mut changes,
+                    );
+                }
             }
             Event::FlowStart {
                 run_id,
@@ -1450,6 +1480,43 @@ impl SessionProjector {
             return None;
         }
         self.active_turns.first().cloned()
+    }
+
+    fn observe_activity(&mut self, event: &Event) {
+        self.session_activity.observe(event);
+        let turn_id = match event {
+            Event::ToolResultMsg { turn_id, .. } => Some(turn_id.clone()),
+            Event::FileEditApplied {
+                turn_id: Some(turn_id),
+                ..
+            } => Some(turn_id.clone()),
+            Event::FileEditApplied {
+                flow_run_id: Some(run_id),
+                ..
+            } => self.run_turns.get(run_id).cloned(),
+            _ => event_run_id(event)
+                .and_then(|run_id| self.run_turns.get(run_id).cloned())
+                .or_else(|| self.unique_active_turn()),
+        };
+        if let Some(turn_id) = turn_id {
+            self.turn_activity
+                .entry(turn_id)
+                .or_default()
+                .observe(event);
+        }
+    }
+}
+
+fn activity_totals(summary: &atman_runtime::activity::ActivitySummary) -> ActivityTotalsProjection {
+    ActivityTotalsProjection {
+        attempted_calls: summary.attempted_calls as u64,
+        completed_calls: summary.completed_calls as u64,
+        failed_calls: summary.failed_calls as u64,
+        applied_edits: summary.applied_edits as u64,
+        files: summary.files as u64,
+        hunks: summary.hunks as u64,
+        insertions: summary.insertions as u64,
+        deletions: summary.deletions as u64,
     }
 }
 
@@ -2851,6 +2918,128 @@ mod tests {
         assert_eq!(projection.usage.cache_read_tokens, 20);
         let encoded = serde_json::to_string(&projection.transcript).unwrap();
         assert!(!encoded.contains("secret-binary"));
+    }
+
+    #[test]
+    fn turn_activity_summaries_isolate_concurrent_turns_and_accumulate_session_totals() {
+        use atman_runtime::activity::EditMetrics;
+        use atman_runtime::message::{
+            MessageOrigin as RuntimeMessageOrigin, MessagePart as RuntimeMessagePart,
+            MessageRole as RuntimeMessageRole,
+        };
+
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let first_turn = RuntimeTurnId::now();
+        let second_turn = RuntimeTurnId::now();
+        let first_run = RuntimeRunId::now();
+        let second_run = RuntimeRunId::now();
+        let now = chrono::Utc::now();
+        let tool_result =
+            |turn_id: RuntimeTurnId, run_id: RuntimeRunId, tool_use_id: &str, is_error: bool| {
+                Event::ToolResultMsg {
+                    turn_id: turn_id.clone(),
+                    flow_run_id: Some(run_id),
+                    message: Message {
+                        role: RuntimeMessageRole::Tool,
+                        parts: vec![RuntimeMessagePart::ToolResult {
+                            tool_use_id: tool_use_id.into(),
+                            content: "done".into(),
+                            is_error,
+                        }],
+                        turn_id,
+                        origin: RuntimeMessageOrigin::User,
+                    },
+                }
+            };
+        let events = vec![
+            Event::TurnStart {
+                turn_id: first_turn.clone(),
+            },
+            Event::TurnStart {
+                turn_id: second_turn.clone(),
+            },
+            Event::FlowStart {
+                run_id: first_run.clone(),
+                turn_id: Some(first_turn.clone()),
+                flow_name: "first".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+            Event::FlowStart {
+                run_id: second_run.clone(),
+                turn_id: Some(second_turn.clone()),
+                flow_name: "second".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+            Event::ToolNode {
+                run_id: first_run.clone(),
+                parent_node_id: "first-node".into(),
+                tool_use_id: "first-tool".into(),
+                tool_name: "fs.edit".into(),
+                args_preview: "README.md".into(),
+                call_intent: None,
+            },
+            Event::ToolNode {
+                run_id: second_run.clone(),
+                parent_node_id: "second-node".into(),
+                tool_use_id: "second-tool".into(),
+                tool_name: "fs.read".into(),
+                args_preview: "Cargo.toml".into(),
+                call_intent: None,
+            },
+            tool_result(first_turn.clone(), first_run.clone(), "first-tool", false),
+            Event::FileEditApplied {
+                turn_id: Some(first_turn.clone()),
+                flow_run_id: Some(first_run),
+                tool_use_id: Some("first-tool".into()),
+                tool_name: "fs.edit".into(),
+                path: "README.md".into(),
+                metrics: EditMetrics {
+                    hunks: 1,
+                    insertions: 3,
+                    deletions: 1,
+                },
+            },
+            Event::TurnEnd {
+                turn_id: first_turn,
+            },
+            tool_result(second_turn.clone(), second_run, "second-tool", true),
+            Event::TurnEnd {
+                turn_id: second_turn,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| envelope(index as u64 + 1, now, event))
+        .collect::<Vec<_>>();
+
+        let mut live = SessionProjector::new(session_id.clone(), None);
+        for event in &events {
+            live.apply_envelope(event);
+        }
+        let replayed = SessionProjector::from_events(session_id, None, &events);
+        assert_eq!(live.projection(), replayed.projection());
+        let summaries = live
+            .projection()
+            .transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::ActivitySummary { turn, session, .. } => Some((turn, session)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].0.attempted_calls, 1);
+        assert_eq!(summaries[0].0.applied_edits, 1);
+        assert_eq!(summaries[0].1.attempted_calls, 2);
+        assert_eq!(summaries[0].1.completed_calls, 1);
+        assert_eq!(summaries[1].0.attempted_calls, 1);
+        assert_eq!(summaries[1].0.failed_calls, 1);
+        assert_eq!(summaries[1].1.completed_calls, 2);
+        assert_eq!(summaries[1].1.failed_calls, 1);
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub struct EditMetrics {
     pub deletions: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActivitySummary {
     pub attempted_calls: usize,
     pub completed_calls: usize,
@@ -19,8 +19,8 @@ pub struct ActivitySummary {
     pub deletions: usize,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ActivityAccumulator {
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ActivityAccumulator {
     summary: ActivitySummary,
     attempted: std::collections::HashSet<(String, String)>,
     completed: std::collections::HashSet<(String, String)>,
@@ -28,7 +28,7 @@ pub(crate) struct ActivityAccumulator {
 }
 
 impl ActivityAccumulator {
-    pub(crate) fn observe(&mut self, event: &crate::event::Event) {
+    pub fn observe(&mut self, event: &crate::event::Event) {
         match event {
             crate::event::Event::ToolNode {
                 run_id,
@@ -80,11 +80,11 @@ impl ActivityAccumulator {
         self.summary.files = self.files.len();
     }
 
-    pub(crate) fn summary(&self) -> ActivitySummary {
+    pub fn summary(&self) -> ActivitySummary {
         self.summary.clone()
     }
 
-    pub(crate) fn file_paths(&self) -> Vec<String> {
+    pub fn file_paths(&self) -> Vec<String> {
         self.files.iter().cloned().collect()
     }
 }

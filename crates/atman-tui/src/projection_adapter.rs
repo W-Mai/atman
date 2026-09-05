@@ -31,7 +31,8 @@ use atman_runtime::workflow::{
 };
 
 use crate::app::{
-    Disclosure, NoteLevel, OutputItem, PendingPermission, PendingPermissionGroup, ToolCallStatus,
+    ActivityTotals, Disclosure, NoteLevel, OutputItem, PendingPermission, PendingPermissionGroup,
+    ToolCallStatus,
 };
 use crate::history::ToolDisplayMeta;
 
@@ -321,6 +322,20 @@ fn transcript(
                     }
                 }
             }
+            atman_proto::TranscriptItem::ActivitySummary {
+                turn,
+                session,
+                turn_files,
+                session_files,
+                ..
+            } => {
+                if turn.attempted_calls > 0 || turn.applied_edits > 0 {
+                    out.push(OutputItem::ActivitySummary {
+                        turn: activity_totals(turn, turn_files)?,
+                        session: activity_totals(session, session_files)?,
+                    });
+                }
+            }
             atman_proto::TranscriptItem::Compaction {
                 operation_id,
                 context_id,
@@ -432,6 +447,39 @@ fn transcript(
     )?;
     apply_workflow_tool_state(&mut out, workflows);
     Ok(out)
+}
+
+fn activity_totals(
+    source: &atman_proto::ActivityTotalsProjection,
+    files: &[String],
+) -> Result<ActivityTotals> {
+    let projected_files =
+        usize::try_from(source.files).context("activity file count exceeds usize")?;
+    let distinct_files = files.iter().collect::<HashSet<_>>().len();
+    anyhow::ensure!(
+        projected_files == distinct_files,
+        "activity file count does not match file identities"
+    );
+    let summary = atman_runtime::activity::ActivitySummary {
+        attempted_calls: usize::try_from(source.attempted_calls)
+            .context("activity attempted call count exceeds usize")?,
+        completed_calls: usize::try_from(source.completed_calls)
+            .context("activity completed call count exceeds usize")?,
+        failed_calls: usize::try_from(source.failed_calls)
+            .context("activity failed call count exceeds usize")?,
+        applied_edits: usize::try_from(source.applied_edits)
+            .context("activity edit count exceeds usize")?,
+        files: projected_files,
+        hunks: usize::try_from(source.hunks).context("activity hunk count exceeds usize")?,
+        insertions: usize::try_from(source.insertions)
+            .context("activity insertion count exceeds usize")?,
+        deletions: usize::try_from(source.deletions)
+            .context("activity deletion count exceeds usize")?,
+    };
+    Ok(ActivityTotals::from_summary(
+        &summary,
+        files.iter().cloned(),
+    ))
 }
 
 fn message_from_projection(
@@ -1808,8 +1856,35 @@ mod tests {
                 removed_lines: 1,
                 hunks: 1,
             },
-            atman_proto::TranscriptItem::Message {
+            atman_proto::TranscriptItem::ActivitySummary {
                 seq: 6,
+                ts: now,
+                turn_id: turn_id.clone(),
+                turn: atman_proto::ActivityTotalsProjection {
+                    attempted_calls: 1,
+                    completed_calls: 1,
+                    failed_calls: 0,
+                    applied_edits: 1,
+                    files: 1,
+                    hunks: 1,
+                    insertions: 2,
+                    deletions: 1,
+                },
+                session: atman_proto::ActivityTotalsProjection {
+                    attempted_calls: 3,
+                    completed_calls: 3,
+                    failed_calls: 1,
+                    applied_edits: 2,
+                    files: 2,
+                    hunks: 2,
+                    insertions: 4,
+                    deletions: 2,
+                },
+                turn_files: vec!["README.md".into()],
+                session_files: vec!["Cargo.toml".into(), "README.md".into()],
+            },
+            atman_proto::TranscriptItem::Message {
+                seq: 7,
                 ts: now,
                 run_id: None,
                 context_id: None,
@@ -1823,7 +1898,7 @@ mod tests {
                 ),
             },
             atman_proto::TranscriptItem::Message {
-                seq: 7,
+                seq: 8,
                 ts: now,
                 run_id: None,
                 context_id: None,
@@ -1840,7 +1915,7 @@ mod tests {
                 ),
             },
             atman_proto::TranscriptItem::Compaction {
-                seq: 8,
+                seq: 9,
                 ts: now,
                 operation_id: Some(CompactionOperationId(uuid::Uuid::now_v7())),
                 context_id: None,
@@ -1854,13 +1929,13 @@ mod tests {
                 summary: "summary".into(),
             },
             atman_proto::TranscriptItem::Notice {
-                seq: 9,
+                seq: 10,
                 ts: now,
                 level: atman_proto::NoticeLevel::Warning,
                 text: "watch warning".into(),
             },
             atman_proto::TranscriptItem::Mermaid {
-                seq: 10,
+                seq: 11,
                 ts: now,
                 source: "graph TD; A-->B".into(),
             },
@@ -1894,6 +1969,15 @@ mod tests {
         assert!(transcript.iter().all(|item| {
             !matches!(item, OutputItem::UserTurn { text } if text.contains("hidden correction"))
         }));
+        assert!(transcript.iter().any(|item| matches!(
+            item,
+            OutputItem::ActivitySummary { turn, session }
+                if turn.attempted_calls == 1
+                    && turn.insertions == 2
+                    && turn.file_count() == 1
+                    && session.failed_calls == 1
+                    && session.file_count() == 2
+        )));
         assert_eq!(
             transcript
                 .iter()

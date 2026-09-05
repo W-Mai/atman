@@ -148,6 +148,18 @@ pub enum RunLifecycle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct ActivityTotalsProjection {
+    pub attempted_calls: u64,
+    pub completed_calls: u64,
+    pub failed_calls: u64,
+    pub applied_edits: u64,
+    pub files: u64,
+    pub hunks: u64,
+    pub insertions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptItem {
     Message {
@@ -190,6 +202,15 @@ pub enum TranscriptItem {
         added_lines: u64,
         removed_lines: u64,
         hunks: u64,
+    },
+    ActivitySummary {
+        seq: u64,
+        ts: DateTime<Utc>,
+        turn_id: TurnId,
+        turn: ActivityTotalsProjection,
+        session: ActivityTotalsProjection,
+        turn_files: Vec<String>,
+        session_files: Vec<String>,
     },
     Compaction {
         seq: u64,
@@ -261,6 +282,7 @@ impl TranscriptItem {
             Self::Message { seq, .. }
             | Self::Diff { seq, .. }
             | Self::FileEdit { seq, .. }
+            | Self::ActivitySummary { seq, .. }
             | Self::Compaction { seq, .. }
             | Self::Mermaid { seq, .. }
             | Self::Notice { seq, .. }

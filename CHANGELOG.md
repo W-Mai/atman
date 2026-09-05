@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Durable turn activity summaries** — daemon projections retain per-turn and cumulative tool and file-edit totals, including affected file identities, so attached clients restore the same turn coda after reconnecting.
+
 - **Daemon-backed TUI transcript projection** — attached terminal clients render durable messages, tool groups and details, workflow state, sub-agent output, compaction progress, notices, diagrams, image references, edit metrics, and restored tool durations through the existing document-flow components. SDK-maintained transcript revisions avoid rebuilding large histories for unrelated projection updates.
 
 - **Accurate compaction transcript totals** — terminal compaction records preserve the runtime compacted-message count for snapshots, deltas, and attached clients instead of requiring clients to infer it from range coordinates.
