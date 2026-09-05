@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use atman_proto::{
-    CatalogDelta, ProviderKind, ProviderMutation, ProviderMutationResult, ProviderStateChange,
-    SwitchDefaultModelResponse, UpsertModelConfigRequest, UpsertModelConfigResponse,
+    CatalogDelta, ProbeProviderRequest, ProbeResponse, ProviderKind, ProviderMutation,
+    ProviderMutationResult, ProviderStateChange, SwitchDefaultModelResponse,
+    UpsertModelConfigRequest, UpsertModelConfigResponse,
 };
 use atman_runtime::auth_store::StoredProvider;
 use atman_runtime::oauth::{OAuthProvider, TokenResult};
@@ -178,6 +179,65 @@ pub fn switch_default_model(
         .update_alias(Some("smart"), "smart", &model)?;
     lifecycle.config_hub().migrate_and_reload_models()?;
     Ok(SwitchDefaultModelResponse { model })
+}
+
+pub async fn probe(request: ProbeProviderRequest) -> ProbeResponse {
+    let reasoning_format = match request.reasoning_format {
+        Some(value) if !value.trim().is_empty() => match value.parse() {
+            Ok(format) => Some(format),
+            Err(error) => {
+                return ProbeResponse {
+                    message: error,
+                    ok: false,
+                };
+            }
+        },
+        _ => None,
+    };
+    let entry = atman_runtime::model_registry::ProviderEntry {
+        name: request.name.clone(),
+        kind: request.kind,
+        api_key: request.api_key,
+        api_key_env: request.api_key_env,
+        base_url: request.base_url,
+        max_tokens: request.max_tokens,
+        reasoning_format,
+        prompt_cache_key: request.prompt_cache_key,
+        enabled: Some(request.enabled),
+    };
+    let provider =
+        match atman_runtime::config_provider::build_config_provider(&request.name, &entry) {
+            Ok(provider) => provider,
+            Err(availability) => {
+                let reason = match availability {
+                atman_runtime::config_provider::ConfigProviderAvailability::Disabled => {
+                    "is disabled"
+                }
+                atman_runtime::config_provider::ConfigProviderAvailability::MissingCredential => {
+                    "has no available credential"
+                }
+                atman_runtime::config_provider::ConfigProviderAvailability::UnsupportedKind => {
+                    "uses an unsupported provider kind"
+                }
+                _ => "is unavailable",
+            };
+                return ProbeResponse {
+                    message: format!("\"{}\" {reason}", request.name),
+                    ok: false,
+                };
+            }
+        };
+    match tokio::time::timeout(Duration::from_secs(15), provider.test_connection()).await {
+        Ok(Ok(message)) => ProbeResponse { message, ok: true },
+        Ok(Err(message)) => ProbeResponse {
+            message: format!("\"{}\" {message}", request.name),
+            ok: false,
+        },
+        Err(_) => ProbeResponse {
+            message: format!("\"{}\" timed out after 15s", request.name),
+            ok: false,
+        },
+    }
 }
 
 fn catalog_delta(delta: atman_runtime::model_registry::CatalogDelta) -> CatalogDelta {

@@ -370,24 +370,75 @@ async fn run_session(
                     });
                 }
                 TuiControl::TestProvider { name, entry } => {
-                    let result = crate::test_provider_endpoint(&name, &entry).await;
+                    let result = control_client
+                        .probe_provider(atman_proto::ProbeProviderRequest {
+                            name,
+                            kind: entry.kind,
+                            api_key: entry.api_key,
+                            api_key_env: entry.api_key_env,
+                            base_url: entry.base_url,
+                            max_tokens: entry.max_tokens,
+                            reasoning_format: entry
+                                .reasoning_format
+                                .map(|format| format.to_string()),
+                            prompt_cache_key: entry.prompt_cache_key,
+                            enabled: entry.enabled.unwrap_or(true),
+                        })
+                        .await
+                        .map(|response| (response.message, response.ok))
+                        .unwrap_or_else(|error| (error.to_string(), false));
                     let _ = command_tx.send(TuiCommand::ProviderTestResult(result));
                 }
                 TuiControl::McpTest { name } => {
-                    let (message, ok) = test_mcp(&name).await;
+                    let (message, ok) = control_client
+                        .probe_mcp(name.clone())
+                        .await
+                        .map(|response| (response.message, response.ok))
+                        .unwrap_or_else(|error| (error.to_string(), false));
                     let _ = command_tx.send(TuiCommand::McpTestResult { name, message, ok });
                 }
                 TuiControl::McpListResources { name } => {
-                    let resources = match connect_mcp(&name).await {
-                        Ok(client) => client.list_resources().await.unwrap_or_default(),
-                        Err(_) => Vec::new(),
+                    let resources = match control_client.list_mcp_resources(name.clone()).await {
+                        Ok(response) => response
+                            .resources
+                            .into_iter()
+                            .map(|resource| atman_runtime::mcp::McpResource {
+                                uri: resource.uri,
+                                name: resource.name,
+                                description: resource.description,
+                                mime_type: resource.mime_type,
+                            })
+                            .collect(),
+                        Err(error) => {
+                            let _ = control_note_tx.send(TuiNote::Error(error.to_string()));
+                            Vec::new()
+                        }
                     };
                     let _ = command_tx.send(TuiCommand::McpResourcesResult { name, resources });
                 }
                 TuiControl::McpListPrompts { name } => {
-                    let prompts = match connect_mcp(&name).await {
-                        Ok(client) => client.list_prompts().await.unwrap_or_default(),
-                        Err(_) => Vec::new(),
+                    let prompts = match control_client.list_mcp_prompts(name.clone()).await {
+                        Ok(response) => response
+                            .prompts
+                            .into_iter()
+                            .map(|prompt| atman_runtime::mcp::McpPrompt {
+                                name: prompt.name,
+                                description: prompt.description,
+                                arguments: prompt
+                                    .arguments
+                                    .into_iter()
+                                    .map(|argument| atman_runtime::mcp::McpPromptArg {
+                                        name: argument.name,
+                                        description: argument.description,
+                                        required: argument.required,
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                        Err(error) => {
+                            let _ = control_note_tx.send(TuiNote::Error(error.to_string()));
+                            Vec::new()
+                        }
                     };
                     let _ = command_tx.send(TuiCommand::McpPromptsResult { name, prompts });
                 }
@@ -929,54 +980,6 @@ fn runtime_catalog_delta(
         updated: delta.updated,
         removed: delta.removed,
         total: delta.total,
-    }
-}
-
-async fn test_mcp(name: &str) -> (String, bool) {
-    let Some(config) = crate::load_mcp_configs()
-        .into_iter()
-        .find(|config| config.name == name)
-    else {
-        return ("not found in config".into(), false);
-    };
-    let registry = atman_runtime::ToolRegistry::new();
-    let mut results = atman_runtime::mcp::register_from_configs(&registry, &[config]).await;
-    match results.pop() {
-        Some(Ok(status)) => (format!("{} tools discovered", status.tool_count), true),
-        Some(Err(error)) => (error.error.to_string(), false),
-        None => ("MCP probe returned no result".into(), false),
-    }
-}
-
-async fn connect_mcp(name: &str) -> Result<atman_runtime::mcp::McpClient> {
-    let config = crate::load_mcp_configs()
-        .into_iter()
-        .find(|config| config.name == name)
-        .with_context(|| format!("MCP server `{name}` is not configured"))?;
-    match config.transport {
-        atman_runtime::mcp::TransportKind::Stdio => atman_runtime::mcp::McpClient::connect_stdio(
-            &config.name,
-            &config.command,
-            &config.args,
-            &config.env,
-            config.timeout_ms,
-        )
-        .await
-        .map_err(anyhow::Error::from),
-        _ => {
-            let url = config
-                .url
-                .as_deref()
-                .with_context(|| format!("MCP server `{name}` requires a URL"))?;
-            atman_runtime::mcp::McpClient::connect_http(
-                &config.name,
-                url,
-                config.auth_token,
-                config.timeout_ms,
-            )
-            .await
-            .map_err(anyhow::Error::from)
-        }
     }
 }
 

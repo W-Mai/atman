@@ -21,6 +21,11 @@ export type AtmanDaemonProtocolPayloads =
   | UpsertModelConfigResponse
   | SwitchDefaultModelRequest
   | SwitchDefaultModelResponse
+  | ProbeProviderRequest
+  | ProbeResponse
+  | McpServerRequest
+  | ListMcpResourcesResponse
+  | ListMcpPromptsResponse
   | SendMessageRequest
   | SendMessageResponse
   | InterjectSessionRequest
@@ -1411,6 +1416,54 @@ export interface SwitchDefaultModelRequest {
 }
 export interface SwitchDefaultModelResponse {
   model: string
+  [k: string]: unknown
+}
+export interface ProbeProviderRequest {
+  api_key?: string | null
+  api_key_env?: string | null
+  base_url?: string | null
+  enabled: boolean
+  kind: string
+  max_tokens?: number | null
+  name: string
+  prompt_cache_key?: boolean | null
+  reasoning_format?: string | null
+  [k: string]: unknown
+}
+export interface ProbeResponse {
+  message: string
+  ok: boolean
+  [k: string]: unknown
+}
+export interface McpServerRequest {
+  name: string
+  [k: string]: unknown
+}
+export interface ListMcpResourcesResponse {
+  resources: McpResource[]
+  [k: string]: unknown
+}
+export interface McpResource {
+  description?: string | null
+  mime_type?: string | null
+  name: string
+  uri: string
+  [k: string]: unknown
+}
+export interface ListMcpPromptsResponse {
+  prompts: McpPrompt[]
+  [k: string]: unknown
+}
+export interface McpPrompt {
+  arguments: McpPromptArg[]
+  description?: string | null
+  name: string
+  [k: string]: unknown
+}
+export interface McpPromptArg {
+  description?: string | null
+  name: string
+  required: boolean
   [k: string]: unknown
 }
 export interface SendMessageRequest {

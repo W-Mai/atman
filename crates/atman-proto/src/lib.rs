@@ -325,6 +325,10 @@ pub mod methods {
     pub const MUTATE_PROVIDER: &str = "config.provider.mutate";
     pub const UPSERT_MODEL_CONFIG: &str = "config.model.upsert";
     pub const SWITCH_DEFAULT_MODEL: &str = "config.model.switch_default";
+    pub const PROBE_PROVIDER: &str = "config.provider.probe";
+    pub const PROBE_MCP: &str = "mcp.probe";
+    pub const LIST_MCP_RESOURCES: &str = "mcp.resources";
+    pub const LIST_MCP_PROMPTS: &str = "mcp.prompts";
     pub const SEND_MESSAGE: &str = "session.send_message";
     pub const INTERJECT_SESSION: &str = "session.interject";
     pub const UPDATE_SESSION_TRUST: &str = "session.update_trust";
@@ -367,6 +371,10 @@ pub mod methods {
         super::method_descriptor::<super::rpc::MutateProvider>(),
         super::method_descriptor::<super::rpc::UpsertModelConfig>(),
         super::method_descriptor::<super::rpc::SwitchDefaultModel>(),
+        super::method_descriptor::<super::rpc::ProbeProvider>(),
+        super::method_descriptor::<super::rpc::ProbeMcp>(),
+        super::method_descriptor::<super::rpc::ListMcpResources>(),
+        super::method_descriptor::<super::rpc::ListMcpPrompts>(),
         super::method_descriptor::<super::rpc::SendMessage>(),
         super::method_descriptor::<super::rpc::InterjectSession>(),
         super::method_descriptor::<super::rpc::UpdateSessionTrust>(),
@@ -719,6 +727,72 @@ pub struct SwitchDefaultModelRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct SwitchDefaultModelResponse {
     pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProbeProviderRequest {
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<bool>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ProbeResponse {
+    pub message: String,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct McpServerRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpResource {
+    pub uri: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpPromptArg {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub arguments: Vec<McpPromptArg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ListMcpResourcesResponse {
+    pub resources: Vec<McpResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct ListMcpPromptsResponse {
+    pub prompts: Vec<McpPrompt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1549,6 +1623,34 @@ pub mod rpc {
         Command,
         SwitchDefaultModelRequest,
         SwitchDefaultModelResponse
+    );
+    method!(
+        ProbeProvider,
+        methods::PROBE_PROVIDER,
+        Query,
+        ProbeProviderRequest,
+        ProbeResponse
+    );
+    method!(
+        ProbeMcp,
+        methods::PROBE_MCP,
+        Query,
+        McpServerRequest,
+        ProbeResponse
+    );
+    method!(
+        ListMcpResources,
+        methods::LIST_MCP_RESOURCES,
+        Query,
+        McpServerRequest,
+        ListMcpResourcesResponse
+    );
+    method!(
+        ListMcpPrompts,
+        methods::LIST_MCP_PROMPTS,
+        Query,
+        McpServerRequest,
+        ListMcpPromptsResponse
     );
     method!(
         SendMessage,

@@ -30,6 +30,8 @@ import type {
   InstallSuggestedFlowResponse,
   InterjectSessionRequest,
   InterjectSessionResponse,
+  ListMcpPromptsResponse,
+  ListMcpResourcesResponse,
   ListPermissionRequestsRequest,
   ListPermissionRequestsResponse,
   ListProjectsRequest,
@@ -38,10 +40,13 @@ import type {
   ListResourcesResponse,
   ListSessionsRequest,
   ListSessionsResult,
+  McpServerRequest,
   MoveSessionRequest,
   MoveSessionResponse,
   MutateProviderRequest,
   PingResponse,
+  ProbeProviderRequest,
+  ProbeResponse,
   ProviderMutationResult,
   ReleaseResourceRequest,
   ReleaseResourceResponse,
@@ -150,6 +155,30 @@ export interface RpcMethodMap {
     revision: 1
     params: SwitchDefaultModelRequest
     result: SwitchDefaultModelResponse
+  }
+  'config.provider.probe': {
+    kind: 'query'
+    revision: 1
+    params: ProbeProviderRequest
+    result: ProbeResponse
+  }
+  'mcp.probe': {
+    kind: 'query'
+    revision: 1
+    params: McpServerRequest
+    result: ProbeResponse
+  }
+  'mcp.resources': {
+    kind: 'query'
+    revision: 1
+    params: McpServerRequest
+    result: ListMcpResourcesResponse
+  }
+  'mcp.prompts': {
+    kind: 'query'
+    revision: 1
+    params: McpServerRequest
+    result: ListMcpPromptsResponse
   }
   'session.send_message': {
     kind: 'command'
@@ -360,6 +389,10 @@ export const RPC_METHODS = {
   'config.provider.mutate': { kind: 'command', revision: 1 },
   'config.model.upsert': { kind: 'command', revision: 1 },
   'config.model.switch_default': { kind: 'command', revision: 1 },
+  'config.provider.probe': { kind: 'query', revision: 1 },
+  'mcp.probe': { kind: 'query', revision: 1 },
+  'mcp.resources': { kind: 'query', revision: 1 },
+  'mcp.prompts': { kind: 'query', revision: 1 },
   'session.send_message': { kind: 'command', revision: 1 },
   'session.interject': { kind: 'command', revision: 1 },
   'session.update_trust': { kind: 'command', revision: 1 },

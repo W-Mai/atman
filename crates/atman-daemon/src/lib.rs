@@ -140,6 +140,7 @@ pub mod config;
 mod events;
 pub mod http;
 mod idempotency;
+pub mod mcp_management;
 pub mod openapi;
 pub mod pidfile;
 pub mod project_registry;
@@ -166,6 +167,10 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::MutateProvider>(),
     method_descriptor::<rpc::UpsertModelConfig>(),
     method_descriptor::<rpc::SwitchDefaultModel>(),
+    method_descriptor::<rpc::ProbeProvider>(),
+    method_descriptor::<rpc::ProbeMcp>(),
+    method_descriptor::<rpc::ListMcpResources>(),
+    method_descriptor::<rpc::ListMcpPrompts>(),
     method_descriptor::<rpc::SendMessage>(),
     method_descriptor::<rpc::InterjectSession>(),
     method_descriptor::<rpc::UpdateSessionTrust>(),
@@ -541,6 +546,63 @@ async fn dispatch_as_inner(
                 Err(error) => JsonRpcResponse::err(id, error),
             }
         }
+        methods::PROBE_PROVIDER => match parse_params::<rpc::ProbeProvider>(req.params) {
+            Ok(params) => method_response::<rpc::ProbeProvider>(
+                id,
+                crate::provider_config::probe(params).await,
+            ),
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::PROBE_MCP => match parse_params::<rpc::ProbeMcp>(req.params) {
+            Ok(params) => match state.launcher() {
+                Some(launcher) => match crate::mcp_management::probe(&launcher, &params.name).await
+                {
+                    Ok(response) => method_response::<rpc::ProbeMcp>(id, response),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                None => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                ),
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::LIST_MCP_RESOURCES => match parse_params::<rpc::ListMcpResources>(req.params) {
+            Ok(params) => match state.launcher() {
+                Some(launcher) => {
+                    match crate::mcp_management::list_resources(&launcher, &params.name).await {
+                        Ok(response) => method_response::<rpc::ListMcpResources>(id, response),
+                        Err(error) => {
+                            JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                        }
+                    }
+                }
+                None => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                ),
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
+        methods::LIST_MCP_PROMPTS => match parse_params::<rpc::ListMcpPrompts>(req.params) {
+            Ok(params) => match state.launcher() {
+                Some(launcher) => {
+                    match crate::mcp_management::list_prompts(&launcher, &params.name).await {
+                        Ok(response) => method_response::<rpc::ListMcpPrompts>(id, response),
+                        Err(error) => {
+                            JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                        }
+                    }
+                }
+                None => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::application("daemon started without a run launcher"),
+                ),
+            },
+            Err(error) => JsonRpcResponse::err(id, error),
+        },
         methods::LIST_SESSIONS => match parse_params::<rpc::ListSessions>(req.params) {
             Ok(ListSessionsRequest {
                 project_root,

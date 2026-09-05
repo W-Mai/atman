@@ -3968,40 +3968,6 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn test_provider_endpoint(
-    name: &str,
-    entry: &atman_runtime::model_registry::ProviderEntry,
-) -> (String, bool) {
-    let provider = match atman_runtime::config_provider::build_config_provider(name, entry) {
-        Ok(provider) => provider,
-        Err(availability) => {
-            let reason = match availability {
-                atman_runtime::config_provider::ConfigProviderAvailability::Disabled => {
-                    "is disabled"
-                }
-                atman_runtime::config_provider::ConfigProviderAvailability::MissingCredential => {
-                    "has no available credential"
-                }
-                atman_runtime::config_provider::ConfigProviderAvailability::UnsupportedKind => {
-                    "uses an unsupported provider kind"
-                }
-                _ => "is unavailable",
-            };
-            return (format!("\"{name}\" {reason}"), false);
-        }
-    };
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        provider.test_connection(),
-    )
-    .await
-    {
-        Ok(Ok(msg)) => (msg, true),
-        Ok(Err(msg)) => (format!("\"{name}\" {msg}"), false),
-        Err(_) => (format!("\"{name}\" timed out after 15s"), false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -64,6 +64,21 @@
       "$ref": "#/$defs/SwitchDefaultModelResponse"
     },
     {
+      "$ref": "#/$defs/ProbeProviderRequest"
+    },
+    {
+      "$ref": "#/$defs/ProbeResponse"
+    },
+    {
+      "$ref": "#/$defs/McpServerRequest"
+    },
+    {
+      "$ref": "#/$defs/ListMcpResourcesResponse"
+    },
+    {
+      "$ref": "#/$defs/ListMcpPromptsResponse"
+    },
+    {
       "$ref": "#/$defs/SendMessageRequest"
     },
     {
@@ -2574,6 +2589,34 @@
         "result": {}
       }
     },
+    "ListMcpPromptsResponse": {
+      "type": "object",
+      "required": [
+        "prompts"
+      ],
+      "properties": {
+        "prompts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpPrompt"
+          }
+        }
+      }
+    },
+    "ListMcpResourcesResponse": {
+      "type": "object",
+      "required": [
+        "resources"
+      ],
+      "properties": {
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpResource"
+          }
+        }
+      }
+    },
     "ListPermissionRequestsRequest": {
       "type": "object",
       "required": [
@@ -2846,6 +2889,78 @@
         }
       }
     },
+    "McpPrompt": {
+      "type": "object",
+      "required": [
+        "name",
+        "arguments"
+      ],
+      "properties": {
+        "arguments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpPromptArg"
+          }
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "McpPromptArg": {
+      "type": "object",
+      "required": [
+        "name",
+        "required"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "McpResource": {
+      "type": "object",
+      "required": [
+        "uri",
+        "name"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        }
+      }
+    },
     "McpServerProjection": {
       "type": "object",
       "required": [
@@ -2862,6 +2977,17 @@
         },
         "transport": {
           "$ref": "#/$defs/McpTransportProjection"
+        }
+      }
+    },
+    "McpServerRequest": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
         }
       }
     },
@@ -3802,6 +3928,78 @@
         },
         "text": {
           "type": "string"
+        }
+      }
+    },
+    "ProbeProviderRequest": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "enabled"
+      ],
+      "properties": {
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "api_key_env": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt_cache_key": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reasoning_format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ProbeResponse": {
+      "type": "object",
+      "required": [
+        "message",
+        "ok"
+      ],
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
         }
       }
     },

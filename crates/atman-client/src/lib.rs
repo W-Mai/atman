@@ -15,11 +15,13 @@ use atman_proto::{
     CreateSessionRequest, DeleteSessionRequest, DeleteSessionResponse, EventCursor,
     GetEventsRequest, GetEventsResponse, ImportSessionMessagesRequest,
     ImportSessionMessagesResponse, ImportedMessage, JsonRpcRequest, JsonRpcResponse,
-    ListProjectsRequest, ListProjectsResponse, ListSessionsRequest, MutateProviderRequest,
-    PROTOCOL_VERSION, ProjectionEventEnvelope, ProviderMutation, ProviderMutationResult, RequestId,
-    RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse, SanitizeSessionAttachmentsRequest,
-    SanitizeSessionAttachmentsResponse, SessionId, SessionSummary, SwitchDefaultModelRequest,
-    SwitchDefaultModelResponse, UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
+    ListMcpPromptsResponse, ListMcpResourcesResponse, ListProjectsRequest, ListProjectsResponse,
+    ListSessionsRequest, McpServerRequest, MutateProviderRequest, PROTOCOL_VERSION,
+    ProbeProviderRequest, ProbeResponse, ProjectionEventEnvelope, ProviderMutation,
+    ProviderMutationResult, RequestId, RpcKind, RpcMethod, RunFlowRequest, RunFlowResponse,
+    SanitizeSessionAttachmentsRequest, SanitizeSessionAttachmentsResponse, SessionId,
+    SessionSummary, SwitchDefaultModelRequest, SwitchDefaultModelResponse,
+    UpsertModelConfigRequest, UpsertModelConfigResponse, rpc,
 };
 use futures::{future::BoxFuture, stream::BoxStream};
 
@@ -345,6 +347,34 @@ impl Client {
             model: model.into(),
         })
         .await
+    }
+
+    pub async fn probe_provider(
+        &self,
+        request: ProbeProviderRequest,
+    ) -> Result<ProbeResponse, ClientError> {
+        self.call::<rpc::ProbeProvider>(&request).await
+    }
+
+    pub async fn probe_mcp(&self, name: impl Into<String>) -> Result<ProbeResponse, ClientError> {
+        self.call::<rpc::ProbeMcp>(&McpServerRequest { name: name.into() })
+            .await
+    }
+
+    pub async fn list_mcp_resources(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<ListMcpResourcesResponse, ClientError> {
+        self.call::<rpc::ListMcpResources>(&McpServerRequest { name: name.into() })
+            .await
+    }
+
+    pub async fn list_mcp_prompts(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<ListMcpPromptsResponse, ClientError> {
+        self.call::<rpc::ListMcpPrompts>(&McpServerRequest { name: name.into() })
+            .await
     }
 
     pub async fn run_flow(
