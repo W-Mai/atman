@@ -303,6 +303,8 @@ atman migrate list | import [--from opencode|kiro]
 atman doctor [--fix]
 ```
 
+`atman run` starts or reuses the local daemon, submits the selected flow, and waits for its durable terminal result. `--mock` and `--ephemeral` are explicit embedded execution modes.
+
 REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:attach`, …
 
 ## Configuration

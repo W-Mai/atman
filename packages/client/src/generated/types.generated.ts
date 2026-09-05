@@ -1360,6 +1360,7 @@ export interface StartRunRequest {
   args?: {
     [k: string]: unknown
   }
+  flow_name?: string | null
   flow_path: string
   images?: InlineImage[]
   reasoning?: string | null
@@ -1378,8 +1379,10 @@ export interface RunFlowRequest {
   args?: {
     [k: string]: unknown
   }
+  flow_name?: string | null
   flow_path: string
   images?: InlineImage[]
+  project_root?: string | null
   reasoning?: string | null
   request_id?: null | RequestId
   [k: string]: unknown

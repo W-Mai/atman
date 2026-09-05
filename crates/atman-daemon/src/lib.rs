@@ -1213,6 +1213,7 @@ pub async fn dispatch_as(
                                     crate::run::RunOptions {
                                         reasoning: operation_params.reasoning,
                                         images: operation_params.images,
+                                        flow_name: operation_params.flow_name,
                                         ..Default::default()
                                     },
                                 )
@@ -1267,6 +1268,8 @@ pub async fn dispatch_as(
                                     crate::run::RunOptions {
                                         reasoning: operation_params.reasoning,
                                         images: operation_params.images,
+                                        flow_name: operation_params.flow_name,
+                                        project_root: operation_params.project_root,
                                         ..Default::default()
                                     },
                                 )

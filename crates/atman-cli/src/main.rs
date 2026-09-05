@@ -477,24 +477,12 @@ async fn cmd_daemon_run(
         std::env::current_dir()?.join(&file)
     };
 
-    let images = images
-        .into_iter()
-        .map(|path| {
-            let source = atman_runtime::attachment_store::AttachmentStore::at("")
-                .import_path(&path)
-                .with_context(|| format!("reading image {}", path.display()))?;
-            Ok(atman_proto::InlineImage {
-                data_base64: atman_runtime::attachment_store::image_base64(&source, None)?,
-                name: path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_owned),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let images = inline_images(images)?;
     let run = client
         .run_flow(
             abs.to_string_lossy().into_owned(),
+            None,
+            Some(std::env::current_dir()?.to_string_lossy().into_owned()),
             serde_json::Map::new(),
             reasoning,
             images,
@@ -511,6 +499,24 @@ async fn cmd_daemon_run(
     Ok(())
 }
 
+fn inline_images(images: Vec<PathBuf>) -> Result<Vec<atman_proto::InlineImage>> {
+    images
+        .into_iter()
+        .map(|path| {
+            let source = atman_runtime::attachment_store::AttachmentStore::at("")
+                .import_path(&path)
+                .with_context(|| format!("reading image {}", path.display()))?;
+            Ok(atman_proto::InlineImage {
+                data_base64: atman_runtime::attachment_store::image_base64(&source, None)?,
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
 async fn follow_daemon_run(
     client: &atman_client::Client,
     run: &atman_proto::RunFlowResponse,
@@ -521,7 +527,7 @@ async fn follow_daemon_run(
         .attach_session(run.session_id.clone())
         .await
         .context("attach daemon session for follow")?;
-    if run_projection_finished(&session.current().projection().runs, &run.run_id) {
+    if terminal_run_projection(&session.current().projection().runs, &run.run_id).is_some() {
         return Ok(());
     }
     let Some(mut events) = client
@@ -534,7 +540,7 @@ async fn follow_daemon_run(
         let event = event?;
         println!("{}", serde_json::to_string(&event)?);
         session.apply_event(event).await?;
-        if run_projection_finished(&session.current().projection().runs, &run.run_id) {
+        if terminal_run_projection(&session.current().projection().runs, &run.run_id).is_some() {
             return Ok(());
         }
     }
@@ -544,11 +550,11 @@ async fn follow_daemon_run(
     )
 }
 
-fn run_projection_finished(
-    runs: &[atman_proto::RunProjection],
+fn terminal_run_projection<'a>(
+    runs: &'a [atman_proto::RunProjection],
     run_id: &atman_proto::FlowRunId,
-) -> bool {
-    runs.iter().any(|run| {
+) -> Option<&'a atman_proto::RunProjection> {
+    runs.iter().find(|run| {
         &run.id == run_id
             && matches!(
                 run.state,
@@ -558,6 +564,30 @@ fn run_projection_finished(
                     | atman_proto::RunLifecycle::Lost
             )
     })
+}
+
+async fn wait_daemon_run(
+    client: &atman_client::Client,
+    run: &atman_proto::RunFlowResponse,
+) -> Result<atman_proto::RunProjection> {
+    let session = client
+        .attach_session(run.session_id.clone())
+        .await
+        .context("attach daemon session for run")?;
+    loop {
+        if let Some(projection) =
+            terminal_run_projection(&session.current().projection().runs, &run.run_id)
+        {
+            return Ok(projection.clone());
+        }
+        session
+            .refresh_until_current()
+            .await
+            .context("refresh daemon run state")?;
+        if terminal_run_projection(&session.current().projection().runs, &run.run_id).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 }
 
 async fn cmd_daemon_start() -> Result<()> {
@@ -688,6 +718,56 @@ async fn cmd_run(
     };
 
     let args = parse_args(&raw_args)?;
+    let target_flow = parsed
+        .flows
+        .iter()
+        .find(|flow| flow.name.name == flow_name)
+        .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", file.display()))?;
+
+    if !mock && !ephemeral {
+        if load_auto_snapshot() {
+            auto_snapshot_flows(&file, &source, &parsed);
+        }
+        let flow_path = if file.is_absolute() {
+            file
+        } else {
+            std::env::current_dir()?.join(file)
+        };
+        let args = args
+            .into_iter()
+            .map(|(name, value)| (name, value.to_json()))
+            .collect();
+        let client = daemon_tui::connect_local_daemon().await?;
+        let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
+        let run = client
+            .run_flow(
+                flow_path.to_string_lossy().into_owned(),
+                Some(flow_name),
+                Some(project_root),
+                args,
+                reasoning,
+                inline_images(images)?,
+            )
+            .await
+            .context("start daemon flow")?;
+        let completed = wait_daemon_run(&client, &run).await?;
+        return match completed.state {
+            atman_proto::RunLifecycle::Succeeded => {
+                println!("{}", completed.output.unwrap_or_default());
+                Ok(())
+            }
+            atman_proto::RunLifecycle::Failed => {
+                bail!(
+                    "flow error: {}",
+                    completed.error.as_deref().unwrap_or("unknown error")
+                )
+            }
+            atman_proto::RunLifecycle::Cancelled => bail!("flow cancelled"),
+            atman_proto::RunLifecycle::Lost => bail!("flow lost after daemon restart"),
+            _ => unreachable!("wait_daemon_run returned a non-terminal run"),
+        };
+    }
+
     let invocation_env = match reasoning {
         Some(value) => {
             let selection: atman_runtime::provider::ReasoningSelection = value
@@ -750,11 +830,6 @@ async fn cmd_run(
         },
     ));
 
-    let target_flow = parsed
-        .flows
-        .iter()
-        .find(|f| f.name.name == flow_name)
-        .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", file.display()))?;
     if let Err(errs) = atman_runtime::validate::validate(target_flow, &executor.tools) {
         for e in &errs {
             atman_runtime::notify!(warn, "validation: {e}");
@@ -7192,20 +7267,20 @@ mod tests {
             atman_proto::RunLifecycle::Lost,
         ] {
             let runs = vec![run_projection(target.clone(), state)];
-            assert!(run_projection_finished(&runs, &target));
+            assert!(terminal_run_projection(&runs, &target).is_some());
         }
 
         let running = vec![run_projection(
             target.clone(),
             atman_proto::RunLifecycle::Running,
         )];
-        assert!(!run_projection_finished(&running, &target));
+        assert!(terminal_run_projection(&running, &target).is_none());
 
         let other = vec![run_projection(
             atman_proto::FlowRunId(uuid::Uuid::now_v7()),
             atman_proto::RunLifecycle::Succeeded,
         )];
-        assert!(!run_projection_finished(&other, &target));
+        assert!(terminal_run_projection(&other, &target).is_none());
     }
 
     async fn panic_provider_mutation() -> Result<atman_tui::ProviderMutationSuccess> {

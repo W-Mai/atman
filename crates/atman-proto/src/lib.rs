@@ -832,6 +832,10 @@ pub struct RunFlowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
     pub flow_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
     #[serde(default)]
     #[schema(value_type = Object)]
     pub args: serde_json::Map<String, serde_json::Value>,
@@ -862,6 +866,8 @@ pub struct StartRunRequest {
     pub request_id: Option<RequestId>,
     pub session_id: SessionId,
     pub flow_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_name: Option<String>,
     #[serde(default)]
     #[schema(value_type = Object)]
     pub args: serde_json::Map<String, serde_json::Value>,
@@ -1459,6 +1465,8 @@ mod tests {
         let s = r#"{"flow_path":"examples/hello.at"}"#;
         let req: RunFlowRequest = serde_json::from_str(s).unwrap();
         assert_eq!(req.flow_path, "examples/hello.at");
+        assert!(req.flow_name.is_none());
+        assert!(req.project_root.is_none());
         assert!(req.request_id.is_none());
         assert!(req.args.is_empty());
         assert!(req.reasoning.is_none());

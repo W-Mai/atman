@@ -72,6 +72,8 @@ impl ProviderCatalogRefreshDispatcher {
 pub struct RunOptions {
     pub reasoning: Option<String>,
     pub images: Vec<atman_proto::InlineImage>,
+    pub flow_name: Option<String>,
+    pub project_root: Option<String>,
     pub prepared_flow: Option<PreparedFlow>,
     pub turn: Option<RunTurn>,
 }
@@ -118,6 +120,7 @@ fn prepare_flow(
     path: &Path,
     config_dir: Option<&Path>,
     prepared: Option<PreparedFlow>,
+    requested_flow_name: Option<String>,
 ) -> Result<PreparedFlow> {
     if path_is_managed_agent_at(path, config_dir)
         && let Some(dir) = config_dir
@@ -126,17 +129,29 @@ fn prepare_flow(
     }
     std::fs::metadata(path).with_context(|| format!("stat flow {}", path.display()))?;
     let prepared = match prepared {
-        Some(prepared) => prepared,
+        Some(prepared) => {
+            if let Some(requested) = requested_flow_name {
+                anyhow::ensure!(
+                    requested == prepared.flow_name,
+                    "prepared flow `{}` does not match requested flow `{requested}`",
+                    prepared.flow_name
+                );
+            }
+            prepared
+        }
         None => {
             let source = std::fs::read_to_string(path)
                 .with_context(|| format!("reading flow {}", path.display()))?;
             let file = atman_dsl::parse::parse_file(&source)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            let flow_name = file
-                .flows
-                .first()
-                .map(|flow| flow.name.name.clone())
-                .ok_or_else(|| anyhow::anyhow!("{} contains no flows", path.display()))?;
+            let flow_name = match requested_flow_name {
+                Some(flow_name) => flow_name,
+                None => file
+                    .flows
+                    .first()
+                    .map(|flow| flow.name.name.clone())
+                    .ok_or_else(|| anyhow::anyhow!("{} contains no flows", path.display()))?,
+            };
             PreparedFlow { file, flow_name }
         }
     };
@@ -686,7 +701,9 @@ impl RunLauncher {
         owner_principal: &str,
         options: RunOptions,
     ) -> Result<SpawnedRun> {
-        let project_root = self.resolve_project(&state, None)?.root;
+        let project_root = self
+            .resolve_project(&state, options.project_root.as_deref())?
+            .root;
         let (session, scope_root) = self.open_new_session(&state, &project_root)?;
         self.spawn_session_as_with_options(
             state,
@@ -799,6 +816,8 @@ impl RunLauncher {
             RunOptions {
                 reasoning,
                 images,
+                flow_name: None,
+                project_root: None,
                 prepared_flow: Some(PreparedFlow {
                     file: resolved.file,
                     flow_name: resolved.flow_name,
@@ -828,10 +847,13 @@ impl RunLauncher {
         let RunOptions {
             reasoning,
             images,
+            flow_name,
+            project_root: _,
             prepared_flow,
             turn,
         } = options;
-        let prepared_flow = prepare_flow(&path, self.config_dir.as_deref(), prepared_flow)?;
+        let prepared_flow =
+            prepare_flow(&path, self.config_dir.as_deref(), prepared_flow, flow_name)?;
         let invocation_env = invocation_env_from_reasoning(reasoning)?;
 
         reload_model_config(self.config_dir.as_deref());

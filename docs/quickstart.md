@@ -217,6 +217,8 @@ atman run ~/.config/atman/commands/hello.at
 atman flow versions hello
 ```
 
+Normal `atman run` commands start or reuse the local daemon and wait for the durable flow result. Use `--mock` for offline provider fixtures or `--ephemeral` when the run must stay embedded and avoid persistent session storage.
+
 Snapshots live in `<project>/.atman/flow-registry.db`. When you edit a flow and it starts misbehaving:
 
 ```bash

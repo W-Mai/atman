@@ -120,6 +120,7 @@ async fn start_run(
     session
         .start_run(
             flow_path.to_string_lossy().into_owned(),
+            None,
             serde_json::Map::new(),
             None,
             Vec::new(),

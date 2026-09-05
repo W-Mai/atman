@@ -75,6 +75,7 @@ export interface MessageOptions extends TransportRequestOptions {
 
 export interface StartRunOptions extends MessageOptions {
   args?: Readonly<Record<string, unknown>>
+  flowName?: string
 }
 
 export interface InterjectOptions extends TransportRequestOptions {
@@ -199,6 +200,7 @@ export class SessionClient {
         request_id: crypto.randomUUID(),
         session_id: this.#sessionId,
         flow_path: flowPath,
+        ...(options.flowName !== undefined ? { flow_name: options.flowName } : {}),
         ...(options.args ? { args: { ...options.args } } : {}),
         ...(options.reasoning !== undefined ? { reasoning: options.reasoning } : {}),
         ...(options.images ? { images: [...options.images] } : {}),

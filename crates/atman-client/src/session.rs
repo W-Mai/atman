@@ -474,6 +474,7 @@ impl SessionClient {
     pub async fn start_run(
         &self,
         flow_path: impl Into<String>,
+        flow_name: Option<String>,
         args: serde_json::Map<String, serde_json::Value>,
         reasoning: Option<String>,
         images: Vec<InlineImage>,
@@ -484,6 +485,7 @@ impl SessionClient {
                 request_id: Some(RequestId::now()),
                 session_id: self.session_id.clone(),
                 flow_path: flow_path.into(),
+                flow_name,
                 args,
                 reasoning,
                 images,
@@ -2310,7 +2312,7 @@ mod tests {
         );
 
         let started = session
-            .start_run("agent.at", serde_json::Map::new(), None, Vec::new())
+            .start_run("agent.at", None, serde_json::Map::new(), None, Vec::new())
             .await
             .unwrap();
         assert_eq!(started.session_id, *session.session_id());

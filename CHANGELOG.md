@@ -42,6 +42,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Daemon-backed flow CLI** — normal `atman run` invocations execute through the local daemon, wait on durable run projections, preserve selected flow names, arguments, images, reasoning effort, output, and terminal failures, while explicit mock and ephemeral runs remain embedded.
+
 - **Durable flow results** — successful flow returns are recorded on terminal run events and retained in daemon projections so detached clients can recover the same textual result after reconnecting.
 
 - **Daemon-backed event CLI** — log tailing and cost reports query durable event pages through the Rust client, and log follow mode streams newly committed events instead of stopping after the initial tail.

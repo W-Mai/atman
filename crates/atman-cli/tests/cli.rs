@@ -21,10 +21,16 @@ fn version_subcommand_prints_semver() {
 #[test]
 fn run_executes_pure_flow_and_prints_return_value() {
     let dir = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let _daemon = spawn_test_daemon(data.path());
     let flow_path = dir.path().join("hello.at");
     std::fs::write(
         &flow_path,
-        r#"flow greet(who: string) -> string {
+        r#"flow unused() -> string {
+    return "wrong"
+}
+
+flow greet(who: string) -> string {
     return "hi " + who
 }
 "#,
@@ -33,7 +39,9 @@ fn run_executes_pure_flow_and_prints_return_value() {
     let out = Command::new(atman_binary())
         .arg("run")
         .arg(&flow_path)
+        .args(["--flow", "greet"])
         .arg("who=atman")
+        .env("ATMAN_DATA_DIR", data.path())
         .output()
         .expect("run atman run");
     assert!(
@@ -58,6 +66,8 @@ fn run_persists_events_and_logs_tail_reads_them() {
     )
     .unwrap();
 
+    let _daemon = spawn_test_daemon(data.path());
+
     let run = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
@@ -78,8 +88,6 @@ fn run_persists_events_and_logs_tail_reads_them() {
         .collect();
     assert_eq!(dirs.len(), 1);
     let sid = dirs[0].file_name().into_string().unwrap();
-
-    let _daemon = spawn_test_daemon(data.path());
 
     let tail = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -111,6 +119,7 @@ fn session_list_prints_rows_sorted_by_mtime() {
     let flow_dir = tempfile::tempdir().unwrap();
     let flow_path = flow_dir.path().join("s.at");
     std::fs::write(&flow_path, "flow s() -> Int { return 1 }\n").unwrap();
+    let _daemon = spawn_test_daemon(data.path());
 
     for _ in 0..2 {
         Command::new(atman_binary())
@@ -121,8 +130,6 @@ fn session_list_prints_rows_sorted_by_mtime() {
             .output()
             .unwrap();
     }
-
-    let _daemon = spawn_test_daemon(data.path());
 
     let out = Command::new(atman_binary())
         .current_dir(flow_dir.path())
@@ -143,6 +150,7 @@ fn session_show_prints_event_counts() {
     let flow_dir = tempfile::tempdir().unwrap();
     let flow_path = flow_dir.path().join("s.at");
     std::fs::write(&flow_path, "flow s() -> Int { return 1 }\n").unwrap();
+    let _daemon = spawn_test_daemon(data.path());
     Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
         .arg("run")
@@ -158,8 +166,6 @@ fn session_show_prints_event_counts() {
         .file_name()
         .into_string()
         .unwrap();
-
-    let _daemon = spawn_test_daemon(data.path());
 
     let out = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -517,6 +523,7 @@ fn logs_tail_without_session_id_uses_latest() {
     let flow_dir = tempfile::tempdir().unwrap();
     let flow_path = flow_dir.path().join("hi.at");
     std::fs::write(&flow_path, "flow hi() -> Int { return 1 }\n").unwrap();
+    let _daemon = spawn_test_daemon(data.path());
 
     Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -524,8 +531,6 @@ fn logs_tail_without_session_id_uses_latest() {
         .arg(&flow_path)
         .output()
         .expect("run");
-
-    let _daemon = spawn_test_daemon(data.path());
 
     let tail = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
@@ -540,6 +545,8 @@ fn logs_tail_without_session_id_uses_latest() {
 #[test]
 fn run_reports_error_and_exits_nonzero() {
     let dir = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let _daemon = spawn_test_daemon(data.path());
     let flow_path = dir.path().join("bad.at");
     std::fs::write(
         &flow_path,
@@ -552,6 +559,7 @@ fn run_reports_error_and_exits_nonzero() {
     let out = Command::new(atman_binary())
         .arg("run")
         .arg(&flow_path)
+        .env("ATMAN_DATA_DIR", data.path())
         .output()
         .expect("run atman run");
     assert!(!out.status.success());

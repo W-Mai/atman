@@ -290,6 +290,8 @@ impl Client {
     pub async fn run_flow(
         &self,
         flow_path: impl Into<String>,
+        flow_name: Option<String>,
+        project_root: Option<String>,
         args: serde_json::Map<String, serde_json::Value>,
         reasoning: Option<String>,
         images: Vec<atman_proto::InlineImage>,
@@ -297,6 +299,8 @@ impl Client {
         self.command::<rpc::RunFlow>(&RunFlowRequest {
             request_id: Some(RequestId::now()),
             flow_path: flow_path.into(),
+            flow_name,
+            project_root,
             args,
             reasoning,
             images,
@@ -575,7 +579,14 @@ mod tests {
         .unwrap();
 
         let response = client
-            .run_flow("agent.at", serde_json::Map::new(), None, Vec::new())
+            .run_flow(
+                "agent.at",
+                None,
+                None,
+                serde_json::Map::new(),
+                None,
+                Vec::new(),
+            )
             .await
             .unwrap();
         assert_eq!(response.revision, Revision(3));

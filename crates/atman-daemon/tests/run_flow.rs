@@ -69,6 +69,8 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     state.set_launcher(launcher);
 
     let flow_path = repo_root().join("examples/hello.at");
+    let requested_project = tmp.path().join("requested-project");
+    std::fs::create_dir_all(&requested_project).unwrap();
     assert!(
         flow_path.exists(),
         "expected {} to exist",
@@ -78,6 +80,8 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     let command = atman_proto::RunFlowRequest {
         request_id: Some(atman_proto::RequestId::now()),
         flow_path: flow_path.to_string_lossy().into_owned(),
+        flow_name: None,
+        project_root: Some(requested_project.to_string_lossy().into_owned()),
         args: serde_json::Map::new(),
         reasoning: Some("high@pro".into()),
         images: vec![atman_proto::InlineImage {
@@ -105,6 +109,15 @@ async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     assert!(result.cursor.0 > 0);
     let sid_val = result.session_id.to_string();
     assert!(!sid_val.is_empty());
+    let snapshot = state
+        .session_snapshot(&result.session_id, "local-daemon")
+        .await
+        .unwrap();
+    let requested_project = std::fs::canonicalize(requested_project).unwrap();
+    assert_eq!(
+        snapshot.projection.metadata.project_root.as_deref(),
+        Some(requested_project.to_string_lossy().as_ref())
+    );
 
     let sessions_root = tmp.path().join("sessions");
     let events_path = sessions_root.join(&sid_val).join("events.jsonl");
@@ -196,6 +209,7 @@ async fn concurrent_runs_share_the_session_and_cancel_independently() {
         request_id: Some(atman_proto::RequestId::now()),
         session_id: created.projection.metadata.id.clone(),
         flow_path: flow_path.to_string_lossy().into_owned(),
+        flow_name: None,
         args: serde_json::Map::new(),
         reasoning: None,
         images: Vec::new(),
@@ -339,6 +353,7 @@ async fn interjection_targets_one_run_and_retries_without_duplication() {
                 request_id: Some(atman_proto::RequestId::now()),
                 session_id: session_id.clone(),
                 flow_path: flow_path.to_string_lossy().into_owned(),
+                flow_name: None,
                 args: serde_json::Map::new(),
                 reasoning: None,
                 images: Vec::new(),
@@ -353,6 +368,7 @@ async fn interjection_targets_one_run_and_retries_without_duplication() {
         request_id: Some(atman_proto::RequestId::now()),
         session_id: session_id.clone(),
         flow_path: flow_path.to_string_lossy().into_owned(),
+        flow_name: None,
         args: serde_json::Map::new(),
         reasoning: None,
         images: Vec::new(),
@@ -516,6 +532,7 @@ async fn start_run_reopens_persisted_session_after_daemon_restart() {
                     .join("examples/hello.at")
                     .to_string_lossy()
                     .into_owned(),
+                flow_name: None,
                 args: serde_json::Map::new(),
                 reasoning: None,
                 images: Vec::new(),
