@@ -1894,8 +1894,12 @@ fn apply_daemon_projection(
         .collect();
     app.app.pending_injections = projected.pending_injections;
     if let Some(transcript) = projected.transcript {
+        let (transcript, sequences) = transcript
+            .into_iter()
+            .map(|item| (item.output, item.sequence))
+            .unzip();
         app.app
-            .reconcile_daemon_transcript(transcript, projected.transcript_revision);
+            .reconcile_daemon_transcript(transcript, sequences, projected.transcript_revision);
     }
     if let Some(task_snapshots) = projected.task_snapshots {
         app.app
@@ -2180,19 +2184,22 @@ mod tests {
             pending_forms: Vec::new(),
             pending_compact_reviews: Vec::new(),
             pending_injections: Vec::new(),
-            transcript: Some(vec![crate::app::OutputItem::WorkflowPanel {
-                turn_index: 0,
-                graph: workflow,
-                expanded_nodes: Default::default(),
-                panel_expanded: true,
-                started_at: std::time::Instant::now(),
-                ended_at: (!matches!(
-                    status,
-                    atman_runtime::workflow::NodeStatus::Pending
-                        | atman_runtime::workflow::NodeStatus::Running
-                ))
-                .then(std::time::Instant::now),
-                cancelled: matches!(status, atman_runtime::workflow::NodeStatus::Cancelled),
+            transcript: Some(vec![crate::projection_adapter::TuiTranscriptItem {
+                output: crate::app::OutputItem::WorkflowPanel {
+                    turn_index: 0,
+                    graph: workflow,
+                    expanded_nodes: Default::default(),
+                    panel_expanded: true,
+                    started_at: std::time::Instant::now(),
+                    ended_at: (!matches!(
+                        status,
+                        atman_runtime::workflow::NodeStatus::Pending
+                            | atman_runtime::workflow::NodeStatus::Running
+                    ))
+                    .then(std::time::Instant::now),
+                    cancelled: matches!(status, atman_runtime::workflow::NodeStatus::Cancelled),
+                },
+                sequence: 1,
             }]),
             transcript_revision: revision,
             task_snapshots: Some(Vec::new()),
@@ -2266,7 +2273,7 @@ mod tests {
         let mut terminal = projected_session(4, "done", atman_runtime::workflow::NodeStatus::Ok);
         terminal.task_snapshots = Some(Vec::new());
         if let app::OutputItem::WorkflowPanel { graph, .. } =
-            &mut terminal.transcript.as_mut().unwrap()[0]
+            &mut terminal.transcript.as_mut().unwrap()[0].output
         {
             let mut updated = graph.clone().into_graph();
             updated.turn_id = match &app.app.items[0] {

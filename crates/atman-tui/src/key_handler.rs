@@ -940,7 +940,7 @@ pub(crate) fn handle_key(
                 _ => (String::new(), Vec::new()),
             };
             let _ = app.remove_item(0);
-            app.inline_note_indices.clear();
+            app.inline_note_ids.clear();
             app.startup_intro = Some(crate::app::StartupIntro {
                 started_at: std::time::Instant::now(),
                 version,

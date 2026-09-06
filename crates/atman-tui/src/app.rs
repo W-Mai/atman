@@ -852,6 +852,12 @@ pub struct PendingPermissionGroup {
     pub expanded: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LocalNoteAnchor {
+    after_sequence: u64,
+    ordinal: u64,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: OutputStore,
@@ -876,7 +882,9 @@ pub struct AppState {
     pub(crate) daemon_generation: Option<String>,
     daemon_transcript_revision: Option<u64>,
     daemon_resources_revision: Option<u64>,
-    daemon_item_count: usize,
+    daemon_latest_sequence: u64,
+    local_note_ordinal: u64,
+    local_note_anchors: std::collections::HashMap<u64, LocalNoteAnchor>,
     pub latest_release: Option<String>,
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
@@ -904,7 +912,7 @@ pub struct AppState {
     /// Status bar notes keyed by slot id (e.g. "compact", "daemon").
     pub status_notes: std::collections::HashMap<String, String>,
     /// Inline notification slots keyed by replacement id.
-    pub inline_note_indices: std::collections::HashMap<String, usize>,
+    pub inline_note_ids: std::collections::HashMap<String, u64>,
     /// Active modal notification (dismiss with Esc).
     pub modal_notification: Option<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
@@ -1237,7 +1245,8 @@ impl AppState {
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
-        self.inline_note_indices.clear();
+        self.inline_note_ids.clear();
+        self.local_note_anchors.clear();
         self.handle_index.clear();
         self.workflow_run_to_panel.clear();
         self.sub_agent_run_ids.clear();
@@ -2125,6 +2134,7 @@ impl AppState {
 
     pub fn push_item(&mut self, item: OutputItem) {
         let idx = self.items.len();
+        let is_local_note = matches!(item, OutputItem::SystemNote { .. });
         match &item {
             OutputItem::Terminal { handle, .. }
             | OutputItem::Bash { handle, .. }
@@ -2138,6 +2148,22 @@ impl AppState {
         }
         let structure_revision = self.items.structure_revision();
         self.items.push(item);
+        if is_local_note {
+            self.local_note_ordinal = self.local_note_ordinal.wrapping_add(1);
+            let item_id = self
+                .items
+                .revisions()
+                .last()
+                .expect("the pushed note has a revision")
+                .id;
+            self.local_note_anchors.insert(
+                item_id,
+                LocalNoteAnchor {
+                    after_sequence: self.daemon_latest_sequence,
+                    ordinal: self.local_note_ordinal,
+                },
+            );
+        }
         debug_assert_eq!(self.items.revisions().len(), self.items.len());
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.items_version = self.items_version.wrapping_add(1);
@@ -2148,11 +2174,13 @@ impl AppState {
     pub(crate) fn reconcile_daemon_transcript(
         &mut self,
         mut projected: Vec<OutputItem>,
+        projected_sequences: Vec<u64>,
         revision: u64,
     ) {
         if self.daemon_transcript_revision == Some(revision) {
             return;
         }
+        debug_assert_eq!(projected.len(), projected_sequences.len());
         let previous = self
             .items
             .iter()
@@ -2169,22 +2197,69 @@ impl AppState {
             .first()
             .filter(|item| matches!(item, OutputItem::StartupCard { .. }))
             .cloned();
-        let daemon_item_offset = usize::from(startup_card.is_some());
-        let local_notes = self
+        let slot_by_item = self
+            .inline_note_ids
+            .iter()
+            .map(|(key, item_id)| (*item_id, key.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut local_notes = self
             .items
             .iter()
-            .skip(daemon_item_offset + self.daemon_item_count)
-            .filter_map(|item| match item {
-                OutputItem::SystemNote { .. } => Some(item.clone()),
-                _ => None,
+            .zip(self.items.revisions())
+            .filter_map(|(item, item_revision)| {
+                self.local_note_anchors
+                    .get(&item_revision.id)
+                    .copied()
+                    .map(|anchor| {
+                        (
+                            item.clone(),
+                            anchor,
+                            slot_by_item.get(&item_revision.id).cloned(),
+                        )
+                    })
             })
             .collect::<Vec<_>>();
-        self.daemon_item_count = projected.len();
+        local_notes.sort_by_key(|(_, anchor, _)| (anchor.after_sequence, anchor.ordinal));
+
+        let mut merged = Vec::with_capacity(projected.len() + local_notes.len() + 1);
+        let mut note_metadata = Vec::with_capacity(merged.capacity());
         if let Some(startup_card) = startup_card {
-            projected.insert(0, startup_card);
+            merged.push(startup_card);
+            note_metadata.push(None);
         }
-        projected.extend(local_notes);
-        self.replace_items(projected);
+        let mut local_notes = local_notes.into_iter().peekable();
+        for (item, sequence) in projected.drain(..).zip(&projected_sequences) {
+            while local_notes
+                .peek()
+                .is_some_and(|(_, anchor, _)| anchor.after_sequence < *sequence)
+            {
+                let (note, anchor, slot) = local_notes.next().expect("peeked local note exists");
+                merged.push(note);
+                note_metadata.push(Some((anchor, slot)));
+            }
+            merged.push(item);
+            note_metadata.push(None);
+        }
+        for (note, anchor, slot) in local_notes {
+            merged.push(note);
+            note_metadata.push(Some((anchor, slot)));
+        }
+        self.daemon_latest_sequence = projected_sequences
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or_default();
+        self.replace_items(merged);
+        for (index, metadata) in note_metadata.into_iter().enumerate() {
+            let Some((anchor, slot)) = metadata else {
+                continue;
+            };
+            let item_id = self.items.revisions()[index].id;
+            self.local_note_anchors.insert(item_id, anchor);
+            if let Some(slot) = slot {
+                self.inline_note_ids.insert(slot, item_id);
+            }
+        }
         self.daemon_transcript_revision = Some(revision);
     }
 
@@ -2240,7 +2315,9 @@ impl AppState {
 
     pub fn remove_item(&mut self, index: usize) -> Option<OutputItem> {
         let structure_revision = self.items.structure_revision();
+        let removed_id = self.items.revisions().get(index)?.id;
         let removed = self.items.remove(index)?;
+        self.local_note_anchors.remove(&removed_id);
         debug_assert_eq!(self.items.revisions().len(), self.items.len());
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.items_version = self.items_version.wrapping_add(1);
@@ -2255,16 +2332,8 @@ impl AppState {
                 true
             }
         });
-        self.inline_note_indices.retain(|_, item_index| {
-            if *item_index == index {
-                false
-            } else {
-                if *item_index > index {
-                    *item_index -= 1;
-                }
-                true
-            }
-        });
+        self.inline_note_ids
+            .retain(|_, item_id| *item_id != removed_id);
         let removed_run_ids = self
             .workflow_run_to_panel
             .iter()
@@ -3306,7 +3375,12 @@ impl AppState {
                             .is_some_and(|key| key.starts_with("llm-call:"))
                             && matches!(level, NoteLevel::Error | NoteLevel::Success);
                         if let Some(key) = replace_key.as_ref()
-                            && let Some(index) = self.inline_note_indices.get(key).copied()
+                            && let Some(item_id) = self.inline_note_ids.get(key).copied()
+                            && let Some(index) = self
+                                .items
+                                .revisions()
+                                .iter()
+                                .position(|revision| revision.id == item_id)
                             && matches!(self.items.get(index), Some(OutputItem::SystemNote { .. }))
                         {
                             self.mutate_item(index, OutputMutation::Semantic, |item| {
@@ -3326,10 +3400,15 @@ impl AppState {
                             });
                             self.reset_lag_state();
                         } else {
-                            let index = self.items.len();
                             self.push_item(OutputItem::SystemNote { text, level });
                             if let Some(key) = replace_key {
-                                self.inline_note_indices.insert(key, index);
+                                let item_id = self
+                                    .items
+                                    .revisions()
+                                    .last()
+                                    .expect("the pushed notification has a revision")
+                                    .id;
+                                self.inline_note_ids.insert(key, item_id);
                             }
                         }
                         if completes_llm_wait {
@@ -4382,7 +4461,7 @@ mod tests {
         };
         let mut app = AppState::new("session".into(), None).with_initial_items(vec![startup]);
 
-        app.reconcile_daemon_transcript(Vec::new(), 1);
+        app.reconcile_daemon_transcript(Vec::new(), Vec::new(), 1);
         assert!(matches!(
             app.items.first(),
             Some(OutputItem::StartupCard { .. })
@@ -4394,6 +4473,7 @@ mod tests {
                 streaming: false,
                 retried: false,
             }],
+            vec![1],
             2,
         );
         assert!(matches!(
@@ -4407,7 +4487,7 @@ mod tests {
 
         app.remove_item(0);
         app.push_note("local", NoteLevel::Info);
-        app.reconcile_daemon_transcript(Vec::new(), 3);
+        app.reconcile_daemon_transcript(Vec::new(), Vec::new(), 3);
         assert!(
             !app.items
                 .iter()
@@ -4446,6 +4526,7 @@ mod tests {
                 ended_at: None,
                 cancelled: false,
             }],
+            vec![1],
             1,
         );
 
@@ -4456,6 +4537,36 @@ mod tests {
                 expanded_nodes,
                 ..
             } if expanded_nodes.contains("stable-run")
+        ));
+    }
+
+    #[test]
+    fn daemon_transcript_keeps_local_notes_at_their_observed_sequence() {
+        let assistant = |md: &str| OutputItem::AssistantMd {
+            md: md.into(),
+            streaming: false,
+            retried: false,
+        };
+        let mut app = AppState::default();
+        app.reconcile_daemon_transcript(vec![assistant("before")], vec![10], 1);
+        app.push_note("anchored", NoteLevel::Info);
+        app.reconcile_daemon_transcript(
+            vec![assistant("older"), assistant("before"), assistant("after")],
+            vec![5, 10, 20],
+            2,
+        );
+
+        assert!(matches!(
+            &*app.items,
+            [
+                OutputItem::AssistantMd { md: older, .. },
+                OutputItem::AssistantMd { md: before, .. },
+                OutputItem::SystemNote { text, .. },
+                OutputItem::AssistantMd { md: after, .. },
+            ] if older == "older"
+                && before == "before"
+                && text == "anchored"
+                && after == "after"
         ));
     }
 
@@ -4613,9 +4724,18 @@ mod tests {
         };
 
         app.apply_stream_frame(frame(atman_runtime::notify::NotifyLevel::Warn, "retrying"));
+        app.reconcile_daemon_transcript(
+            vec![OutputItem::AssistantMd {
+                md: "later".into(),
+                streaming: false,
+                retried: false,
+            }],
+            vec![1],
+            1,
+        );
         app.apply_stream_frame(frame(atman_runtime::notify::NotifyLevel::Error, "failed"));
 
-        assert_eq!(app.items.len(), 1);
+        assert_eq!(app.items.len(), 2);
         assert!(!app.streaming);
         assert!(!app.waiting_for_llm);
         assert!(matches!(

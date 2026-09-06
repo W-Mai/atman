@@ -42,6 +42,12 @@ pub(crate) enum TuiDaemonSignal {
     LlmDone { run_id: String, total_tokens: u64 },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TuiTranscriptItem {
+    pub(crate) output: OutputItem,
+    pub(crate) sequence: u64,
+}
+
 pub(crate) fn daemon_signal(
     signal: atman_proto::SessionSignal,
     projection: &SessionProjection,
@@ -232,7 +238,7 @@ pub(crate) struct TuiSessionProjection {
     pub(crate) pending_forms: Vec<PendingForm>,
     pub(crate) pending_compact_reviews: Vec<atman_runtime::PendingCompactReview>,
     pub(crate) pending_injections: Vec<Injection>,
-    pub(crate) transcript: Option<Vec<OutputItem>>,
+    pub(crate) transcript: Option<Vec<TuiTranscriptItem>>,
     pub(crate) transcript_revision: u64,
     pub(crate) task_snapshots: Option<Vec<atman_runtime::TaskSnapshot>>,
     pub(crate) resources_revision: u64,
@@ -517,7 +523,7 @@ fn transcript(
     workflows: &[WorkflowProjection],
     approvals: &[PermissionRequestAudit],
     groups: &[PermissionGroupAudit],
-) -> Result<Vec<OutputItem>> {
+) -> Result<Vec<TuiTranscriptItem>> {
     let messages = projection
         .transcript
         .iter()
@@ -559,6 +565,7 @@ fn transcript(
         .map(|(index, (source, workflow))| (source.turn_id.0, (index, workflow.clone())))
         .collect::<HashMap<_, _>>();
     let mut out = Vec::new();
+    let mut sequences = Vec::new();
 
     for (item, message) in projection.transcript.iter().zip(messages) {
         match item {
@@ -731,6 +738,7 @@ fn transcript(
                 });
             }
         }
+        sequences.resize(out.len(), item.seq());
     }
 
     let mut remaining = workflow_slots.into_values().collect::<Vec<_>>();
@@ -739,6 +747,14 @@ fn transcript(
         remaining
             .into_iter()
             .map(|(index, workflow)| workflow_item(index, &workflow)),
+    );
+    sequences.resize(
+        out.len(),
+        projection
+            .transcript
+            .last()
+            .map(atman_proto::TranscriptItem::seq)
+            .unwrap_or_default(),
     );
     for compaction in &projection.compactions {
         out.push(OutputItem::CompactionSummary {
@@ -757,6 +773,13 @@ fn transcript(
                 .context("active compaction message count exceeds usize")?,
             disclosure: Disclosure::Summary,
         });
+        sequences.push(
+            sequences
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .max(compaction.started_seq),
+        );
     }
     attach_subflows(
         &mut out,
@@ -766,8 +789,21 @@ fn transcript(
         approvals,
         groups,
     )?;
+    sequences.resize(
+        out.len(),
+        projection
+            .transcript
+            .last()
+            .map(atman_proto::TranscriptItem::seq)
+            .unwrap_or_default(),
+    );
     apply_workflow_tool_state(&mut out, workflows);
-    Ok(out)
+    debug_assert_eq!(out.len(), sequences.len());
+    Ok(out
+        .into_iter()
+        .zip(sequences)
+        .map(|(output, sequence)| TuiTranscriptItem { output, sequence })
+        .collect())
 }
 
 fn activity_totals(
@@ -2037,7 +2073,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .iter()
-            .find_map(|item| match item {
+            .find_map(|item| match &item.output {
                 OutputItem::WorkflowPanel { graph, .. } => Some(graph),
                 _ => None,
             })
@@ -2264,20 +2300,29 @@ mod tests {
 
         let converted = TuiSessionProjection::try_from(&source).unwrap();
         let transcript = converted.transcript.as_deref().unwrap();
+        let outputs = transcript
+            .iter()
+            .map(|item| &item.output)
+            .collect::<Vec<_>>();
         assert_eq!(converted.transcript_revision, source.revision.0);
+        assert!(
+            transcript
+                .windows(2)
+                .all(|window| window[0].sequence <= window[1].sequence)
+        );
         assert!(matches!(
-            transcript.first(),
+            outputs.first(),
             Some(OutputItem::UserTurn { text })
                 if text.contains("Inspect the project") && text.contains("[image: layout.png]")
         ));
         assert!(matches!(
-            transcript.get(1),
+            outputs.get(1),
             Some(OutputItem::WorkflowPanel {
                 panel_expanded: false,
                 ..
             })
         ));
-        let call = transcript
+        let call = outputs
             .iter()
             .find_map(|item| match item {
                 OutputItem::ToolDispatch { calls } => calls.first(),
@@ -2290,10 +2335,10 @@ mod tests {
             call.detail.as_deref(),
             Some(OutputItem::DiffPreview { title, .. }) if title == "README.md"
         ));
-        assert!(transcript.iter().all(|item| {
+        assert!(outputs.iter().all(|item| {
             !matches!(item, OutputItem::UserTurn { text } if text.contains("hidden correction"))
         }));
-        assert!(transcript.iter().any(|item| matches!(
+        assert!(outputs.iter().any(|item| matches!(
             item,
             OutputItem::ActivitySummary { turn, session }
                 if turn.attempted_calls == 1
@@ -2303,14 +2348,14 @@ mod tests {
                     && session.file_count() == 2
         )));
         assert_eq!(
-            transcript
+            outputs
                 .iter()
                 .filter(|item| matches!(item, OutputItem::CompactionSummary { .. }))
                 .count(),
             1
         );
         assert!(matches!(
-            transcript
+            outputs
                 .iter()
                 .find(|item| matches!(item, OutputItem::CompactionSummary { .. })),
             Some(OutputItem::CompactionSummary {
@@ -2320,12 +2365,12 @@ mod tests {
                 ..
             })
         ));
-        assert!(transcript.iter().any(|item| matches!(
+        assert!(outputs.iter().any(|item| matches!(
             item,
             OutputItem::SystemNote { text, level: NoteLevel::Warn }
                 if text == "watch warning"
         )));
-        assert!(transcript.iter().any(|item| matches!(
+        assert!(outputs.iter().any(|item| matches!(
             item,
             OutputItem::MermaidDiagram { source } if source == "graph TD; A-->B"
         )));
@@ -2456,7 +2501,7 @@ mod tests {
         let transcript = converted.transcript.as_deref().unwrap();
         let detail = transcript
             .iter()
-            .find_map(|item| match item {
+            .find_map(|item| match &item.output {
                 OutputItem::ToolDispatch { calls } => calls
                     .iter()
                     .find(|call| call.id == "spawn-1")
@@ -2474,7 +2519,7 @@ mod tests {
             } if model == "child-model" && output == "Implemented"
         ));
         assert!(transcript.iter().all(|item| {
-            !matches!(item, OutputItem::AssistantMd { md, .. } if md == "Implemented")
+            !matches!(&item.output, OutputItem::AssistantMd { md, .. } if md == "Implemented")
         }));
     }
 
