@@ -526,7 +526,10 @@ async fn follow_daemon_run(
         .attach_session(run.session_id.clone())
         .await
         .context("attach daemon session for follow")?;
-    if terminal_run_projection(&session.current().projection().runs, &run.run_id).is_some() {
+    if let Some(completed) =
+        terminal_run_projection(&session.current().projection().runs, &run.run_id).cloned()
+    {
+        wait_for_durable_run_events(client, run, &completed).await?;
         return Ok(());
     }
     let Some(mut events) = client
@@ -539,7 +542,10 @@ async fn follow_daemon_run(
         let event = event?;
         println!("{}", serde_json::to_string(&event)?);
         session.apply_event(event).await?;
-        if terminal_run_projection(&session.current().projection().runs, &run.run_id).is_some() {
+        if let Some(completed) =
+            terminal_run_projection(&session.current().projection().runs, &run.run_id).cloned()
+        {
+            wait_for_durable_run_events(client, run, &completed).await?;
             return Ok(());
         }
     }
@@ -577,7 +583,9 @@ async fn wait_daemon_run(
         if let Some(projection) =
             terminal_run_projection(&session.current().projection().runs, &run.run_id)
         {
-            return Ok(projection.clone());
+            let completed = projection.clone();
+            wait_for_durable_run_events(client, run, &completed).await?;
+            return Ok(completed);
         }
         session
             .refresh_until_current()
@@ -586,6 +594,47 @@ async fn wait_daemon_run(
         if terminal_run_projection(&session.current().projection().runs, &run.run_id).is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+}
+
+async fn wait_for_durable_run_events(
+    client: &atman_client::Client,
+    run: &atman_proto::RunFlowResponse,
+    completed: &atman_proto::RunProjection,
+) -> Result<()> {
+    let run_id = run.run_id.to_string();
+    let turn_id = completed
+        .turn_id
+        .as_ref()
+        .map(|turn_id| turn_id.0.to_string());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut cursor = 0;
+    let mut saw_flow_end = false;
+    let mut saw_turn_end = turn_id.is_none();
+    loop {
+        let page = client
+            .get_events(run.session_id.clone(), Some(cursor))
+            .await
+            .context("wait for durable daemon run events")?;
+        if page.has_more && page.next_cursor.0 <= cursor {
+            bail!("daemon event page did not advance beyond cursor {cursor}");
+        }
+        cursor = page.next_cursor.0;
+        for envelope in page.events {
+            let event = envelope.event;
+            saw_flow_end |= event["type"] == "flow_end" && event["run_id"] == run_id;
+            saw_turn_end |= event["type"] == "turn_end"
+                && turn_id
+                    .as_deref()
+                    .is_some_and(|turn_id| event["turn_id"] == turn_id);
+        }
+        if saw_flow_end && saw_turn_end {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("daemon run {run_id} reached terminal state before its events became durable");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
