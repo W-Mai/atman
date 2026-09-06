@@ -175,7 +175,10 @@ pub enum RefreshOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionUpdate {
-    Event(ProjectionEventEnvelope),
+    Changed {
+        state: SessionState,
+        signals: Vec<SessionSignal>,
+    },
     Reset(Box<SessionState>),
 }
 
@@ -337,31 +340,25 @@ impl SessionClient {
         response: GetSessionUpdatesResponse,
     ) -> Result<RefreshOutcome, SessionClientError> {
         let capabilities = self.client.capabilities();
-        let previous_cursor = current.cursor();
         let previous_transcript_revision = current.transcript_revision;
         let previous_resources_revision = current.resources_revision;
         let mut next = current;
         match next.apply_updates(&response) {
             Ok(applied) => {
-                let applied_events = response
-                    .events
-                    .iter()
-                    .filter(|event| event.cursor > previous_cursor)
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let outcome = RefreshOutcome::Applied {
                     events: applied.applied,
                     signals: applied.signals.clone(),
                     has_more: applied.has_more,
                 };
                 if applied.applied > 0 {
-                    self.state.send_replace(next);
+                    self.state.send_replace(next.clone());
+                    let _ = self.updates.send(SessionUpdate::Changed {
+                        state: next,
+                        signals: applied.signals.clone(),
+                    });
                 }
                 for signal in applied.signals {
                     let _ = self.signals.send(signal);
-                }
-                for event in applied_events {
-                    let _ = self.updates.send(SessionUpdate::Event(event));
                 }
                 Ok(outcome)
             }
@@ -1955,11 +1952,12 @@ mod tests {
                 }],
             },
         );
-        session.apply_event(projection_event.clone()).await.unwrap();
+        session.apply_event(projection_event).await.unwrap();
         assert_eq!(
             session.current().projection().goal.as_deref(),
             Some("streamed")
         );
+        let projected_state = session.current();
 
         let mut signals = session.subscribe_signals();
         let mut signal_event = envelope(
@@ -1981,15 +1979,22 @@ mod tests {
         signal_event.event = ServerEvent::Signal {
             signal: signal.clone(),
         };
-        session.apply_event(signal_event.clone()).await.unwrap();
+        session.apply_event(signal_event).await.unwrap();
         assert_eq!(signals.recv().await.unwrap(), signal);
         assert_eq!(
             updates.recv().await.unwrap(),
-            SessionUpdate::Event(projection_event)
+            SessionUpdate::Changed {
+                state: projected_state,
+                signals: Vec::new(),
+            }
         );
+        let signal_state = session.current();
         assert_eq!(
             updates.recv().await.unwrap(),
-            SessionUpdate::Event(signal_event)
+            SessionUpdate::Changed {
+                state: signal_state,
+                signals: vec![signal],
+            }
         );
         assert_eq!(session.current().cursor(), EventCursor(3));
     }

@@ -1928,30 +1928,20 @@ fn apply_daemon_update(
             *state = Some(next);
             apply_daemon_projection(app, projected);
         }
-        atman_client::SessionUpdate::Event(event) => {
-            let state = state
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("daemon event arrived before its snapshot"))?;
-            let response = atman_proto::GetSessionUpdatesResponse {
-                daemon_generation: event.daemon_generation.clone(),
-                next_cursor: event.cursor,
-                events: vec![event],
-                has_more: false,
-                resync_required: None,
-            };
-            let applied = state.apply_updates(&response)?;
-            if applied.signals.is_empty() {
-                let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
-                    state,
-                    app.app.daemon_transcript_revision(),
-                    app.app.daemon_resources_revision(),
-                )?;
-                apply_daemon_projection(app, projected);
-            } else {
-                for signal in applied.signals {
-                    apply_daemon_signal(app, signal, state.projection())?;
-                }
+        atman_client::SessionUpdate::Changed {
+            state: next,
+            signals,
+        } => {
+            for signal in signals {
+                apply_daemon_signal(app, signal, next.projection())?;
             }
+            let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
+                &next,
+                app.app.daemon_transcript_revision(),
+                app.app.daemon_resources_revision(),
+            )?;
+            *state = Some(next);
+            apply_daemon_projection(app, projected);
         }
     }
     Ok(())
