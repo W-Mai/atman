@@ -558,6 +558,7 @@ impl RunLauncher {
         )
         .with_context(|| format!("opening existing session {session_id}"))?;
         let loaded = crate::projection_snapshot::load(session_id, &session_dir)?;
+        let recovered_without_snapshot = loaded.is_none();
         let (mut projection, mut event_cursor) = match loaded {
             Some(loaded) => (loaded.projector, loaded.event_cursor),
             None => {
@@ -591,6 +592,27 @@ impl RunLauncher {
                 .0
                 .saturating_sub(previous_revision),
         );
+        if recovered_without_snapshot {
+            match futures::executor::block_on(restored.session.flush_writer()) {
+                Some(watermark) => {
+                    if let Err(error) = crate::projection_snapshot::save(
+                        session_id,
+                        &session_dir,
+                        watermark,
+                        event_cursor,
+                        &projection,
+                        restored.session.sink().redactor().as_deref(),
+                    ) {
+                        eprintln!(
+                            "warning: failed to persist cold projection for {session_id}: {error:#}"
+                        );
+                    }
+                }
+                None => eprintln!(
+                    "warning: failed to persist cold projection for {session_id}: session event writer stopped"
+                ),
+            }
+        }
         Ok(LoadedSession {
             session: Arc::new(restored.session),
             projection: crate::projection::RestoredProjection {
@@ -1372,6 +1394,11 @@ mod tests {
         )
         .unwrap();
         let loaded = launcher.open_existing_session(&state, &session_id).unwrap();
+        assert!(
+            crate::projection_snapshot::load(&session_id, &session_dir)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             loaded.projection.projector.projection().runs[0].state,
             atman_proto::RunLifecycle::Lost
