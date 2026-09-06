@@ -694,8 +694,13 @@ export type ProjectionChange =
       [k: string]: unknown
     }
   | {
-      type: 'workflows_replace'
-      workflows: WorkflowProjection[]
+      type: 'workflow_upsert'
+      workflow: WorkflowProjection
+      [k: string]: unknown
+    }
+  | {
+      turn_id: TurnId
+      type: 'workflow_remove'
       [k: string]: unknown
     }
   | {

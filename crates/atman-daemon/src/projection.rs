@@ -1178,15 +1178,9 @@ impl SessionProjector {
             _ => {}
         }
 
-        if self.apply_workflow_event(envelope) {
-            self.projection.workflows = self
-                .workflows
-                .iter()
-                .map(|(_, workflow)| workflow_projection(workflow))
-                .collect();
-            changes.push(ProjectionChange::WorkflowsReplace {
-                workflows: self.projection.workflows.clone(),
-            });
+        for workflow in self.apply_workflow_event(envelope) {
+            upsert_workflow(&mut self.projection.workflows, workflow.clone());
+            changes.push(ProjectionChange::WorkflowUpsert { workflow });
         }
 
         self.commit(changes)
@@ -1443,23 +1437,26 @@ impl SessionProjector {
         });
     }
 
-    fn apply_workflow_event(&mut self, envelope: &EventEnvelope) -> bool {
+    fn apply_workflow_event(&mut self, envelope: &EventEnvelope) -> Vec<WorkflowProjection> {
         if matches!(
             &envelope.event,
             Event::PermissionGroupCreated { .. }
                 | Event::PermissionGroupUpdated { .. }
                 | Event::PermissionGroupResolved { .. }
         ) {
-            let mut changed = false;
-            for (_, workflow) in &mut self.workflows {
-                changed |= workflow
-                    .apply_event_at(&envelope.event, envelope.ts)
-                    .changed();
-            }
-            return changed;
+            return self
+                .workflows
+                .iter_mut()
+                .filter_map(|(_, workflow)| {
+                    workflow
+                        .apply_event_at(&envelope.event, envelope.ts)
+                        .changed()
+                        .then(|| workflow_projection(workflow))
+                })
+                .collect();
         }
         let Some(run_id) = event_run_id(&envelope.event) else {
-            return false;
+            return Vec::new();
         };
         let turn_id = self
             .run_turns
@@ -1481,9 +1478,14 @@ impl SessionProjector {
                 .push((turn_id.clone(), RuntimeWorkflowProjection::new(turn_id)));
             &mut self.workflows.last_mut().expect("workflow inserted").1
         };
-        workflow
+        if workflow
             .apply_event_at(&envelope.event, envelope.ts)
             .changed()
+        {
+            vec![workflow_projection(workflow)]
+        } else {
+            Vec::new()
+        }
     }
 
     fn unique_active_turn(&self) -> Option<atman_runtime::event::TurnId> {
@@ -1515,6 +1517,17 @@ impl SessionProjector {
                 .or_default()
                 .observe(event);
         }
+    }
+}
+
+fn upsert_workflow(workflows: &mut Vec<WorkflowProjection>, workflow: WorkflowProjection) {
+    if let Some(existing) = workflows
+        .iter_mut()
+        .find(|existing| existing.turn_id == workflow.turn_id)
+    {
+        *existing = workflow;
+    } else {
+        workflows.push(workflow);
     }
 }
 
@@ -2825,6 +2838,67 @@ mod tests {
                 .unwrap()
                 .turn_id
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn workflow_delta_updates_only_the_affected_turn() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let first_turn = RuntimeTurnId::now();
+        let second_turn = RuntimeTurnId::now();
+        let first_run = RuntimeRunId::now();
+        let second_run = RuntimeRunId::now();
+        let now = chrono::Utc::now();
+        let mut projector = SessionProjector::new(session_id, None);
+
+        for (run_id, turn_id, flow_name) in [
+            (&first_run, &first_turn, "first"),
+            (&second_run, &second_turn, "second"),
+        ] {
+            projector.apply_envelope(&envelope(
+                projector.last_runtime_seq + 1,
+                now,
+                Event::FlowStart {
+                    run_id: run_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    flow_name: flow_name.into(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    spawned: false,
+                },
+            ));
+        }
+
+        let delta = projector
+            .apply_envelope(&envelope(
+                projector.last_runtime_seq + 1,
+                now,
+                Event::FlowEnd {
+                    run_id: first_run,
+                    flow_name: "first".into(),
+                    status: FlowStatus::Ok,
+                    output: None,
+                },
+            ))
+            .expect("flow end changes the projection");
+        let workflows = delta
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                ProjectionChange::WorkflowUpsert { workflow } => Some(workflow),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].turn_id.0, first_turn.0);
+        assert_eq!(projector.projection().workflows.len(), 2);
+        assert!(
+            projector
+                .projection()
+                .workflows
+                .iter()
+                .any(|workflow| workflow.turn_id.0 == second_turn.0)
         );
     }
 

@@ -4489,21 +4489,36 @@
         {
           "type": "object",
           "required": [
-            "workflows",
+            "workflow",
             "type"
           ],
           "properties": {
             "type": {
               "type": "string",
               "enum": [
-                "workflows_replace"
+                "workflow_upsert"
               ]
             },
-            "workflows": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/WorkflowProjection"
-              }
+            "workflow": {
+              "$ref": "#/$defs/WorkflowProjection"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "turn_id",
+            "type"
+          ],
+          "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "workflow_remove"
+              ]
             }
           }
         },

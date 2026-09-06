@@ -196,6 +196,44 @@ describe('SessionStore', () => {
     expect(Object.isFrozen(store.current.projection.runs?.[0])).toBeTrue()
   })
 
+  test('updates and removes workflows without replacing their siblings', () => {
+    const store = new SessionStore(snapshot({
+      projection: {
+        revision: 0,
+        lifecycle: 'idle',
+        metadata: { id: sessionId, title: 'initial' },
+        transcript: [],
+        runs: [],
+        resources: [],
+        workflows: [
+          { turn_id: 'turn-1', roots: [] },
+          { turn_id: 'turn-2', roots: [] },
+        ],
+      },
+    }))
+    const updated = {
+      turn_id: 'turn-1',
+      roots: [],
+      marker: 'updated',
+    }
+
+    store.applyUpdates(page([event(1, delta(1, [
+      { type: 'workflow_upsert', workflow: updated },
+    ]))]))
+    updated.marker = 'mutated outside the store'
+    expect(store.current.projection.workflows).toEqual([
+      { turn_id: 'turn-1', roots: [], marker: 'updated' },
+      { turn_id: 'turn-2', roots: [] },
+    ])
+
+    store.applyUpdates(page([event(2, delta(2, [
+      { type: 'workflow_remove', turn_id: 'turn-1' },
+    ]))]))
+    expect(store.current.projection.workflows).toEqual([
+      { turn_id: 'turn-2', roots: [] },
+    ])
+  })
+
   test('deduplicates replayed events without notifying subscribers', () => {
     const store = new SessionStore(snapshot({ cursor: 2 }))
     let notifications = 0

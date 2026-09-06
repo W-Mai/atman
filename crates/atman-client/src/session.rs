@@ -1126,7 +1126,8 @@ fn apply_envelope(
                             | ProjectionChange::RunRemove { .. }
                             | ProjectionChange::TranscriptAppend { .. }
                             | ProjectionChange::TranscriptReplace { .. }
-                            | ProjectionChange::WorkflowsReplace { .. }
+                            | ProjectionChange::WorkflowUpsert { .. }
+                            | ProjectionChange::WorkflowRemove { .. }
                             | ProjectionChange::CompactionsReplace { .. }
                             | ProjectionChange::InteractionsSet { .. }
                     )
@@ -1190,9 +1191,12 @@ fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
             projection.transcript.extend(items.iter().cloned())
         }
         ProjectionChange::TranscriptReplace { items } => projection.transcript.clone_from(items),
-        ProjectionChange::WorkflowsReplace { workflows } => {
-            projection.workflows.clone_from(workflows)
+        ProjectionChange::WorkflowUpsert { workflow } => {
+            upsert_workflow(&mut projection.workflows, workflow.clone())
         }
+        ProjectionChange::WorkflowRemove { turn_id } => projection
+            .workflows
+            .retain(|workflow| &workflow.turn_id != turn_id),
         ProjectionChange::CompactionsReplace { compactions } => {
             projection.compactions.clone_from(compactions)
         }
@@ -1219,6 +1223,20 @@ fn upsert_run(runs: &mut Vec<atman_proto::RunProjection>, run: atman_proto::RunP
         *existing = run;
     } else {
         runs.push(run);
+    }
+}
+
+fn upsert_workflow(
+    workflows: &mut Vec<atman_proto::WorkflowProjection>,
+    workflow: atman_proto::WorkflowProjection,
+) {
+    if let Some(existing) = workflows
+        .iter_mut()
+        .find(|existing| existing.turn_id == workflow.turn_id)
+    {
+        *existing = workflow;
+    } else {
+        workflows.push(workflow);
     }
 }
 

@@ -285,8 +285,17 @@ function applyChange(projection: SessionProjection, change: ProjectionChange): v
     case 'transcript_replace':
       projection.transcript = structuredClone(change.items)
       break
-    case 'workflows_replace':
-      projection.workflows = structuredClone(change.workflows)
+    case 'workflow_upsert':
+      projection.workflows = upsertByKey(
+        projection.workflows ?? [],
+        change.workflow,
+        (workflow) => workflow.turn_id,
+      )
+      break
+    case 'workflow_remove':
+      projection.workflows = (projection.workflows ?? []).filter(
+        (workflow) => workflow.turn_id !== change.turn_id,
+      )
       break
     case 'compactions_replace':
       projection.compactions = structuredClone(change.compactions)
@@ -330,8 +339,13 @@ function applyChange(projection: SessionProjection, change: ProjectionChange): v
 }
 
 function upsertById<T extends RunProjection | ResourceProjection>(items: T[], item: T): T[] {
+  return upsertByKey(items, item, (existing) => existing.id)
+}
+
+function upsertByKey<T>(items: T[], item: T, key: (item: T) => string): T[] {
   const next = items.map((existing) => structuredClone(existing))
-  const index = next.findIndex((existing) => existing.id === item.id)
+  const itemKey = key(item)
+  const index = next.findIndex((existing) => key(existing) === itemKey)
   if (index === -1) {
     next.push(structuredClone(item))
   } else {

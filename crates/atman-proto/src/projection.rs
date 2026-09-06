@@ -1101,8 +1101,11 @@ pub enum ProjectionChange {
     TranscriptReplace {
         items: Vec<TranscriptItem>,
     },
-    WorkflowsReplace {
-        workflows: Vec<WorkflowProjection>,
+    WorkflowUpsert {
+        workflow: WorkflowProjection,
+    },
+    WorkflowRemove {
+        turn_id: TurnId,
     },
     CompactionsReplace {
         compactions: Vec<CompactionProjection>,
