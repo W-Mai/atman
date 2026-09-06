@@ -446,6 +446,27 @@ impl DaemonState {
         })
     }
 
+    pub(crate) async fn attach_session_snapshot(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<SessionSnapshot> {
+        if self.launcher().is_none() {
+            return self.session_snapshot(id, principal).await;
+        }
+        let (cursor, projection) = self
+            .get_or_load_actor(id, principal)
+            .await?
+            .snapshot()
+            .await?;
+        Ok(SessionSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
+            cursor,
+            projection,
+        })
+    }
+
     pub async fn session_updates(
         &self,
         id: &SessionId,
@@ -487,7 +508,7 @@ impl DaemonState {
     }
 
     pub(crate) async fn subscribe_session_updates(
-        &self,
+        self: &std::sync::Arc<Self>,
         id: &SessionId,
         principal: &str,
     ) -> Result<
@@ -496,8 +517,7 @@ impl DaemonState {
             Option<std::sync::Arc<atman_runtime::redact::Redactor>>,
         )>,
     > {
-        let actor = self.sessions.lock().unwrap().get(id).cloned();
-        let Some(actor) = actor else {
+        if self.launcher().is_none() && self.sessions.lock().unwrap().get(id).is_none() {
             anyhow::ensure!(
                 self.sessions_root()
                     .join(id.to_string())
@@ -506,12 +526,13 @@ impl DaemonState {
                 "session not found: {id}"
             );
             return Ok(None);
-        };
-        anyhow::ensure!(
-            actor.owns(principal),
-            "session {id} is owned by another principal"
-        );
-        Ok(Some(actor.lease()?.subscribe_updates().await?))
+        }
+        Ok(Some(
+            self.get_or_load_actor(id, principal)
+                .await?
+                .subscribe_updates()
+                .await?,
+        ))
     }
 
     pub fn finish_run(&self, session_id: &SessionId, run_id: &FlowRunId) -> bool {
@@ -1960,6 +1981,64 @@ mod tests {
         let restored = state.session_snapshot(&session_id, "owner").await.unwrap();
         assert_eq!(restored.projection.transcript, live.projection.transcript);
         assert_eq!(restored.projection.usage, live.projection.usage);
+    }
+
+    #[tokio::test]
+    async fn attach_snapshot_and_updates_share_one_restored_actor() {
+        let root = tempfile::tempdir().unwrap();
+        let project_root = root.path().join("project");
+        let config_dir = root.path().join("config");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[storage]\nscope = \"global\"\n",
+        )
+        .unwrap();
+        let launcher = Arc::new(
+            crate::run::RunLauncher::new(project_root.clone(), Some(config_dir.clone()), None)
+                .unwrap(),
+        );
+        let first_state = Arc::new(DaemonState::new(data_dir.clone()));
+        first_state.set_launcher(launcher.clone());
+        let session_id = launcher
+            .create_session(
+                first_state.clone(),
+                Some(project_root.to_str().unwrap()),
+                None,
+                "owner",
+            )
+            .await
+            .unwrap();
+        assert!(
+            first_state
+                .unload_session_if_idle(&session_id)
+                .await
+                .unwrap()
+        );
+        drop(first_state);
+
+        let state = Arc::new(DaemonState::new(data_dir));
+        state.set_launcher(launcher);
+        assert!(state.session_revision(&session_id).is_none());
+
+        let snapshot = state
+            .attach_session_snapshot(&session_id, "owner")
+            .await
+            .unwrap();
+        let attached = state.authorized_actor(&session_id, "owner").unwrap();
+        let subscription = state
+            .subscribe_session_updates(&session_id, "owner")
+            .await
+            .unwrap();
+        assert!(subscription.is_some());
+        let updates = state
+            .session_updates(&session_id, "owner", snapshot.cursor, None)
+            .await
+            .unwrap();
+        assert!(updates.events.is_empty());
+        assert!(attached.is_same_actor(&state.authorized_actor(&session_id, "owner").unwrap()));
     }
 
     #[tokio::test]

@@ -1232,7 +1232,10 @@ async fn dispatch_as_inner(
         methods::GET_SESSION_SNAPSHOT => {
             match parse_params::<rpc::GetSessionSnapshot>(req.params) {
                 Ok(GetSessionSnapshotRequest { session_id }) => {
-                    match state.session_snapshot(&session_id, principal_id).await {
+                    match state
+                        .attach_session_snapshot(&session_id, principal_id)
+                        .await
+                    {
                         Ok(snapshot) => method_response::<rpc::GetSessionSnapshot>(id, snapshot),
                         Err(error) => {
                             JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
