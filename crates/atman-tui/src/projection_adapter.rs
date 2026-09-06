@@ -911,7 +911,7 @@ fn workflow_item(turn_index: usize, workflow: &WorkflowProjection) -> OutputItem
         turn_index,
         graph: workflow.clone(),
         expanded_nodes: HashSet::new(),
-        panel_expanded: true,
+        panel_expanded: false,
         started_at: Instant::now(),
         ended_at: terminal.then(Instant::now),
         cancelled: workflow
@@ -2272,7 +2272,10 @@ mod tests {
         ));
         assert!(matches!(
             transcript.get(1),
-            Some(OutputItem::WorkflowPanel { .. })
+            Some(OutputItem::WorkflowPanel {
+                panel_expanded: false,
+                ..
+            })
         ));
         let call = transcript
             .iter()

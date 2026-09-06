@@ -464,9 +464,20 @@ fn output_identity(item: &OutputItem) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("\u{1f}")
         )),
-        OutputItem::WorkflowPanel { graph, .. } => {
-            Some(format!("workflow:{}", graph.graph().turn_id))
-        }
+        OutputItem::WorkflowPanel { graph, .. } => Some(format!(
+            "workflow:{}",
+            graph
+                .graph()
+                .root
+                .iter()
+                .find_map(|node| match &node.kind {
+                    atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } => {
+                        Some(run_id.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| graph.graph().turn_id.to_string())
+        )),
         OutputItem::Terminal { handle, .. } => Some(format!("terminal:{handle}")),
         OutputItem::Bash { handle, .. } => Some(format!("bash:{handle}")),
         OutputItem::DiffPreview { title, .. } => Some(format!("diff:{title}")),
@@ -4405,6 +4416,46 @@ mod tests {
         assert!(matches!(
             app.items.first(),
             Some(OutputItem::SystemNote { text, .. }) if text == "local"
+        ));
+    }
+
+    #[test]
+    fn daemon_transcript_preserves_workflow_disclosure_by_root_run() {
+        let mut app = AppState::new("session".into(), None);
+        app.apply_stream_frame(StreamFrame::FlowStart {
+            run_id: "stable-run".into(),
+            flow_name: "agent".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        app.toggle_workflow_panel_expansion(0);
+        app.toggle_workflow_node(0, "stable-run");
+
+        let OutputItem::WorkflowPanel { graph, .. } = &app.items[0] else {
+            panic!("expected live workflow panel");
+        };
+        let mut projected_graph = graph.clone().into_graph();
+        projected_graph.turn_id = atman_runtime::event::TurnId::now();
+        app.reconcile_daemon_transcript(
+            vec![OutputItem::WorkflowPanel {
+                turn_index: 0,
+                graph: projected_graph.into(),
+                expanded_nodes: HashSet::new(),
+                panel_expanded: false,
+                started_at: Instant::now(),
+                ended_at: None,
+                cancelled: false,
+            }],
+            1,
+        );
+
+        assert!(matches!(
+            &app.items[0],
+            OutputItem::WorkflowPanel {
+                panel_expanded: true,
+                expanded_nodes,
+                ..
+            } if expanded_nodes.contains("stable-run")
         ));
     }
 
