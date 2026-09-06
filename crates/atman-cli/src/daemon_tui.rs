@@ -23,7 +23,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     let first = match resume {
         Some(prefix) => {
             let session_id = resolve_session_prefix(&client, &prefix).await?;
-            client.attach_session(session_id).await?
+            client.attach_session_windowed(session_id).await?
         }
         None => {
             client
@@ -242,7 +242,7 @@ async fn run_session(
                 TuiControl::SwitchSession { sid, intro } => {
                     let attached = match resolve_session_prefix(&control_client, &sid).await {
                         Ok(session_id) => control_client
-                            .attach_session(session_id)
+                            .attach_session_windowed(session_id)
                             .await
                             .map_err(anyhow::Error::from),
                         Err(error) => Err(error),
@@ -488,6 +488,13 @@ async fn run_session(
                         )));
                     }
                 },
+                TuiControl::LoadOlderHistory => {
+                    if let Err(error) = control_session.load_older_history().await {
+                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                            "could not load older session history: {error}"
+                        )));
+                    }
+                }
                 _ => {
                     let _ = control_note_tx.send(TuiNote::Warn(
                         "this control is not available through the daemon yet".into(),

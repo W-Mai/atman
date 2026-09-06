@@ -145,6 +145,7 @@ pub enum TuiControl {
     McpListPrompts {
         name: String,
     },
+    LoadOlderHistory,
 }
 
 /// Session mutations shared by embedded and daemon-backed TUI hosts.

@@ -1,28 +1,31 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use atman_proto::{
     AutoNameSessionRequest, AutoNameSessionResponse, CancelRunRequest, CancelRunResponse,
     CompactReviewDecision, CompactSessionRequest, CompactSessionResponse,
     CreatePermissionGroupRequest, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
-    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionUpdatesRequest,
-    GetSessionUpdatesResponse, InlineImage, InspectResourceRequest, InspectResourceResponse,
-    InstallSuggestedFlowRequest, InstallSuggestedFlowResponse, InterjectSessionRequest,
-    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
-    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
-    MoveSessionRequest, MoveSessionResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
-    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
-    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
-    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
-    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
-    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionTimelineBeforeRequest,
+    GetSessionTimelineTailRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse,
+    InlineImage, InspectResourceRequest, InspectResourceResponse, InstallSuggestedFlowRequest,
+    InstallSuggestedFlowResponse, InterjectSessionRequest, InterjectSessionResponse,
+    InterjectionLevel, ListPermissionRequestsRequest, ListPermissionRequestsResponse,
+    ListResourcesRequest, ListResourcesResponse, MoveSessionRequest, MoveSessionResponse,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
+    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
+    ReleaseResourceRequest, ReleaseResourceResponse, ReloadSessionMcpRequest,
+    ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse, RequestId,
+    ResizeTerminalResourceRequest, ResizeTerminalResourceResponse, ResolveCompactReviewRequest,
+    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
-    SessionSignal, SessionSnapshot, SetSessionGoalRequest, SetSessionGoalResponse, StartRunRequest,
-    StartRunResponse, SubmitFormRequest, SubmitFormResponse, SuggestFlowRequest,
-    SuggestFlowResponse, TerminateResourceRequest, TerminateResourceResponse, TodoMutation,
-    TrustProjection, UpdateSessionTodosRequest, UpdateSessionTodosResponse,
-    UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
+    SessionSignal, SessionSnapshot, SessionTimelineBudget, SessionTimelinePage,
+    SetSessionGoalRequest, SetSessionGoalResponse, StartRunRequest, StartRunResponse,
+    SubmitFormRequest, SubmitFormResponse, SuggestFlowRequest, SuggestFlowResponse,
+    TerminateResourceRequest, TerminateResourceResponse, TimelineCursor, TimelineItemId,
+    TimelineSegment, TodoMutation, TrustProjection, UpdateSessionTodosRequest,
+    UpdateSessionTodosResponse, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -90,6 +93,7 @@ pub struct SessionState {
     snapshot: Arc<SessionSnapshot>,
     transcript_revision: u64,
     resources_revision: u64,
+    bounded_transcript: bool,
 }
 
 impl SessionState {
@@ -103,6 +107,7 @@ impl SessionState {
             snapshot: Arc::new(snapshot),
             transcript_revision,
             resources_revision: transcript_revision,
+            bounded_transcript: false,
         })
     }
 
@@ -138,7 +143,8 @@ impl SessionState {
             if envelope.cursor <= snapshot.cursor {
                 continue;
             }
-            let changes = apply_validated_envelope(snapshot, envelope, &mut signals);
+            let changes =
+                apply_validated_envelope(snapshot, envelope, &mut signals, self.bounded_transcript);
             if changes.transcript {
                 self.transcript_revision = self.transcript_revision.wrapping_add(1);
             }
@@ -178,6 +184,10 @@ pub enum SessionUpdate {
     Changed {
         state: SessionState,
         signals: Vec<SessionSignal>,
+    },
+    HistoryPrepended {
+        state: SessionState,
+        loaded_items: usize,
     },
     Reset(Box<SessionState>),
 }
@@ -219,6 +229,8 @@ pub enum SessionClientError {
         expected: ResourceId,
         received: ResourceId,
     },
+    #[error("invalid session timeline: {0}")]
+    Timeline(String),
 }
 
 impl SessionClientError {
@@ -233,7 +245,8 @@ impl SessionClientError {
             | Self::CommandForm { .. }
             | Self::CommandCompactReview { .. }
             | Self::CommandPrompt { .. }
-            | Self::CommandResource { .. } => false,
+            | Self::CommandResource { .. }
+            | Self::Timeline(_) => false,
         }
     }
 }
@@ -246,6 +259,19 @@ pub struct SessionClient {
     signals: broadcast::Sender<SessionSignal>,
     updates: broadcast::Sender<SessionUpdate>,
     refresh_lock: Arc<Mutex<()>>,
+    history: Option<Arc<Mutex<TimelineHistory>>>,
+}
+
+struct TimelineHistory {
+    oldest: Option<TimelineCursor>,
+    has_older: bool,
+    loaded_items: HashSet<TimelineItemId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryLoadOutcome {
+    pub loaded_items: usize,
+    pub has_more: bool,
 }
 
 impl SessionClient {
@@ -260,6 +286,23 @@ impl SessionClient {
             .await?;
         validate_session(&snapshot, &session_id)?;
         Self::from_snapshot(client, snapshot)
+    }
+
+    pub(crate) async fn attach_windowed(
+        client: Client,
+        session_id: SessionId,
+    ) -> Result<Self, SessionClientError> {
+        let page = client
+            .call::<rpc::GetSessionTimelineTail>(&GetSessionTimelineTailRequest {
+                session_id: session_id.clone(),
+                budget: SessionTimelineBudget {
+                    turn_budget: Some(12),
+                    byte_budget: Some(256 * 1024),
+                },
+            })
+            .await?;
+        validate_timeline_page(&page, &session_id, &client.capabilities().daemon_generation)?;
+        Self::from_timeline_page(client, page)
     }
 
     pub(crate) fn from_snapshot(
@@ -280,6 +323,35 @@ impl SessionClient {
             signals,
             updates,
             refresh_lock: Arc::new(Mutex::new(())),
+            history: None,
+        })
+    }
+
+    fn from_timeline_page(
+        client: Client,
+        page: SessionTimelinePage,
+    ) -> Result<Self, SessionClientError> {
+        let capabilities = client.capabilities();
+        let snapshot = snapshot_from_timeline(&page)?;
+        let session_id = snapshot.projection.metadata.id.clone();
+        let mut state = SessionState::new(snapshot, &capabilities.daemon_generation)?;
+        state.bounded_transcript = true;
+        let history = TimelineHistory {
+            oldest: oldest_cursor(&page),
+            has_older: page.older.has_more,
+            loaded_items: timeline_item_ids(&page),
+        };
+        let (state, _) = watch::channel(state);
+        let (signals, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
+        let (updates, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
+        Ok(Self {
+            client,
+            session_id,
+            state,
+            signals,
+            updates,
+            refresh_lock: Arc::new(Mutex::new(())),
+            history: Some(Arc::new(Mutex::new(history))),
         })
     }
 
@@ -301,6 +373,54 @@ impl SessionClient {
 
     pub fn subscribe_updates(&self) -> broadcast::Receiver<SessionUpdate> {
         self.updates.subscribe()
+    }
+
+    pub async fn load_older_history(&self) -> Result<HistoryLoadOutcome, SessionClientError> {
+        let Some(history) = &self.history else {
+            return Ok(HistoryLoadOutcome {
+                loaded_items: 0,
+                has_more: false,
+            });
+        };
+        let _refresh_guard = self.refresh_lock.lock().await;
+        let mut history = history.lock().await;
+        let Some(before) = history.oldest.clone().filter(|_| history.has_older) else {
+            return Ok(HistoryLoadOutcome {
+                loaded_items: 0,
+                has_more: false,
+            });
+        };
+        let page = self
+            .client
+            .call::<rpc::GetSessionTimelineBefore>(&GetSessionTimelineBeforeRequest {
+                session_id: self.session_id.clone(),
+                before,
+                budget: SessionTimelineBudget {
+                    turn_budget: Some(12),
+                    byte_budget: Some(256 * 1024),
+                },
+            })
+            .await?;
+        validate_timeline_page(
+            &page,
+            &self.session_id,
+            &self.client.capabilities().daemon_generation,
+        )?;
+        let mut next = self.current();
+        let loaded_items = merge_timeline_page(&mut next, &page, &mut history.loaded_items);
+        history.oldest = oldest_cursor(&page).or(history.oldest.clone());
+        history.has_older = page.older.has_more;
+        if loaded_items > 0 {
+            self.state.send_replace(next.clone());
+            let _ = self.updates.send(SessionUpdate::HistoryPrepended {
+                state: next,
+                loaded_items,
+            });
+        }
+        Ok(HistoryLoadOutcome {
+            loaded_items,
+            has_more: history.has_older,
+        })
     }
 
     pub async fn refresh(&self) -> Result<RefreshOutcome, SessionClientError> {
@@ -369,14 +489,9 @@ impl SessionClient {
                 } else {
                     self.client.refresh_capabilities().await?
                 };
-                let snapshot = self
-                    .client
-                    .call::<rpc::GetSessionSnapshot>(&GetSessionSnapshotRequest {
-                        session_id: self.session_id.clone(),
-                    })
+                let mut next = self
+                    .fetch_fresh_state(&capabilities.daemon_generation)
                     .await?;
-                validate_session(&snapshot, &self.session_id)?;
-                let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 next.transcript_revision = previous_transcript_revision.wrapping_add(1);
                 next.resources_revision = previous_resources_revision.wrapping_add(1);
                 self.state.send_replace(next.clone());
@@ -384,14 +499,9 @@ impl SessionClient {
                 Ok(RefreshOutcome::Reconnected)
             }
             Err(error) if error.requires_resync() => {
-                let snapshot = self
-                    .client
-                    .call::<rpc::GetSessionSnapshot>(&GetSessionSnapshotRequest {
-                        session_id: self.session_id.clone(),
-                    })
+                let mut next = self
+                    .fetch_fresh_state(&capabilities.daemon_generation)
                     .await?;
-                validate_session(&snapshot, &self.session_id)?;
-                let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
                 next.transcript_revision = previous_transcript_revision.wrapping_add(1);
                 next.resources_revision = previous_resources_revision.wrapping_add(1);
                 self.state.send_replace(next.clone());
@@ -400,6 +510,41 @@ impl SessionClient {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn fetch_fresh_state(
+        &self,
+        expected_generation: &DaemonGeneration,
+    ) -> Result<SessionState, SessionClientError> {
+        if let Some(history) = &self.history {
+            let page = self
+                .client
+                .call::<rpc::GetSessionTimelineTail>(&GetSessionTimelineTailRequest {
+                    session_id: self.session_id.clone(),
+                    budget: SessionTimelineBudget {
+                        turn_budget: Some(12),
+                        byte_budget: Some(256 * 1024),
+                    },
+                })
+                .await?;
+            validate_timeline_page(&page, &self.session_id, expected_generation)?;
+            let mut state = SessionState::new(snapshot_from_timeline(&page)?, expected_generation)?;
+            state.bounded_transcript = true;
+            *history.lock().await = TimelineHistory {
+                oldest: oldest_cursor(&page),
+                has_older: page.older.has_more,
+                loaded_items: timeline_item_ids(&page),
+            };
+            return Ok(state);
+        }
+        let snapshot = self
+            .client
+            .call::<rpc::GetSessionSnapshot>(&GetSessionSnapshotRequest {
+                session_id: self.session_id.clone(),
+            })
+            .await?;
+        validate_session(&snapshot, &self.session_id)?;
+        Ok(SessionState::new(snapshot, expected_generation)?)
     }
 
     pub async fn refresh_until_current(&self) -> Result<RefreshOutcome, SessionClientError> {
@@ -1031,6 +1176,138 @@ enum SyncConnection {
     StreamEnded,
 }
 
+fn validate_timeline_page(
+    page: &SessionTimelinePage,
+    expected_session: &SessionId,
+    expected_generation: &DaemonGeneration,
+) -> Result<(), SessionClientError> {
+    if &page.session_id != expected_session {
+        return Err(ReconcileError::Session {
+            expected: expected_session.clone(),
+            received: page.session_id.clone(),
+        }
+        .into());
+    }
+    if &page.daemon_generation != expected_generation {
+        return Err(ReconcileError::DaemonGeneration {
+            expected: expected_generation.clone(),
+            received: page.daemon_generation.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn snapshot_from_timeline(
+    page: &SessionTimelinePage,
+) -> Result<SessionSnapshot, SessionClientError> {
+    let live = page
+        .live
+        .as_ref()
+        .ok_or_else(|| SessionClientError::Timeline("tail page has no live state".into()))?;
+    let mut transcript = page
+        .segments
+        .iter()
+        .flat_map(timeline_items)
+        .map(|item| item.preview.clone())
+        .collect::<Vec<_>>();
+    transcript.sort_by_key(atman_proto::TranscriptItem::seq);
+    let mut workflow_turns = HashSet::new();
+    let workflows = page
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            TimelineSegment::Turn { segment } => segment.workflow.clone(),
+            TimelineSegment::Session { .. } => None,
+        })
+        .filter(|workflow| workflow_turns.insert(workflow.turn_id.0))
+        .collect();
+    Ok(SessionSnapshot {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        daemon_generation: page.daemon_generation.clone(),
+        cursor: page.as_of_cursor,
+        projection: SessionProjection {
+            revision: page.projection_revision,
+            metadata: live.metadata.clone(),
+            lifecycle: live.lifecycle,
+            runs: live.runs.clone(),
+            transcript,
+            workflows,
+            compactions: live.compactions.clone(),
+            goal: live.goal.clone(),
+            todos: live.todos.clone(),
+            plans: live.plans.clone(),
+            context: live.context.clone(),
+            trust: live.trust.clone(),
+            interactions: live.interactions.clone(),
+            resources: live.resources.clone(),
+            usage: live.usage.clone(),
+        },
+    })
+}
+
+fn merge_timeline_page(
+    state: &mut SessionState,
+    page: &SessionTimelinePage,
+    loaded_items: &mut HashSet<TimelineItemId>,
+) -> usize {
+    let snapshot = Arc::make_mut(&mut state.snapshot);
+    let mut loaded = 0;
+    for item in page.segments.iter().flat_map(timeline_items) {
+        if loaded_items.insert(item.id.clone()) {
+            snapshot.projection.transcript.push(item.preview.clone());
+            loaded += 1;
+        }
+    }
+    for workflow in page.segments.iter().filter_map(|segment| match segment {
+        TimelineSegment::Turn { segment } => segment.workflow.as_ref(),
+        TimelineSegment::Session { .. } => None,
+    }) {
+        if !snapshot
+            .projection
+            .workflows
+            .iter()
+            .any(|existing| existing.turn_id == workflow.turn_id)
+        {
+            snapshot.projection.workflows.push(workflow.clone());
+        }
+    }
+    if loaded > 0 {
+        snapshot
+            .projection
+            .transcript
+            .sort_by_key(atman_proto::TranscriptItem::seq);
+        state.transcript_revision = state.transcript_revision.wrapping_add(1);
+    }
+    loaded
+}
+
+fn oldest_cursor(page: &SessionTimelinePage) -> Option<TimelineCursor> {
+    page.segments
+        .iter()
+        .flat_map(timeline_items)
+        .min_by_key(|item| item.seq)
+        .map(|item| TimelineCursor {
+            seq: item.seq,
+            item_id: item.id.clone(),
+        })
+}
+
+fn timeline_item_ids(page: &SessionTimelinePage) -> HashSet<TimelineItemId> {
+    page.segments
+        .iter()
+        .flat_map(timeline_items)
+        .map(|item| item.id.clone())
+        .collect()
+}
+
+fn timeline_items(segment: &TimelineSegment) -> impl Iterator<Item = &atman_proto::TimelineItem> {
+    match segment {
+        TimelineSegment::Turn { segment } => segment.items.iter(),
+        TimelineSegment::Session { segment } => segment.items.iter(),
+    }
+}
+
 fn validate_snapshot(
     snapshot: &SessionSnapshot,
     expected_generation: &DaemonGeneration,
@@ -1132,10 +1409,11 @@ fn apply_validated_envelope(
     snapshot: &mut SessionSnapshot,
     envelope: &ProjectionEventEnvelope,
     signals: &mut Vec<SessionSignal>,
+    bounded_transcript: bool,
 ) -> SliceChanges {
     let changes = match &envelope.event {
         ServerEvent::ProjectionDelta { delta } => {
-            apply_validated_delta(&mut snapshot.projection, delta);
+            apply_validated_delta(&mut snapshot.projection, delta, bounded_transcript);
             SliceChanges {
                 transcript: delta.changes.iter().any(|change| {
                     matches!(
@@ -1193,14 +1471,22 @@ fn validate_delta(revision: Revision, delta: &ProjectionDelta) -> Result<(), Rec
     Ok(())
 }
 
-fn apply_validated_delta(projection: &mut SessionProjection, delta: &ProjectionDelta) {
+fn apply_validated_delta(
+    projection: &mut SessionProjection,
+    delta: &ProjectionDelta,
+    bounded_transcript: bool,
+) {
     for change in &delta.changes {
-        apply_change(projection, change);
+        apply_change(projection, change, bounded_transcript);
     }
     projection.revision = delta.revision;
 }
 
-fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
+fn apply_change(
+    projection: &mut SessionProjection,
+    change: &ProjectionChange,
+    bounded_transcript: bool,
+) {
     match change {
         ProjectionChange::MetadataSet { metadata } => projection.metadata.clone_from(metadata),
         ProjectionChange::LifecycleSet { lifecycle } => projection.lifecycle = *lifecycle,
@@ -1208,6 +1494,9 @@ fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
         ProjectionChange::RunRemove { run_id } => projection.runs.retain(|run| &run.id != run_id),
         ProjectionChange::TranscriptAppend { items } => {
             projection.transcript.extend(items.iter().cloned())
+        }
+        ProjectionChange::TranscriptReplace { items } if bounded_transcript => {
+            replace_bounded_transcript(projection, items)
         }
         ProjectionChange::TranscriptReplace { items } => projection.transcript.clone_from(items),
         ProjectionChange::WorkflowUpsert { workflow } => {
@@ -1318,6 +1607,60 @@ fn upsert_interaction(
     }
 }
 
+fn replace_bounded_transcript(
+    projection: &mut SessionProjection,
+    replacement: &[atman_proto::TranscriptItem],
+) {
+    let run_turns = projection
+        .runs
+        .iter()
+        .filter_map(|run| run.turn_id.as_ref().map(|turn| (run.id.0, turn.0)))
+        .collect::<std::collections::HashMap<_, _>>();
+    let visible_turns = projection
+        .transcript
+        .iter()
+        .filter_map(|item| transcript_turn_id(item, &run_turns))
+        .collect::<HashSet<_>>();
+    let minimum_seq = projection
+        .transcript
+        .iter()
+        .map(atman_proto::TranscriptItem::seq)
+        .min()
+        .unwrap_or_default();
+    projection.transcript = replacement
+        .iter()
+        .filter(|item| match transcript_turn_id(item, &run_turns) {
+            Some(turn_id) => visible_turns.contains(&turn_id),
+            None => item.seq() >= minimum_seq,
+        })
+        .cloned()
+        .collect();
+}
+
+fn transcript_turn_id(
+    item: &atman_proto::TranscriptItem,
+    run_turns: &std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    match item {
+        atman_proto::TranscriptItem::Message { message, .. } => Some(message.turn_id.0),
+        atman_proto::TranscriptItem::FileEdit {
+            turn_id, run_id, ..
+        } => turn_id.as_ref().map(|turn| turn.0).or_else(|| {
+            run_id
+                .as_ref()
+                .and_then(|run| run_turns.get(&run.0).copied())
+        }),
+        atman_proto::TranscriptItem::ActivitySummary { turn_id, .. } => Some(turn_id.0),
+        atman_proto::TranscriptItem::Diff { run_id, .. }
+        | atman_proto::TranscriptItem::Compaction { run_id, .. } => run_id
+            .as_ref()
+            .and_then(|run| run_turns.get(&run.0).copied()),
+        atman_proto::TranscriptItem::Mermaid { .. }
+        | atman_proto::TranscriptItem::Notice { .. }
+        | atman_proto::TranscriptItem::Extension { .. } => None,
+    }
+}
+
 fn remove_interaction(
     interactions: &mut atman_proto::InteractionProjection,
     target: &atman_proto::InteractionTarget,
@@ -1420,6 +1763,139 @@ mod tests {
             ts: serde_json::from_value(serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
             event: ServerEvent::ProjectionDelta { delta },
         }
+    }
+
+    fn timeline_item(seq: u64, turn_id: atman_proto::TurnId) -> atman_proto::TimelineItem {
+        let preview = atman_proto::TranscriptItem::Message {
+            seq,
+            ts: chrono::Utc::now(),
+            run_id: None,
+            context_id: None,
+            checkpoint_index: None,
+            message: atman_proto::MessageProjection {
+                role: atman_proto::MessageRole::User,
+                origin: atman_proto::MessageOrigin::User,
+                turn_id: turn_id.clone(),
+                parts: vec![atman_proto::MessagePart::Text {
+                    text: format!("message {seq}"),
+                }],
+            },
+        };
+        atman_proto::TimelineItem {
+            id: TimelineItemId(format!("message:{seq}")),
+            seq,
+            turn_id: Some(turn_id),
+            run_id: None,
+            kind: atman_proto::TimelineItemKind::Message,
+            preview,
+            detail: None,
+        }
+    }
+
+    fn timeline_page(
+        source: &SessionProjection,
+        seq: u64,
+        has_older: bool,
+        include_live: bool,
+    ) -> SessionTimelinePage {
+        let turn_id = atman_proto::TurnId(uuid::Uuid::from_u128(seq as u128));
+        let item = timeline_item(seq, turn_id.clone());
+        SessionTimelinePage {
+            session_id: source.metadata.id.clone(),
+            daemon_generation: DaemonGeneration("generation-a".into()),
+            as_of_cursor: EventCursor(7),
+            projection_revision: source.revision,
+            segments: vec![TimelineSegment::Turn {
+                segment: atman_proto::TimelineTurnSegment {
+                    id: atman_proto::TimelineSegmentId(format!("turn:{}", turn_id.0)),
+                    turn_id,
+                    start_seq: seq,
+                    latest_seq: seq,
+                    revision: Revision(seq),
+                    state: atman_proto::TimelineTurnState::Complete,
+                    items: vec![item],
+                    workflow: None,
+                },
+            }],
+            older: atman_proto::TimelineRemaining {
+                has_more: has_older,
+                estimated_segments: None,
+            },
+            newer: atman_proto::TimelineRemaining::default(),
+            serialized_bytes: 1,
+            live: include_live.then(|| atman_proto::TimelineLiveState {
+                metadata: source.metadata.clone(),
+                lifecycle: source.lifecycle,
+                runs: source.runs.clone(),
+                active_turns: Vec::new(),
+                compactions: source.compactions.clone(),
+                goal: source.goal.clone(),
+                todos: source.todos.clone(),
+                plans: source.plans.clone(),
+                context: source.context.clone(),
+                trust: source.trust.clone(),
+                interactions: source.interactions.clone(),
+                resources: source.resources.clone(),
+                usage: source.usage.clone(),
+            }),
+        }
+    }
+
+    #[test]
+    fn timeline_bootstrap_and_prepend_preserve_live_revision_and_cursor() {
+        let source = projection(
+            serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789abc"))
+                .unwrap(),
+            Revision(3),
+        );
+        let tail = timeline_page(&source, 2, true, true);
+        let snapshot = snapshot_from_timeline(&tail).unwrap();
+        let mut state = SessionState::new(snapshot, &tail.daemon_generation).unwrap();
+        state.bounded_transcript = true;
+        let mut loaded = timeline_item_ids(&tail);
+        let before = timeline_page(&source, 1, false, false);
+
+        let replacement = GetSessionUpdatesResponse {
+            daemon_generation: tail.daemon_generation.clone(),
+            events: vec![envelope(
+                &state,
+                8,
+                ProjectionDelta {
+                    base_revision: Revision(3),
+                    revision: Revision(4),
+                    changes: vec![ProjectionChange::TranscriptReplace {
+                        items: vec![
+                            timeline_item(8, atman_proto::TurnId(uuid::Uuid::from_u128(1))).preview,
+                            timeline_item(8, atman_proto::TurnId(uuid::Uuid::from_u128(2))).preview,
+                        ],
+                    }],
+                },
+            )],
+            next_cursor: EventCursor(8),
+            has_more: false,
+            resync_required: None,
+        };
+        state.apply_updates(&replacement).unwrap();
+        let atman_proto::TranscriptItem::Message { message, .. } =
+            &state.projection().transcript[0]
+        else {
+            panic!("expected message");
+        };
+        assert_eq!(state.projection().transcript.len(), 1);
+        assert_eq!(message.turn_id.0, uuid::Uuid::from_u128(2));
+
+        assert_eq!(merge_timeline_page(&mut state, &before, &mut loaded), 1);
+        assert_eq!(state.cursor(), EventCursor(8));
+        assert_eq!(state.projection().revision, Revision(4));
+        assert_eq!(
+            state
+                .projection()
+                .transcript
+                .iter()
+                .map(atman_proto::TranscriptItem::seq)
+                .collect::<Vec<_>>(),
+            vec![1, 8]
+        );
     }
 
     #[test]

@@ -241,6 +241,20 @@ impl Client {
         SessionClient::attach(self.clone(), session_id).await
     }
 
+    pub async fn attach_session_windowed(
+        &self,
+        session_id: atman_proto::SessionId,
+    ) -> Result<SessionClient, SessionClientError> {
+        if self
+            .capabilities()
+            .supports::<atman_proto::rpc::GetSessionTimelineTail>()
+        {
+            SessionClient::attach_windowed(self.clone(), session_id).await
+        } else {
+            SessionClient::attach(self.clone(), session_id).await
+        }
+    }
+
     pub async fn create_session(
         &self,
         project_root: Option<String>,

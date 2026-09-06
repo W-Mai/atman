@@ -1260,6 +1260,11 @@ pub(crate) fn handle_key(
             } else {
                 1
             });
+            if app.scroll_offset == 0
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::LoadOlderHistory);
+            }
             *interrupt_prompt = None;
         }
         KeyAction::ScrollDown | KeyAction::PageDown => {
@@ -1284,6 +1289,9 @@ pub(crate) fn handle_key(
         }
         KeyAction::Home => {
             app.scroll_to_top();
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::LoadOlderHistory);
+            }
             *interrupt_prompt = None;
         }
         KeyAction::End => {

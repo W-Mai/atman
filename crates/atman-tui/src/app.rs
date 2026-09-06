@@ -865,6 +865,7 @@ pub struct AppState {
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,
     pub scroll_offset: u32,
     pub follow_tail: bool,
+    preserve_scroll_on_prepend: bool,
     pub should_quit: bool,
     pub streaming: bool,
     pub was_streaming: bool,
@@ -2084,6 +2085,11 @@ impl AppState {
         self.follow_tail = true;
     }
 
+    pub(crate) fn preserve_scroll_for_history_prepend(&mut self) {
+        self.preserve_scroll_on_prepend = true;
+        self.follow_tail = false;
+    }
+
     pub fn resolve_scroll(
         &mut self,
         total_rows: u32,
@@ -2091,6 +2097,7 @@ impl AppState {
         input_overlay_rows: u32,
         items_len: usize,
     ) {
+        let old_total_rows = self.last_total_rows;
         let new_items = items_len > self.last_items_len;
         let old_visible_above = self
             .last_document_visible_rows
@@ -2108,7 +2115,13 @@ impl AppState {
             .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
             .max(1);
         let max = total_rows.saturating_sub(visible_above);
-        if self.follow_tail && (new_items || was_at_bottom) {
+        if std::mem::take(&mut self.preserve_scroll_on_prepend) {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(total_rows.saturating_sub(old_total_rows))
+                .min(max);
+            self.follow_tail = false;
+        } else if self.follow_tail && (new_items || was_at_bottom) {
             self.scroll_offset = max;
         } else {
             self.scroll_offset = self.scroll_offset.min(max);
@@ -5940,6 +5953,19 @@ mod tests {
         assert_eq!(app.scroll_offset, 127);
         app.resolve_scroll(300, 30, 5, 5);
         assert_eq!(app.scroll_offset, 127);
+    }
+
+    #[test]
+    fn history_prepend_preserves_the_visible_anchor() {
+        let mut app = AppState::new("s".into(), None);
+        app.resolve_scroll(100, 30, 5, 5);
+        app.scroll_to_top();
+        app.preserve_scroll_for_history_prepend();
+
+        app.resolve_scroll(140, 30, 5, 7);
+
+        assert_eq!(app.scroll_offset, 40);
+        assert!(!app.follow_tail);
     }
 
     #[test]
