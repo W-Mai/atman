@@ -325,8 +325,7 @@ impl DaemonState {
         &self,
         id: &SessionId,
         principal: &str,
-    ) -> Result<std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<crate::run::SessionRuntimeHost>>>>
-    {
+    ) -> Result<std::sync::Arc<crate::run::SessionRuntimeSlot>> {
         Ok(self
             .authorized_actor(id, principal)
             .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
@@ -1914,7 +1913,7 @@ mod tests {
         let second = state.session_runtime_slot(&session_id, "owner").unwrap();
 
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(first.get().is_none());
+        assert!(first.current_host().is_none());
     }
 
     #[tokio::test]

@@ -186,7 +186,7 @@ pub(crate) struct SessionActorHandle {
     tx: mpsc::UnboundedSender<Command>,
     view: watch::Receiver<SessionActorView>,
     leases: Arc<AtomicUsize>,
-    runtime: Arc<tokio::sync::OnceCell<Arc<crate::run::SessionRuntimeHost>>>,
+    runtime: Arc<crate::run::SessionRuntimeSlot>,
 }
 
 pub(crate) struct SessionActorLease {
@@ -269,7 +269,7 @@ impl SessionActorHandle {
             .map(|cursor| EventCursor(cursor.0.max(projection_cursor.0)))
             .unwrap_or(projection_cursor);
         let leases = Arc::new(AtomicUsize::new(0));
-        let runtime = Arc::new(tokio::sync::OnceCell::new());
+        let runtime = Arc::new(crate::run::SessionRuntimeSlot::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
         let runs: HashMap<_, _> = initial_runs
@@ -389,9 +389,7 @@ impl SessionActorHandle {
         self.session.clone()
     }
 
-    pub(crate) fn runtime_slot(
-        &self,
-    ) -> Arc<tokio::sync::OnceCell<Arc<crate::run::SessionRuntimeHost>>> {
+    pub(crate) fn runtime_slot(&self) -> Arc<crate::run::SessionRuntimeSlot> {
         self.runtime.clone()
     }
 
@@ -907,7 +905,7 @@ struct SessionActor {
     session_id: SessionId,
     session: Arc<atman_runtime::Session>,
     runs: HashMap<FlowRunId, LiveRun>,
-    runtime: Arc<tokio::sync::OnceCell<Arc<crate::run::SessionRuntimeHost>>>,
+    runtime: Arc<crate::run::SessionRuntimeSlot>,
     prompts: HashMap<PromptId, PendingPrompt>,
     prompt_terminals: VecDeque<(PromptId, PromptResolutionStatus)>,
     form_terminals: VecDeque<(String, FormResolutionStatus)>,
@@ -1081,7 +1079,7 @@ impl SessionActor {
                     .replace_mcp_servers(crate::bootstrap::initial_mcp_statuses(&configs));
                 let result = if self
                     .runtime
-                    .get()
+                    .current_host()
                     .is_some_and(|runtime| !runtime.reload_mcp(configs))
                 {
                     Err(anyhow::anyhow!("session MCP supervisor stopped"))

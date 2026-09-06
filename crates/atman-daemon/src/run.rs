@@ -25,6 +25,70 @@ pub(crate) struct SessionRuntimeHost {
     mcp: McpController,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionRuntimeKey {
+    project_root: PathBuf,
+    scope_root: PathBuf,
+    config_digest: blake3::Hash,
+}
+
+pub(crate) struct SessionRuntimeGeneration {
+    key: SessionRuntimeKey,
+    host: Arc<SessionRuntimeHost>,
+}
+
+#[derive(Default)]
+pub(crate) struct SessionRuntimeSlot {
+    current: std::sync::RwLock<Option<Arc<SessionRuntimeGeneration>>>,
+    build: tokio::sync::Mutex<()>,
+}
+
+impl SessionRuntimeSlot {
+    pub(crate) async fn acquire<F, Fut>(
+        &self,
+        key: SessionRuntimeKey,
+        build: F,
+    ) -> Result<Arc<SessionRuntimeGeneration>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Arc<SessionRuntimeHost>>>,
+    {
+        if let Some(current) = self.matching(&key) {
+            return Ok(current);
+        }
+        let _build = self.build.lock().await;
+        if let Some(current) = self.matching(&key) {
+            return Ok(current);
+        }
+        let host = build().await?;
+        let generation = Arc::new(SessionRuntimeGeneration { key, host });
+        *self.current.write().unwrap() = Some(generation.clone());
+        Ok(generation)
+    }
+
+    fn matching(&self, key: &SessionRuntimeKey) -> Option<Arc<SessionRuntimeGeneration>> {
+        self.current
+            .read()
+            .unwrap()
+            .as_ref()
+            .filter(|generation| generation.key == *key)
+            .cloned()
+    }
+
+    pub(crate) fn current_host(&self) -> Option<Arc<SessionRuntimeHost>> {
+        self.current
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|generation| generation.host.clone())
+    }
+
+    #[cfg(test)]
+    fn current_generation(&self) -> Option<Arc<SessionRuntimeGeneration>> {
+        self.current.read().unwrap().clone()
+    }
+}
+
 impl SessionRuntimeHost {
     fn executor(&self) -> atman_runtime::Executor {
         self.executor.clone()
@@ -431,6 +495,35 @@ impl RunLauncher {
             }));
         let mcp = McpController::start(executor.clone(), session, self.mcp_configs()?).await;
         Ok(Arc::new(SessionRuntimeHost { executor, mcp }))
+    }
+
+    fn session_runtime_key(
+        &self,
+        project_root: &Path,
+        scope_root: &Path,
+    ) -> Result<SessionRuntimeKey> {
+        let hub = self.config_hub()?;
+        let mut hasher = blake3::Hasher::new();
+        hash_runtime_path(&mut hasher, b"project-root", project_root);
+        hash_runtime_path(&mut hasher, b"scope-root", scope_root);
+        hash_runtime_file(&mut hasher, b"global-config", &hub.config_toml_path())?;
+        hash_runtime_file(
+            &mut hasher,
+            b"project-config",
+            &project_root.join(".atman/config.toml"),
+        )?;
+        let mut auth = hub.load_auth().context("load runtime auth configuration")?;
+        auth.providers.sort_by(|left, right| left.id.cmp(&right.id));
+        for provider in &mut auth.providers {
+            provider.model_cache = None;
+        }
+        hasher.update(b"auth-config");
+        hasher.update(&serde_json::to_vec(&auth).context("serialize runtime auth configuration")?);
+        Ok(SessionRuntimeKey {
+            project_root: project_root.to_path_buf(),
+            scope_root: scope_root.to_path_buf(),
+            config_digest: hasher.finalize(),
+        })
     }
 
     pub(crate) fn session_rebase_context(
@@ -950,6 +1043,26 @@ impl RunLauncher {
 
         let images = prepare_run_images(&session, images)?;
         let sid_proto = ProtoSessionId(session.id().0);
+        state
+            .register_session(
+                sid_proto.clone(),
+                session.clone(),
+                owner_principal.to_owned(),
+            )
+            .await?;
+        let runtime_key = self.session_runtime_key(&project_root, &scope_root)?;
+        let runtime_slot = state.session_runtime_slot(&sid_proto, owner_principal)?;
+        let runtime_generation = runtime_slot
+            .acquire(runtime_key, || {
+                self.build_session_runtime(
+                    state.clone(),
+                    session.clone(),
+                    project_root.clone(),
+                    scope_root.clone(),
+                    provider_catalog_refresh,
+                )
+            })
+            .await?;
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
         let turn_id = atman_runtime::event::TurnId::now();
@@ -973,26 +1086,7 @@ impl RunLauncher {
                 owner_principal,
             )
             .await?;
-        let runtime_slot = state.session_runtime_slot(&sid_proto, owner_principal)?;
-        let runtime_host = match runtime_slot
-            .get_or_try_init(|| {
-                self.build_session_runtime(
-                    state.clone(),
-                    session.clone(),
-                    project_root.clone(),
-                    scope_root.clone(),
-                    provider_catalog_refresh,
-                )
-            })
-            .await
-        {
-            Ok(runtime) => runtime.clone(),
-            Err(error) => {
-                emit_pre_execution_failure(&session, &context, &run_id_runtime, &flow_name, &error);
-                state.finish_run(&sid_proto, &run_id_proto);
-                return Err(error);
-            }
-        };
+        let runtime_host = runtime_generation.host.clone();
         let config_dir = self.config_dir.clone();
         let state_for_task = state.clone();
         let sid_for_task = sid_proto.clone();
@@ -1175,6 +1269,27 @@ fn reload_model_config(config_dir: Option<&Path>) {
             error,
             "config.toml migration/reload failed; disk migration may already be committed: {error}"
         );
+    }
+}
+
+fn hash_runtime_path(hasher: &mut blake3::Hasher, label: &[u8], path: &Path) {
+    hasher.update(label);
+    hasher.update(path.to_string_lossy().as_bytes());
+}
+
+fn hash_runtime_file(hasher: &mut blake3::Hasher, label: &[u8], path: &Path) -> Result<()> {
+    hash_runtime_path(hasher, label, path);
+    match std::fs::read(path) {
+        Ok(contents) => {
+            hasher.update(b"present");
+            hasher.update(&contents);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            hasher.update(b"missing");
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("read runtime config {}", path.display())),
     }
 }
 
@@ -1871,9 +1986,10 @@ mod tests {
         std::fs::write(&flow_path, "flow echo() -> string { return \"ok\" }").unwrap();
         let state = Arc::new(DaemonState::new(temp.path().join("data")));
         let session = Arc::new(atman_runtime::Session::open(temp.path().join("sessions")).unwrap());
-        let launcher = RunLauncher::new(temp.path().to_path_buf(), Some(config), None).unwrap();
+        let launcher =
+            RunLauncher::new(temp.path().to_path_buf(), Some(config.clone()), None).unwrap();
         let session_id = ProtoSessionId(session.id().0);
-        let mut runtime_address = None;
+        let mut first_generation = None;
 
         for _ in 0..2 {
             let spawned = launcher
@@ -1899,15 +2015,45 @@ mod tests {
             let slot = state
                 .session_runtime_slot(&session_id, "test-principal")
                 .unwrap();
-            let current_address = Arc::as_ptr(slot.get().unwrap()) as usize;
-            if let Some(first_address) = runtime_address {
-                assert_eq!(current_address, first_address);
+            let current = slot.current_generation().unwrap();
+            if let Some(first) = &first_generation {
+                assert!(Arc::ptr_eq(&current, first));
             } else {
-                runtime_address = Some(current_address);
+                first_generation = Some(current);
             }
         }
 
-        assert_eq!(session.messages().len(), 2);
+        std::fs::write(config.join("config.toml"), "# refresh runtime generation\n").unwrap();
+        let spawned = launcher
+            .spawn_session_as_with_options(
+                state.clone(),
+                session.clone(),
+                temp.path().to_path_buf(),
+                temp.path().to_path_buf(),
+                flow_path.to_str().unwrap(),
+                Vec::new(),
+                "test-principal",
+                RunOptions::default(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.has_live_runs(&spawned.session_id) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let replacement = state
+            .session_runtime_slot(&session_id, "test-principal")
+            .unwrap()
+            .current_generation()
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &replacement,
+            first_generation.as_ref().unwrap()
+        ));
+        assert_eq!(session.messages().len(), 3);
         state.shutdown(std::time::Duration::from_secs(1)).await;
     }
 
