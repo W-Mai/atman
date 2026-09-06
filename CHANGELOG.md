@@ -42,6 +42,10 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Bounded session timeline** — the TUI attaches to a bounded tail of complete turns, loads older history through keyset pages, jumps around indexed search results, retains per-session viewport bookmarks, and fetches heavy tool or diff details only when opened.
+
+- **Session-scoped runtime hosts** — each loaded session owns one actor, runtime generation, MCP supervisor, and provider lifecycle shared by concurrent runs without sharing invocation environments. Idle actors flush and unload independently while the daemon remains available to other clients.
+
 - **Daemon-owned configuration and MCP management** — terminal and command-line clients mutate, probe, and inspect provider, model, and MCP configuration through typed daemon methods. Active sessions hot-reload MCP namespaces, and client-side configuration refreshes remain read-only.
 
 - **Daemon client integration contract** — Rust and TypeScript SDK examples cover attach, send, subscribe, and reconnect behavior. Persistent state converges across Unix and HTTP clients while drafts and presentation state remain client-local.
@@ -112,9 +116,13 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Bounded recovery and history ordering** — cold session recovery persists a covered projection snapshot, indexed tail reads avoid replaying complete logs, inline notices retain their timeline position, and search or prepend reconciliation preserves the visible anchor without changing the model context.
+
+- **Shared interaction presentation** — auto-resolved permission audits stay out of approval modals, concurrent decisions converge through one terminal result, and workflow updates preserve each client's collapsed or expanded state.
+
 - **Daemon-backed TUI startup** — fresh terminal sessions retain the startup screen and recent-session shortcuts through the initial daemon transcript projection, while resumed sessions open directly into their history.
 
-- **Durable synchronous runs** — CLI commands that wait for daemon execution return only after the terminal flow and turn events are readable from the persisted event stream.
+- **Durable synchronous runs** — CLI commands and non-interactive terminal sessions that wait for daemon execution return only after the terminal flow and turn events are readable from the persisted event stream.
 
 - **Daemon compatibility diagnostics** — Rust and TypeScript clients identify protocol, snapshot, event, and method revision mismatches and direct the operator to restart the daemon from the same Atman installation.
 

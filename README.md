@@ -308,6 +308,8 @@ atman doctor [--fix]
 
 The daemon is the exclusive writer for persistent sessions, runs, approvals, forms, resources, provider settings, and MCP settings. Multiple TUI and browser clients can attach to one session and converge through the same snapshot and ordered projection stream; unsent drafts, scroll, disclosure, and themes remain local to each client. See [Daemon client platform](docs/daemon-client-platform.md) for the ownership, authentication, synchronization, and SDK contracts.
 
+The TUI loads a bounded tail of complete turns, pages older history while scrolling, jumps around indexed search matches, and fetches large tool output or diffs only when opened. Timeline paging remains independent of the LLM message window, context checkpoints, compaction, and prompt-cache identity.
+
 REPL builtins: `:help`, `:cost`, `:goal`, `:suggest`, `:compact`, `:copy`, `:attach`, …
 
 ## Configuration

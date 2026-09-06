@@ -12,7 +12,13 @@ Atman uses one local daemon as the exclusive owner of persistent sessions, runs,
 | Provider, model, and MCP configuration | Daemon configuration services | Typed query, mutation, probe, and reload commands |
 | Input draft, attached-but-unsent images, scroll, disclosure, and theme | Individual client | Local UI state only |
 
-An attached client never opens a second writer for the same persistent session. Explicit `atman run --mock`, `atman run --ephemeral`, `atman tui-preview`, test fixtures, and offline maintenance commands remain embedded because they do not attach to a daemon-owned persistent session.
+An attached client never opens a second writer for the same persistent session. The daemon keeps one `SessionActor` and one session-scoped runtime host for each loaded session; concurrent runs receive separate invocation environments while reusing the host's executor, provider lifecycle, MCP supervisor, memory stores, and tool registries. Explicit `atman run --mock`, `atman run --ephemeral`, `atman tui-preview`, test fixtures, and offline maintenance commands remain embedded because they do not attach to a daemon-owned persistent session.
+
+## Process and session lifecycle
+
+Normal `atman` TUI and `atman run` commands connect to the existing local daemon or start one detached daemon process when no live pid is present. Closing a client does not terminate the daemon or another client's run. The daemon remains available until `atman daemon stop`, SIGTERM, or Ctrl+C reaches the daemon process.
+
+One daemon process hosts multiple session actors in-process; it does not create one Atman subprocess per session. A loaded actor owns the canonical Session, projection, interactions, active runs, and runtime host. External Bash, terminal, and MCP processes remain supervised resources rather than replacement session owners. An actor with no client lease, active run, pending interaction, blocking resource, or background compaction becomes eligible for unload after five minutes; unload flushes durable state and releases its runtime host while the daemon continues serving other sessions.
 
 ## Transports and authentication
 
@@ -24,7 +30,7 @@ The daemon currently represents one local operator. Authenticated HTTP clients a
 
 ## Synchronization model
 
-Attachment starts with one complete `SessionSnapshot` and its durable cursor. The SDK then reads ordered projection envelopes after that cursor and applies each revision atomically. Duplicate events are ignored, a cursor or revision gap triggers a fresh snapshot, and a daemon generation change reconnects through the same snapshot boundary.
+Full-state attachment starts with one complete `SessionSnapshot` and its durable cursor. The TUI uses windowed attachment instead: the initial response combines current non-transcript projection state with a bounded timeline tail. Both modes then read ordered projection envelopes after the response cursor and apply each revision atomically. Duplicate events are ignored, a cursor or revision gap triggers a fresh bounded page or snapshot, and a daemon generation change reconnects through the same authoritative boundary.
 
 Durable state converges across every transport pairing:
 
@@ -35,6 +41,14 @@ Durable state converges across every transport pairing:
 | Web UI + Web UI | Shared and cursor-ordered | Independent |
 
 Approval resolution is compare-and-set by request revision. Concurrent decisions produce one committed result; another client receives a stale result and removes the already-resolved request when it consumes the committed projection event. Disconnecting a client does not cancel a run, and reconnecting reconstructs the same durable projection before live signals continue.
+
+## Windowed session history
+
+The TUI initially requests the latest 12 complete turn or session segments with a 256 KiB response budget. Scrolling near the top requests an older keyset page, search jumps request a page centered on the matched sequence, and live events patch the loaded segment by stable identity and revision. The client retains up to 48 nearby segments, preserves a per-session visual bookmark across switching, and follows the tail only while the viewport remains at the bottom.
+
+Large tool results, terminal output, and diffs are represented by bounded previews and fetched through `session.history.item_detail` only when the row is expanded or opened fullscreen. Pages never split a visual turn merely to satisfy the byte budget; an oversized segment retains structured items with deferred detail. A validated event index locates historical byte ranges without replaying the file from its beginning. Missing or stale index coverage falls back to a bounded contiguous tail and schedules actor-backed recovery, after which the authoritative page replaces the provisional one without moving the requested anchor.
+
+Timeline navigation is a presentation read model. `session.history.tail`, `before`, `after`, `around`, `search`, and `item_detail` do not append events, select another context head, change checkpoint epochs, run compaction, or alter provider request construction. The model context remains governed by the Session's context journal and checkpoint mechanism independently of which history pages a client has loaded.
 
 ## Rust SDK
 
@@ -64,8 +78,10 @@ Both SDKs negotiate protocol, snapshot schema, event schema, and method revision
 
 - Construct one SDK transport and complete capability negotiation before rendering session state.
 - Attach through `SessionClient`; do not read `events.jsonl`, session SQLite files, or daemon storage directly.
-- Render the current snapshot and subscribe before starting background synchronization.
+- Use the bounded history methods for interactive transcript views; reserve full snapshots for consumers that require the complete materialized transcript.
+- Render the current page or snapshot and subscribe before starting background synchronization.
 - Send every mutation through a typed SDK command and retain its generated business request identity for safe retries.
 - Treat projection state as durable and signals as transient presentation hints.
 - Keep unsent input, image drafts, scroll, expanded rows, and theme client-local.
+- Preserve viewport anchors by stable timeline item identity across prepend, search jumps, session switching, and authoritative resynchronization.
 - Surface compatibility errors directly and reconnect after daemon generation changes.
