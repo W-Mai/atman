@@ -99,7 +99,7 @@ export class SessionStore {
     }
 
     const startingCursor = this.#snapshot.cursor
-    const next = structuredClone(this.#snapshot)
+    const next = cloneSnapshotShell(this.#snapshot)
     const signals: SessionSignal[] = []
     let events = 0
     for (const envelope of response.events) {
@@ -348,7 +348,7 @@ function upsertById<T extends RunProjection | ResourceProjection>(items: T[], it
 }
 
 function upsertByKey<T>(items: T[], item: T, key: (item: T) => string): T[] {
-  const next = items.map((existing) => structuredClone(existing))
+  const next = items.slice()
   const itemKey = key(item)
   const index = next.findIndex((existing) => key(existing) === itemKey)
   if (index === -1) {
@@ -360,7 +360,7 @@ function upsertByKey<T>(items: T[], item: T, key: (item: T) => string): T[] {
 }
 
 function upsertInteraction(projection: SessionProjection, interaction: InteractionItem): void {
-  const current = projection.interactions ?? {}
+  const current = { ...(projection.interactions ?? {}) }
   switch (interaction.type) {
     case 'prompt':
       current.prompts = upsertByKey(current.prompts ?? [], interaction.prompt, (item) => item.id)
@@ -404,7 +404,7 @@ function upsertInteraction(projection: SessionProjection, interaction: Interacti
 }
 
 function removeInteraction(projection: SessionProjection, target: InteractionTarget): void {
-  const current = projection.interactions ?? {}
+  const current = { ...(projection.interactions ?? {}) }
   switch (target.type) {
     case 'prompt':
       current.prompts = (current.prompts ?? []).filter((item) => item.id !== target.prompt_id)
@@ -436,6 +436,13 @@ function removeInteraction(projection: SessionProjection, target: InteractionTar
       assertNever(target)
   }
   projection.interactions = current
+}
+
+function cloneSnapshotShell(snapshot: SessionSnapshot): SessionSnapshot {
+  return {
+    ...snapshot,
+    projection: { ...snapshot.projection },
+  }
 }
 
 function reconcileError(

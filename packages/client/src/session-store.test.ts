@@ -199,6 +199,28 @@ describe('SessionStore', () => {
     expect(Object.isFrozen(store.current.projection.runs?.[0])).toBeTrue()
   })
 
+  test('shares unchanged projection branches across updates', () => {
+    const store = new SessionStore(snapshot())
+    const previous = store.current
+
+    store.applyUpdates(page([event(1, delta(1, [{
+      type: 'run_upsert',
+      run: {
+        id: 'run-1',
+        flow_name: 'agent',
+        state: 'running',
+        started_at: '2026-09-03T00:00:00Z',
+      },
+    }]))]))
+
+    expect(store.current).not.toBe(previous)
+    expect(store.current.projection).not.toBe(previous.projection)
+    expect(store.current.projection.runs).not.toBe(previous.projection.runs)
+    expect(store.current.projection.metadata).toBe(previous.projection.metadata)
+    expect(store.current.projection.transcript).toBe(previous.projection.transcript)
+    expect(store.current.projection.resources).toBe(previous.projection.resources)
+  })
+
   test('updates and removes workflows without replacing their siblings', () => {
     const store = new SessionStore(snapshot({
       projection: {
