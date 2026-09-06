@@ -1824,6 +1824,7 @@ mod tests {
             newer: atman_proto::TimelineRemaining::default(),
             serialized_bytes: 1,
             live: include_live.then(|| atman_proto::TimelineLiveState {
+                head_complete: true,
                 metadata: source.metadata.clone(),
                 lifecycle: source.lifecycle,
                 runs: source.runs.clone(),

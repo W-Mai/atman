@@ -7483,6 +7483,7 @@
     "TimelineLiveState": {
       "type": "object",
       "required": [
+        "head_complete",
         "metadata",
         "lifecycle",
         "interactions"
@@ -7508,6 +7509,9 @@
             "string",
             "null"
           ]
+        },
+        "head_complete": {
+          "type": "boolean"
         },
         "interactions": {
           "$ref": "#/$defs/InteractionProjection"

@@ -105,6 +105,7 @@ impl<'a> TimelineCatalog<'a> {
             projection,
             segments,
             live: TimelineLiveState {
+                head_complete: true,
                 metadata: projection.metadata.clone(),
                 lifecycle: projection.lifecycle,
                 runs: projection.runs.clone(),

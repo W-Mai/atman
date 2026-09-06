@@ -2001,6 +2001,7 @@ export interface TimelineLiveState {
   compactions?: CompactionProjection[]
   context?: ContextProjection
   goal?: string | null
+  head_complete: boolean
   interactions: InteractionProjection
   lifecycle: SessionLifecycle
   metadata: SessionMetadataProjection

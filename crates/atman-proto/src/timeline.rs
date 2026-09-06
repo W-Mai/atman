@@ -101,6 +101,7 @@ pub struct TimelineRemaining {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct TimelineLiveState {
+    pub head_complete: bool,
     pub metadata: SessionMetadataProjection,
     pub lifecycle: SessionLifecycle,
     #[serde(default)]
