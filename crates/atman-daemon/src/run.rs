@@ -23,6 +23,7 @@ pub struct SpawnedRun {
 pub(crate) struct SessionRuntimeHost {
     executor: atman_runtime::Executor,
     mcp: McpController,
+    lifecycles: Arc<atman_runtime::lifecycle::LifecycleRunner>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +62,10 @@ impl SessionRuntimeSlot {
             return Ok(current);
         }
         let host = build().await?;
+        if self.current.read().unwrap().is_none() {
+            host.fire_with(&host.executor, atman_dsl::ast::LifecycleEvent::SessionStart)
+                .await;
+        }
         let generation = Arc::new(SessionRuntimeGeneration { key, host });
         *self.current.write().unwrap() = Some(generation.clone());
         Ok(generation)
@@ -83,6 +88,13 @@ impl SessionRuntimeSlot {
             .map(|generation| generation.host.clone())
     }
 
+    pub(crate) async fn shutdown(&self) {
+        let current = self.current.write().unwrap().take();
+        if let Some(generation) = current {
+            generation.host.fire_session_end().await;
+        }
+    }
+
     #[cfg(test)]
     fn current_generation(&self) -> Option<Arc<SessionRuntimeGeneration>> {
         self.current.read().unwrap().clone()
@@ -96,6 +108,22 @@ impl SessionRuntimeHost {
 
     pub(crate) fn reload_mcp(&self, configs: Vec<atman_runtime::mcp::McpServerConfig>) -> bool {
         self.mcp.reload(configs)
+    }
+
+    async fn fire_with(
+        &self,
+        executor: &atman_runtime::Executor,
+        event: atman_dsl::ast::LifecycleEvent,
+    ) {
+        self.lifecycles.fire(executor, event).await;
+    }
+
+    async fn fire_session_end(&self) {
+        let mut executor = self.executor();
+        executor.tool_ctx.prompt_resolver = None;
+        self.lifecycles
+            .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
+            .await;
     }
 }
 
@@ -494,7 +522,15 @@ impl RunLauncher {
                 session_id: atman_proto::SessionId(session.id().0),
             }));
         let mcp = McpController::start(executor.clone(), session, self.mcp_configs()?).await;
-        Ok(Arc::new(SessionRuntimeHost { executor, mcp }))
+        let lifecycles = Arc::new(match &self.config_dir {
+            Some(config_dir) => atman_runtime::lifecycle::LifecycleRunner::from_dir(config_dir),
+            None => atman_runtime::lifecycle::LifecycleRunner::new(),
+        });
+        Ok(Arc::new(SessionRuntimeHost {
+            executor,
+            mcp,
+            lifecycles,
+        }))
     }
 
     fn session_runtime_key(
@@ -512,6 +548,7 @@ impl RunLauncher {
             b"project-config",
             &project_root.join(".atman/config.toml"),
         )?;
+        hash_runtime_lifecycles(&mut hasher, hub.config_dir())?;
         let mut auth = hub.load_auth().context("load runtime auth configuration")?;
         auth.providers.sort_by(|left, right| left.id.cmp(&right.id));
         for provider in &mut auth.providers {
@@ -1087,7 +1124,6 @@ impl RunLauncher {
             )
             .await?;
         let runtime_host = runtime_generation.host.clone();
-        let config_dir = self.config_dir.clone();
         let state_for_task = state.clone();
         let sid_for_task = sid_proto.clone();
         let run_id_for_task = run_id_proto.clone();
@@ -1131,7 +1167,6 @@ impl RunLauncher {
                         args,
                         run_id_runtime_for_task.clone(),
                         turn_id,
-                        config_dir,
                         Some(state_for_run),
                         runtime_host,
                         invocation_env,
@@ -1175,7 +1210,6 @@ async fn run_flow_inner(
     args: Vec<(String, atman_runtime::Value)>,
     run_id: RuntimeRunId,
     turn_id: atman_runtime::event::TurnId,
-    config_dir: Option<PathBuf>,
     daemon_state: Option<Arc<crate::DaemonState>>,
     runtime_host: Arc<SessionRuntimeHost>,
     invocation_env: atman_runtime::InvocationEnv,
@@ -1190,11 +1224,6 @@ async fn run_flow_inner(
 
     let mut executor = runtime_host.executor();
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
-
-    let lifecycles = match &config_dir {
-        Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),
-        None => atman_runtime::lifecycle::LifecycleRunner::new(),
-    };
 
     let (lifecycle_tx, mut lifecycle_rx) =
         tokio::sync::mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
@@ -1215,12 +1244,8 @@ async fn run_flow_inner(
         );
     }
 
-    lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
-        .await;
-
-    lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
+    runtime_host
+        .fire_with(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
         .await;
     let result = executor
         .run_with_invocation(
@@ -1238,10 +1263,10 @@ async fn run_flow_inner(
         )
         .await;
     while let Ok(ev) = lifecycle_rx.try_recv() {
-        lifecycles.fire(&executor, ev).await;
+        runtime_host.fire_with(&executor, ev).await;
     }
-    lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
+    runtime_host
+        .fire_with(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;
     session.end_turn(&turn_id);
     if result.is_ok() && session.record_successful_flow().is_some() {
@@ -1252,9 +1277,6 @@ async fn run_flow_inner(
                 .await;
         }
     }
-    lifecycles
-        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
-        .await;
     Ok(())
 }
 
@@ -1291,6 +1313,27 @@ fn hash_runtime_file(hasher: &mut blake3::Hasher, label: &[u8], path: &Path) -> 
         }
         Err(error) => Err(error).with_context(|| format!("read runtime config {}", path.display())),
     }
+}
+
+fn hash_runtime_lifecycles(hasher: &mut blake3::Hasher, config_dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(config_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("read runtime config directory {}", config_dir.display())
+            });
+        }
+    };
+    let mut paths = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("at"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        hash_runtime_file(hasher, b"lifecycle", &path)?;
+    }
+    Ok(())
 }
 
 fn path_is_managed_agent_at(path: &Path, config_dir: Option<&Path>) -> bool {
@@ -1982,6 +2025,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("config");
         std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("lifecycle.at"),
+            "on session.start { }\non session.end { }\n",
+        )
+        .unwrap();
         let flow_path = temp.path().join("echo.at");
         std::fs::write(&flow_path, "flow echo() -> string { return \"ok\" }").unwrap();
         let state = Arc::new(DaemonState::new(temp.path().join("data")));
@@ -2054,7 +2102,24 @@ mod tests {
             first_generation.as_ref().unwrap()
         ));
         assert_eq!(session.messages().len(), 3);
+        let lifecycle_count = |name: &str| {
+            session
+                .sink()
+                .snapshot_envelopes()
+                .into_iter()
+                .filter(|envelope| {
+                    matches!(
+                        &envelope.event,
+                        atman_runtime::event::Event::FlowStart { flow_name, .. }
+                            if flow_name == name
+                    )
+                })
+                .count()
+        };
+        assert_eq!(lifecycle_count("__lifecycle_session.start_0"), 1);
+        assert_eq!(lifecycle_count("__lifecycle_session.end_1"), 0);
         state.shutdown(std::time::Duration::from_secs(1)).await;
+        assert_eq!(lifecycle_count("__lifecycle_session.end_1"), 1);
     }
 
     #[test]

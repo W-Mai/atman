@@ -957,6 +957,7 @@ impl SessionActor {
                     let result = self.prepare_unload();
                     let should_stop = matches!(result, Ok(true));
                     if should_stop {
+                        self.runtime.shutdown().await;
                         if let Err(error) = self.persist_projection_snapshot().await {
                             eprintln!(
                                 "warning: failed to persist projection snapshot for {}: {error:#}",
@@ -974,6 +975,7 @@ impl SessionActor {
                 }
                 ActorInput::Command(Some(Command::ForceShutdown { reply })) => {
                     let result = self.prepare_forced_shutdown();
+                    self.runtime.shutdown().await;
                     if let Err(error) = self.persist_projection_snapshot().await {
                         eprintln!(
                             "warning: failed to persist projection snapshot for {}: {error:#}",
@@ -988,7 +990,12 @@ impl SessionActor {
                 }
                 ActorInput::Command(Some(command)) => self.handle_command(command).await,
                 ActorInput::Event(event) => match *event {
-                    Ok(event) => self.apply_runtime_event(&event),
+                    Ok(event) => {
+                        if self.is_admitted_run_end(&event) {
+                            self.session.flush_writer().await;
+                        }
+                        self.apply_runtime_event(&event);
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up_projection(),
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
@@ -1018,6 +1025,15 @@ impl SessionActor {
             run.run_id
         );
         Ok(())
+    }
+
+    fn is_admitted_run_end(&self, event: &atman_runtime::event::EventEnvelope) -> bool {
+        match &event.event {
+            atman_runtime::event::Event::FlowEnd { run_id, .. } => {
+                self.runs.contains_key(&FlowRunId(run_id.0))
+            }
+            _ => false,
+        }
     }
 
     fn register_live_run(&mut self, run: LiveRun) {
