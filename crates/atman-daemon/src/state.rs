@@ -2177,6 +2177,207 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timeline_queries_do_not_mutate_the_llm_message_window_or_checkpoint_facts() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        let first_turn = atman_runtime::event::TurnId::now();
+        let second_turn = atman_runtime::event::TurnId::now();
+        session.append_message(
+            atman_runtime::message::Message::user_text(first_turn.clone(), "first"),
+            None,
+        );
+        session.append_message(
+            atman_runtime::message::Message::assistant_text(first_turn, "answer"),
+            None,
+        );
+        session.append_message(
+            atman_runtime::message::Message::user_text(second_turn, "second"),
+            None,
+        );
+        let messages = session.messages_full();
+        session
+            .commit_rewritten_window(
+                &session.context(),
+                vec![messages.last().unwrap().clone()],
+                3,
+                messages.as_ref(),
+                2,
+            )
+            .unwrap();
+        state
+            .register_session(session_id.clone(), session.clone(), "owner")
+            .await
+            .unwrap();
+        let messages_before = serde_json::to_vec(session.messages_full().as_ref()).unwrap();
+        let events_before = serde_json::to_vec(&session.sink().snapshot_envelopes()).unwrap();
+        let budget = SessionTimelineBudget {
+            turn_budget: Some(1),
+            byte_budget: Some(64 * 1024),
+        };
+
+        let tail = state
+            .session_timeline_tail(&session_id, "owner", budget.clone())
+            .await
+            .unwrap();
+        let item = tail
+            .segments
+            .iter()
+            .flat_map(|segment| match segment {
+                atman_proto::TimelineSegment::Turn { segment } => segment.items.iter(),
+                atman_proto::TimelineSegment::Session { segment } => segment.items.iter(),
+            })
+            .next()
+            .unwrap();
+        let cursor = TimelineCursor {
+            seq: item.seq,
+            item_id: item.id.clone(),
+        };
+        state
+            .session_timeline_before(&session_id, "owner", cursor.clone(), budget.clone())
+            .await
+            .unwrap();
+        state
+            .session_timeline_after(&session_id, "owner", cursor.clone(), budget.clone())
+            .await
+            .unwrap();
+        state
+            .session_timeline_around(&session_id, "owner", cursor, budget)
+            .await
+            .unwrap();
+        state
+            .session_timeline_item_detail(&session_id, "owner", item.id.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(session.messages_full().as_ref()).unwrap(),
+            messages_before
+        );
+        assert_eq!(
+            serde_json::to_vec(&session.sink().snapshot_envelopes()).unwrap(),
+            events_before
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "large session recovery benchmark"]
+    async fn benchmark_large_session_recovery_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let project_root = root.path().join("project");
+        let config_dir = root.path().join("config");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[storage]\nscope = \"global\"\n",
+        )
+        .unwrap();
+        let launcher = Arc::new(
+            crate::run::RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap(),
+        );
+        let seed_state = Arc::new(DaemonState::new(data_dir.clone()));
+        seed_state.set_launcher(launcher.clone());
+        let session_id = launcher
+            .create_session(seed_state.clone(), project_root.to_str(), None, "owner")
+            .await
+            .unwrap();
+        let session = seed_state
+            .authorized_actor(&session_id, "owner")
+            .unwrap()
+            .runtime_session();
+        let event_count = std::env::var("ATMAN_BENCH_EVENTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(25_000);
+        for index in 0..event_count {
+            session.append_message(
+                atman_runtime::message::Message::user_text(
+                    atman_runtime::event::TurnId::now(),
+                    format!("synthetic history event {index}"),
+                ),
+                None,
+            );
+        }
+        session.flush_writer().await.unwrap();
+        assert!(
+            seed_state
+                .unload_session_if_idle(&session_id)
+                .await
+                .unwrap()
+        );
+        drop(session);
+        drop(seed_state);
+        let snapshot_dir = data_dir
+            .join("sessions")
+            .join(session_id.to_string())
+            .join(".projection-snapshots");
+        std::fs::remove_dir_all(&snapshot_dir).unwrap();
+
+        let cold_state = Arc::new(DaemonState::new(data_dir.clone()));
+        cold_state.set_launcher(launcher.clone());
+        let started = std::time::Instant::now();
+        let cold = cold_state
+            .attach_session_snapshot(&session_id, "owner")
+            .await
+            .unwrap();
+        let cold_elapsed = started.elapsed();
+        assert_eq!(cold.projection.transcript.len(), event_count);
+        cold_state
+            .authorized_actor(&session_id, "owner")
+            .unwrap()
+            .force_shutdown()
+            .await
+            .unwrap();
+        drop(cold_state);
+
+        let warm_state = Arc::new(DaemonState::new(data_dir.clone()));
+        warm_state.set_launcher(launcher.clone());
+        let started = std::time::Instant::now();
+        let warm = warm_state
+            .attach_session_snapshot(&session_id, "owner")
+            .await
+            .unwrap();
+        let warm_elapsed = started.elapsed();
+        assert_eq!(warm.projection, cold.projection);
+        warm_state
+            .authorized_actor(&session_id, "owner")
+            .unwrap()
+            .force_shutdown()
+            .await
+            .unwrap();
+        drop(warm_state);
+
+        let indexed_state = Arc::new(DaemonState::new(data_dir));
+        indexed_state.set_launcher(launcher);
+        let started = std::time::Instant::now();
+        let page = indexed_state
+            .session_timeline_tail(
+                &session_id,
+                "owner",
+                SessionTimelineBudget {
+                    turn_budget: Some(12),
+                    byte_budget: Some(256 * 1024),
+                },
+            )
+            .await
+            .unwrap();
+        let indexed_elapsed = started.elapsed();
+        assert!(page.segments.len() <= 12);
+        assert!(page.older.has_more);
+        eprintln!(
+            "large session recovery: events={event_count} cold_ms={} warm_ms={} indexed_tail_ms={} indexed_bytes={}",
+            cold_elapsed.as_millis(),
+            warm_elapsed.as_millis(),
+            indexed_elapsed.as_millis(),
+            page.serialized_bytes
+        );
+    }
+
+    #[tokio::test]
     async fn attach_snapshot_and_updates_share_one_restored_actor() {
         let root = tempfile::tempdir().unwrap();
         let project_root = root.path().join("project");
