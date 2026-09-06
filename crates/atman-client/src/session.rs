@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use atman_proto::{
@@ -6,17 +6,17 @@ use atman_proto::{
     CompactReviewDecision, CompactSessionRequest, CompactSessionResponse,
     CreatePermissionGroupRequest, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
     FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionTimelineBeforeRequest,
-    GetSessionTimelineTailRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse,
-    InlineImage, InspectResourceRequest, InspectResourceResponse, InstallSuggestedFlowRequest,
-    InstallSuggestedFlowResponse, InterjectSessionRequest, InterjectSessionResponse,
-    InterjectionLevel, ListPermissionRequestsRequest, ListPermissionRequestsResponse,
-    ListResourcesRequest, ListResourcesResponse, MoveSessionRequest, MoveSessionResponse,
-    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
-    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    ReleaseResourceRequest, ReleaseResourceResponse, ReloadSessionMcpRequest,
-    ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse, RequestId,
-    ResizeTerminalResourceRequest, ResizeTerminalResourceResponse, ResolveCompactReviewRequest,
-    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    GetSessionTimelineItemDetailRequest, GetSessionTimelineTailRequest, GetSessionUpdatesRequest,
+    GetSessionUpdatesResponse, InlineImage, InspectResourceRequest, InspectResourceResponse,
+    InstallSuggestedFlowRequest, InstallSuggestedFlowResponse, InterjectSessionRequest,
+    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
+    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
+    MoveSessionRequest, MoveSessionResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
+    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
+    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
+    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
+    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
+    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
@@ -189,6 +189,10 @@ pub enum SessionUpdate {
         state: SessionState,
         loaded_items: usize,
     },
+    HistoryDetailLoaded {
+        state: SessionState,
+        tool_use_id: String,
+    },
     Reset(Box<SessionState>),
 }
 
@@ -266,6 +270,7 @@ struct TimelineHistory {
     oldest: Option<TimelineCursor>,
     has_older: bool,
     loaded_items: HashSet<TimelineItemId>,
+    tool_details: HashMap<String, Vec<TimelineItemId>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +345,7 @@ impl SessionClient {
             oldest: oldest_cursor(&page),
             has_older: page.older.has_more,
             loaded_items: timeline_item_ids(&page),
+            tool_details: timeline_tool_details(&page),
         };
         let (state, _) = watch::channel(state);
         let (signals, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
@@ -408,6 +414,7 @@ impl SessionClient {
         )?;
         let mut next = self.current();
         let loaded_items = merge_timeline_page(&mut next, &page, &mut history.loaded_items);
+        merge_tool_details(&mut history.tool_details, timeline_tool_details(&page));
         history.oldest = oldest_cursor(&page).or(history.oldest.clone());
         history.has_older = page.older.has_more;
         if loaded_items > 0 {
@@ -421,6 +428,66 @@ impl SessionClient {
             loaded_items,
             has_more: history.has_older,
         })
+    }
+
+    pub async fn load_tool_detail(&self, tool_use_id: &str) -> Result<bool, SessionClientError> {
+        let Some(history) = &self.history else {
+            return Ok(false);
+        };
+        let _refresh_guard = self.refresh_lock.lock().await;
+        let item_ids = {
+            let history = history.lock().await;
+            history.tool_details.get(tool_use_id).cloned()
+        };
+        let Some(item_ids) = item_ids else {
+            return Ok(false);
+        };
+        let mut details = Vec::with_capacity(item_ids.len());
+        for item_id in &item_ids {
+            let detail = self
+                .client
+                .call::<rpc::GetSessionTimelineItemDetail>(&GetSessionTimelineItemDetailRequest {
+                    session_id: self.session_id.clone(),
+                    item_id: item_id.clone(),
+                })
+                .await?;
+            if detail.session_id != self.session_id {
+                return Err(SessionClientError::Timeline(format!(
+                    "detail belongs to session {}, expected {}",
+                    detail.session_id, self.session_id
+                )));
+            }
+            if detail.item_id != *item_id {
+                return Err(SessionClientError::Timeline(format!(
+                    "detail item {} does not match requested {}",
+                    detail.item_id.0, item_id.0
+                )));
+            }
+            details.push(detail.item);
+        }
+        let mut next = self.current();
+        let snapshot = Arc::make_mut(&mut next.snapshot);
+        for detail in details {
+            let Some(target) = snapshot
+                .projection
+                .transcript
+                .iter_mut()
+                .find(|item| same_timeline_item(item, &detail))
+            else {
+                return Err(SessionClientError::Timeline(format!(
+                    "loaded detail for tool call {tool_use_id} has no visible preview"
+                )));
+            };
+            *target = detail;
+        }
+        next.transcript_revision = next.transcript_revision.wrapping_add(1);
+        history.lock().await.tool_details.remove(tool_use_id);
+        self.state.send_replace(next.clone());
+        let _ = self.updates.send(SessionUpdate::HistoryDetailLoaded {
+            state: next,
+            tool_use_id: tool_use_id.to_owned(),
+        });
+        Ok(true)
     }
 
     pub async fn refresh(&self) -> Result<RefreshOutcome, SessionClientError> {
@@ -534,6 +601,7 @@ impl SessionClient {
                 oldest: oldest_cursor(&page),
                 has_older: page.older.has_more,
                 loaded_items: timeline_item_ids(&page),
+                tool_details: timeline_tool_details(&page),
             };
             return Ok(state);
         }
@@ -1301,6 +1369,85 @@ fn timeline_item_ids(page: &SessionTimelinePage) -> HashSet<TimelineItemId> {
         .collect()
 }
 
+fn timeline_tool_details(page: &SessionTimelinePage) -> HashMap<String, Vec<TimelineItemId>> {
+    let mut details = HashMap::<String, Vec<TimelineItemId>>::new();
+    for item in page.segments.iter().flat_map(timeline_items) {
+        let Some(detail) = &item.detail else {
+            continue;
+        };
+        for tool_use_id in transcript_tool_ids(&item.preview) {
+            let entries = details.entry(tool_use_id).or_default();
+            if !entries.contains(&detail.item_id) {
+                entries.push(detail.item_id.clone());
+            }
+        }
+    }
+    details
+}
+
+fn merge_tool_details(
+    target: &mut HashMap<String, Vec<TimelineItemId>>,
+    source: HashMap<String, Vec<TimelineItemId>>,
+) {
+    for (tool_use_id, item_ids) in source {
+        let target_ids = target.entry(tool_use_id).or_default();
+        for item_id in item_ids {
+            if !target_ids.contains(&item_id) {
+                target_ids.push(item_id);
+            }
+        }
+    }
+}
+
+fn same_timeline_item(
+    left: &atman_proto::TranscriptItem,
+    right: &atman_proto::TranscriptItem,
+) -> bool {
+    match (left, right) {
+        (
+            atman_proto::TranscriptItem::Message {
+                seq: left_seq,
+                checkpoint_index: left_checkpoint,
+                ..
+            },
+            atman_proto::TranscriptItem::Message {
+                seq: right_seq,
+                checkpoint_index: right_checkpoint,
+                ..
+            },
+        ) => left_seq == right_seq && left_checkpoint == right_checkpoint,
+        (left, right) => {
+            std::mem::discriminant(left) == std::mem::discriminant(right)
+                && left.seq() == right.seq()
+        }
+    }
+}
+
+fn transcript_tool_ids(item: &atman_proto::TranscriptItem) -> Vec<String> {
+    match item {
+        atman_proto::TranscriptItem::Message { message, .. } => message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                atman_proto::MessagePart::ToolUse { id, .. } => Some(id.clone()),
+                atman_proto::MessagePart::ToolResult { tool_use_id, .. } => {
+                    Some(tool_use_id.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+        atman_proto::TranscriptItem::Diff { tool_use_id, .. }
+        | atman_proto::TranscriptItem::FileEdit { tool_use_id, .. } => {
+            tool_use_id.iter().cloned().collect()
+        }
+        atman_proto::TranscriptItem::ActivitySummary { .. }
+        | atman_proto::TranscriptItem::Compaction { .. }
+        | atman_proto::TranscriptItem::Mermaid { .. }
+        | atman_proto::TranscriptItem::Notice { .. }
+        | atman_proto::TranscriptItem::Extension { .. } => Vec::new(),
+    }
+}
+
 fn timeline_items(segment: &TimelineSegment) -> impl Iterator<Item = &atman_proto::TimelineItem> {
     match segment {
         TimelineSegment::Turn { segment } => segment.items.iter(),
@@ -1840,6 +1987,77 @@ mod tests {
                 usage: source.usage.clone(),
             }),
         }
+    }
+
+    #[test]
+    fn timeline_tool_details_keep_every_heavy_item_for_one_call() {
+        let source = projection(
+            serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789abc"))
+                .unwrap(),
+            Revision(3),
+        );
+        let mut page = timeline_page(&source, 1, false, true);
+        let TimelineSegment::Turn { segment } = &mut page.segments[0] else {
+            panic!("expected turn segment");
+        };
+        let turn_id = segment.turn_id.clone();
+        segment.items = vec![
+            atman_proto::TimelineItem {
+                id: TimelineItemId("message:1".into()),
+                seq: 1,
+                turn_id: Some(turn_id),
+                run_id: None,
+                kind: atman_proto::TimelineItemKind::Message,
+                preview: atman_proto::TranscriptItem::Message {
+                    seq: 1,
+                    ts: chrono::Utc::now(),
+                    run_id: None,
+                    context_id: None,
+                    checkpoint_index: None,
+                    message: atman_proto::MessageProjection {
+                        role: atman_proto::MessageRole::Tool,
+                        origin: atman_proto::MessageOrigin::Internal,
+                        turn_id: atman_proto::TurnId(uuid::Uuid::from_u128(1)),
+                        parts: vec![atman_proto::MessagePart::ToolResult {
+                            tool_use_id: "call-1".into(),
+                            content: "preview".into(),
+                            is_error: false,
+                        }],
+                    },
+                },
+                detail: Some(atman_proto::TimelineDetailRef {
+                    item_id: TimelineItemId("message:1".into()),
+                }),
+            },
+            atman_proto::TimelineItem {
+                id: TimelineItemId("diff:2".into()),
+                seq: 2,
+                turn_id: None,
+                run_id: None,
+                kind: atman_proto::TimelineItemKind::Diff,
+                preview: atman_proto::TranscriptItem::Diff {
+                    seq: 2,
+                    ts: chrono::Utc::now(),
+                    run_id: None,
+                    tool_use_id: Some("call-1".into()),
+                    title: "file.rs".into(),
+                    old_content: None,
+                    new_content: Some("preview".into()),
+                    unified_diff: None,
+                },
+                detail: Some(atman_proto::TimelineDetailRef {
+                    item_id: TimelineItemId("diff:2".into()),
+                }),
+            },
+        ];
+
+        assert_eq!(
+            timeline_tool_details(&page)["call-1"],
+            vec![
+                TimelineItemId("message:1".into()),
+                TimelineItemId("diff:2".into())
+            ]
+        );
     }
 
     #[test]
