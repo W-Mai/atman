@@ -26,7 +26,7 @@ enum Window {
     Tail,
     Before(TimelineCursor),
     After(TimelineCursor),
-    Around(TimelineItemId),
+    Around(TimelineCursor),
 }
 
 impl<'a> TimelineCatalog<'a> {
@@ -145,15 +145,10 @@ impl<'a> TimelineCatalog<'a> {
 
     pub(crate) fn around(
         &self,
-        item_id: TimelineItemId,
+        anchor: TimelineCursor,
         budget: &SessionTimelineBudget,
-    ) -> anyhow::Result<SessionTimelinePage> {
-        anyhow::ensure!(
-            self.detail(&item_id).is_some(),
-            "timeline item not found: {}",
-            item_id.0
-        );
-        Ok(self.page(Window::Around(item_id), budget, true))
+    ) -> SessionTimelinePage {
+        self.page(Window::Around(anchor), budget, true)
     }
 
     pub(crate) fn detail(&self, item_id: &TimelineItemId) -> Option<&TranscriptItem> {
@@ -174,7 +169,7 @@ impl<'a> TimelineCatalog<'a> {
             Window::Before(cursor) | Window::After(cursor) => {
                 self.segment_index(&cursor.item_id, cursor.seq)
             }
-            Window::Around(item_id) => self.segment_index(item_id, 0),
+            Window::Around(cursor) => self.segment_index(&cursor.item_id, cursor.seq),
         };
         let available = match window {
             Window::Tail => (0, self.segments.len(), Direction::Backward),
@@ -269,22 +264,36 @@ impl<'a> TimelineCatalog<'a> {
     }
 }
 
+pub(crate) enum IndexedPageWindow {
+    Tail,
+    Before(TimelineCursor),
+    Around(TimelineCursor),
+}
+
 pub(crate) fn indexed_page(
     source: &crate::run::IndexedTimelineSource,
     session_id: &SessionId,
     daemon_generation: DaemonGeneration,
-    before: Option<&TimelineCursor>,
+    window: IndexedPageWindow,
     budget: &SessionTimelineBudget,
     include_live: bool,
 ) -> anyhow::Result<Option<SessionTimelinePage>> {
-    let before_start = match before {
-        Some(cursor) => Some(
-            source
+    let (before_start, include_unowned_through) = match window {
+        IndexedPageWindow::Tail => (None, source.coverage.seq),
+        IndexedPageWindow::Before(ref cursor) => {
+            let start = source
                 .index
                 .turn_start_for_event(&session_id.to_string(), cursor.seq)?
-                .unwrap_or(cursor.seq),
-        ),
-        None => None,
+                .unwrap_or(cursor.seq);
+            (Some(start), start.saturating_sub(1))
+        }
+        IndexedPageWindow::Around(ref cursor) => {
+            let start = source
+                .index
+                .turn_start_for_event(&session_id.to_string(), cursor.seq)?
+                .unwrap_or(cursor.seq);
+            (Some(start.saturating_add(1)), cursor.seq)
+        }
     };
     let turn_budget = budget
         .turn_budget
@@ -300,9 +309,6 @@ pub(crate) fn indexed_page(
     if turns.is_empty() {
         return Ok(None);
     }
-    let include_unowned_through = before_start
-        .map(|seq| seq.saturating_sub(1))
-        .unwrap_or(source.coverage.seq);
     let rows = source.index.read_events_for_turns(
         &session_id.to_string(),
         &turns,
@@ -336,7 +342,7 @@ pub(crate) fn indexed_page(
     if page.older.has_more {
         page.older.estimated_segments = None;
     }
-    if before.is_some() {
+    if !matches!(window, IndexedPageWindow::Tail) {
         page.newer.has_more = true;
         page.newer.estimated_segments = None;
     }
@@ -907,7 +913,7 @@ mod tests {
             &source,
             &session_id,
             DaemonGeneration("test".into()),
-            None,
+            IndexedPageWindow::Tail,
             &budget,
             true,
         )
@@ -922,7 +928,7 @@ mod tests {
             &source,
             &session_id,
             DaemonGeneration("test".into()),
-            Some(&TimelineCursor {
+            IndexedPageWindow::Before(TimelineCursor {
                 seq: newest.seq,
                 item_id: newest.id.clone(),
             }),
@@ -933,6 +939,24 @@ mod tests {
         .unwrap();
         assert!(before.live.is_none());
         assert_eq!(segment_start_seq(&before.segments[0]), 1);
+
+        let oldest = &segment_items(&before.segments[0])[0];
+        let around = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::Around(TimelineCursor {
+                seq: oldest.seq,
+                item_id: TimelineItemId(format!("search:{}", oldest.seq)),
+            }),
+            &budget,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(segment_start_seq(&around.segments[0]), 1);
+        assert!(around.newer.has_more);
+        assert!(around.live.is_some());
     }
 
     #[test]
@@ -951,7 +975,7 @@ mod tests {
             &source,
             &session_id,
             DaemonGeneration("test".into()),
-            None,
+            IndexedPageWindow::Tail,
             &SessionTimelineBudget {
                 turn_budget: Some(2),
                 byte_budget: None,
@@ -1046,17 +1070,18 @@ mod tests {
 
         let before = catalog.before(cursors[2].clone(), &one_turn);
         let after = catalog.after(cursors[0].clone(), &one_turn);
-        let around = catalog
-            .around(cursors[1].item_id.clone(), &one_turn)
-            .unwrap();
+        let around = catalog.around(cursors[1].clone(), &one_turn);
+        let around_by_sequence = catalog.around(
+            TimelineCursor {
+                seq: cursors[1].seq,
+                item_id: TimelineItemId(format!("search:{}", cursors[1].seq)),
+            },
+            &one_turn,
+        );
 
         assert_eq!(segment_start_seq(&before.segments[0]), 2);
         assert_eq!(segment_start_seq(&after.segments[0]), 2);
         assert_eq!(segment_start_seq(&around.segments[0]), 2);
-        assert!(
-            catalog
-                .around(TimelineItemId("missing".into()), &one_turn)
-                .is_err()
-        );
+        assert_eq!(segment_start_seq(&around_by_sequence.segments[0]), 2);
     }
 }

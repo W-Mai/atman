@@ -176,9 +176,34 @@ pub struct GetSessionTimelineAfterRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct GetSessionTimelineAroundRequest {
     pub session_id: SessionId,
-    pub anchor: TimelineItemId,
+    pub anchor: TimelineCursor,
     #[serde(flatten)]
     pub budget: SessionTimelineBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SearchSessionHistoryRequest {
+    pub session_id: SessionId,
+    pub query: String,
+    #[serde(default)]
+    pub project_wide: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SessionHistorySearchHit {
+    pub session_id: String,
+    pub seq: u64,
+    pub ts: String,
+    pub kind: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SearchSessionHistoryResponse {
+    #[serde(default)]
+    pub hits: Vec<SessionHistorySearchHit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

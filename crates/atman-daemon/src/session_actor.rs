@@ -11,12 +11,44 @@ use atman_proto::{
     PROJECTION_EVENT_SCHEMA_VERSION, PermissionResolutionView, ProjectionDelta,
     ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
     ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
-    RunCancellationStatus, ServerEvent, SessionId, SessionNotification, SessionProjection,
-    SessionSignal, SessionSummary, SessionTimelineBudget, SessionTimelineItemDetail,
-    SessionTimelinePage, TerminalResizeStatus, TimelineCursor, TimelineItemId, TrustProjection,
+    RunCancellationStatus, SearchSessionHistoryResponse, ServerEvent, SessionHistorySearchHit,
+    SessionId, SessionNotification, SessionProjection, SessionSignal, SessionSummary,
+    SessionTimelineBudget, SessionTimelineItemDetail, SessionTimelinePage, TerminalResizeStatus,
+    TimelineCursor, TimelineItemId, TrustProjection,
 };
 use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+
+fn history_search_snippet(text: &str, query: &str, max_chars: usize) -> String {
+    let text_chars = text.chars().collect::<Vec<_>>();
+    if text_chars.len() <= max_chars {
+        return text.to_owned();
+    }
+    let query_chars = query.chars().collect::<Vec<_>>();
+    let match_start = (!query_chars.is_empty())
+        .then(|| {
+            text_chars.windows(query_chars.len()).position(|window| {
+                window
+                    .iter()
+                    .zip(&query_chars)
+                    .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            })
+        })
+        .flatten()
+        .unwrap_or(0);
+    let start = match_start
+        .saturating_sub(max_chars / 4)
+        .min(text_chars.len().saturating_sub(max_chars));
+    let end = (start + max_chars).min(text_chars.len());
+    let mut snippet = text_chars[start..end].iter().collect::<String>();
+    if start > 0 {
+        snippet.insert(0, '…');
+    }
+    if end < text_chars.len() {
+        snippet.push('…');
+    }
+    snippet
+}
 
 use crate::projection::{RestoredProjection, SessionProjector};
 use crate::state::LiveRun;
@@ -700,7 +732,7 @@ impl SessionActorHandle {
 
     pub async fn timeline_around(
         &self,
-        anchor: TimelineItemId,
+        anchor: TimelineCursor,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
         let page = request(&self.tx, |reply| Command::TimelineAround {
@@ -725,6 +757,39 @@ impl SessionActorHandle {
             &detail,
             self.session.sink().redactor().as_deref(),
         )
+    }
+
+    pub async fn search_history(
+        &self,
+        query: String,
+        project_wide: bool,
+        limit: Option<u32>,
+    ) -> Result<SearchSessionHistoryResponse> {
+        anyhow::ensure!(!query.trim().is_empty(), "history search query is empty");
+        let index = self
+            .session
+            .project_index()
+            .context("project index unavailable")?;
+        let session_id = self.session.id().to_string();
+        let limit = usize::try_from(limit.unwrap_or(50).min(200)).unwrap_or(200);
+        let search_query = query.clone();
+        let rows = tokio::task::spawn_blocking(move || {
+            let session_filter = (!project_wide).then_some(session_id.as_str());
+            index.fts_search_project_events(&search_query, session_filter, limit)
+        })
+        .await
+        .context("join session history search")??;
+        let hits = rows
+            .into_iter()
+            .map(|row| SessionHistorySearchHit {
+                session_id: row.session_id,
+                seq: row.seq,
+                ts: row.ts,
+                kind: row.kind,
+                snippet: history_search_snippet(&row.text, &query, 512),
+            })
+            .collect();
+        Ok(SearchSessionHistoryResponse { hits })
     }
 
     pub async fn subscribe_updates(
@@ -947,7 +1012,7 @@ enum Command {
         reply: oneshot::Sender<Result<SessionTimelinePage>>,
     },
     TimelineAround {
-        anchor: TimelineItemId,
+        anchor: TimelineCursor,
         budget: SessionTimelineBudget,
         reply: oneshot::Sender<Result<SessionTimelinePage>>,
     },
@@ -1397,7 +1462,7 @@ impl SessionActor {
             } => {
                 let result = self
                     .timeline_catalog()
-                    .and_then(|catalog| catalog.around(anchor, &budget));
+                    .map(|catalog| catalog.around(anchor, &budget));
                 let _ = reply.send(result);
             }
             Command::TimelineItemDetail { item_id, reply } => {
@@ -3018,6 +3083,17 @@ pub(crate) fn session_summary<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_search_snippet_is_unicode_safe_and_keeps_the_match() {
+        let text = format!("{}needle{}", "前".repeat(400), "后".repeat(400));
+        let snippet = history_search_snippet(&text, "needle", 80);
+
+        assert!(snippet.contains("needle"));
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= 82);
+    }
 
     fn actor_at(
         data_dir: &std::path::Path,

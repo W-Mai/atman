@@ -229,6 +229,12 @@
       "$ref": "#/$defs/SessionTimelineItemDetail"
     },
     {
+      "$ref": "#/$defs/SearchSessionHistoryRequest"
+    },
+    {
+      "$ref": "#/$defs/SearchSessionHistoryResponse"
+    },
+    {
       "$ref": "#/$defs/ResolvePromptRequest"
     },
     {
@@ -2143,7 +2149,7 @@
           ],
           "properties": {
             "anchor": {
-              "$ref": "#/$defs/TimelineItemId"
+              "$ref": "#/$defs/TimelineCursor"
             },
             "session_id": {
               "$ref": "#/$defs/SessionId"
@@ -6260,6 +6266,43 @@
         }
       }
     },
+    "SearchSessionHistoryRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "query"
+      ],
+      "properties": {
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "minimum": 0
+        },
+        "project_wide": {
+          "type": "boolean"
+        },
+        "query": {
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "SearchSessionHistoryResponse": {
+      "type": "object",
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionHistorySearchHit"
+          }
+        }
+      }
+    },
     "SendMessageRequest": {
       "type": "object",
       "required": [
@@ -6429,6 +6472,35 @@
         "busy",
         "unsafe_resources"
       ]
+    },
+    "SessionHistorySearchHit": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "seq",
+        "ts",
+        "kind",
+        "snippet"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string"
+        }
+      }
     },
     "SessionId": {
       "type": "string",

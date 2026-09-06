@@ -168,7 +168,11 @@ impl HistorySearchModal {
 
     /// Execute a search using the current editor content as query.
     /// Called on Enter (Submit).
-    pub fn run_search(&mut self, app: &crate::app::AppState) {
+    pub fn run_search(
+        &mut self,
+        app: &crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
         let query = self.editor.buf().to_string();
         if query.trim().is_empty() {
             self.results.clear();
@@ -177,6 +181,15 @@ impl HistorySearchModal {
             return;
         }
         let Some(session) = app.session.as_ref() else {
+            if let Some(tx) = tx {
+                let _ = tx.send(crate::TuiControl::SearchHistory {
+                    query,
+                    project_wide: matches!(self.scope, HistorySearchScope::Project),
+                });
+                self.error = None;
+            } else {
+                self.set_error("history search is unavailable".into());
+            }
             return;
         };
         let Some(idx) = session.project_index() else {
@@ -196,8 +209,7 @@ impl HistorySearchModal {
                         seq: r.seq,
                         ts: r.ts,
                         kind: r.kind.clone(),
-                        snippet: extract_event_text(&r.kind, &r.payload)
-                            .unwrap_or_else(|| r.payload.chars().take(80).collect()),
+                        snippet: r.text,
                     })
                     .collect();
                 self.set_results(hits, query);
@@ -210,14 +222,23 @@ impl HistorySearchModal {
 }
 
 pub(crate) fn refresh_history_preview(app: &mut UiState) {
-    let (session_id, seq) = match app.wm.modals.history_search.selected_hit() {
-        Some(hit) => (hit.session_id.clone(), hit.seq),
+    let (session_id, seq, kind, snippet) = match app.wm.modals.history_search.selected_hit() {
+        Some(hit) => (
+            hit.session_id.clone(),
+            hit.seq,
+            hit.kind.clone(),
+            hit.snippet.clone(),
+        ),
         None => {
             app.wm.modals.history_search.set_preview(Vec::new());
             return;
         }
     };
     let Some(session) = app.session.as_ref() else {
+        app.wm
+            .modals
+            .history_search
+            .set_preview(vec![format!("▶ **[{kind}]** seq={seq}  \n{snippet}")]);
         return;
     };
     let Some(idx) = session.project_index() else {
@@ -331,7 +352,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
-        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         match action {
             KeyAction::Escape => self.close(),
@@ -360,8 +381,18 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
                 self.scope = self.scope.toggle();
             }
             KeyAction::Submit => {
-                self.run_search(app);
-                self.input_focused = false;
+                if self.input_focused {
+                    self.run_search(app, tx);
+                    self.input_focused = false;
+                } else if let Some(hit) = self.selected_hit().cloned() {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::TuiControl::JumpToHistory {
+                            session_id: hit.session_id,
+                            seq: hit.seq,
+                        });
+                        self.close();
+                    }
+                }
             }
             _ => {}
         }
@@ -666,6 +697,7 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySea
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wm::modal::ModalOverlay;
 
     fn hit(sid: &str, seq: u64, snippet: &str) -> HistoryHit {
         HistoryHit {
@@ -765,5 +797,35 @@ mod tests {
         assert_eq!(m.click_result(10, 5), None, "border row should not select");
         assert_eq!(m.click_result(10, 9), None, "past last result");
         assert_eq!(m.click_result(5, 6), None, "outside rect");
+    }
+
+    #[test]
+    fn daemon_search_and_jump_are_sent_through_controls() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = crate::app::AppState::new("session".into(), None);
+        let mut modal = HistorySearchModal::default();
+        modal.editor.replace_with("needle");
+        modal.scope = HistorySearchScope::Project;
+
+        modal.run_search(&app, Some(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            crate::TuiControl::SearchHistory {
+                query,
+                project_wide: true
+            } if query == "needle"
+        ));
+
+        modal.set_results(vec![hit("session-b", 42, "needle")], "needle".into());
+        modal.input_focused = false;
+        modal.open = true;
+        let mut app = crate::app::AppState::new("session".into(), None);
+        modal.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            crate::TuiControl::JumpToHistory { session_id, seq: 42 }
+                if session_id == "session-b"
+        ));
+        assert!(!modal.open);
     }
 }

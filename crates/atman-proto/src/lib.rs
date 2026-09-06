@@ -356,6 +356,7 @@ pub mod methods {
     pub const GET_SESSION_TIMELINE_AFTER: &str = "session.history.after";
     pub const GET_SESSION_TIMELINE_AROUND: &str = "session.history.around";
     pub const GET_SESSION_TIMELINE_ITEM_DETAIL: &str = "session.history.item_detail";
+    pub const SEARCH_SESSION_HISTORY: &str = "session.history.search";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
     pub const SUBMIT_FORM: &str = "form.submit";
     pub const COMPACT_SESSION: &str = "session.compact";
@@ -414,6 +415,7 @@ pub mod methods {
         super::method_descriptor::<super::rpc::GetSessionTimelineAfter>(),
         super::method_descriptor::<super::rpc::GetSessionTimelineAround>(),
         super::method_descriptor::<super::rpc::GetSessionTimelineItemDetail>(),
+        super::method_descriptor::<super::rpc::SearchSessionHistory>(),
         super::method_descriptor::<super::rpc::ResolvePrompt>(),
         super::method_descriptor::<super::rpc::SubmitForm>(),
         super::method_descriptor::<super::rpc::CompactSession>(),
@@ -1958,6 +1960,13 @@ pub mod rpc {
         Query,
         GetSessionTimelineItemDetailRequest,
         SessionTimelineItemDetail
+    );
+    method!(
+        SearchSessionHistory,
+        methods::SEARCH_SESSION_HISTORY,
+        Query,
+        SearchSessionHistoryRequest,
+        SearchSessionHistoryResponse
     );
     method!(
         ResolvePrompt,

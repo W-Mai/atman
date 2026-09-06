@@ -878,6 +878,19 @@ pub struct TranscriptBookmark {
     follow_tail: bool,
 }
 
+impl TranscriptBookmark {
+    pub fn at_sequence(sequence: u64) -> Self {
+        Self {
+            anchor: Some(DaemonItemKey {
+                sequence,
+                ordinal: 0,
+            }),
+            follow_tail: false,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: OutputStore,
@@ -2176,6 +2189,25 @@ impl AppState {
         self.pending_scroll_anchor = bookmark.anchor.map(|item| PendingScrollAnchor {
             item,
             row_offset: bookmark.row_offset,
+        });
+    }
+
+    pub(crate) fn jump_to_daemon_sequence(&mut self, sequence: u64) {
+        let Some(item) = self
+            .daemon_item_keys
+            .iter()
+            .flatten()
+            .filter(|item| item.sequence >= sequence)
+            .min_by_key(|item| (item.sequence, item.ordinal))
+            .copied()
+            .or_else(|| self.daemon_item_keys.iter().flatten().next_back().copied())
+        else {
+            return;
+        };
+        self.follow_tail = false;
+        self.pending_scroll_anchor = Some(PendingScrollAnchor {
+            item,
+            row_offset: 0,
         });
     }
 
@@ -6214,6 +6246,32 @@ mod tests {
             ..TranscriptBookmark::default()
         });
         assert!(restored.follow_tail);
+    }
+
+    #[test]
+    fn history_jump_anchors_to_the_nearest_loaded_daemon_item() {
+        let assistant = |md: &str| OutputItem::AssistantMd {
+            md: md.into(),
+            streaming: false,
+            retried: false,
+        };
+        let mut app = AppState::new("s".into(), None);
+        app.reconcile_daemon_transcript(
+            vec![assistant("before"), assistant("after")],
+            vec![10, 30],
+            1,
+        );
+
+        app.jump_to_daemon_sequence(20);
+
+        assert!(!app.follow_tail);
+        assert_eq!(
+            app.pending_scroll_anchor.unwrap().item,
+            DaemonItemKey {
+                sequence: 30,
+                ordinal: 0,
+            }
+        );
     }
 
     #[test]

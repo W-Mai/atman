@@ -718,6 +718,23 @@
       }
     },
     {
+      "name": "session.history.search",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "SearchSessionHistoryRequest",
+        "schema": {
+          "$ref": "#/$defs/SearchSessionHistoryRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SearchSessionHistoryResponse",
+        "schema": {
+          "$ref": "#/$defs/SearchSessionHistoryResponse"
+        }
+      }
+    },
+    {
       "name": "resolve_prompt",
       "kind": "command",
       "revision": 2,

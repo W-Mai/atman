@@ -6,26 +6,26 @@ use atman_proto::{
     CompactReviewDecision, CompactSessionRequest, CompactSessionResponse,
     CreatePermissionGroupRequest, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
     FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionTimelineAfterRequest,
-    GetSessionTimelineBeforeRequest, GetSessionTimelineItemDetailRequest,
-    GetSessionTimelineTailRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse,
-    InlineImage, InspectResourceRequest, InspectResourceResponse, InstallSuggestedFlowRequest,
-    InstallSuggestedFlowResponse, InterjectSessionRequest, InterjectSessionResponse,
-    InterjectionLevel, ListPermissionRequestsRequest, ListPermissionRequestsResponse,
-    ListResourcesRequest, ListResourcesResponse, MoveSessionRequest, MoveSessionResponse,
-    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
-    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
-    ReleaseResourceRequest, ReleaseResourceResponse, ReloadSessionMcpRequest,
-    ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse, RequestId,
-    ResizeTerminalResourceRequest, ResizeTerminalResourceResponse, ResolveCompactReviewRequest,
-    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    GetSessionTimelineAroundRequest, GetSessionTimelineBeforeRequest,
+    GetSessionTimelineItemDetailRequest, GetSessionTimelineTailRequest, GetSessionUpdatesRequest,
+    GetSessionUpdatesResponse, InlineImage, InspectResourceRequest, InspectResourceResponse,
+    InstallSuggestedFlowRequest, InstallSuggestedFlowResponse, InterjectSessionRequest,
+    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
+    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
+    MoveSessionRequest, MoveSessionResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
+    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
+    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
+    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
+    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
+    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
-    SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
-    SessionSignal, SessionSnapshot, SessionTimelineBudget, SessionTimelinePage,
-    SetSessionGoalRequest, SetSessionGoalResponse, StartRunRequest, StartRunResponse,
-    SubmitFormRequest, SubmitFormResponse, SuggestFlowRequest, SuggestFlowResponse,
-    TerminateResourceRequest, TerminateResourceResponse, TimelineCursor, TimelineItemId,
-    TimelineSegment, TodoMutation, TrustProjection, UpdateSessionTodosRequest,
+    SearchSessionHistoryRequest, SearchSessionHistoryResponse, SendMessageRequest,
+    SendMessageResponse, ServerEvent, SessionId, SessionProjection, SessionSignal, SessionSnapshot,
+    SessionTimelineBudget, SessionTimelinePage, SetSessionGoalRequest, SetSessionGoalResponse,
+    StartRunRequest, StartRunResponse, SubmitFormRequest, SubmitFormResponse, SuggestFlowRequest,
+    SuggestFlowResponse, TerminateResourceRequest, TerminateResourceResponse, TimelineCursor,
+    TimelineItemId, TimelineSegment, TodoMutation, TrustProjection, UpdateSessionTodosRequest,
     UpdateSessionTodosResponse, UpdateSessionTrustRequest, UpdateSessionTrustResponse, rpc,
 };
 use futures::StreamExt;
@@ -198,6 +198,10 @@ pub enum SessionUpdate {
         loaded_items: usize,
         has_more: bool,
     },
+    HistoryReplaced {
+        state: SessionState,
+        anchor_seq: u64,
+    },
     HistoryDetailLoaded {
         state: SessionState,
         tool_use_id: String,
@@ -283,6 +287,7 @@ struct TimelineHistory {
     segments: VecDeque<TimelineSegment>,
     loaded_items: HashSet<TimelineItemId>,
     tool_details: HashMap<String, Vec<TimelineItemId>>,
+    pending_authoritative_anchor: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +366,7 @@ impl SessionClient {
             segments: page.segments.clone().into(),
             loaded_items: timeline_item_ids(&page),
             tool_details: timeline_tool_details(&page),
+            pending_authoritative_anchor: None,
         };
         let (state, _) = watch::channel(state);
         let (signals, _) = broadcast::channel(capabilities.limits.subscriber_buffer.max(1));
@@ -515,6 +521,75 @@ impl SessionClient {
         })
     }
 
+    pub async fn load_history_around(&self, anchor_seq: u64) -> Result<(), SessionClientError> {
+        let Some(history) = &self.history else {
+            return Ok(());
+        };
+        let _refresh_guard = self.refresh_lock.lock().await;
+        let page = self
+            .client
+            .call::<rpc::GetSessionTimelineAround>(&GetSessionTimelineAroundRequest {
+                session_id: self.session_id.clone(),
+                anchor: TimelineCursor {
+                    seq: anchor_seq,
+                    item_id: TimelineItemId(format!("search:{anchor_seq}")),
+                },
+                budget: SessionTimelineBudget {
+                    turn_budget: Some(TIMELINE_PAGE_TURNS),
+                    byte_budget: Some(TIMELINE_PAGE_BYTES),
+                },
+            })
+            .await?;
+        validate_timeline_page(
+            &page,
+            &self.session_id,
+            &self.client.capabilities().daemon_generation,
+        )?;
+        let mut next = SessionState::new(
+            snapshot_from_timeline(&page)?,
+            &self.client.capabilities().daemon_generation,
+        )?;
+        next.bounded_transcript = true;
+        let pending_authoritative_anchor = page
+            .live
+            .as_ref()
+            .is_some_and(|live| !live.head_complete)
+            .then_some(anchor_seq);
+        *history.lock().await = TimelineHistory {
+            oldest: oldest_cursor(&page),
+            newest: newest_cursor(&page),
+            has_older: page.older.has_more,
+            has_newer: page.newer.has_more,
+            segments: page.segments.clone().into(),
+            loaded_items: timeline_item_ids(&page),
+            tool_details: timeline_tool_details(&page),
+            pending_authoritative_anchor,
+        };
+        self.state.send_replace(next.clone());
+        let _ = self.updates.send(SessionUpdate::HistoryReplaced {
+            state: next,
+            anchor_seq,
+        });
+        Ok(())
+    }
+
+    pub async fn search_history(
+        &self,
+        query: String,
+        project_wide: bool,
+        limit: Option<u32>,
+    ) -> Result<SearchSessionHistoryResponse, SessionClientError> {
+        Ok(self
+            .client
+            .call::<rpc::SearchSessionHistory>(&SearchSessionHistoryRequest {
+                session_id: self.session_id.clone(),
+                query,
+                project_wide,
+                limit,
+            })
+            .await?)
+    }
+
     pub async fn load_tool_detail(&self, tool_use_id: &str) -> Result<bool, SessionClientError> {
         let Some(history) = &self.history else {
             return Ok(false);
@@ -641,23 +716,37 @@ impl SessionClient {
                 } else {
                     self.client.refresh_capabilities().await?
                 };
-                let mut next = self
+                let (mut next, history_anchor) = self
                     .fetch_fresh_state(&capabilities.daemon_generation)
                     .await?;
                 next.transcript_revision = previous_transcript_revision.wrapping_add(1);
                 next.resources_revision = previous_resources_revision.wrapping_add(1);
                 self.state.send_replace(next.clone());
-                let _ = self.updates.send(SessionUpdate::Reset(Box::new(next)));
+                let update = match history_anchor {
+                    Some(anchor_seq) => SessionUpdate::HistoryReplaced {
+                        state: next,
+                        anchor_seq,
+                    },
+                    None => SessionUpdate::Reset(Box::new(next)),
+                };
+                let _ = self.updates.send(update);
                 Ok(RefreshOutcome::Reconnected)
             }
             Err(error) if error.requires_resync() => {
-                let mut next = self
+                let (mut next, history_anchor) = self
                     .fetch_fresh_state(&capabilities.daemon_generation)
                     .await?;
                 next.transcript_revision = previous_transcript_revision.wrapping_add(1);
                 next.resources_revision = previous_resources_revision.wrapping_add(1);
                 self.state.send_replace(next.clone());
-                let _ = self.updates.send(SessionUpdate::Reset(Box::new(next)));
+                let update = match history_anchor {
+                    Some(anchor_seq) => SessionUpdate::HistoryReplaced {
+                        state: next,
+                        anchor_seq,
+                    },
+                    None => SessionUpdate::Reset(Box::new(next)),
+                };
+                let _ = self.updates.send(update);
                 Ok(RefreshOutcome::Resynced)
             }
             Err(error) => Err(error.into()),
@@ -667,18 +756,35 @@ impl SessionClient {
     async fn fetch_fresh_state(
         &self,
         expected_generation: &DaemonGeneration,
-    ) -> Result<SessionState, SessionClientError> {
+    ) -> Result<(SessionState, Option<u64>), SessionClientError> {
         if let Some(history) = &self.history {
-            let page = self
-                .client
-                .call::<rpc::GetSessionTimelineTail>(&GetSessionTimelineTailRequest {
-                    session_id: self.session_id.clone(),
-                    budget: SessionTimelineBudget {
-                        turn_budget: Some(TIMELINE_PAGE_TURNS),
-                        byte_budget: Some(TIMELINE_PAGE_BYTES),
-                    },
-                })
-                .await?;
+            let pending_anchor = history.lock().await.pending_authoritative_anchor;
+            let budget = SessionTimelineBudget {
+                turn_budget: Some(TIMELINE_PAGE_TURNS),
+                byte_budget: Some(TIMELINE_PAGE_BYTES),
+            };
+            let page = match pending_anchor {
+                Some(anchor_seq) => {
+                    self.client
+                        .call::<rpc::GetSessionTimelineAround>(&GetSessionTimelineAroundRequest {
+                            session_id: self.session_id.clone(),
+                            anchor: TimelineCursor {
+                                seq: anchor_seq,
+                                item_id: TimelineItemId(format!("search:{anchor_seq}")),
+                            },
+                            budget,
+                        })
+                        .await?
+                }
+                None => {
+                    self.client
+                        .call::<rpc::GetSessionTimelineTail>(&GetSessionTimelineTailRequest {
+                            session_id: self.session_id.clone(),
+                            budget,
+                        })
+                        .await?
+                }
+            };
             validate_timeline_page(&page, &self.session_id, expected_generation)?;
             let mut state = SessionState::new(snapshot_from_timeline(&page)?, expected_generation)?;
             state.bounded_transcript = true;
@@ -690,8 +796,10 @@ impl SessionClient {
                 segments: page.segments.clone().into(),
                 loaded_items: timeline_item_ids(&page),
                 tool_details: timeline_tool_details(&page),
+                pending_authoritative_anchor: pending_anchor
+                    .filter(|_| page.live.as_ref().is_some_and(|live| !live.head_complete)),
             };
-            return Ok(state);
+            return Ok((state, pending_anchor));
         }
         let snapshot = self
             .client
@@ -700,7 +808,7 @@ impl SessionClient {
             })
             .await?;
         validate_session(&snapshot, &self.session_id)?;
-        Ok(SessionState::new(snapshot, expected_generation)?)
+        Ok((SessionState::new(snapshot, expected_generation)?, None))
     }
 
     pub async fn refresh_until_current(&self) -> Result<RefreshOutcome, SessionClientError> {
@@ -2390,6 +2498,7 @@ mod tests {
             segments: page.segments.clone().into(),
             loaded_items: timeline_item_ids(&page),
             tool_details: timeline_tool_details(&page),
+            pending_authoritative_anchor: None,
         };
 
         assert!(trim_timeline_window(

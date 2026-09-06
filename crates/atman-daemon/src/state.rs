@@ -7,9 +7,10 @@ use anyhow::{Context, Result};
 use atman_proto::{
     CloseSessionResponse, DaemonGeneration, DeleteSessionResponse, EventCursor, FlowRunId,
     GetSessionUpdatesResponse, ListProjectsResponse, ProjectSummary, PromptId, ResourceState,
-    ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SessionCloseStatus, SessionDeleteStatus, SessionId,
-    SessionSnapshot, SessionStatus, SessionSummary, SessionTimelineBudget,
-    SessionTimelineItemDetail, SessionTimelinePage, TimelineCursor, TimelineItemId,
+    ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SearchSessionHistoryResponse, SessionCloseStatus,
+    SessionDeleteStatus, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
+    SessionTimelineBudget, SessionTimelineItemDetail, SessionTimelinePage, TimelineCursor,
+    TimelineItemId,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -475,7 +476,12 @@ impl DaemonState {
             return actor.timeline_tail(budget).await;
         }
         match self
-            .indexed_timeline_page(id, None, budget.clone(), true)
+            .indexed_timeline_page(
+                id,
+                crate::timeline::IndexedPageWindow::Tail,
+                budget.clone(),
+                true,
+            )
             .await
         {
             Ok(Some(page)) => {
@@ -504,7 +510,12 @@ impl DaemonState {
             return actor.timeline_before(before, budget).await;
         }
         match self
-            .indexed_timeline_page(id, Some(before.clone()), budget.clone(), false)
+            .indexed_timeline_page(
+                id,
+                crate::timeline::IndexedPageWindow::Before(before.clone()),
+                budget.clone(),
+                false,
+            )
             .await
         {
             Ok(Some(page)) => return Ok(page),
@@ -522,7 +533,7 @@ impl DaemonState {
     async fn indexed_timeline_page(
         self: &std::sync::Arc<Self>,
         id: &SessionId,
-        before: Option<TimelineCursor>,
+        window: crate::timeline::IndexedPageWindow,
         budget: SessionTimelineBudget,
         include_live: bool,
     ) -> Result<Option<SessionTimelinePage>> {
@@ -540,7 +551,7 @@ impl DaemonState {
                 &source,
                 &id,
                 daemon_generation,
-                before.as_ref(),
+                window,
                 &budget,
                 include_live,
             )?
@@ -574,9 +585,30 @@ impl DaemonState {
         self: &std::sync::Arc<Self>,
         id: &SessionId,
         principal: &str,
-        anchor: TimelineItemId,
+        anchor: TimelineCursor,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
+        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+            return actor.timeline_around(anchor, budget).await;
+        }
+        match self
+            .indexed_timeline_page(
+                id,
+                crate::timeline::IndexedPageWindow::Around(anchor.clone()),
+                budget.clone(),
+                true,
+            )
+            .await
+        {
+            Ok(Some(page)) => {
+                self.warm_session_actor(id.clone(), principal.to_owned());
+                return Ok(page);
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
+            ),
+        }
         self.get_or_load_actor(id, principal)
             .await?
             .timeline_around(anchor, budget)
@@ -592,6 +624,20 @@ impl DaemonState {
         self.get_or_load_actor(id, principal)
             .await?
             .timeline_item_detail(item_id)
+            .await
+    }
+
+    pub async fn search_session_history(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+        query: String,
+        project_wide: bool,
+        limit: Option<u32>,
+    ) -> Result<SearchSessionHistoryResponse> {
+        self.get_or_load_actor(id, principal)
+            .await?
+            .search_history(query, project_wide, limit)
             .await
     }
 

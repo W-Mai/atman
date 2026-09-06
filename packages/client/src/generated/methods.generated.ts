@@ -79,6 +79,8 @@ import type {
   RunFlowResponse,
   SanitizeSessionAttachmentsRequest,
   SanitizeSessionAttachmentsResponse,
+  SearchSessionHistoryRequest,
+  SearchSessionHistoryResponse,
   SendMessageRequest,
   SendMessageResponse,
   SessionSnapshot,
@@ -361,6 +363,12 @@ export interface RpcMethodMap {
     params: GetSessionTimelineItemDetailRequest
     result: SessionTimelineItemDetail
   }
+  'session.history.search': {
+    kind: 'query'
+    revision: 1
+    params: SearchSessionHistoryRequest
+    result: SearchSessionHistoryResponse
+  }
   'resolve_prompt': {
     kind: 'command'
     revision: 2
@@ -488,6 +496,7 @@ export const RPC_METHODS = {
   'session.history.after': { kind: 'query', revision: 1 },
   'session.history.around': { kind: 'query', revision: 1 },
   'session.history.item_detail': { kind: 'query', revision: 1 },
+  'session.history.search': { kind: 'query', revision: 1 },
   'resolve_prompt': { kind: 'command', revision: 2 },
   'form.submit': { kind: 'command', revision: 1 },
   'session.compact': { kind: 'command', revision: 1 },

@@ -152,7 +152,7 @@ impl AnchorIndex {
         query: &str,
         session_filter: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<ProjectEventRow>> {
+    ) -> Result<Vec<ProjectEventSearchHit>> {
         let conn = self.conn();
         if let Some(pattern) = parse_regex_query(query) {
             return self.search_events_regex(&pattern, session_filter, limit, &conn);
@@ -166,11 +166,11 @@ impl AnchorIndex {
         session_filter: Option<&str>,
         limit: usize,
         conn: &std::sync::MutexGuard<'_, rusqlite::Connection>,
-    ) -> Result<Vec<ProjectEventRow>> {
+    ) -> Result<Vec<ProjectEventSearchHit>> {
         let pattern = format!("%{query}%");
         let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
             Some(sid) => (
-                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, f.text_content \
                  FROM events e JOIN events_fts f ON f.rowid = e.id \
                  WHERE f.text_content LIKE ?1 AND e.session_id = ?2 \
                  ORDER BY e.id DESC LIMIT ?3",
@@ -181,7 +181,7 @@ impl AnchorIndex {
                 ],
             ),
             None => (
-                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, f.text_content \
                  FROM events e JOIN events_fts f ON f.rowid = e.id \
                  WHERE f.text_content LIKE ?1 \
                  ORDER BY e.id DESC LIMIT ?2",
@@ -190,7 +190,7 @@ impl AnchorIndex {
         };
         let mut stmt = conn.prepare(sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), project_event_row_from)?;
+        let rows = stmt.query_map(param_refs.as_slice(), project_event_search_hit_from)?;
         collect(rows)
     }
 
@@ -210,22 +210,20 @@ impl AnchorIndex {
         session_filter: Option<&str>,
         limit: usize,
         conn: &std::sync::MutexGuard<'_, rusqlite::Connection>,
-    ) -> Result<Vec<ProjectEventRow>> {
+    ) -> Result<Vec<ProjectEventSearchHit>> {
         let re = regex::RegexBuilder::new(pattern)
             .case_insensitive(true)
             .build()
             .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
         let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
             Some(sid) => (
-                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, \
-                 f.text_content \
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, f.text_content \
                  FROM events e JOIN events_fts f ON f.rowid = e.id \
                  WHERE e.session_id = ?1 ORDER BY e.id DESC LIMIT 2000",
                 vec![Box::new(sid.to_string())],
             ),
             None => (
-                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, \
-                 f.text_content \
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, f.text_content \
                  FROM events e JOIN events_fts f ON f.rowid = e.id \
                  ORDER BY e.id DESC LIMIT 2000",
                 vec![],
@@ -235,15 +233,7 @@ impl AnchorIndex {
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             Ok((
-                ProjectEventRow {
-                    session_id: row.get(0)?,
-                    seq: row.get::<_, i64>(1)? as u64,
-                    ts: row.get(2)?,
-                    kind: row.get(3)?,
-                    turn_id: row.get(4)?,
-                    flow_run_id: row.get(5)?,
-                    payload: row.get(6)?,
-                },
+                project_event_search_hit_from(row)?,
                 row.get::<_, String>(7)?,
             ))
         })?;
@@ -1053,6 +1043,33 @@ pub struct ProjectEventRow {
     pub turn_id: Option<String>,
     pub flow_run_id: Option<String>,
     pub payload: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectEventSearchHit {
+    pub session_id: String,
+    pub seq: u64,
+    pub ts: String,
+    pub kind: String,
+    pub turn_id: Option<String>,
+    pub flow_run_id: Option<String>,
+    pub payload: String,
+    pub text: String,
+}
+
+fn project_event_search_hit_from(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProjectEventSearchHit> {
+    Ok(ProjectEventSearchHit {
+        session_id: row.get(0)?,
+        seq: row.get::<_, i64>(1)? as u64,
+        ts: row.get(2)?,
+        kind: row.get(3)?,
+        turn_id: row.get(4)?,
+        flow_run_id: row.get(5)?,
+        payload: row.get(6)?,
+        text: row.get(7)?,
+    })
 }
 
 fn project_event_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectEventRow> {

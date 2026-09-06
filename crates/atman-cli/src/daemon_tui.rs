@@ -10,6 +10,7 @@ enum NextSession {
         session: SessionClient,
         intro: Option<atman_tui::app::StartupIntro>,
         show_startup: bool,
+        transcript_bookmark: Option<atman_tui::app::TranscriptBookmark>,
     },
 }
 
@@ -76,12 +77,14 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
         session: first,
         intro: None,
         show_startup,
+        transcript_bookmark: None,
     };
     loop {
         let NextSession::Attached {
             session,
             intro,
             show_startup,
+            transcript_bookmark,
         } = current;
         let session_id = session.session_id().clone();
         let (next, bookmark) = run_session(
@@ -90,7 +93,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             intro,
             show_startup,
             onboarding_recommended,
-            bookmarks.get(&session_id).copied(),
+            transcript_bookmark.or_else(|| bookmarks.get(&session_id).copied()),
             sessions.clone(),
         )
         .await?;
@@ -315,6 +318,7 @@ async fn run_session(
                                 session,
                                 intro: Some(intro),
                                 show_startup: false,
+                                transcript_bookmark: None,
                             });
                             if let Some(tx) = shutdown_tx.take() {
                                 let _ = tx.send(());
@@ -340,6 +344,7 @@ async fn run_session(
                                 session,
                                 intro: None,
                                 show_startup: true,
+                                transcript_bookmark: None,
                             });
                             if let Some(tx) = shutdown_tx.take() {
                                 let _ = tx.send(());
@@ -563,6 +568,90 @@ async fn run_session(
                         let _ = control_note_tx.send(TuiNote::Error(format!(
                             "could not load newer session history: {error}"
                         )));
+                    }
+                }
+                TuiControl::SearchHistory {
+                    query,
+                    project_wide,
+                } => {
+                    let result = control_session
+                        .search_history(query.clone(), project_wide, Some(50))
+                        .await
+                        .map(|response| {
+                            response
+                                .hits
+                                .into_iter()
+                                .map(|hit| atman_tui::history_search_modal::HistoryHit {
+                                    session_id: hit.session_id,
+                                    seq: hit.seq,
+                                    ts: hit.ts,
+                                    kind: hit.kind,
+                                    snippet: hit.snippet,
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| format!("could not search session history: {error}"));
+                    let _ = command_tx.send(TuiCommand::HistorySearchResult { query, result });
+                }
+                TuiControl::JumpToHistory { session_id, seq } => {
+                    let parsed = uuid::Uuid::parse_str(&session_id)
+                        .map(atman_proto::SessionId)
+                        .context("invalid history search session id");
+                    match parsed {
+                        Ok(session_id) if session_id == *control_session.session_id() => {
+                            if let Err(error) = control_session.load_history_around(seq).await {
+                                let _ = control_note_tx.send(TuiNote::Error(format!(
+                                    "could not load session history: {error}"
+                                )));
+                            }
+                        }
+                        Ok(session_id) => {
+                            let cached = control_sessions.lock().await.get(&session_id);
+                            let attached = match cached {
+                                Some(session) => Ok(session),
+                                None => match control_client
+                                    .attach_session_windowed(session_id.clone())
+                                    .await
+                                {
+                                    Ok(session) => {
+                                        control_sessions.lock().await.insert(session.clone());
+                                        Ok(session)
+                                    }
+                                    Err(error) => Err(anyhow::Error::from(error)),
+                                },
+                            };
+                            match attached {
+                                Ok(session) => match session.load_history_around(seq).await {
+                                    Ok(()) => {
+                                        let _ = next_tx.send(NextSession::Attached {
+                                            session,
+                                            intro: None,
+                                            show_startup: false,
+                                            transcript_bookmark: Some(
+                                                atman_tui::app::TranscriptBookmark::at_sequence(
+                                                    seq,
+                                                ),
+                                            ),
+                                        });
+                                        if let Some(tx) = shutdown_tx.take() {
+                                            let _ = tx.send(());
+                                        }
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                                            "could not load session history: {error}"
+                                        )));
+                                    }
+                                },
+                                Err(error) => {
+                                    let _ = control_note_tx.send(TuiNote::Error(error.to_string()));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let _ = control_note_tx.send(TuiNote::Error(error.to_string()));
+                        }
                     }
                 }
                 TuiControl::LoadToolDetail { tool_use_id } => {

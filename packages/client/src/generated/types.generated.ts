@@ -76,6 +76,8 @@ export type AtmanDaemonProtocolPayloads =
   | GetSessionTimelineAroundRequest
   | GetSessionTimelineItemDetailRequest
   | SessionTimelineItemDetail
+  | SearchSessionHistoryRequest
+  | SearchSessionHistoryResponse
   | ResolvePromptRequest
   | ResolvePromptResponse
   | SubmitFormRequest
@@ -968,7 +970,7 @@ export type GetSessionTimelineAfterRequest = SessionTimelineBudget & {
   [k: string]: unknown
 }
 export type GetSessionTimelineAroundRequest = SessionTimelineBudget & {
-  anchor: TimelineItemId
+  anchor: TimelineCursor
   session_id: SessionId
   [k: string]: unknown
 }
@@ -2065,6 +2067,25 @@ export interface SessionTimelineItemDetail {
   item: TranscriptItem
   item_id: TimelineItemId
   session_id: SessionId
+  [k: string]: unknown
+}
+export interface SearchSessionHistoryRequest {
+  limit?: number | null
+  project_wide?: boolean
+  query: string
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface SearchSessionHistoryResponse {
+  hits?: SessionHistorySearchHit[]
+  [k: string]: unknown
+}
+export interface SessionHistorySearchHit {
+  kind: string
+  seq: number
+  session_id: string
+  snippet: string
+  ts: string
   [k: string]: unknown
 }
 export interface ResolvePromptRequest {

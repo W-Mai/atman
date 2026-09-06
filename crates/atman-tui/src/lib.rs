@@ -147,6 +147,14 @@ pub enum TuiControl {
     },
     LoadOlderHistory,
     LoadNewerHistory,
+    SearchHistory {
+        query: String,
+        project_wide: bool,
+    },
+    JumpToHistory {
+        session_id: String,
+        seq: u64,
+    },
     LoadToolDetail {
         tool_use_id: String,
     },
@@ -255,6 +263,10 @@ pub enum TuiCommand {
     SessionListUpdated {
         scope: session_switcher::SessionScope,
         rows: Vec<SessionPickerRow>,
+    },
+    HistorySearchResult {
+        query: String,
+        result: Result<Vec<history_search_modal::HistoryHit>, String>,
     },
     McpResourcesResult {
         name: String,

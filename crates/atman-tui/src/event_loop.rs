@@ -1540,6 +1540,29 @@ pub(crate) async fn run_frames(
                                 app.wm.modals.session_switcher.set_rows(rows);
                             }
                         }
+                        TuiCommand::HistorySearchResult { query, result } => {
+                            match result {
+                                Ok(hits) => {
+                                    app.wm.modals.history_search.set_results(hits, query);
+                                    if let Some((kind, seq, snippet)) = app
+                                        .wm
+                                        .modals
+                                        .history_search
+                                        .selected_hit()
+                                        .map(|hit| {
+                                            (hit.kind.clone(), hit.seq, hit.snippet.clone())
+                                        })
+                                    {
+                                        app.wm.modals.history_search.set_preview(vec![format!(
+                                            "▶ **[{}]** seq={}  \n{}",
+                                            kind, seq, snippet
+                                        )]);
+                                    }
+                                }
+                                Err(error) => app.wm.modals.history_search.set_error(error),
+                            }
+                            app.app.mark_visual_dirty();
+                        }
                         TuiCommand::SessionNameUpdated(name) => {
                             app.app.session_name = Some(name);
                             if app.wm.modals.session_switcher.open {
@@ -2002,6 +2025,16 @@ fn apply_daemon_update(
             )?;
             *state = Some(next);
             apply_daemon_projection(app, projected);
+        }
+        atman_client::SessionUpdate::HistoryReplaced {
+            state: next,
+            anchor_seq,
+        } => {
+            let projected =
+                crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
+            *state = Some(next);
+            apply_daemon_projection(app, projected);
+            app.app.jump_to_daemon_sequence(anchor_seq);
         }
         atman_client::SessionUpdate::HistoryDetailLoaded {
             state: next,

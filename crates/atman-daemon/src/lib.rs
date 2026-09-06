@@ -10,10 +10,10 @@ use atman_proto::{
     PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
     ReloadSessionMcpResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
     ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
-    RpcMethodDescriptor, RunFlowResponse, SanitizeSessionAttachmentsResponse, SendMessageResponse,
-    SetSessionGoalResponse, StartRunResponse, SubmitFormResponse, SuggestFlowResponse,
-    SuggestFlowStatus, TerminateResourceResponse, UpdateSessionTodosResponse,
-    UpdateSessionTrustResponse, method_descriptor, methods, rpc,
+    RpcMethodDescriptor, RunFlowResponse, SanitizeSessionAttachmentsResponse,
+    SearchSessionHistoryRequest, SendMessageResponse, SetSessionGoalResponse, StartRunResponse,
+    SubmitFormResponse, SuggestFlowResponse, SuggestFlowStatus, TerminateResourceResponse,
+    UpdateSessionTodosResponse, UpdateSessionTrustResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -202,6 +202,7 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::GetSessionTimelineAfter>(),
     method_descriptor::<rpc::GetSessionTimelineAround>(),
     method_descriptor::<rpc::GetSessionTimelineItemDetail>(),
+    method_descriptor::<rpc::SearchSessionHistory>(),
     method_descriptor::<rpc::ResolvePrompt>(),
     method_descriptor::<rpc::SubmitForm>(),
     method_descriptor::<rpc::CompactSession>(),
@@ -1347,6 +1348,25 @@ async fn dispatch_as_inner(
                     .await
                 {
                     Ok(detail) => method_response::<rpc::GetSessionTimelineItemDetail>(id, detail),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::SEARCH_SESSION_HISTORY => {
+            match parse_params::<rpc::SearchSessionHistory>(req.params) {
+                Ok(SearchSessionHistoryRequest {
+                    session_id,
+                    query,
+                    project_wide,
+                    limit,
+                }) => match state
+                    .search_session_history(&session_id, principal_id, query, project_wide, limit)
+                    .await
+                {
+                    Ok(response) => method_response::<rpc::SearchSessionHistory>(id, response),
                     Err(error) => {
                         JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
                     }
