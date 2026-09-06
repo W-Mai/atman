@@ -1,8 +1,9 @@
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub struct AnchorIndex {
     path: PathBuf,
@@ -346,11 +347,35 @@ impl AnchorIndex {
             "DELETE FROM events WHERE session_id = ?",
             rusqlite::params![session_id],
         )?;
+        tx.execute(
+            "DELETE FROM timeline_turns WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM event_index_coverage WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
         tx.commit()?;
         Ok(n)
     }
 
     pub fn insert_project_event_raw(&self, row: ProjectEventInsert<'_>) -> rusqlite::Result<i64> {
+        self.insert_project_event_row(row, None)
+    }
+
+    pub fn insert_project_event_at_boundary(
+        &self,
+        row: ProjectEventInsert<'_>,
+        boundary: EventLogBoundary<'_>,
+    ) -> rusqlite::Result<i64> {
+        self.insert_project_event_row(row, Some(boundary))
+    }
+
+    fn insert_project_event_row(
+        &self,
+        row: ProjectEventInsert<'_>,
+        boundary: Option<EventLogBoundary<'_>>,
+    ) -> rusqlite::Result<i64> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
@@ -372,8 +397,144 @@ impl AnchorIndex {
             "INSERT OR REPLACE INTO events_fts (rowid, text_content) VALUES (?, ?)",
             rusqlite::params![id, row.text_content],
         )?;
+        if let Some(turn_id) = row.turn_id {
+            tx.execute(
+                "INSERT INTO timeline_turns (session_id, turn_id, start_seq, latest_seq) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(session_id, turn_id) DO UPDATE SET \
+                 start_seq = MIN(start_seq, excluded.start_seq), \
+                 latest_seq = MAX(latest_seq, excluded.latest_seq)",
+                rusqlite::params![row.session_id, turn_id, row.seq, row.seq],
+            )?;
+        }
+        if let Some(boundary) = boundary {
+            tx.execute(
+                "INSERT INTO event_index_coverage \
+                 (session_id, seq, line_start, line_end, log_offset, line_digest) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(session_id) DO UPDATE SET \
+                 seq = excluded.seq, line_start = excluded.line_start, \
+                 line_end = excluded.line_end, log_offset = excluded.log_offset, \
+                 line_digest = excluded.line_digest \
+                 WHERE excluded.seq >= event_index_coverage.seq",
+                rusqlite::params![
+                    row.session_id,
+                    row.seq,
+                    boundary.line_start,
+                    boundary.line_end,
+                    boundary.log_offset,
+                    boundary.line_digest,
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn read_turns_before(
+        &self,
+        session_id: &str,
+        before_start_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<ProjectTurnRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT turn_id, start_seq, latest_seq FROM timeline_turns \
+             WHERE session_id = ? AND start_seq < ? \
+             ORDER BY start_seq DESC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                session_id,
+                before_start_seq.map_or(i64::MAX, |seq| { i64::try_from(seq).unwrap_or(i64::MAX) }),
+                limit as i64,
+            ],
+            |row| {
+                Ok(ProjectTurnRow {
+                    turn_id: row.get(0)?,
+                    start_seq: row.get::<_, i64>(1)? as u64,
+                    latest_seq: row.get::<_, i64>(2)? as u64,
+                })
+            },
+        )?;
+        collect(rows)
+    }
+
+    pub fn validated_event_coverage(
+        &self,
+        session_id: &str,
+        events_path: &Path,
+    ) -> Result<Option<EventIndexCoverage>> {
+        let (coverage, max_seq, indexed_payload) = {
+            let conn = self.conn();
+            let coverage = conn
+                .query_row(
+                    "SELECT seq, line_start, line_end, log_offset, line_digest \
+                     FROM event_index_coverage WHERE session_id = ?",
+                    rusqlite::params![session_id],
+                    |row| {
+                        Ok(EventIndexCoverage {
+                            seq: row.get::<_, i64>(0)? as u64,
+                            line_start: row.get::<_, i64>(1)? as u64,
+                            line_end: row.get::<_, i64>(2)? as u64,
+                            log_offset: row.get::<_, i64>(3)? as u64,
+                            line_digest: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()?;
+            let Some(coverage) = coverage else {
+                return Ok(None);
+            };
+            let max_seq = conn.query_row(
+                "SELECT MAX(seq) FROM events WHERE session_id = ?",
+                rusqlite::params![session_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            let indexed_payload = conn
+                .query_row(
+                    "SELECT payload FROM events WHERE session_id = ? AND seq = ?",
+                    rusqlite::params![session_id, coverage.seq as i64],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            (coverage, max_seq, indexed_payload)
+        };
+        let Some(indexed_payload) = indexed_payload else {
+            return Ok(None);
+        };
+        if max_seq.map(|seq| seq as u64) != Some(coverage.seq)
+            || blake3::hash(indexed_payload.as_bytes()).to_hex().as_str() != coverage.line_digest
+        {
+            return Ok(None);
+        }
+        let metadata = std::fs::metadata(events_path)
+            .with_context(|| format!("inspect {}", events_path.display()))?;
+        if metadata.len() != coverage.log_offset
+            || coverage.line_start > coverage.line_end
+            || coverage.line_end > coverage.log_offset
+        {
+            return Ok(None);
+        }
+        let mut file = std::fs::File::open(events_path)
+            .with_context(|| format!("open {}", events_path.display()))?;
+        file.seek(SeekFrom::Start(coverage.line_start))?;
+        let mut remaining = coverage.line_end.saturating_sub(coverage.line_start);
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        while remaining > 0 {
+            let requested = remaining.min(buffer.len() as u64) as usize;
+            let read = file.read(&mut buffer[..requested])?;
+            if read == 0 {
+                return Ok(None);
+            }
+            hasher.update(&buffer[..read]);
+            remaining = remaining.saturating_sub(read as u64);
+        }
+        if hasher.finalize().to_hex().as_str() != coverage.line_digest {
+            return Ok(None);
+        }
+        Ok(Some(coverage))
     }
 
     pub fn find_project_events_around(
@@ -440,29 +601,55 @@ impl AnchorIndex {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let jsonl = dir.join("events.jsonl");
-            let envelopes = match crate::event_log::reader::read_event_envelopes(&jsonl) {
-                Ok(envelopes) => envelopes,
+            let file = match std::fs::File::open(&jsonl) {
+                Ok(file) => file,
                 Err(_) => continue,
             };
-            for envelope in &envelopes {
-                let value = serde_json::to_value(envelope)?;
+            self.delete_events_for_session(&sid)?;
+            let mut reader = std::io::BufReader::new(file);
+            let mut offset = 0_u64;
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let read = reader.read_until(b'\n', &mut line)?;
+                if read == 0 {
+                    break;
+                }
+                let line_start = offset;
+                offset = offset.saturating_add(read as u64);
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                let Ok(envelope) = serde_json::from_slice::<crate::event::EventEnvelope>(&line)
+                else {
+                    stats.skipped += 1;
+                    continue;
+                };
+                let payload_json = String::from_utf8_lossy(&line);
                 let seq = envelope.seq as i64;
                 let ts = envelope.ts.to_rfc3339();
-                let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let (turn_id, flow_run_id) = crate::event_writer::extract_anchors(&envelope.event);
                 let text_content =
                     crate::event_writer::extract_text_content(&envelope.event).unwrap_or_default();
-                let payload_json = serde_json::to_string(&value).unwrap_or_default();
-                self.insert_project_event_raw(ProjectEventInsert {
-                    session_id: &sid,
-                    seq,
-                    ts: &ts,
-                    kind,
-                    turn_id: turn_id.as_deref(),
-                    flow_run_id: flow_run_id.as_deref(),
-                    text_content: &text_content,
-                    payload_json: &payload_json,
-                })?;
+                let line_digest = blake3::hash(&line).to_hex().to_string();
+                self.insert_project_event_at_boundary(
+                    ProjectEventInsert {
+                        session_id: &sid,
+                        seq,
+                        ts: &ts,
+                        kind: crate::event_writer::event_kind(&envelope.event),
+                        turn_id: turn_id.as_deref(),
+                        flow_run_id: flow_run_id.as_deref(),
+                        text_content: &text_content,
+                        payload_json: &payload_json,
+                    },
+                    EventLogBoundary {
+                        line_start,
+                        line_end: line_start.saturating_add(line.len() as u64),
+                        log_offset: offset,
+                        line_digest: &line_digest,
+                    },
+                )?;
                 stats.rebuilt += 1;
             }
         }
@@ -522,6 +709,30 @@ pub struct ProjectEventInsert<'a> {
     pub flow_run_id: Option<&'a str>,
     pub text_content: &'a str,
     pub payload_json: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EventLogBoundary<'a> {
+    pub line_start: u64,
+    pub line_end: u64,
+    pub log_offset: u64,
+    pub line_digest: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventIndexCoverage {
+    pub seq: u64,
+    pub line_start: u64,
+    pub line_end: u64,
+    pub log_offset: u64,
+    pub line_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectTurnRow {
+    pub turn_id: String,
+    pub start_seq: u64,
+    pub latest_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,6 +804,27 @@ CREATE INDEX IF NOT EXISTS events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS events_kind    ON events(kind);
 CREATE INDEX IF NOT EXISTS events_turn    ON events(turn_id);
 CREATE INDEX IF NOT EXISTS events_flow    ON events(flow_run_id);
+CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq);
+CREATE INDEX IF NOT EXISTS events_session_turn_seq ON events(session_id, turn_id, seq);
+
+CREATE TABLE IF NOT EXISTS timeline_turns (
+    session_id TEXT    NOT NULL,
+    turn_id    TEXT    NOT NULL,
+    start_seq  INTEGER NOT NULL,
+    latest_seq INTEGER NOT NULL,
+    PRIMARY KEY (session_id, turn_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_turns_keyset
+ON timeline_turns(session_id, start_seq);
+
+CREATE TABLE IF NOT EXISTS event_index_coverage (
+    session_id  TEXT    PRIMARY KEY,
+    seq         INTEGER NOT NULL,
+    line_start  INTEGER NOT NULL,
+    line_end    INTEGER NOT NULL,
+    log_offset  INTEGER NOT NULL,
+    line_digest TEXT    NOT NULL
+);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
     text_content,
@@ -694,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn open_project_creates_all_four_tables() {
+    fn open_project_creates_all_tables() {
         let dir = tempfile::tempdir().unwrap();
         let idx = AnchorIndex::open_project(dir.path()).unwrap();
         let tables = tables_in(&idx);
@@ -702,12 +934,14 @@ mod tests {
             "anchors",
             "confessions",
             "confessions_fts",
+            "event_index_coverage",
             "events",
             "events_fts",
             "spec_entries",
             "spec_entries_fts",
             "spec_deviations",
             "spec_deviations_fts",
+            "timeline_turns",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -792,6 +1026,89 @@ mod tests {
             .fts_search_project_events("uniquetoken", None, 10)
             .unwrap();
         assert_eq!(hits.len(), 1, "same (session_id, seq) must upsert");
+    }
+
+    #[test]
+    fn turn_keyset_is_descending_and_strictly_before_the_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "sess-a", 1, "user_msg", Some("turn-1"), None, "one");
+        seed_project_event(
+            &idx,
+            "sess-a",
+            3,
+            "assistant_msg",
+            Some("turn-1"),
+            None,
+            "one later",
+        );
+        seed_project_event(&idx, "sess-a", 4, "user_msg", Some("turn-2"), None, "two");
+        seed_project_event(&idx, "sess-a", 8, "user_msg", Some("turn-3"), None, "three");
+
+        let tail = idx.read_turns_before("sess-a", None, 2).unwrap();
+        assert_eq!(
+            tail,
+            vec![
+                ProjectTurnRow {
+                    turn_id: "turn-3".into(),
+                    start_seq: 8,
+                    latest_seq: 8,
+                },
+                ProjectTurnRow {
+                    turn_id: "turn-2".into(),
+                    start_seq: 4,
+                    latest_seq: 4,
+                },
+            ]
+        );
+        let before = idx.read_turns_before("sess-a", Some(4), 2).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].turn_id, "turn-1");
+        assert_eq!(before[0].latest_seq, 3);
+    }
+
+    #[test]
+    fn coverage_requires_the_index_and_jsonl_to_share_one_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_path = dir.path().join("events.jsonl");
+        let payload = r#"{"type":"user_msg","seq":1}"#;
+        let durable = format!("{payload}\n");
+        std::fs::write(&events_path, durable.as_bytes()).unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        let digest = blake3::hash(payload.as_bytes()).to_hex().to_string();
+        idx.insert_project_event_at_boundary(
+            ProjectEventInsert {
+                session_id: "sess-a",
+                seq: 1,
+                ts: "2026-07-05T00:00:00Z",
+                kind: "user_msg",
+                turn_id: Some("turn-1"),
+                flow_run_id: None,
+                text_content: "",
+                payload_json: payload,
+            },
+            EventLogBoundary {
+                line_start: 0,
+                line_end: payload.len() as u64,
+                log_offset: durable.len() as u64,
+                line_digest: &digest,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            idx.validated_event_coverage("sess-a", &events_path)
+                .unwrap()
+                .unwrap()
+                .seq,
+            1
+        );
+        std::fs::write(&events_path, format!("{durable}{{}}\n")).unwrap();
+        assert!(
+            idx.validated_event_coverage("sess-a", &events_path)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

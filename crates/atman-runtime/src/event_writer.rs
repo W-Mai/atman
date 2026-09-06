@@ -7,7 +7,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::event::{Event, EventEnvelope};
-use crate::index::{AnchorIndex, ProjectEventInsert};
+use crate::index::{AnchorIndex, EventLogBoundary, ProjectEventInsert};
 use crate::redact::Redactor;
 
 pub struct EventWriter {
@@ -437,7 +437,7 @@ async fn write_event(
         );
     }
     if let Some((idx, sid)) = indexer
-        && let Err(e) = insert_project_row(idx, sid, envelope, &line)
+        && let Err(e) = insert_project_row(idx, sid, envelope, &line, start, end)
     {
         crate::notify!(
             warn,
@@ -498,22 +498,33 @@ fn insert_project_row(
     session_id: &str,
     envelope: &EventEnvelope,
     payload_json: &str,
+    line_start: u64,
+    log_offset: u64,
 ) -> rusqlite::Result<()> {
     let event = &envelope.event;
     let ts = extract_ts(envelope);
     let kind = event_kind(event);
     let (turn_id, flow_run_id) = extract_anchors(event);
     let text = extract_text_content(event).unwrap_or_default();
-    index.insert_project_event_raw(ProjectEventInsert {
-        session_id,
-        seq: envelope.seq as i64,
-        ts: &ts,
-        kind,
-        turn_id: turn_id.as_deref(),
-        flow_run_id: flow_run_id.as_deref(),
-        text_content: &text,
-        payload_json,
-    })?;
+    let line_digest = blake3::hash(payload_json.as_bytes()).to_hex().to_string();
+    index.insert_project_event_at_boundary(
+        ProjectEventInsert {
+            session_id,
+            seq: envelope.seq as i64,
+            ts: &ts,
+            kind,
+            turn_id: turn_id.as_deref(),
+            flow_run_id: flow_run_id.as_deref(),
+            text_content: &text,
+            payload_json,
+        },
+        EventLogBoundary {
+            line_start,
+            line_end: line_start.saturating_add(payload_json.len() as u64),
+            log_offset,
+            line_digest: &line_digest,
+        },
+    )?;
     Ok(())
 }
 
