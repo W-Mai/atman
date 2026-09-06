@@ -9,6 +9,7 @@ enum NextSession {
     Attached {
         session: SessionClient,
         intro: Option<atman_tui::app::StartupIntro>,
+        show_startup: bool,
     },
 }
 
@@ -18,6 +19,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     let client = connect_local_daemon_as("atman-tui").await?;
     crate::load_model_config_from_disk();
     let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
+    let show_startup = resume.is_none();
     let first = match resume {
         Some(prefix) => {
             let session_id = resolve_session_prefix(&client, &prefix).await?;
@@ -35,11 +37,22 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     let mut current = NextSession::Attached {
         session: first,
         intro: None,
+        show_startup,
     };
     loop {
-        let NextSession::Attached { session, intro } = current;
-        let Some(next) =
-            run_session(client.clone(), session, intro, onboarding_recommended).await?
+        let NextSession::Attached {
+            session,
+            intro,
+            show_startup,
+        } = current;
+        let Some(next) = run_session(
+            client.clone(),
+            session,
+            intro,
+            show_startup,
+            onboarding_recommended,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -52,8 +65,17 @@ async fn run_session(
     client: Client,
     session: SessionClient,
     intro: Option<atman_tui::app::StartupIntro>,
+    show_startup: bool,
     onboarding_recommended: bool,
 ) -> Result<Option<NextSession>> {
+    let startup_card = if show_startup {
+        Some(atman_tui::app::OutputItem::StartupCard {
+            version: env!("CARGO_PKG_VERSION").into(),
+            recent: build_startup_recent(&client, session.session_id()).await,
+        })
+    } else {
+        None
+    };
     let (control_tx, mut control_rx) = mpsc::unbounded_channel();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (note_tx, note_rx) = mpsc::unbounded_channel();
@@ -230,6 +252,7 @@ async fn run_session(
                             let _ = next_tx.send(NextSession::Attached {
                                 session,
                                 intro: Some(intro),
+                                show_startup: false,
                             });
                             if let Some(tx) = shutdown_tx.take() {
                                 let _ = tx.send(());
@@ -253,6 +276,7 @@ async fn run_session(
                             let _ = next_tx.send(NextSession::Attached {
                                 session,
                                 intro: None,
+                                show_startup: true,
                             });
                             if let Some(tx) = shutdown_tx.take() {
                                 let _ = tx.send(());
@@ -474,6 +498,9 @@ async fn run_session(
     });
 
     let mut handle = TuiHandle::from_daemon(&session);
+    if let Some(startup_card) = startup_card {
+        handle.initial_items.push(startup_card);
+    }
     handle.control_tx = Some(control_tx);
     handle.cmd_rx = Some(command_rx);
     handle.note_rx = Some(note_rx);
@@ -1008,6 +1035,55 @@ fn session_row(
             .map(|timestamp| timestamp.to_rfc3339())
             .unwrap_or_default(),
         goal: summary.goal.clone(),
+    }
+}
+
+async fn build_startup_recent(
+    client: &Client,
+    current: &atman_proto::SessionId,
+) -> Vec<atman_tui::app::StartupSessionEntry> {
+    let Ok(summaries) = client.list_sessions(None, None, Some(6)).await else {
+        return Vec::new();
+    };
+    let now = chrono::Utc::now();
+    summaries
+        .into_iter()
+        .filter(|summary| &summary.id != current)
+        .take(5)
+        .map(|summary| {
+            let age_secs = summary
+                .updated_at
+                .and_then(|updated_at| (now - updated_at).to_std().ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let session_id = summary.id.to_string();
+            let short_id = session_id.chars().take(8).collect();
+            let project = summary.project_root.as_deref().and_then(|project_root| {
+                std::path::Path::new(project_root)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+            atman_tui::app::StartupSessionEntry {
+                session_id,
+                short_id,
+                goal: summary.goal,
+                project,
+                age_label: format_age(age_secs),
+                event_count: u64::try_from(summary.event_count).unwrap_or(u64::MAX),
+            }
+        })
+        .collect()
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3_600)
+    } else {
+        format!("{}d", secs / 86_400)
     }
 }
 

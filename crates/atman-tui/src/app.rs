@@ -2153,16 +2153,25 @@ impl AppState {
                 preserve_output_interaction(source, item);
             }
         }
+        let startup_card = self
+            .items
+            .first()
+            .filter(|item| matches!(item, OutputItem::StartupCard { .. }))
+            .cloned();
+        let daemon_item_offset = usize::from(startup_card.is_some());
         let local_notes = self
             .items
             .iter()
-            .skip(self.daemon_item_count)
+            .skip(daemon_item_offset + self.daemon_item_count)
             .filter_map(|item| match item {
                 OutputItem::SystemNote { .. } => Some(item.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
         self.daemon_item_count = projected.len();
+        if let Some(startup_card) = startup_card {
+            projected.insert(0, startup_card);
+        }
         projected.extend(local_notes);
         self.replace_items(projected);
         self.daemon_transcript_revision = Some(revision);
@@ -4355,6 +4364,51 @@ mod tests {
             atman_runtime::model_registry::remove_provider_catalog("test-codex");
             atman_runtime::model_registry::remove_provider_catalog("test-compatible");
         }
+    }
+
+    #[test]
+    fn daemon_transcript_keeps_startup_card_until_it_is_dismissed() {
+        let startup = OutputItem::StartupCard {
+            version: "1.0.0".into(),
+            recent: Vec::new(),
+        };
+        let mut app = AppState::new("session".into(), None).with_initial_items(vec![startup]);
+
+        app.reconcile_daemon_transcript(Vec::new(), 1);
+        assert!(matches!(
+            app.items.first(),
+            Some(OutputItem::StartupCard { .. })
+        ));
+
+        app.reconcile_daemon_transcript(
+            vec![OutputItem::AssistantMd {
+                md: "projected".into(),
+                streaming: false,
+                retried: false,
+            }],
+            2,
+        );
+        assert!(matches!(
+            app.items.first(),
+            Some(OutputItem::StartupCard { .. })
+        ));
+        assert!(matches!(
+            app.items.get(1),
+            Some(OutputItem::AssistantMd { .. })
+        ));
+
+        app.remove_item(0);
+        app.push_note("local", NoteLevel::Info);
+        app.reconcile_daemon_transcript(Vec::new(), 3);
+        assert!(
+            !app.items
+                .iter()
+                .any(|item| matches!(item, OutputItem::StartupCard { .. }))
+        );
+        assert!(matches!(
+            app.items.first(),
+            Some(OutputItem::SystemNote { text, .. }) if text == "local"
+        ));
     }
 
     #[test]

@@ -112,6 +112,10 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Daemon-backed TUI startup** — fresh terminal sessions retain the startup screen and recent-session shortcuts through the initial daemon transcript projection, while resumed sessions open directly into their history.
+
+- **Durable synchronous runs** — CLI commands that wait for daemon execution return only after the terminal flow and turn events are readable from the persisted event stream.
+
 - **Daemon compatibility diagnostics** — Rust and TypeScript clients identify protocol, snapshot, event, and method revision mismatches and direct the operator to restart the daemon from the same Atman installation.
 
 - **TUI onboarding bootstrap** — terminal startup reads provider state without running migrations, refreshes after daemon initialization, and presents first-run onboarding once instead of repeating it after session switches.
