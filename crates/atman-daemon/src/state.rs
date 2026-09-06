@@ -471,6 +471,22 @@ impl DaemonState {
         principal: &str,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
+        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+            return actor.timeline_tail(budget).await;
+        }
+        match self
+            .indexed_timeline_page(id, None, budget.clone(), true)
+            .await
+        {
+            Ok(Some(page)) => {
+                self.warm_session_actor(id.clone(), principal.to_owned());
+                return Ok(page);
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
+            ),
+        }
         self.get_or_load_actor(id, principal)
             .await?
             .timeline_tail(budget)
@@ -484,10 +500,61 @@ impl DaemonState {
         before: TimelineCursor,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
+        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+            return actor.timeline_before(before, budget).await;
+        }
+        match self
+            .indexed_timeline_page(id, Some(before.clone()), budget.clone(), false)
+            .await
+        {
+            Ok(Some(page)) => return Ok(page),
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
+            ),
+        }
         self.get_or_load_actor(id, principal)
             .await?
             .timeline_before(before, budget)
             .await
+    }
+
+    async fn indexed_timeline_page(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        before: Option<TimelineCursor>,
+        budget: SessionTimelineBudget,
+        include_live: bool,
+    ) -> Result<Option<SessionTimelinePage>> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+        let state = self.clone();
+        let id = id.clone();
+        let daemon_generation = DaemonGeneration(self.daemon_generation.clone());
+        tokio::task::spawn_blocking(move || {
+            let Some(source) = launcher.indexed_timeline_source(&state, &id)? else {
+                return Ok(None);
+            };
+            let Some(page) = crate::timeline::indexed_page(
+                &source,
+                &id,
+                daemon_generation,
+                before.as_ref(),
+                &budget,
+                include_live,
+            )?
+            else {
+                return Ok(None);
+            };
+            let redactor = crate::bootstrap::build_redactor(launcher.config_dir.as_deref());
+            Ok(Some(crate::projection::redacted_timeline_page(
+                &page,
+                redactor.as_deref(),
+            )?))
+        })
+        .await
+        .context("join indexed timeline task")?
     }
 
     pub async fn session_timeline_after(
@@ -1266,6 +1333,15 @@ impl DaemonState {
                 .context("join session replay task")?
         })
         .await
+    }
+
+    fn warm_session_actor(self: &std::sync::Arc<Self>, session_id: SessionId, principal: String) {
+        let state = self.clone();
+        drop(tokio::spawn(async move {
+            if let Err(error) = state.get_or_load_actor(&session_id, &principal).await {
+                eprintln!("warning: background session replay failed for {session_id}: {error:#}");
+            }
+        }));
     }
 
     pub(crate) async fn terminate_resource(

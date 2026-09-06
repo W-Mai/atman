@@ -269,6 +269,83 @@ impl<'a> TimelineCatalog<'a> {
     }
 }
 
+pub(crate) fn indexed_page(
+    source: &crate::run::IndexedTimelineSource,
+    session_id: &SessionId,
+    daemon_generation: DaemonGeneration,
+    before: Option<&TimelineCursor>,
+    budget: &SessionTimelineBudget,
+    include_live: bool,
+) -> anyhow::Result<Option<SessionTimelinePage>> {
+    let before_start = match before {
+        Some(cursor) => Some(
+            source
+                .index
+                .turn_start_for_event(&session_id.to_string(), cursor.seq)?
+                .unwrap_or(cursor.seq),
+        ),
+        None => None,
+    };
+    let turn_budget = budget
+        .turn_budget
+        .map_or(DEFAULT_TURN_BUDGET, |value| value.max(1) as usize);
+    let mut turns = source.index.read_turns_before(
+        &session_id.to_string(),
+        before_start,
+        turn_budget.saturating_add(1),
+    )?;
+    let has_older = turns.len() > turn_budget || source.coverage.start_seq > 1;
+    turns.retain(|turn| turn.start_seq >= source.coverage.start_seq);
+    turns.truncate(turn_budget);
+    if turns.is_empty() {
+        return Ok(None);
+    }
+    let include_unowned_through = before_start
+        .map(|seq| seq.saturating_sub(1))
+        .unwrap_or(source.coverage.seq);
+    let rows = source.index.read_events_for_turns(
+        &session_id.to_string(),
+        &turns,
+        Some(include_unowned_through),
+    )?;
+    let events = rows
+        .into_iter()
+        .map(|row| {
+            let event = serde_json::from_str::<atman_runtime::event::EventEnvelope>(&row.payload)?;
+            anyhow::ensure!(
+                event.seq == row.seq,
+                "timeline index sequence mismatch for session {session_id}: row {} != payload {}",
+                row.seq,
+                event.seq
+            );
+            Ok(event)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut projector = crate::projection::SessionProjector::from_events(
+        session_id.clone(),
+        source.metadata.clone(),
+        &events,
+    );
+    projector.set_trust(source.trust.clone());
+    let projection = projector.snapshot();
+    let mut catalog =
+        TimelineCatalog::from_projection(daemon_generation, EventCursor::default(), &projection);
+    catalog.live.head_complete = false;
+    let mut page = catalog.tail(budget);
+    page.older.has_more |= has_older;
+    if page.older.has_more {
+        page.older.estimated_segments = None;
+    }
+    if before.is_some() {
+        page.newer.has_more = true;
+        page.newer.estimated_segments = None;
+    }
+    if !include_live {
+        page.live = None;
+    }
+    Ok(Some(page))
+}
+
 struct SegmentRecord {
     id: TimelineSegmentId,
     turn_id: Option<TurnId>,
@@ -695,6 +772,7 @@ mod tests {
         MessageOrigin, MessageProjection, MessageRole, SessionLifecycle, SessionTimelineBudget,
         TimelineSegment, TranscriptItem,
     };
+    use atman_runtime::index::{AnchorIndex, EventIndexCoverage, ProjectEventInsert};
 
     use super::*;
 
@@ -727,6 +805,60 @@ mod tests {
         projection
     }
 
+    fn indexed_source(
+        events: &[(atman_runtime::event::EventEnvelope, TurnId)],
+    ) -> (tempfile::TempDir, crate::run::IndexedTimelineSource) {
+        let dir = tempfile::tempdir().unwrap();
+        let index = std::sync::Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
+        for (event, turn_id) in events {
+            let payload = serde_json::to_string(event).unwrap();
+            index
+                .insert_project_event_raw(ProjectEventInsert {
+                    session_id: "00000000-0000-0000-0000-000000000063",
+                    seq: i64::try_from(event.seq).unwrap(),
+                    ts: &event.ts.to_rfc3339(),
+                    kind: "user_msg",
+                    turn_id: Some(&turn_id.0.to_string()),
+                    flow_run_id: None,
+                    text_content: "",
+                    payload_json: &payload,
+                })
+                .unwrap();
+        }
+        index
+            .materialize_timeline_session("00000000-0000-0000-0000-000000000063")
+            .unwrap();
+        let coverage = EventIndexCoverage {
+            start_seq: 1,
+            seq: events.last().unwrap().0.seq,
+            line_start: 0,
+            line_end: 0,
+            log_offset: 0,
+            line_digest: String::new(),
+        };
+        (
+            dir,
+            crate::run::IndexedTimelineSource {
+                index,
+                metadata: None,
+                trust: atman_runtime::trust::TrustConfig::default(),
+                coverage,
+            },
+        )
+    }
+
+    fn user_event(seq: u64, turn_id: &TurnId, text: &str) -> atman_runtime::event::EventEnvelope {
+        let runtime_turn_id = atman_runtime::event::TurnId(turn_id.0);
+        atman_runtime::event::EventEnvelope::new(
+            seq,
+            atman_runtime::event::Event::UserMsg {
+                turn_id: runtime_turn_id.clone(),
+                flow_run_id: None,
+                message: atman_runtime::message::Message::user_text(runtime_turn_id, text),
+            },
+        )
+    }
+
     #[test]
     fn groups_interleaved_items_by_explicit_turn_identity() {
         let first = turn(1);
@@ -754,6 +886,84 @@ mod tests {
         assert_eq!(segment.turn_id, first);
         assert_eq!(segment.latest_seq, 3);
         assert_eq!(segment.items.len(), 2);
+    }
+
+    #[test]
+    fn indexed_pages_are_provisional_and_page_by_complete_turn() {
+        let session_id = SessionId(uuid::Uuid::from_u128(99));
+        let first = turn(1);
+        let second = turn(2);
+        let events = vec![
+            (user_event(1, &first, "first"), first),
+            (user_event(2, &second, "second"), second),
+        ];
+        let (_dir, source) = indexed_source(&events);
+        let budget = SessionTimelineBudget {
+            turn_budget: Some(1),
+            byte_budget: None,
+        };
+
+        let tail = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            None,
+            &budget,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!tail.live.as_ref().unwrap().head_complete);
+        assert!(tail.older.has_more);
+        assert_eq!(segment_start_seq(&tail.segments[0]), 2);
+
+        let newest = &segment_items(&tail.segments[0])[0];
+        let before = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            Some(&TimelineCursor {
+                seq: newest.seq,
+                item_id: newest.id.clone(),
+            }),
+            &budget,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(before.live.is_none());
+        assert_eq!(segment_start_seq(&before.segments[0]), 1);
+    }
+
+    #[test]
+    fn indexed_pages_exclude_turns_crossing_the_validated_suffix() {
+        let session_id = SessionId(uuid::Uuid::from_u128(99));
+        let incomplete = turn(1);
+        let complete = turn(2);
+        let events = vec![
+            (user_event(1, &incomplete, "incomplete"), incomplete),
+            (user_event(2, &complete, "complete"), complete),
+        ];
+        let (_dir, mut source) = indexed_source(&events);
+        source.coverage.start_seq = 2;
+
+        let page = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            None,
+            &SessionTimelineBudget {
+                turn_budget: Some(2),
+                byte_budget: None,
+            },
+            true,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(page.older.has_more);
+        assert_eq!(page.segments.len(), 1);
+        assert_eq!(segment_start_seq(&page.segments[0]), 2);
     }
 
     #[test]

@@ -20,6 +20,13 @@ pub struct SpawnedRun {
     pub run_id: ProtoRunId,
 }
 
+pub(crate) struct IndexedTimelineSource {
+    pub index: Arc<atman_runtime::index::AnchorIndex>,
+    pub metadata: Option<atman_runtime::session_meta::SessionMeta>,
+    pub trust: atman_runtime::trust::TrustConfig,
+    pub coverage: atman_runtime::index::EventIndexCoverage,
+}
+
 pub(crate) struct SessionRuntimeHost {
     executor: atman_runtime::Executor,
     mcp: McpController,
@@ -741,6 +748,7 @@ impl RunLauncher {
         let session_dir = state.sessions_root().join(session_id.to_string());
         let project_root = self.session_project(state, &session_dir)?.root;
         let (_, project_index, trust) = self.session_context(state, &project_root)?;
+        let repair_index = project_index.clone();
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
         let restored = atman_runtime::Session::restore_existing_with_context_and_trust(
             state.data_dir(),
@@ -750,6 +758,26 @@ impl RunLauncher {
             trust,
         )
         .with_context(|| format!("opening existing session {session_id}"))?;
+        if let Some(index) = repair_index {
+            let events_path = session_dir.join("events.jsonl");
+            let needs_backfill =
+                match index.recover_event_coverage(&session_id.to_string(), &events_path) {
+                    Ok(Some(coverage)) => coverage.start_seq > 1,
+                    Ok(None) => true,
+                    Err(error) => {
+                        eprintln!(
+                            "warning: failed to inspect timeline index for {session_id}: {error:#}"
+                        );
+                        true
+                    }
+                };
+            if needs_backfill
+                && let Err(error) =
+                    index.backfill_session_events(&session_id.to_string(), &restored.events)
+            {
+                eprintln!("warning: failed to backfill timeline index for {session_id}: {error:#}");
+            }
+        }
         let loaded = crate::projection_snapshot::load(session_id, &session_dir)?;
         let recovered_without_snapshot = loaded.is_none();
         let (mut projection, mut event_cursor) = match loaded {
@@ -813,6 +841,37 @@ impl RunLauncher {
                 event_cursor,
             },
         })
+    }
+
+    pub(crate) fn indexed_timeline_source(
+        &self,
+        state: &DaemonState,
+        session_id: &ProtoSessionId,
+    ) -> Result<Option<IndexedTimelineSource>> {
+        let session_dir = state.sessions_root().join(session_id.to_string());
+        let events_path = session_dir.join("events.jsonl");
+        if !events_path.is_file() {
+            return Ok(None);
+        }
+        let project_root = self.session_project(state, &session_dir)?.root;
+        let (_, project_index, fallback_trust) = self.session_context(state, &project_root)?;
+        let Some(index) = project_index else {
+            return Ok(None);
+        };
+        let Some(coverage) = index.recover_event_coverage(&session_id.to_string(), &events_path)?
+        else {
+            return Ok(None);
+        };
+        index.materialize_timeline_session(&session_id.to_string())?;
+        let metadata = atman_runtime::session_meta::SessionMeta::load(&session_dir);
+        let trust =
+            atman_runtime::session::load_session_trust(&session_dir)?.unwrap_or(fallback_trust);
+        Ok(Some(IndexedTimelineSource {
+            index,
+            metadata,
+            trust,
+            coverage,
+        }))
     }
 
     fn append_workspace_reconciliation_events(
