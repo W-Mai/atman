@@ -4,12 +4,14 @@ use uuid::Uuid;
 
 mod projection;
 mod schema;
+mod timeline;
 
 pub use projection::*;
 pub use schema::{
     MethodManifest, MethodPayloadSchema, ProtocolArtifacts, ProtocolManifest, ProtocolSchemaError,
     generate_protocol_artifacts, protocol_openapi_components,
 };
+pub use timeline::*;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const PROTOCOL_VERSION: u32 = 1;
