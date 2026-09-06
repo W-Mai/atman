@@ -222,6 +222,14 @@ pub struct PermissionRequestAudit {
 }
 
 impl PermissionRequestAudit {
+    pub fn is_decided(&self) -> bool {
+        self.decision_id.is_some()
+    }
+
+    pub fn requires_user_decision(&self) -> bool {
+        matches!(self.target, PermissionAuditTarget::User) && !self.is_decided()
+    }
+
     pub fn from_request(
         request: &PermissionRequest,
         group_ids: Vec<PermissionGroupId>,

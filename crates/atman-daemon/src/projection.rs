@@ -1067,7 +1067,9 @@ impl SessionProjector {
             Event::PermissionRequestCreated { payload }
             | Event::PermissionRequestTargeted { payload }
             | Event::PermissionRequestDeferred { payload } => {
-                self.upsert_approval(payload, ApprovalState::Pending, &mut changes)
+                if !payload.is_decided() {
+                    self.upsert_approval(payload, ApprovalState::Pending, &mut changes)
+                }
             }
             Event::PermissionRequestApproved { payload }
             | Event::UnrestrictedExecution { payload } => {
@@ -3948,6 +3950,27 @@ mod tests {
         assert_eq!(public.reason.as_deref(), Some("approved by user"));
         assert_eq!(public.at, at);
         assert_eq!(public.revision, 7);
+
+        let mut projector = SessionProjector::new(SessionId(uuid::Uuid::now_v7()), None);
+        projector.apply_envelope(&envelope(
+            1,
+            at,
+            Event::PermissionRequestCreated {
+                payload: payload.clone(),
+            },
+        ));
+        assert!(projector.projection().interactions.approvals.is_empty());
+        projector.apply_envelope(&envelope(
+            2,
+            at,
+            Event::PermissionRequestApproved {
+                payload: payload.clone(),
+            },
+        ));
+        assert!(matches!(
+            projector.projection().interactions.approvals.as_slice(),
+            [approval] if approval.state == ApprovalState::Approved
+        ));
 
         let group = approval_group_projection(
             &PermissionGroupAudit {

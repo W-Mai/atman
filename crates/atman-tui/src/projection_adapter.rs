@@ -284,6 +284,7 @@ impl TuiSessionProjection {
                     source.state,
                     ApprovalState::Evaluating | ApprovalState::Pending
                 ) && matches!(source.target, Some(ApprovalTarget::User))
+                    && source.decision_id.is_none()
             })
             .map(|(_, audit)| {
                 let request_id = audit

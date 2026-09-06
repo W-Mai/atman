@@ -2454,10 +2454,7 @@ impl AppState {
             StreamFrame::PermissionRequestCreated { payload, .. }
             | StreamFrame::PermissionRequestTargeted { payload, .. }
             | StreamFrame::PermissionRequestDeferred { payload, .. } => {
-                if !matches!(
-                    payload.target,
-                    atman_runtime::permission_audit::PermissionAuditTarget::User
-                ) {
+                if !payload.requires_user_decision() {
                     return;
                 }
                 if let Some(request_id) = payload.request_id.clone() {
@@ -4693,6 +4690,7 @@ mod tests {
         );
         assert_eq!(app.pending_permissions.len(), 2);
         let root_id = root_payload.request_id.clone().unwrap();
+        let root_run_id = root_payload.requesting_run_id.to_string();
         assert_eq!(app.pending_permissions[&root_id].revision, 1);
 
         let mut approved = root_payload;
@@ -4712,6 +4710,14 @@ mod tests {
             payload: unrestricted,
         });
         assert!(!app.pending_permissions.contains_key(&child_id));
+        assert!(app.pending_permissions.is_empty());
+
+        let mut automatic = payload(&root_run_id, "automatic-tool");
+        automatic.decision_id = Some("automatic-decision".into());
+        app.apply_stream_frame(StreamFrame::PermissionRequestCreated {
+            run_id: root_run_id,
+            payload: automatic,
+        });
         assert!(app.pending_permissions.is_empty());
     }
 
