@@ -6950,6 +6950,7 @@
       "type": "object",
       "required": [
         "session_id",
+        "daemon_generation",
         "as_of_cursor",
         "projection_revision",
         "older",
@@ -6959,6 +6960,9 @@
       "properties": {
         "as_of_cursor": {
           "$ref": "#/$defs/EventCursor"
+        },
+        "daemon_generation": {
+          "$ref": "#/$defs/DaemonGeneration"
         },
         "live": {
           "oneOf": [
@@ -7479,6 +7483,7 @@
     "TimelineLiveState": {
       "type": "object",
       "required": [
+        "metadata",
         "lifecycle",
         "interactions"
       ],
@@ -7489,17 +7494,59 @@
             "$ref": "#/$defs/TurnId"
           }
         },
+        "compactions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactionProjection"
+          }
+        },
+        "context": {
+          "$ref": "#/$defs/ContextProjection"
+        },
+        "goal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "interactions": {
           "$ref": "#/$defs/InteractionProjection"
         },
         "lifecycle": {
           "$ref": "#/$defs/SessionLifecycle"
         },
+        "metadata": {
+          "$ref": "#/$defs/SessionMetadataProjection"
+        },
+        "plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanProjection"
+          }
+        },
         "resources": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/ResourceProjection"
           }
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunProjection"
+          }
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TodoProjection"
+          }
+        },
+        "trust": {
+          "$ref": "#/$defs/TrustProjection"
+        },
+        "usage": {
+          "$ref": "#/$defs/UsageProjection"
         }
       }
     },

@@ -1460,6 +1460,7 @@ impl SessionActor {
         let target_seq = self.session.sink().published_seq();
         self.catch_up_through(target_seq)?;
         Ok(crate::timeline::TimelineCatalog::from_projection(
+            self.daemon_generation.clone(),
             self.event_cursor,
             self.projection.projection(),
         ))

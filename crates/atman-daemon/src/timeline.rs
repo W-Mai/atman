@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use atman_proto::{
-    EventCursor, FlowRunId, MessagePart, Revision, RunLifecycle, SessionId, SessionProjection,
-    SessionTimelineBudget, SessionTimelinePage, TimelineCursor, TimelineDetailRef, TimelineItem,
-    TimelineItemId, TimelineItemKind, TimelineLiveState, TimelineRemaining, TimelineSegment,
-    TimelineSegmentId, TimelineSessionSegment, TimelineTurnSegment, TimelineTurnState,
-    TranscriptItem, TurnId,
+    DaemonGeneration, EventCursor, FlowRunId, MessagePart, Revision, RunLifecycle, SessionId,
+    SessionProjection, SessionTimelineBudget, SessionTimelinePage, TimelineCursor,
+    TimelineDetailRef, TimelineItem, TimelineItemId, TimelineItemKind, TimelineLiveState,
+    TimelineRemaining, TimelineSegment, TimelineSegmentId, TimelineSessionSegment,
+    TimelineTurnSegment, TimelineTurnState, TranscriptItem, TurnId,
 };
 
 const DEFAULT_TURN_BUDGET: usize = 12;
@@ -14,6 +14,7 @@ const MAX_PREVIEW_TEXT_BYTES: usize = 8 * 1024;
 
 pub(crate) struct TimelineCatalog<'a> {
     session_id: SessionId,
+    daemon_generation: DaemonGeneration,
     cursor: EventCursor,
     projection_revision: Revision,
     projection: &'a SessionProjection,
@@ -29,7 +30,11 @@ enum Window {
 }
 
 impl<'a> TimelineCatalog<'a> {
-    pub(crate) fn from_projection(cursor: EventCursor, projection: &'a SessionProjection) -> Self {
+    pub(crate) fn from_projection(
+        daemon_generation: DaemonGeneration,
+        cursor: EventCursor,
+        projection: &'a SessionProjection,
+    ) -> Self {
         let run_turns = projection
             .runs
             .iter()
@@ -94,15 +99,25 @@ impl<'a> TimelineCatalog<'a> {
 
         Self {
             session_id: projection.metadata.id.clone(),
+            daemon_generation,
             cursor,
             projection_revision: projection.revision,
             projection,
             segments,
             live: TimelineLiveState {
+                metadata: projection.metadata.clone(),
                 lifecycle: projection.lifecycle,
+                runs: projection.runs.clone(),
                 active_turns: active_turn_ids,
+                compactions: projection.compactions.clone(),
+                goal: projection.goal.clone(),
+                todos: projection.todos.clone(),
+                plans: projection.plans.clone(),
+                context: projection.context.clone(),
+                trust: projection.trust.clone(),
                 interactions: projection.interactions.clone(),
                 resources: projection.resources.clone(),
+                usage: projection.usage.clone(),
             },
         }
     }
@@ -181,6 +196,7 @@ impl<'a> TimelineCatalog<'a> {
             .sum();
         SessionTimelinePage {
             session_id: self.session_id.clone(),
+            daemon_generation: self.daemon_generation.clone(),
             as_of_cursor: self.cursor,
             projection_revision: self.projection_revision,
             segments,
@@ -603,11 +619,73 @@ fn segment_items(segment: &TimelineSegment) -> &[TimelineItem] {
 }
 
 fn estimated_item_bytes(item: &TranscriptItem) -> usize {
-    let mut preview = item.clone();
-    truncate_transcript_item(&mut preview);
-    serde_json::to_vec(&preview)
-        .map_or(0, |bytes| bytes.len())
-        .saturating_add(256)
+    let text_bytes = match item {
+        TranscriptItem::Message { message, .. } => message
+            .parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::ContextRecord { key, content, .. } => key
+                    .len()
+                    .saturating_add(content.len().min(MAX_PREVIEW_TEXT_BYTES)),
+                MessagePart::CompactSummary { summary, .. } => {
+                    summary.len().min(MAX_PREVIEW_TEXT_BYTES)
+                }
+                MessagePart::Text { text } => text.len().min(MAX_PREVIEW_TEXT_BYTES),
+                MessagePart::Thinking { thinking } => thinking.len().min(MAX_PREVIEW_TEXT_BYTES),
+                MessagePart::Image {
+                    media_type,
+                    artifact_id,
+                    name,
+                    ..
+                } => {
+                    media_type.len()
+                        + artifact_id.as_ref().map_or(0, String::len)
+                        + name.as_ref().map_or(0, String::len)
+                }
+                MessagePart::ToolUse {
+                    id, name, intent, ..
+                } => id.len() + name.len() + intent.as_ref().map_or(0, String::len) + 512,
+                MessagePart::ToolResult { content, .. } => {
+                    content.len().min(MAX_PREVIEW_TEXT_BYTES)
+                }
+            })
+            .sum(),
+        TranscriptItem::Diff {
+            title,
+            old_content,
+            new_content,
+            unified_diff,
+            ..
+        } => {
+            title.len()
+                + old_content
+                    .as_ref()
+                    .map_or(0, |text| text.len().min(MAX_PREVIEW_TEXT_BYTES))
+                + new_content
+                    .as_ref()
+                    .map_or(0, |text| text.len().min(MAX_PREVIEW_TEXT_BYTES))
+                + unified_diff
+                    .as_ref()
+                    .map_or(0, |text| text.len().min(MAX_PREVIEW_TEXT_BYTES))
+        }
+        TranscriptItem::FileEdit {
+            path, tool_name, ..
+        } => path.len() + tool_name.len(),
+        TranscriptItem::ActivitySummary {
+            turn_files,
+            session_files,
+            ..
+        } => turn_files
+            .iter()
+            .chain(session_files)
+            .map(String::len)
+            .sum(),
+        TranscriptItem::Compaction { summary, .. } => summary.len().min(MAX_PREVIEW_TEXT_BYTES),
+        TranscriptItem::Mermaid { source, .. } => source.len().min(MAX_PREVIEW_TEXT_BYTES),
+        TranscriptItem::Notice { text, .. } => text.len().min(MAX_PREVIEW_TEXT_BYTES),
+        TranscriptItem::Extension { kind, .. } => kind.len() + 512,
+    };
+    text_bytes.saturating_add(256)
 }
 
 #[cfg(test)]
@@ -658,7 +736,11 @@ mod tests {
             message(3, first.clone(), "late first"),
         ]);
 
-        let catalog = TimelineCatalog::from_projection(EventCursor(42), &projection);
+        let catalog = TimelineCatalog::from_projection(
+            DaemonGeneration("test".into()),
+            EventCursor(42),
+            &projection,
+        );
         let page = catalog.tail(&SessionTimelineBudget {
             turn_budget: None,
             byte_budget: None,
@@ -681,7 +763,11 @@ mod tests {
             message(3, turn(2), "two"),
             message(4, turn(3), "three"),
         ]);
-        let catalog = TimelineCatalog::from_projection(EventCursor(42), &projection);
+        let catalog = TimelineCatalog::from_projection(
+            DaemonGeneration("test".into()),
+            EventCursor(42),
+            &projection,
+        );
 
         let page = catalog.tail(&SessionTimelineBudget {
             turn_budget: Some(2),
@@ -698,7 +784,11 @@ mod tests {
     fn oversized_text_uses_a_stable_detail_reference() {
         let original = "界".repeat(MAX_PREVIEW_TEXT_BYTES);
         let projection = projection(vec![message(1, turn(1), &original)]);
-        let catalog = TimelineCatalog::from_projection(EventCursor(42), &projection);
+        let catalog = TimelineCatalog::from_projection(
+            DaemonGeneration("test".into()),
+            EventCursor(42),
+            &projection,
+        );
         let page = catalog.tail(&SessionTimelineBudget {
             turn_budget: None,
             byte_budget: Some(1),
@@ -718,7 +808,11 @@ mod tests {
             message(2, turn(2), "two"),
             message(3, turn(3), "three"),
         ]);
-        let catalog = TimelineCatalog::from_projection(EventCursor(42), &projection);
+        let catalog = TimelineCatalog::from_projection(
+            DaemonGeneration("test".into()),
+            EventCursor(42),
+            &projection,
+        );
         let all = catalog.tail(&SessionTimelineBudget {
             turn_budget: None,
             byte_budget: None,

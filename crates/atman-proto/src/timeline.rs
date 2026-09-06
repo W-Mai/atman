@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    EventCursor, FlowRunId, InteractionProjection, ResourceProjection, Revision, SessionId,
-    SessionLifecycle, TranscriptItem, TurnId, WorkflowProjection,
+    CompactionProjection, ContextProjection, DaemonGeneration, EventCursor, FlowRunId,
+    InteractionProjection, PlanProjection, ResourceProjection, Revision, RunProjection, SessionId,
+    SessionLifecycle, SessionMetadataProjection, TodoProjection, TranscriptItem, TrustProjection,
+    TurnId, UsageProjection, WorkflowProjection,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
@@ -99,17 +101,35 @@ pub struct TimelineRemaining {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct TimelineLiveState {
+    pub metadata: SessionMetadataProjection,
     pub lifecycle: SessionLifecycle,
     #[serde(default)]
+    pub runs: Vec<RunProjection>,
+    #[serde(default)]
     pub active_turns: Vec<TurnId>,
+    #[serde(default)]
+    pub compactions: Vec<CompactionProjection>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub todos: Vec<TodoProjection>,
+    #[serde(default)]
+    pub plans: Vec<PlanProjection>,
+    #[serde(default)]
+    pub context: ContextProjection,
+    #[serde(default)]
+    pub trust: TrustProjection,
     pub interactions: InteractionProjection,
     #[serde(default)]
     pub resources: Vec<ResourceProjection>,
+    #[serde(default)]
+    pub usage: UsageProjection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SessionTimelinePage {
     pub session_id: SessionId,
+    pub daemon_generation: DaemonGeneration,
     pub as_of_cursor: EventCursor,
     pub projection_revision: Revision,
     #[serde(default)]

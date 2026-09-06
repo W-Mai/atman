@@ -1986,6 +1986,7 @@ export interface SessionTimelineBudget {
 }
 export interface SessionTimelinePage {
   as_of_cursor: EventCursor
+  daemon_generation: DaemonGeneration
   live?: null | TimelineLiveState
   newer: TimelineRemaining
   older: TimelineRemaining
@@ -1997,9 +1998,18 @@ export interface SessionTimelinePage {
 }
 export interface TimelineLiveState {
   active_turns?: TurnId[]
+  compactions?: CompactionProjection[]
+  context?: ContextProjection
+  goal?: string | null
   interactions: InteractionProjection
   lifecycle: SessionLifecycle
+  metadata: SessionMetadataProjection
+  plans?: PlanProjection[]
   resources?: ResourceProjection[]
+  runs?: RunProjection[]
+  todos?: TodoProjection[]
+  trust?: TrustProjection
+  usage?: UsageProjection
   [k: string]: unknown
 }
 export interface TimelineRemaining {
