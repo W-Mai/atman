@@ -360,6 +360,10 @@ impl AnchorIndex {
             rusqlite::params![session_id],
         )?;
         tx.execute(
+            "DELETE FROM timeline_materializations WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
             "DELETE FROM event_index_coverage WHERE session_id = ?",
             rusqlite::params![session_id],
         )?;
@@ -461,8 +465,142 @@ impl AnchorIndex {
                 ],
             )?;
         }
+        tx.execute(
+            "UPDATE timeline_materializations SET source_seq = MAX(source_seq, ?) \
+             WHERE session_id = ?",
+            rusqlite::params![row.seq, row.session_id],
+        )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    pub fn materialize_timeline_session(&self, session_id: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let source_seq = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?",
+            rusqlite::params![session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let materialized_seq = tx
+            .query_row(
+                "SELECT source_seq FROM timeline_materializations WHERE session_id = ?",
+                rusqlite::params![session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if materialized_seq == Some(source_seq) {
+            return Ok(());
+        }
+
+        tx.execute(
+            "DELETE FROM timeline_turns WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM timeline_runs WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM timeline_event_owners WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "INSERT INTO timeline_runs (session_id, flow_run_id, turn_id) \
+             SELECT session_id, flow_run_id, turn_id FROM events \
+             WHERE session_id = ? AND flow_run_id IS NOT NULL AND turn_id IS NOT NULL \
+             ORDER BY seq ON CONFLICT(session_id, flow_run_id) DO UPDATE SET \
+             turn_id = excluded.turn_id",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "INSERT INTO timeline_event_owners (session_id, seq, turn_id) \
+             SELECT e.session_id, e.seq, COALESCE(e.turn_id, r.turn_id) FROM events e \
+             LEFT JOIN timeline_runs r ON r.session_id = e.session_id \
+             AND r.flow_run_id = e.flow_run_id WHERE e.session_id = ? \
+             AND COALESCE(e.turn_id, r.turn_id) IS NOT NULL",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "INSERT INTO timeline_turns (session_id, turn_id, start_seq, latest_seq) \
+             SELECT session_id, turn_id, MIN(seq), MAX(seq) FROM timeline_event_owners \
+             WHERE session_id = ? GROUP BY session_id, turn_id",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "INSERT INTO timeline_materializations (session_id, source_seq) VALUES (?, ?) \
+             ON CONFLICT(session_id) DO UPDATE SET source_seq = excluded.source_seq",
+            rusqlite::params![session_id, source_seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn backfill_session_events(
+        &self,
+        session_id: &str,
+        events: &[crate::event::EventEnvelope],
+    ) -> Result<usize> {
+        let existing = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare("SELECT seq FROM events WHERE session_id = ?")?;
+            let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })?;
+            let mut existing = std::collections::HashSet::new();
+            for row in rows {
+                existing.insert(row?);
+            }
+            existing
+        };
+        let missing = events
+            .iter()
+            .filter(|event| !existing.contains(&event.seq))
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut inserted = 0;
+        for envelope in missing {
+            let payload = serde_json::to_string(envelope)?;
+            let (turn_id, flow_run_id) = crate::event_writer::extract_anchors(&envelope.event);
+            let text_content =
+                crate::event_writer::extract_text_content(&envelope.event).unwrap_or_default();
+            let changed = tx.execute(
+                "INSERT OR IGNORE INTO events \
+                 (session_id, seq, ts, kind, turn_id, flow_run_id, payload) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    session_id,
+                    i64::try_from(envelope.seq).unwrap_or(i64::MAX),
+                    envelope.ts.to_rfc3339(),
+                    crate::event_writer::event_kind(&envelope.event),
+                    turn_id,
+                    flow_run_id,
+                    payload,
+                ],
+            )?;
+            if changed == 0 {
+                continue;
+            }
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT OR REPLACE INTO events_fts (rowid, text_content) VALUES (?, ?)",
+                rusqlite::params![id, text_content],
+            )?;
+            inserted += 1;
+        }
+        tx.execute(
+            "DELETE FROM timeline_materializations WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.materialize_timeline_session(session_id)?;
+        Ok(inserted)
     }
 
     pub fn read_turns_before(
@@ -498,6 +636,7 @@ impl AnchorIndex {
         &self,
         session_id: &str,
         turns: &[ProjectTurnRow],
+        include_unowned_through: Option<u64>,
     ) -> Result<Vec<ProjectEventRow>> {
         let Some(first_seq) = turns.iter().map(|turn| turn.start_seq).min() else {
             return Ok(Vec::new());
@@ -506,7 +645,8 @@ impl AnchorIndex {
             .iter()
             .map(|turn| turn.latest_seq)
             .max()
-            .unwrap_or(first_seq);
+            .unwrap_or(first_seq)
+            .max(include_unowned_through.unwrap_or(first_seq));
         let mut params = vec![rusqlite::types::Value::from(session_id.to_owned())];
         let owners = sql_membership(
             "o.turn_id",
@@ -547,7 +687,7 @@ impl AnchorIndex {
         session_id: &str,
         events_path: &Path,
     ) -> Result<Option<EventIndexCoverage>> {
-        let (coverage, max_seq, indexed_payload) = {
+        let (mut coverage, max_seq, indexed_payload) = {
             let conn = self.conn();
             let coverage = conn
                 .query_row(
@@ -556,6 +696,7 @@ impl AnchorIndex {
                     rusqlite::params![session_id],
                     |row| {
                         Ok(EventIndexCoverage {
+                            start_seq: 0,
                             seq: row.get::<_, i64>(0)? as u64,
                             line_start: row.get::<_, i64>(1)? as u64,
                             line_end: row.get::<_, i64>(2)? as u64,
@@ -616,7 +757,92 @@ impl AnchorIndex {
         if hasher.finalize().to_hex().as_str() != coverage.line_digest {
             return Ok(None);
         }
+        coverage.start_seq = self.contiguous_event_suffix_start(session_id, coverage.seq)?;
         Ok(Some(coverage))
+    }
+
+    fn contiguous_event_suffix_start(&self, session_id: &str, latest_seq: u64) -> Result<u64> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT seq FROM events WHERE session_id = ? AND seq <= ? ORDER BY seq DESC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, i64::try_from(latest_seq).unwrap_or(i64::MAX),],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let mut expected = latest_seq;
+        for row in rows {
+            let seq = row? as u64;
+            if seq != expected {
+                break;
+            }
+            if expected == 0 {
+                return Ok(0);
+            }
+            expected -= 1;
+        }
+        Ok(expected.saturating_add(1))
+    }
+
+    pub fn recover_event_coverage(
+        &self,
+        session_id: &str,
+        events_path: &Path,
+    ) -> Result<Option<EventIndexCoverage>> {
+        if let Some(coverage) = self.validated_event_coverage(session_id, events_path)? {
+            return Ok(Some(coverage));
+        }
+        let Some(line) = last_event_log_line(events_path)? else {
+            return Ok(None);
+        };
+        let envelope = match serde_json::from_slice::<crate::event::EventEnvelope>(&line.payload) {
+            Ok(envelope) => envelope,
+            Err(_) => return Ok(None),
+        };
+        let indexed_payload = {
+            let conn = self.conn();
+            let max_seq = conn.query_row(
+                "SELECT MAX(seq) FROM events WHERE session_id = ?",
+                rusqlite::params![session_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            if max_seq.map(|seq| seq as u64) != Some(envelope.seq) {
+                return Ok(None);
+            }
+            conn.query_row(
+                "SELECT payload FROM events WHERE session_id = ? AND seq = ?",
+                rusqlite::params![session_id, i64::try_from(envelope.seq).unwrap_or(i64::MAX),],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        };
+        let Some(indexed_payload) = indexed_payload else {
+            return Ok(None);
+        };
+        if indexed_payload.as_bytes() != line.payload {
+            return Ok(None);
+        }
+        let line_digest = blake3::hash(&line.payload).to_hex().to_string();
+        {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO event_index_coverage \
+                 (session_id, seq, line_start, line_end, log_offset, line_digest) \
+                 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET \
+                 seq = excluded.seq, line_start = excluded.line_start, \
+                 line_end = excluded.line_end, log_offset = excluded.log_offset, \
+                 line_digest = excluded.line_digest",
+                rusqlite::params![
+                    session_id,
+                    i64::try_from(envelope.seq).unwrap_or(i64::MAX),
+                    i64::try_from(line.start).unwrap_or(i64::MAX),
+                    i64::try_from(line.end).unwrap_or(i64::MAX),
+                    i64::try_from(line.log_offset).unwrap_or(i64::MAX),
+                    line_digest,
+                ],
+            )?;
+        }
+        self.validated_event_coverage(session_id, events_path)
     }
 
     pub fn find_project_events_around(
@@ -803,6 +1029,7 @@ pub struct EventLogBoundary<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventIndexCoverage {
+    pub start_seq: u64,
     pub seq: u64,
     pub line_start: u64,
     pub line_end: u64,
@@ -848,6 +1075,63 @@ fn collect<T>(
         out.push(r.map_err(|e| anyhow::anyhow!(e))?);
     }
     Ok(out)
+}
+
+struct EventLogLine {
+    start: u64,
+    end: u64,
+    log_offset: u64,
+    payload: Vec<u8>,
+}
+
+fn last_event_log_line(path: &Path) -> Result<Option<EventLogLine>> {
+    const CHUNK_BYTES: u64 = 64 * 1024;
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let log_offset = file.metadata()?.len();
+    if log_offset == 0 {
+        return Ok(None);
+    }
+    let mut line_end = log_offset;
+    while line_end > 0 {
+        file.seek(SeekFrom::Start(line_end - 1))?;
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte)?;
+        if !matches!(byte[0], b'\n' | b'\r') {
+            break;
+        }
+        line_end -= 1;
+    }
+    if line_end == 0 {
+        return Ok(None);
+    }
+
+    let mut position = line_end;
+    let mut reversed_chunks = Vec::new();
+    let line_start = loop {
+        let start = position.saturating_sub(CHUNK_BYTES);
+        let mut chunk = vec![0_u8; (position - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk)?;
+        if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            reversed_chunks.push(chunk[index + 1..].to_vec());
+            break start + index as u64 + 1;
+        }
+        reversed_chunks.push(chunk);
+        if start == 0 {
+            break 0;
+        }
+        position = start;
+    };
+    let mut line = Vec::with_capacity((line_end - line_start) as usize);
+    for chunk in reversed_chunks.into_iter().rev() {
+        line.extend_from_slice(&chunk);
+    }
+    Ok(Some(EventLogLine {
+        start: line_start,
+        end: line_end,
+        log_offset,
+        payload: line,
+    }))
 }
 
 fn parse_regex_query(query: &str) -> Option<String> {
@@ -914,6 +1198,11 @@ CREATE TABLE IF NOT EXISTS timeline_event_owners (
 );
 CREATE INDEX IF NOT EXISTS timeline_event_owners_turn
 ON timeline_event_owners(session_id, turn_id, seq);
+
+CREATE TABLE IF NOT EXISTS timeline_materializations (
+    session_id TEXT    PRIMARY KEY,
+    source_seq INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS event_index_coverage (
     session_id  TEXT    PRIMARY KEY,
@@ -1040,6 +1329,7 @@ mod tests {
             "spec_deviations",
             "spec_deviations_fts",
             "timeline_event_owners",
+            "timeline_materializations",
             "timeline_runs",
             "timeline_turns",
         ] {
@@ -1195,7 +1485,7 @@ mod tests {
         let first = idx.read_turns_before("sess-a", Some(2), 1).unwrap();
         assert_eq!(first[0].turn_id, "turn-1");
         assert_eq!(first[0].latest_seq, 3);
-        let events = idx.read_events_for_turns("sess-a", &first).unwrap();
+        let events = idx.read_events_for_turns("sess-a", &first, None).unwrap();
         assert_eq!(
             events.iter().map(|event| event.seq).collect::<Vec<_>>(),
             vec![1, 3]
@@ -1203,6 +1493,76 @@ mod tests {
         assert_eq!(idx.turn_start_for_event("sess-a", 3).unwrap(), Some(1));
         assert_eq!(idx.turn_start_for_event("sess-a", 2).unwrap(), Some(2));
         assert_eq!(idx.turn_start_for_event("sess-a", 99).unwrap(), None);
+    }
+
+    #[test]
+    fn timeline_materialization_rebuilds_derived_rows_from_existing_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(
+            &idx,
+            "sess-a",
+            1,
+            "flow_start",
+            Some("turn-1"),
+            Some("run-1"),
+            "",
+        );
+        seed_project_event(&idx, "sess-a", 2, "flow_node_end", None, Some("run-1"), "");
+        {
+            let conn = idx.conn();
+            conn.execute("DELETE FROM timeline_turns", []).unwrap();
+            conn.execute("DELETE FROM timeline_runs", []).unwrap();
+            conn.execute("DELETE FROM timeline_event_owners", [])
+                .unwrap();
+        }
+
+        idx.materialize_timeline_session("sess-a").unwrap();
+
+        let turns = idx.read_turns_before("sess-a", None, 1).unwrap();
+        assert_eq!(turns[0].turn_id, "turn-1");
+        assert_eq!(turns[0].latest_seq, 2);
+        idx.materialize_timeline_session("sess-a").unwrap();
+    }
+
+    #[test]
+    fn session_backfill_only_inserts_missing_event_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        let turn_id = crate::event::TurnId(uuid::Uuid::from_u128(1));
+        let events = vec![
+            crate::event::EventEnvelope::new(
+                1,
+                crate::event::Event::TurnStart {
+                    turn_id: turn_id.clone(),
+                },
+            ),
+            crate::event::EventEnvelope::new(
+                2,
+                crate::event::Event::TurnEnd {
+                    turn_id: turn_id.clone(),
+                },
+            ),
+        ];
+        let payload = serde_json::to_string(&events[1]).unwrap();
+        idx.insert_project_event_raw(ProjectEventInsert {
+            session_id: "sess-a",
+            seq: 2,
+            ts: &events[1].ts.to_rfc3339(),
+            kind: "turn_end",
+            turn_id: Some(&turn_id.to_string()),
+            flow_run_id: None,
+            text_content: "",
+            payload_json: &payload,
+        })
+        .unwrap();
+
+        assert_eq!(idx.backfill_session_events("sess-a", &events).unwrap(), 1);
+        assert_eq!(idx.backfill_session_events("sess-a", &events).unwrap(), 0);
+        assert_eq!(idx.count_events("sess-a", EventFilter::All).unwrap(), 2);
+        let turns = idx.read_turns_before("sess-a", None, 1).unwrap();
+        assert_eq!(turns[0].start_seq, 1);
+        assert_eq!(turns[0].latest_seq, 2);
     }
 
     #[test]
@@ -1246,6 +1606,47 @@ mod tests {
             idx.validated_event_coverage("sess-a", &events_path)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn coverage_can_adopt_an_existing_exact_index_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_path = dir.path().join("events.jsonl");
+        let turn_id = crate::event::TurnId(uuid::Uuid::from_u128(1));
+        let envelope = crate::event::EventEnvelope::new(
+            7,
+            crate::event::Event::TurnEnd {
+                turn_id: turn_id.clone(),
+            },
+        );
+        let payload = serde_json::to_string(&envelope).unwrap();
+        std::fs::write(&events_path, format!("{payload}\n")).unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        idx.insert_project_event_raw(ProjectEventInsert {
+            session_id: "sess-a",
+            seq: 7,
+            ts: &envelope.ts.to_rfc3339(),
+            kind: "turn_end",
+            turn_id: Some(&turn_id.to_string()),
+            flow_run_id: None,
+            text_content: "",
+            payload_json: &payload,
+        })
+        .unwrap();
+
+        let coverage = idx
+            .recover_event_coverage("sess-a", &events_path)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(coverage.start_seq, 7);
+        assert_eq!(coverage.seq, 7);
+        assert_eq!(coverage.log_offset, payload.len() as u64 + 1);
+        assert!(
+            idx.validated_event_coverage("sess-a", &events_path)
+                .unwrap()
+                .is_some()
         );
     }
 
