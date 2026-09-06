@@ -20,6 +20,21 @@ pub struct SpawnedRun {
     pub run_id: ProtoRunId,
 }
 
+pub(crate) struct SessionRuntimeHost {
+    executor: atman_runtime::Executor,
+    mcp: McpController,
+}
+
+impl SessionRuntimeHost {
+    fn executor(&self) -> atman_runtime::Executor {
+        self.executor.clone()
+    }
+
+    pub(crate) fn reload_mcp(&self, configs: Vec<atman_runtime::mcp::McpServerConfig>) -> bool {
+        self.mcp.reload(configs)
+    }
+}
+
 #[derive(Clone)]
 struct ProviderCatalogRefreshDispatcher {
     runtime: tokio::runtime::Handle,
@@ -235,6 +250,7 @@ struct RegistryCleanup {
 }
 
 struct McpController {
+    reload_tx: tokio::sync::mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -248,8 +264,8 @@ impl McpController {
         executor: atman_runtime::Executor,
         session: Arc<atman_runtime::Session>,
         initial: Vec<atman_runtime::mcp::McpServerConfig>,
-        mut reloads: tokio::sync::mpsc::UnboundedReceiver<Vec<atman_runtime::mcp::McpServerConfig>>,
     ) -> Self {
+        let (reload_tx, mut reloads) = tokio::sync::mpsc::unbounded_channel();
         let mut active = match crate::bootstrap::spawn_mcp_boot_with_configs(
             executor.clone(),
             session.clone(),
@@ -283,7 +299,11 @@ impl McpController {
                 });
             }
         });
-        Self { task }
+        Self { reload_tx, task }
+    }
+
+    fn reload(&self, configs: Vec<atman_runtime::mcp::McpServerConfig>) -> bool {
+        self.reload_tx.send(configs).is_ok()
     }
 }
 
@@ -368,6 +388,49 @@ impl RunLauncher {
         let mut executor = atman_runtime::Executor::new();
         executor.providers = lifecycle.provider_registry().clone();
         Ok(executor)
+    }
+
+    async fn build_session_runtime(
+        &self,
+        state: Arc<DaemonState>,
+        session: Arc<atman_runtime::Session>,
+        project_root: PathBuf,
+        scope_root: PathBuf,
+        provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
+    ) -> Result<Arc<SessionRuntimeHost>> {
+        let outcome = crate::bootstrap::build_executor_with_terminal_registry(
+            crate::bootstrap::BootstrapOptions {
+                events: session.sink().clone(),
+                task_registry: state.task_registry(),
+                mock: false,
+                config_dir: self.config_dir.clone(),
+                project_root,
+                home_dir: self.home_dir.clone(),
+                workspace_generation: state.daemon_generation().to_owned(),
+            },
+            Some(state.terminal_registry()),
+        )
+        .await?;
+        provider_catalog_refresh.dispatch(outcome.provider_catalog_refresh_plan);
+        let mut executor = outcome.executor;
+        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
+        crate::bootstrap::attach_memory_stores_with_redactor(
+            &mut executor,
+            session.dir(),
+            &scope_root,
+            redactor,
+            session.project_index(),
+            session.goal_watch().clone(),
+            session.todos_watch().clone(),
+            session.plans_watch().clone(),
+        );
+        executor.tool_ctx.prompt_resolver =
+            Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
+                state,
+                session_id: atman_proto::SessionId(session.id().0),
+            }));
+        let mcp = McpController::start(executor.clone(), session, self.mcp_configs()?).await;
+        Ok(Arc::new(SessionRuntimeHost { executor, mcp }))
     }
 
     pub(crate) fn session_rebase_context(
@@ -894,8 +957,6 @@ impl RunLauncher {
         let user_message = prepare_user_message(turn_id.clone(), &flow_name, &args, turn, images);
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let initial_mcp_configs = self.mcp_configs()?;
-        let (mcp_reload_tx, mcp_reload_rx) = tokio::sync::mpsc::unbounded_channel();
         let live_run = LiveRun {
             run_id: run_id_proto.clone(),
             turn_id: turn_id.clone(),
@@ -912,20 +973,27 @@ impl RunLauncher {
                 owner_principal,
             )
             .await?;
-        if let Err(error) = state
-            .register_mcp_reloader(
-                &sid_proto,
-                run_id_proto.clone(),
-                mcp_reload_tx,
-                owner_principal,
-            )
+        let runtime_slot = state.session_runtime_slot(&sid_proto, owner_principal)?;
+        let runtime_host = match runtime_slot
+            .get_or_try_init(|| {
+                self.build_session_runtime(
+                    state.clone(),
+                    session.clone(),
+                    project_root.clone(),
+                    scope_root.clone(),
+                    provider_catalog_refresh,
+                )
+            })
             .await
         {
-            state.finish_run(&sid_proto, &run_id_proto);
-            return Err(error);
-        }
+            Ok(runtime) => runtime.clone(),
+            Err(error) => {
+                emit_pre_execution_failure(&session, &context, &run_id_runtime, &flow_name, &error);
+                state.finish_run(&sid_proto, &run_id_proto);
+                return Err(error);
+            }
+        };
         let config_dir = self.config_dir.clone();
-        let home_dir = self.home_dir.clone();
         let state_for_task = state.clone();
         let sid_for_task = sid_proto.clone();
         let run_id_for_task = run_id_proto.clone();
@@ -969,14 +1037,9 @@ impl RunLauncher {
                         args,
                         run_id_runtime_for_task.clone(),
                         turn_id,
-                        project_root,
-                        scope_root,
                         config_dir,
-                        home_dir,
-                        initial_mcp_configs,
-                        mcp_reload_rx,
                         Some(state_for_run),
-                        provider_catalog_refresh,
+                        runtime_host,
                         invocation_env,
                         prepared_flow,
                         context_for_task.clone(),
@@ -1018,14 +1081,9 @@ async fn run_flow_inner(
     args: Vec<(String, atman_runtime::Value)>,
     run_id: RuntimeRunId,
     turn_id: atman_runtime::event::TurnId,
-    project_root: PathBuf,
-    scope_root: PathBuf,
     config_dir: Option<PathBuf>,
-    home_dir: Option<PathBuf>,
-    initial_mcp_configs: Vec<atman_runtime::mcp::McpServerConfig>,
-    mcp_reload_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<atman_runtime::mcp::McpServerConfig>>,
     daemon_state: Option<Arc<crate::DaemonState>>,
-    provider_catalog_refresh: ProviderCatalogRefreshDispatcher,
+    runtime_host: Arc<SessionRuntimeHost>,
     invocation_env: atman_runtime::InvocationEnv,
     prepared_flow: PreparedFlow,
     context: Arc<atman_runtime::context_state::ContextState>,
@@ -1036,61 +1094,14 @@ async fn run_flow_inner(
         flow_name,
     } = prepared_flow;
 
-    let workspace_generation = daemon_state
-        .as_ref()
-        .map(|state| state.daemon_generation().to_owned())
-        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let terminal_registry = daemon_state.as_ref().map(|state| state.terminal_registry());
-    let outcome = crate::bootstrap::build_executor_with_terminal_registry(
-        crate::bootstrap::BootstrapOptions {
-            events: session.sink().clone(),
-            task_registry: daemon_state
-                .as_ref()
-                .map(|state| state.task_registry())
-                .unwrap_or_default(),
-            mock: false,
-            config_dir: config_dir.clone(),
-            project_root: project_root.clone(),
-            home_dir,
-            workspace_generation,
-        },
-        terminal_registry,
-    )
-    .await?;
-    provider_catalog_refresh.dispatch(outcome.provider_catalog_refresh_plan);
-    let mut executor = outcome.executor;
+    let mut executor = runtime_host.executor();
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
-    let _mcp_controller = McpController::start(
-        executor.clone(),
-        session.clone(),
-        initial_mcp_configs,
-        mcp_reload_rx,
-    )
-    .await;
 
     let lifecycles = match &config_dir {
         Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),
         None => atman_runtime::lifecycle::LifecycleRunner::new(),
     };
 
-    let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
-    crate::bootstrap::attach_memory_stores_with_redactor(
-        &mut executor,
-        session.dir(),
-        &scope_root,
-        redactor,
-        session.project_index(),
-        session.goal_watch().clone(),
-        session.todos_watch().clone(),
-        session.plans_watch().clone(),
-    );
-    if let Some(state) = daemon_state.clone() {
-        executor.tool_ctx.prompt_resolver =
-            Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
-                state,
-                session_id: atman_proto::SessionId(session.id().0),
-            }));
-    }
     let (lifecycle_tx, mut lifecycle_rx) =
         tokio::sync::mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
     executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
@@ -1644,6 +1655,20 @@ mod tests {
             });
     }
 
+    #[tokio::test]
+    async fn session_mcp_supervisor_accepts_reloads_without_an_active_run() {
+        let controller = McpController::start(
+            atman_runtime::Executor::new(),
+            Arc::new(atman_runtime::Session::open_ephemeral()),
+            Vec::new(),
+        )
+        .await;
+
+        assert!(controller.reload(Vec::new()));
+        tokio::task::yield_now().await;
+        assert!(!controller.task.is_finished());
+    }
+
     #[test]
     fn daemon_state_retains_provider_lifecycle_between_executors() {
         const PROVIDER_ID: &str = "launcher-root-oauth";
@@ -1834,6 +1859,55 @@ mod tests {
                 .count(),
             1
         );
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consecutive_runs_share_one_session_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let flow_path = temp.path().join("echo.at");
+        std::fs::write(&flow_path, "flow echo() -> string { return \"ok\" }").unwrap();
+        let state = Arc::new(DaemonState::new(temp.path().join("data")));
+        let session = Arc::new(atman_runtime::Session::open(temp.path().join("sessions")).unwrap());
+        let launcher = RunLauncher::new(temp.path().to_path_buf(), Some(config), None).unwrap();
+        let session_id = ProtoSessionId(session.id().0);
+        let mut runtime_address = None;
+
+        for _ in 0..2 {
+            let spawned = launcher
+                .spawn_session_as_with_options(
+                    state.clone(),
+                    session.clone(),
+                    temp.path().to_path_buf(),
+                    temp.path().to_path_buf(),
+                    flow_path.to_str().unwrap(),
+                    Vec::new(),
+                    "test-principal",
+                    RunOptions::default(),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while state.has_live_runs(&spawned.session_id) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let slot = state
+                .session_runtime_slot(&session_id, "test-principal")
+                .unwrap();
+            let current_address = Arc::as_ptr(slot.get().unwrap()) as usize;
+            if let Some(first_address) = runtime_address {
+                assert_eq!(current_address, first_address);
+            } else {
+                runtime_address = Some(current_address);
+            }
+        }
+
+        assert_eq!(session.messages().len(), 2);
         state.shutdown(std::time::Duration::from_secs(1)).await;
     }
 

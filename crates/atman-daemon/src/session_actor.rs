@@ -186,6 +186,7 @@ pub(crate) struct SessionActorHandle {
     tx: mpsc::UnboundedSender<Command>,
     view: watch::Receiver<SessionActorView>,
     leases: Arc<AtomicUsize>,
+    runtime: Arc<tokio::sync::OnceCell<Arc<crate::run::SessionRuntimeHost>>>,
 }
 
 pub(crate) struct SessionActorLease {
@@ -268,6 +269,7 @@ impl SessionActorHandle {
             .map(|cursor| EventCursor(cursor.0.max(projection_cursor.0)))
             .unwrap_or(projection_cursor);
         let leases = Arc::new(AtomicUsize::new(0));
+        let runtime = Arc::new(tokio::sync::OnceCell::new());
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, _) = broadcast::channel(UPDATE_RETENTION);
         let runs: HashMap<_, _> = initial_runs
@@ -280,7 +282,7 @@ impl SessionActorHandle {
             session_id,
             session: session.clone(),
             runs,
-            mcp_reloaders: HashMap::new(),
+            runtime: runtime.clone(),
             prompts: HashMap::new(),
             prompt_terminals: VecDeque::new(),
             form_terminals: VecDeque::new(),
@@ -319,6 +321,7 @@ impl SessionActorHandle {
             tx,
             view,
             leases,
+            runtime,
         }
     }
 
@@ -386,21 +389,14 @@ impl SessionActorHandle {
         self.session.clone()
     }
 
-    pub fn finish_run(&self, run_id: FlowRunId) -> bool {
-        self.tx.send(Command::FinishRun { run_id }).is_ok()
+    pub(crate) fn runtime_slot(
+        &self,
+    ) -> Arc<tokio::sync::OnceCell<Arc<crate::run::SessionRuntimeHost>>> {
+        self.runtime.clone()
     }
 
-    pub async fn register_mcp_reloader(
-        &self,
-        run_id: FlowRunId,
-        sender: mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
-    ) -> Result<()> {
-        request(&self.tx, |reply| Command::RegisterMcpReloader {
-            run_id,
-            sender,
-            reply,
-        })
-        .await?
+    pub fn finish_run(&self, run_id: FlowRunId) -> bool {
+        self.tx.send(Command::FinishRun { run_id }).is_ok()
     }
 
     pub async fn reload_mcp(
@@ -745,11 +741,6 @@ enum Command {
     FinishRun {
         run_id: FlowRunId,
     },
-    RegisterMcpReloader {
-        run_id: FlowRunId,
-        sender: mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
-        reply: oneshot::Sender<Result<()>>,
-    },
     ReloadMcp {
         configs: Vec<atman_runtime::mcp::McpServerConfig>,
         reply: oneshot::Sender<Result<McpReloadCommit>>,
@@ -916,8 +907,7 @@ struct SessionActor {
     session_id: SessionId,
     session: Arc<atman_runtime::Session>,
     runs: HashMap<FlowRunId, LiveRun>,
-    mcp_reloaders:
-        HashMap<FlowRunId, mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>>,
+    runtime: Arc<tokio::sync::OnceCell<Arc<crate::run::SessionRuntimeHost>>>,
     prompts: HashMap<PromptId, PendingPrompt>,
     prompt_terminals: VecDeque<(PromptId, PromptResolutionStatus)>,
     form_terminals: VecDeque<(String, FormResolutionStatus)>,
@@ -1082,37 +1072,28 @@ impl SessionActor {
             }
             Command::FinishRun { run_id } => {
                 if let Some(run) = self.runs.remove(&run_id) {
-                    self.mcp_reloaders.remove(&run_id);
                     self.session.end_turn(&run.turn_id);
                     self.publish();
                 }
             }
-            Command::RegisterMcpReloader {
-                run_id,
-                sender,
-                reply,
-            } => {
-                let result = if self.runs.contains_key(&run_id) {
-                    self.mcp_reloaders.insert(run_id, sender);
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "cannot register MCP reloader for an inactive run"
-                    ))
-                };
-                let _ = reply.send(result);
-            }
             Command::ReloadMcp { configs, reply } => {
                 self.session
                     .replace_mcp_servers(crate::bootstrap::initial_mcp_statuses(&configs));
-                self.mcp_reloaders
-                    .retain(|_, sender| sender.send(configs.clone()).is_ok());
-                self.refresh_watch_projections();
-                let _ = reply.send(Ok(McpReloadCommit {
-                    active_runs: self.mcp_reloaders.len(),
-                    revision: self.projection.projection().revision,
-                    cursor: self.event_cursor,
-                }));
+                let result = if self
+                    .runtime
+                    .get()
+                    .is_some_and(|runtime| !runtime.reload_mcp(configs))
+                {
+                    Err(anyhow::anyhow!("session MCP supervisor stopped"))
+                } else {
+                    self.refresh_watch_projections();
+                    Ok(McpReloadCommit {
+                        active_runs: self.runs.len(),
+                        revision: self.projection.projection().revision,
+                        cursor: self.event_cursor,
+                    })
+                };
+                let _ = reply.send(result);
             }
             Command::SanitizeAttachments { dry_run, reply } => {
                 let result = self.sanitize_attachments(dry_run).await;

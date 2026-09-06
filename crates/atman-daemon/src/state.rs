@@ -265,20 +265,6 @@ impl DaemonState {
         actor.lease()?.admit_run(run, user_message).await
     }
 
-    pub(crate) async fn register_mcp_reloader(
-        &self,
-        session_id: &SessionId,
-        run_id: FlowRunId,
-        sender: tokio::sync::mpsc::UnboundedSender<Vec<atman_runtime::mcp::McpServerConfig>>,
-        principal: &str,
-    ) -> Result<()> {
-        self.authorized_actor(session_id, principal)
-            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
-            .lease()?
-            .register_mcp_reloader(run_id, sender)
-            .await
-    }
-
     async fn register_session_with_runs(
         &self,
         id: SessionId,
@@ -333,6 +319,18 @@ impl DaemonState {
             .get(id)
             .filter(|entry| entry.owns(principal))
             .cloned()
+    }
+
+    pub(crate) fn session_runtime_slot(
+        &self,
+        id: &SessionId,
+        principal: &str,
+    ) -> Result<std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<crate::run::SessionRuntimeHost>>>>
+    {
+        Ok(self
+            .authorized_actor(id, principal)
+            .ok_or_else(|| anyhow::anyhow!("permission denied for session"))?
+            .runtime_slot())
     }
 
     fn loaded_runtime_session(
@@ -1611,24 +1609,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_reload_targets_each_active_run_and_projects_pending_status() {
+    async fn mcp_reload_projects_pending_status_before_runtime_start() {
         let state = DaemonState::new(tempfile::tempdir().unwrap().path().to_path_buf());
         let session = Arc::new(atman_runtime::Session::open_ephemeral());
         let session_id = SessionId(session.id().0);
         let run = live_run("agent");
-        let run_id = run.run_id.clone();
         state
             .register_session_run(session_id.clone(), session.clone(), run, "owner")
             .await
             .unwrap();
         let actor = state.authorized_actor(&session_id, "owner").unwrap();
-        let (reload_tx, mut reload_rx) = tokio::sync::mpsc::unbounded_channel();
-        actor
-            .lease()
-            .unwrap()
-            .register_mcp_reloader(run_id, reload_tx)
-            .await
-            .unwrap();
         let config = atman_runtime::mcp::McpServerConfig::stdio(
             "local-tools",
             "tool-server",
@@ -1645,7 +1635,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(commit.active_runs, 1);
-        assert_eq!(reload_rx.try_recv().unwrap()[0].name, config.name);
         let context = session.subscribe_context().borrow().clone();
         assert!(matches!(
             context.mcp_servers.as_slice(),
@@ -1907,6 +1896,25 @@ mod tests {
             &second.runtime_session()
         ));
         assert_eq!(load_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn clients_attached_to_one_session_share_the_runtime_slot() {
+        let state = Arc::new(DaemonState::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = Arc::new(atman_runtime::Session::open_ephemeral());
+        let session_id = SessionId(session.id().0);
+        state
+            .register_session(session_id.clone(), session, "owner")
+            .await
+            .unwrap();
+
+        let first = state.session_runtime_slot(&session_id, "owner").unwrap();
+        let second = state.session_runtime_slot(&session_id, "owner").unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.get().is_none());
     }
 
     #[tokio::test]
