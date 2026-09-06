@@ -138,4 +138,27 @@ impl UiState {
         }
         true
     }
+
+    pub fn refresh_open_tool_output_panel(&mut self, tool_use_id: &str) -> bool {
+        let suffix = format!(":{tool_use_id}");
+        if !self.wm.panels.iter().any(|panel| {
+            matches!(
+                &panel.content_key,
+                crate::wm::ContentKey::Output(item_id)
+                    if item_id.starts_with("tool-output:") && item_id.ends_with(&suffix)
+            )
+        }) {
+            return false;
+        }
+        let Some(item_idx) = self.app.items.iter().position(|item| {
+            matches!(
+                item,
+                crate::app::OutputItem::ToolDispatch { calls }
+                    if calls.iter().any(|call| call.id == tool_use_id)
+            )
+        }) else {
+            return false;
+        };
+        self.open_tool_output_panel(item_idx, tool_use_id)
+    }
 }

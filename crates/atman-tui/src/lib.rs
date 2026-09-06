@@ -146,6 +146,9 @@ pub enum TuiControl {
         name: String,
     },
     LoadOlderHistory,
+    LoadToolDetail {
+        tool_use_id: String,
+    },
 }
 
 /// Session mutations shared by embedded and daemon-backed TUI hosts.

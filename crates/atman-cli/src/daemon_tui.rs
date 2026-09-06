@@ -495,6 +495,13 @@ async fn run_session(
                         )));
                     }
                 }
+                TuiControl::LoadToolDetail { tool_use_id } => {
+                    if let Err(error) = control_session.load_tool_detail(&tool_use_id).await {
+                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                            "could not load tool output detail: {error}"
+                        )));
+                    }
+                }
                 _ => {
                     let _ = control_note_tx.send(TuiNote::Warn(
                         "this control is not available through the daemon yet".into(),

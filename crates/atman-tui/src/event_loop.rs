@@ -820,6 +820,13 @@ pub(crate) async fn run_frames(
                                     if let Some(tool_use_id) = node_id
                                         .strip_prefix(crate::output::TOOL_CALL_REGION_PREFIX)
                                     {
+                                        if handle.daemon_state_rx.is_some()
+                                            && let Some(tx) = handle.control_tx.as_ref()
+                                        {
+                                            let _ = tx.send(TuiControl::LoadToolDetail {
+                                                tool_use_id: tool_use_id.to_owned(),
+                                            });
+                                        }
                                         app.app.cycle_tool_call_disclosure(
                                             panel_idx,
                                             tool_use_id,
@@ -832,6 +839,13 @@ pub(crate) async fn run_frames(
                                             )
                                         })
                                     {
+                                        if handle.daemon_state_rx.is_some()
+                                            && let Some(tx) = handle.control_tx.as_ref()
+                                        {
+                                            let _ = tx.send(TuiControl::LoadToolDetail {
+                                                tool_use_id: tool_use_id.to_owned(),
+                                            });
+                                        }
                                         if let Some(handle) = app
                                             .app
                                             .tool_call_detail_handle(panel_idx, tool_use_id)
@@ -1962,6 +1976,16 @@ fn apply_daemon_update(
             )?;
             *state = Some(next);
             apply_daemon_projection(app, projected);
+        }
+        atman_client::SessionUpdate::HistoryDetailLoaded {
+            state: next,
+            tool_use_id,
+        } => {
+            let projected =
+                crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
+            *state = Some(next);
+            apply_daemon_projection(app, projected);
+            app.refresh_open_tool_output_panel(&tool_use_id);
         }
     }
     Ok(())
