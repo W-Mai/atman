@@ -382,6 +382,8 @@ pub struct TuiHandle {
     pub permission_client: Option<atman_runtime::permission::PermissionClientGuard>,
     /// Toasts collected during boot, to be pushed to app on start.
     pub boot_toasts: Vec<app::ToastNote>,
+    pub initial_transcript_bookmark: Option<app::TranscriptBookmark>,
+    pub transcript_bookmark_tx: Option<tokio::sync::oneshot::Sender<app::TranscriptBookmark>>,
 }
 
 impl TuiHandle {
@@ -423,6 +425,8 @@ impl TuiHandle {
             task_registry: None,
             permission_client: Some(permission_client),
             boot_toasts: Vec::new(),
+            initial_transcript_bookmark: None,
+            transcript_bookmark_tx: None,
         }
     }
 
@@ -463,6 +467,8 @@ impl TuiHandle {
             task_registry: None,
             permission_client: None,
             boot_toasts: Vec::new(),
+            initial_transcript_bookmark: None,
+            transcript_bookmark_tx: None,
         }
     }
 }

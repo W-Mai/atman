@@ -25,6 +25,7 @@ pub(crate) async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
 ) -> Result<()> {
+    let transcript_bookmark_tx = handle.transcript_bookmark_tx.take();
     let mut daemon_state = handle
         .daemon_state_rx
         .as_ref()
@@ -56,6 +57,9 @@ pub(crate) async fn run_frames(
     ui_state.apply(&mut app.app);
     if let Some(projected) = daemon_projection {
         apply_daemon_projection(&mut app, projected);
+    }
+    if let Some(bookmark) = handle.initial_transcript_bookmark.take() {
+        app.app.restore_transcript_bookmark(bookmark);
     }
     if handle.onboarding_recommended && !app.app.onboarding_skipped {
         app.wm.modals.onboarding_open = true;
@@ -1682,6 +1686,9 @@ pub(crate) async fn run_frames(
                 }
             }
         }
+    }
+    if let Some(tx) = transcript_bookmark_tx {
+        let _ = tx.send(app.app.transcript_bookmark());
     }
     Ok(())
 }

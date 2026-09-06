@@ -870,6 +870,14 @@ struct PendingScrollAnchor {
     row_offset: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TranscriptBookmark {
+    anchor: Option<DaemonItemKey>,
+    row_offset: u32,
+    fallback_scroll_offset: u32,
+    follow_tail: bool,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: OutputStore,
@@ -2134,6 +2142,41 @@ impl AppState {
             });
         self.preserve_scroll_on_prepend = self.pending_scroll_anchor.is_none();
         self.follow_tail = false;
+    }
+
+    pub fn transcript_bookmark(&self) -> TranscriptBookmark {
+        let anchor = self
+            .last_item_ranges
+            .iter()
+            .find(|range| {
+                range.start_row <= self.scroll_offset && self.scroll_offset < range.end_row
+            })
+            .and_then(|range| {
+                self.daemon_item_keys
+                    .get(range.item_index)
+                    .copied()
+                    .flatten()
+                    .map(|item| (item, self.scroll_offset.saturating_sub(range.start_row)))
+            });
+        TranscriptBookmark {
+            anchor: anchor.map(|(item, _)| item),
+            row_offset: anchor.map_or(0, |(_, row_offset)| row_offset),
+            fallback_scroll_offset: self.scroll_offset,
+            follow_tail: self.follow_tail,
+        }
+    }
+
+    pub fn restore_transcript_bookmark(&mut self, bookmark: TranscriptBookmark) {
+        self.follow_tail = bookmark.follow_tail;
+        self.pending_scroll_anchor = None;
+        if bookmark.follow_tail {
+            return;
+        }
+        self.scroll_offset = bookmark.fallback_scroll_offset;
+        self.pending_scroll_anchor = bookmark.anchor.map(|item| PendingScrollAnchor {
+            item,
+            row_offset: bookmark.row_offset,
+        });
     }
 
     pub(crate) fn scroll_anchor_offset(
@@ -6116,6 +6159,61 @@ mod tests {
                 ordinal: 0,
             })
         );
+    }
+
+    #[test]
+    fn transcript_bookmark_restores_follow_mode_and_item_anchor() {
+        let assistant = |md: &str| OutputItem::AssistantMd {
+            md: md.into(),
+            streaming: false,
+            retried: false,
+        };
+        let mut source = AppState::new("s".into(), None);
+        source.reconcile_daemon_transcript(
+            vec![assistant("first"), assistant("anchor")],
+            vec![10, 20],
+            1,
+        );
+        source.last_item_ranges = vec![
+            crate::output::ItemRange {
+                item_index: 0,
+                start_row: 0,
+                end_row: 4,
+            },
+            crate::output::ItemRange {
+                item_index: 1,
+                start_row: 4,
+                end_row: 12,
+            },
+        ];
+        source.scroll_offset = 7;
+        source.follow_tail = false;
+
+        let bookmark = source.transcript_bookmark();
+        let mut restored = AppState::new("s".into(), None);
+        restored.reconcile_daemon_transcript(
+            vec![assistant("first"), assistant("anchor")],
+            vec![10, 20],
+            1,
+        );
+        restored.restore_transcript_bookmark(bookmark);
+
+        assert!(!restored.follow_tail);
+        assert_eq!(restored.scroll_offset, 7);
+        assert_eq!(restored.pending_scroll_anchor.unwrap().row_offset, 3);
+        assert_eq!(
+            restored.pending_scroll_anchor.unwrap().item,
+            DaemonItemKey {
+                sequence: 20,
+                ordinal: 0,
+            }
+        );
+
+        restored.restore_transcript_bookmark(TranscriptBookmark {
+            follow_tail: true,
+            ..TranscriptBookmark::default()
+        });
+        assert!(restored.follow_tail);
     }
 
     #[test]

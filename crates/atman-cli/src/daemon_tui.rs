@@ -13,6 +13,38 @@ enum NextSession {
     },
 }
 
+const RETAINED_SESSION_LIMIT: usize = 8;
+
+#[derive(Default)]
+struct RetainedSessions {
+    entries: std::collections::HashMap<atman_proto::SessionId, SessionClient>,
+    recency: std::collections::VecDeque<atman_proto::SessionId>,
+}
+
+impl RetainedSessions {
+    fn get(&mut self, session_id: &atman_proto::SessionId) -> Option<SessionClient> {
+        let session = self.entries.get(session_id).cloned()?;
+        self.touch(session_id);
+        Some(session)
+    }
+
+    fn insert(&mut self, session: SessionClient) {
+        let session_id = session.session_id().clone();
+        self.entries.insert(session_id.clone(), session);
+        self.touch(&session_id);
+        while self.recency.len() > RETAINED_SESSION_LIMIT {
+            if let Some(evicted) = self.recency.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+    }
+
+    fn touch(&mut self, session_id: &atman_proto::SessionId) {
+        self.recency.retain(|known| known != session_id);
+        self.recency.push_back(session_id.clone());
+    }
+}
+
 pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     crate::load_model_config_from_disk();
     let mut onboarding_recommended = atman_runtime::model_registry::is_first_run();
@@ -34,6 +66,12 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
 
     let _terminal_guard = atman_tui::terminal_guard::TerminalGuard::install()?;
     let _sink_guard = atman_runtime::notify::ScopedSink::tui();
+    let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(RetainedSessions::default()));
+    sessions.lock().await.insert(first.clone());
+    let mut bookmarks = std::collections::HashMap::<
+        atman_proto::SessionId,
+        atman_tui::app::TranscriptBookmark,
+    >::new();
     let mut current = NextSession::Attached {
         session: first,
         intro: None,
@@ -45,15 +83,21 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             intro,
             show_startup,
         } = current;
-        let Some(next) = run_session(
+        let session_id = session.session_id().clone();
+        let (next, bookmark) = run_session(
             client.clone(),
             session,
             intro,
             show_startup,
             onboarding_recommended,
+            bookmarks.get(&session_id).copied(),
+            sessions.clone(),
         )
-        .await?
-        else {
+        .await?;
+        if let Some(bookmark) = bookmark {
+            bookmarks.insert(session_id, bookmark);
+        }
+        let Some(next) = next else {
             return Ok(());
         };
         onboarding_recommended = false;
@@ -67,7 +111,12 @@ async fn run_session(
     intro: Option<atman_tui::app::StartupIntro>,
     show_startup: bool,
     onboarding_recommended: bool,
-) -> Result<Option<NextSession>> {
+    transcript_bookmark: Option<atman_tui::app::TranscriptBookmark>,
+    sessions: std::sync::Arc<tokio::sync::Mutex<RetainedSessions>>,
+) -> Result<(
+    Option<NextSession>,
+    Option<atman_tui::app::TranscriptBookmark>,
+)> {
     let startup_card = if show_startup {
         Some(atman_tui::app::OutputItem::StartupCard {
             version: env!("CARGO_PKG_VERSION").into(),
@@ -96,6 +145,7 @@ async fn run_session(
     let control_client = client.clone();
     let control_session = session.clone();
     let control_note_tx = note_tx.clone();
+    let control_sessions = sessions.clone();
     let control_task = tokio::spawn(async move {
         let mut shutdown_tx = Some(shutdown_tx);
         let mut pending_suggestions = std::collections::HashMap::<String, (String, String)>::new();
@@ -241,10 +291,22 @@ async fn run_session(
                 }
                 TuiControl::SwitchSession { sid, intro } => {
                     let attached = match resolve_session_prefix(&control_client, &sid).await {
-                        Ok(session_id) => control_client
-                            .attach_session_windowed(session_id)
-                            .await
-                            .map_err(anyhow::Error::from),
+                        Ok(session_id) => {
+                            let cached = control_sessions.lock().await.get(&session_id);
+                            match cached {
+                                Some(session) => Ok(session),
+                                None => match control_client
+                                    .attach_session_windowed(session_id.clone())
+                                    .await
+                                {
+                                    Ok(session) => {
+                                        control_sessions.lock().await.insert(session.clone());
+                                        Ok(session)
+                                    }
+                                    Err(error) => Err(anyhow::Error::from(error)),
+                                },
+                            }
+                        }
                         Err(error) => Err(error),
                     };
                     match attached {
@@ -273,6 +335,7 @@ async fn run_session(
                         .clone();
                     match control_client.create_session(project_root, None).await {
                         Ok(session) => {
+                            control_sessions.lock().await.insert(session.clone());
                             let _ = next_tx.send(NextSession::Attached {
                                 session,
                                 intro: None,
@@ -529,12 +592,16 @@ async fn run_session(
     handle.flow_names = crate::discover_flow_names();
     handle.startup_intro = intro;
     handle.onboarding_recommended = onboarding_recommended;
+    handle.initial_transcript_bookmark = transcript_bookmark;
+    let (bookmark_tx, bookmark_rx) = tokio::sync::oneshot::channel();
+    handle.transcript_bookmark_tx = Some(bookmark_tx);
     let result = atman_tui::run_tui(handle).await;
+    let bookmark = bookmark_rx.await.ok();
 
     sync_task.abort();
     control_task.await.context("join daemon TUI control task")?;
     result?;
-    Ok(next_rx.try_recv().ok())
+    Ok((next_rx.try_recv().ok(), bookmark))
 }
 
 async fn handle_meta_command(
