@@ -858,6 +858,18 @@ struct LocalNoteAnchor {
     ordinal: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DaemonItemKey {
+    sequence: u64,
+    ordinal: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingScrollAnchor {
+    item: DaemonItemKey,
+    row_offset: u32,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: OutputStore,
@@ -884,6 +896,8 @@ pub struct AppState {
     daemon_transcript_revision: Option<u64>,
     daemon_resources_revision: Option<u64>,
     daemon_latest_sequence: u64,
+    daemon_item_keys: Vec<Option<DaemonItemKey>>,
+    pending_scroll_anchor: Option<PendingScrollAnchor>,
     local_note_ordinal: u64,
     local_note_anchors: std::collections::HashMap<u64, LocalNoteAnchor>,
     pub latest_release: Option<String>,
@@ -2060,6 +2074,22 @@ impl AppState {
         self.last_total_rows.saturating_sub(visible_above)
     }
 
+    pub fn near_history_start(&self) -> bool {
+        let viewport = self
+            .last_document_visible_rows
+            .saturating_sub(self.last_input_overlay_rows)
+            .max(1);
+        self.scroll_offset <= viewport.saturating_mul(2)
+    }
+
+    pub fn near_history_end(&self) -> bool {
+        let viewport = self
+            .last_document_visible_rows
+            .saturating_sub(self.last_input_overlay_rows)
+            .max(1);
+        self.max_scroll_offset().saturating_sub(self.scroll_offset) <= viewport.saturating_mul(2)
+    }
+
     pub fn scroll_up(&mut self, rows: u32) {
         self.scroll_offset = self.scroll_offset.saturating_sub(rows);
         self.follow_tail = false;
@@ -2085,9 +2115,55 @@ impl AppState {
         self.follow_tail = true;
     }
 
-    pub(crate) fn preserve_scroll_for_history_prepend(&mut self) {
-        self.preserve_scroll_on_prepend = true;
+    pub(crate) fn preserve_scroll_for_history_change(&mut self) {
+        self.pending_scroll_anchor = self
+            .last_item_ranges
+            .iter()
+            .find(|range| {
+                range.start_row <= self.scroll_offset && self.scroll_offset < range.end_row
+            })
+            .and_then(|range| {
+                self.daemon_item_keys
+                    .get(range.item_index)
+                    .copied()
+                    .flatten()
+                    .map(|item| PendingScrollAnchor {
+                        item,
+                        row_offset: self.scroll_offset.saturating_sub(range.start_row),
+                    })
+            });
+        self.preserve_scroll_on_prepend = self.pending_scroll_anchor.is_none();
         self.follow_tail = false;
+    }
+
+    pub(crate) fn scroll_anchor_offset(
+        &self,
+        layout: &crate::output::LayoutCache,
+        max_scroll_offset: u32,
+    ) -> Option<u32> {
+        let anchor = self.pending_scroll_anchor?;
+        let index = self
+            .daemon_item_keys
+            .iter()
+            .position(|key| *key == Some(anchor.item))?;
+        let (start, end) = layout.item_row_range(index)?;
+        Some(
+            start
+                .saturating_add(
+                    anchor
+                        .row_offset
+                        .min(end.saturating_sub(start).saturating_sub(1)),
+                )
+                .min(max_scroll_offset),
+        )
+    }
+
+    pub(crate) fn apply_scroll_anchor(&mut self, offset: u32) {
+        if self.pending_scroll_anchor.take().is_none() {
+            return;
+        }
+        self.scroll_offset = offset;
+        self.preserve_scroll_on_prepend = false;
     }
 
     pub fn resolve_scroll(
@@ -2194,6 +2270,19 @@ impl AppState {
             return;
         }
         debug_assert_eq!(projected.len(), projected_sequences.len());
+        let mut ordinals = std::collections::HashMap::<u64, u32>::new();
+        let projected_keys = projected_sequences
+            .iter()
+            .map(|sequence| {
+                let ordinal = ordinals.entry(*sequence).or_default();
+                let key = DaemonItemKey {
+                    sequence: *sequence,
+                    ordinal: *ordinal,
+                };
+                *ordinal = ordinal.saturating_add(1);
+                key
+            })
+            .collect::<Vec<_>>();
         let previous = self
             .items
             .iter()
@@ -2236,12 +2325,18 @@ impl AppState {
 
         let mut merged = Vec::with_capacity(projected.len() + local_notes.len() + 1);
         let mut note_metadata = Vec::with_capacity(merged.capacity());
+        let mut daemon_item_keys = Vec::with_capacity(merged.capacity());
         if let Some(startup_card) = startup_card {
             merged.push(startup_card);
             note_metadata.push(None);
+            daemon_item_keys.push(None);
         }
         let mut local_notes = local_notes.into_iter().peekable();
-        for (item, sequence) in projected.drain(..).zip(&projected_sequences) {
+        for ((item, sequence), key) in projected
+            .drain(..)
+            .zip(&projected_sequences)
+            .zip(projected_keys)
+        {
             while local_notes
                 .peek()
                 .is_some_and(|(_, anchor, _)| anchor.after_sequence < *sequence)
@@ -2249,13 +2344,16 @@ impl AppState {
                 let (note, anchor, slot) = local_notes.next().expect("peeked local note exists");
                 merged.push(note);
                 note_metadata.push(Some((anchor, slot)));
+                daemon_item_keys.push(None);
             }
             merged.push(item);
             note_metadata.push(None);
+            daemon_item_keys.push(Some(key));
         }
         for (note, anchor, slot) in local_notes {
             merged.push(note);
             note_metadata.push(Some((anchor, slot)));
+            daemon_item_keys.push(None);
         }
         self.daemon_latest_sequence = projected_sequences
             .iter()
@@ -2263,6 +2361,7 @@ impl AppState {
             .max()
             .unwrap_or_default();
         self.replace_items(merged);
+        self.daemon_item_keys = daemon_item_keys;
         for (index, metadata) in note_metadata.into_iter().enumerate() {
             let Some((anchor, slot)) = metadata else {
                 continue;
@@ -5960,12 +6059,63 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.resolve_scroll(100, 30, 5, 5);
         app.scroll_to_top();
-        app.preserve_scroll_for_history_prepend();
+        app.preserve_scroll_for_history_change();
 
         app.resolve_scroll(140, 30, 5, 7);
 
         assert_eq!(app.scroll_offset, 40);
         assert!(!app.follow_tail);
+    }
+
+    #[test]
+    fn history_anchor_follows_the_same_daemon_item_across_window_replacement() {
+        let mut app = AppState::new("s".into(), None);
+        let assistant = |md: &str| OutputItem::AssistantMd {
+            md: md.into(),
+            streaming: false,
+            retried: false,
+        };
+        app.reconcile_daemon_transcript(
+            vec![assistant("first"), assistant("anchor")],
+            vec![10, 20],
+            1,
+        );
+        app.last_item_ranges = vec![
+            crate::output::ItemRange {
+                item_index: 0,
+                start_row: 0,
+                end_row: 4,
+            },
+            crate::output::ItemRange {
+                item_index: 1,
+                start_row: 4,
+                end_row: 12,
+            },
+        ];
+        app.scroll_offset = 7;
+        app.preserve_scroll_for_history_change();
+
+        app.reconcile_daemon_transcript(
+            vec![assistant("older"), assistant("first"), assistant("anchor")],
+            vec![5, 10, 20],
+            2,
+        );
+
+        assert_eq!(
+            app.pending_scroll_anchor.map(|anchor| anchor.item),
+            Some(DaemonItemKey {
+                sequence: 20,
+                ordinal: 0,
+            })
+        );
+        assert_eq!(app.pending_scroll_anchor.unwrap().row_offset, 3);
+        assert_eq!(
+            app.daemon_item_keys[2],
+            Some(DaemonItemKey {
+                sequence: 20,
+                ordinal: 0,
+            })
+        );
     }
 
     #[test]

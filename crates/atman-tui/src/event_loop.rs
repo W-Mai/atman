@@ -1287,13 +1287,18 @@ pub(crate) async fn run_frames(
                 }
                 if scroll_delta < 0 {
                     app.app.scroll_up((-scroll_delta) as u32);
-                    if app.app.scroll_offset == 0
+                    if app.app.near_history_start()
                         && let Some(tx) = &handle.control_tx
                     {
                         let _ = tx.send(TuiControl::LoadOlderHistory);
                     }
                 } else if scroll_delta > 0 {
                     app.app.scroll_down(scroll_delta as u32);
+                    if app.app.near_history_end()
+                        && let Some(tx) = &handle.control_tx
+                    {
+                        let _ = tx.send(TuiControl::LoadNewerHistory);
+                    }
                 }
             }
             frame = merge_rx.recv() => {
@@ -1964,10 +1969,24 @@ fn apply_daemon_update(
         }
         atman_client::SessionUpdate::HistoryPrepended {
             state: next,
-            loaded_items,
+            loaded_items: _,
         } => {
-            if loaded_items > 0 {
-                app.app.preserve_scroll_for_history_prepend();
+            app.app.preserve_scroll_for_history_change();
+            let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
+                &next,
+                app.app.daemon_transcript_revision(),
+                app.app.daemon_resources_revision(),
+            )?;
+            *state = Some(next);
+            apply_daemon_projection(app, projected);
+        }
+        atman_client::SessionUpdate::HistoryAppended {
+            state: next,
+            loaded_items: _,
+            has_more,
+        } => {
+            if has_more || !app.app.follow_tail {
+                app.app.preserve_scroll_for_history_change();
             }
             let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
                 &next,

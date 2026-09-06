@@ -296,14 +296,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         let empty_messages: Vec<atman_runtime::message::Message> = Vec::new();
         let messages: &[atman_runtime::message::Message] =
             messages_guard.as_deref().unwrap_or(&empty_messages);
-        let ctx = output::RenderCtx {
-            expanded_tools: &app.expanded_tools,
-            messages,
-            animation_frame: app.animation_frame,
-            panel_width: transcript_area.width,
-            hovered_thinking_idx: app.hovered_thinking_idx,
-            hovered_output_node: app.hovered_output_node.as_ref(),
-        };
         let cache_key = output::LayoutKey {
             width: transcript_area.width,
             theme: crate::theme::current_mode(),
@@ -315,16 +307,48 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
                 .max(1)
         });
-        let metrics = cache.update_dirty(
-            cache_key,
-            &app.items,
-            &ctx,
-            output::LayoutRequest {
-                scroll_offset: app.scroll_offset,
-                viewport_rows: effective_viewport,
-                follow_tail_rows,
-            },
-        );
+        let mut metrics = {
+            let ctx = output::RenderCtx {
+                expanded_tools: &app.expanded_tools,
+                messages,
+                animation_frame: app.animation_frame,
+                panel_width: transcript_area.width,
+                hovered_thinking_idx: app.hovered_thinking_idx,
+                hovered_output_node: app.hovered_output_node.as_ref(),
+            };
+            cache.update_dirty(
+                cache_key,
+                &app.items,
+                &ctx,
+                output::LayoutRequest {
+                    scroll_offset: app.scroll_offset,
+                    viewport_rows: effective_viewport,
+                    follow_tail_rows,
+                },
+            )
+        };
+        let max_scroll_offset = metrics.total_rows.saturating_sub(effective_viewport);
+        if let Some(scroll_offset) = app.scroll_anchor_offset(&cache, max_scroll_offset) {
+            app.apply_scroll_anchor(scroll_offset);
+            let ctx = output::RenderCtx {
+                expanded_tools: &app.expanded_tools,
+                messages,
+                animation_frame: app.animation_frame,
+                panel_width: transcript_area.width,
+                hovered_thinking_idx: app.hovered_thinking_idx,
+                hovered_output_node: app.hovered_output_node.as_ref(),
+            };
+            metrics = cache.update_dirty(
+                cache_key,
+                &app.items,
+                &ctx,
+                output::LayoutRequest {
+                    scroll_offset: app.scroll_offset,
+                    viewport_rows: effective_viewport,
+                    follow_tail_rows: None,
+                },
+            );
+        }
         let (lines, ranges, node_regions) = cache.visible_slice(
             metrics.scroll_offset,
             effective_viewport,

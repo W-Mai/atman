@@ -1045,6 +1045,13 @@ impl LayoutCache {
             .unwrap_or(0)
     }
 
+    pub(crate) fn item_row_range(&self, index: usize) -> Option<(u32, u32)> {
+        self.row_ends
+            .get(index)
+            .copied()
+            .map(|end| (self.row_start(index), end))
+    }
+
     fn item_window(&self, scroll_offset: u32, viewport_rows: u32) -> (usize, usize) {
         if viewport_rows == 0 || self.entries.is_empty() {
             return (0, 0);

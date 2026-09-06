@@ -1260,7 +1260,7 @@ pub(crate) fn handle_key(
             } else {
                 1
             });
-            if app.scroll_offset == 0
+            if app.near_history_start()
                 && let Some(tx) = control_tx
             {
                 let _ = tx.send(TuiControl::LoadOlderHistory);
@@ -1285,6 +1285,11 @@ pub(crate) fn handle_key(
             } else {
                 1
             });
+            if app.near_history_end()
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::LoadNewerHistory);
+            }
             *interrupt_prompt = None;
         }
         KeyAction::Home => {
@@ -1296,6 +1301,9 @@ pub(crate) fn handle_key(
         }
         KeyAction::End => {
             app.scroll_to_tail();
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::LoadNewerHistory);
+            }
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {

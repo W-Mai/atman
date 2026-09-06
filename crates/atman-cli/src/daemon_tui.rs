@@ -495,6 +495,13 @@ async fn run_session(
                         )));
                     }
                 }
+                TuiControl::LoadNewerHistory => {
+                    if let Err(error) = control_session.load_newer_history().await {
+                        let _ = control_note_tx.send(TuiNote::Error(format!(
+                            "could not load newer session history: {error}"
+                        )));
+                    }
+                }
                 TuiControl::LoadToolDetail { tool_use_id } => {
                     if let Err(error) = control_session.load_tool_detail(&tool_use_id).await {
                         let _ = control_note_tx.send(TuiNote::Error(format!(

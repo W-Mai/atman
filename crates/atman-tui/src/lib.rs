@@ -146,6 +146,7 @@ pub enum TuiControl {
         name: String,
     },
     LoadOlderHistory,
+    LoadNewerHistory,
     LoadToolDetail {
         tool_use_id: String,
     },

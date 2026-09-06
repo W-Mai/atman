@@ -1,22 +1,23 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use atman_proto::{
     AutoNameSessionRequest, AutoNameSessionResponse, CancelRunRequest, CancelRunResponse,
     CompactReviewDecision, CompactSessionRequest, CompactSessionResponse,
     CreatePermissionGroupRequest, CreatePermissionGroupResponse, DaemonGeneration, EventCursor,
-    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionTimelineBeforeRequest,
-    GetSessionTimelineItemDetailRequest, GetSessionTimelineTailRequest, GetSessionUpdatesRequest,
-    GetSessionUpdatesResponse, InlineImage, InspectResourceRequest, InspectResourceResponse,
-    InstallSuggestedFlowRequest, InstallSuggestedFlowResponse, InterjectSessionRequest,
-    InterjectSessionResponse, InterjectionLevel, ListPermissionRequestsRequest,
-    ListPermissionRequestsResponse, ListResourcesRequest, ListResourcesResponse,
-    MoveSessionRequest, MoveSessionResponse, PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction,
-    PermissionRpcScope, PermissionRpcSelector, ProjectionChange, ProjectionDelta,
-    ProjectionEventEnvelope, PromptId, ReleaseResourceRequest, ReleaseResourceResponse,
-    ReloadSessionMcpRequest, ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse,
-    RequestId, ResizeTerminalResourceRequest, ResizeTerminalResourceResponse,
-    ResolveCompactReviewRequest, ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
+    FlowRunId, FormSubmission, GetSessionSnapshotRequest, GetSessionTimelineAfterRequest,
+    GetSessionTimelineBeforeRequest, GetSessionTimelineItemDetailRequest,
+    GetSessionTimelineTailRequest, GetSessionUpdatesRequest, GetSessionUpdatesResponse,
+    InlineImage, InspectResourceRequest, InspectResourceResponse, InstallSuggestedFlowRequest,
+    InstallSuggestedFlowResponse, InterjectSessionRequest, InterjectSessionResponse,
+    InterjectionLevel, ListPermissionRequestsRequest, ListPermissionRequestsResponse,
+    ListResourcesRequest, ListResourcesResponse, MoveSessionRequest, MoveSessionResponse,
+    PROJECTION_EVENT_SCHEMA_VERSION, PermissionRpcAction, PermissionRpcScope,
+    PermissionRpcSelector, ProjectionChange, ProjectionDelta, ProjectionEventEnvelope, PromptId,
+    ReleaseResourceRequest, ReleaseResourceResponse, ReloadSessionMcpRequest,
+    ReloadSessionMcpResponse, RenameSessionRequest, RenameSessionResponse, RequestId,
+    ResizeTerminalResourceRequest, ResizeTerminalResourceResponse, ResolveCompactReviewRequest,
+    ResolveCompactReviewResponse, ResolvePermissionRequestsRequest,
     ResolvePermissionRequestsResponse, ResolvePromptRequest, ResolvePromptResponse, ResourceId,
     RetainResourceRequest, RetainResourceResponse, Revision, SNAPSHOT_SCHEMA_VERSION,
     SendMessageRequest, SendMessageResponse, ServerEvent, SessionId, SessionProjection,
@@ -35,6 +36,9 @@ use crate::{Client, ClientError, TransportError};
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 const MIN_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+const TIMELINE_PAGE_TURNS: u32 = 12;
+const TIMELINE_PAGE_BYTES: u64 = 256 * 1024;
+const TIMELINE_WINDOW_SEGMENTS: usize = 48;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ReconcileError {
@@ -189,6 +193,11 @@ pub enum SessionUpdate {
         state: SessionState,
         loaded_items: usize,
     },
+    HistoryAppended {
+        state: SessionState,
+        loaded_items: usize,
+        has_more: bool,
+    },
     HistoryDetailLoaded {
         state: SessionState,
         tool_use_id: String,
@@ -268,7 +277,10 @@ pub struct SessionClient {
 
 struct TimelineHistory {
     oldest: Option<TimelineCursor>,
+    newest: Option<TimelineCursor>,
     has_older: bool,
+    has_newer: bool,
+    segments: VecDeque<TimelineSegment>,
     loaded_items: HashSet<TimelineItemId>,
     tool_details: HashMap<String, Vec<TimelineItemId>>,
 }
@@ -301,8 +313,8 @@ impl SessionClient {
             .call::<rpc::GetSessionTimelineTail>(&GetSessionTimelineTailRequest {
                 session_id: session_id.clone(),
                 budget: SessionTimelineBudget {
-                    turn_budget: Some(12),
-                    byte_budget: Some(256 * 1024),
+                    turn_budget: Some(TIMELINE_PAGE_TURNS),
+                    byte_budget: Some(TIMELINE_PAGE_BYTES),
                 },
             })
             .await?;
@@ -343,7 +355,10 @@ impl SessionClient {
         state.bounded_transcript = true;
         let history = TimelineHistory {
             oldest: oldest_cursor(&page),
+            newest: newest_cursor(&page),
             has_older: page.older.has_more,
+            has_newer: page.newer.has_more,
+            segments: page.segments.clone().into(),
             loaded_items: timeline_item_ids(&page),
             tool_details: timeline_tool_details(&page),
         };
@@ -402,8 +417,8 @@ impl SessionClient {
                 session_id: self.session_id.clone(),
                 before,
                 budget: SessionTimelineBudget {
-                    turn_budget: Some(12),
-                    byte_budget: Some(256 * 1024),
+                    turn_budget: Some(TIMELINE_PAGE_TURNS),
+                    byte_budget: Some(TIMELINE_PAGE_BYTES),
                 },
             })
             .await?;
@@ -414,10 +429,22 @@ impl SessionClient {
         )?;
         let mut next = self.current();
         let loaded_items = merge_timeline_page(&mut next, &page, &mut history.loaded_items);
-        merge_tool_details(&mut history.tool_details, timeline_tool_details(&page));
+        merge_segments(&mut history.segments, &page);
         history.oldest = oldest_cursor(&page).or(history.oldest.clone());
         history.has_older = page.older.has_more;
-        if loaded_items > 0 {
+        let trimmed = trim_timeline_window(&mut next, &mut history, TrimEdge::Newest);
+        if trimmed {
+            history.has_newer = true;
+            history.newest = history
+                .segments
+                .iter()
+                .filter(|segment| !timeline_segment_is_active(segment))
+                .flat_map(timeline_items)
+                .max_by_key(|item| item.seq)
+                .map(timeline_cursor);
+        }
+        rebuild_timeline_lookup(&mut history);
+        if loaded_items > 0 || trimmed {
             self.state.send_replace(next.clone());
             let _ = self.updates.send(SessionUpdate::HistoryPrepended {
                 state: next,
@@ -427,6 +454,64 @@ impl SessionClient {
         Ok(HistoryLoadOutcome {
             loaded_items,
             has_more: history.has_older,
+        })
+    }
+
+    pub async fn load_newer_history(&self) -> Result<HistoryLoadOutcome, SessionClientError> {
+        let Some(history) = &self.history else {
+            return Ok(HistoryLoadOutcome {
+                loaded_items: 0,
+                has_more: false,
+            });
+        };
+        let _refresh_guard = self.refresh_lock.lock().await;
+        let mut history = history.lock().await;
+        let Some(after) = history.newest.clone().filter(|_| history.has_newer) else {
+            return Ok(HistoryLoadOutcome {
+                loaded_items: 0,
+                has_more: false,
+            });
+        };
+        let page = self
+            .client
+            .call::<rpc::GetSessionTimelineAfter>(&GetSessionTimelineAfterRequest {
+                session_id: self.session_id.clone(),
+                after,
+                budget: SessionTimelineBudget {
+                    turn_budget: Some(TIMELINE_PAGE_TURNS),
+                    byte_budget: Some(TIMELINE_PAGE_BYTES),
+                },
+            })
+            .await?;
+        validate_timeline_page(
+            &page,
+            &self.session_id,
+            &self.client.capabilities().daemon_generation,
+        )?;
+        let mut next = self.current();
+        let loaded_items = merge_timeline_page(&mut next, &page, &mut history.loaded_items);
+        merge_segments(&mut history.segments, &page);
+        history.newest = newest_cursor(&page).or(history.newest.clone());
+        history.has_newer = page.newer.has_more;
+        let trimmed = trim_timeline_window(&mut next, &mut history, TrimEdge::Oldest);
+        if trimmed {
+            history.has_older = true;
+        }
+        if history.has_newer {
+            history.newest = newest_cursor(&page).or(history.newest.clone());
+        }
+        rebuild_timeline_lookup(&mut history);
+        if loaded_items > 0 || trimmed {
+            self.state.send_replace(next.clone());
+            let _ = self.updates.send(SessionUpdate::HistoryAppended {
+                state: next,
+                loaded_items,
+                has_more: history.has_newer,
+            });
+        }
+        Ok(HistoryLoadOutcome {
+            loaded_items,
+            has_more: history.has_newer,
         })
     }
 
@@ -589,8 +674,8 @@ impl SessionClient {
                 .call::<rpc::GetSessionTimelineTail>(&GetSessionTimelineTailRequest {
                     session_id: self.session_id.clone(),
                     budget: SessionTimelineBudget {
-                        turn_budget: Some(12),
-                        byte_budget: Some(256 * 1024),
+                        turn_budget: Some(TIMELINE_PAGE_TURNS),
+                        byte_budget: Some(TIMELINE_PAGE_BYTES),
                     },
                 })
                 .await?;
@@ -599,7 +684,10 @@ impl SessionClient {
             state.bounded_transcript = true;
             *history.lock().await = TimelineHistory {
                 oldest: oldest_cursor(&page),
+                newest: newest_cursor(&page),
                 has_older: page.older.has_more,
+                has_newer: page.newer.has_more,
+                segments: page.segments.clone().into(),
                 loaded_items: timeline_item_ids(&page),
                 tool_details: timeline_tool_details(&page),
             };
@@ -1322,7 +1410,13 @@ fn merge_timeline_page(
     let snapshot = Arc::make_mut(&mut state.snapshot);
     let mut loaded = 0;
     for item in page.segments.iter().flat_map(timeline_items) {
-        if loaded_items.insert(item.id.clone()) {
+        if loaded_items.insert(item.id.clone())
+            && !snapshot
+                .projection
+                .transcript
+                .iter()
+                .any(|existing| same_timeline_item(existing, &item.preview))
+        {
             snapshot.projection.transcript.push(item.preview.clone());
             loaded += 1;
         }
@@ -1350,15 +1444,177 @@ fn merge_timeline_page(
     loaded
 }
 
+#[derive(Clone, Copy)]
+enum TrimEdge {
+    Oldest,
+    Newest,
+}
+
+fn merge_segments(target: &mut VecDeque<TimelineSegment>, page: &SessionTimelinePage) {
+    let known = target
+        .iter()
+        .map(timeline_segment_id)
+        .cloned()
+        .collect::<HashSet<_>>();
+    target.extend(
+        page.segments
+            .iter()
+            .filter(|segment| !known.contains(timeline_segment_id(segment)))
+            .cloned(),
+    );
+    target
+        .make_contiguous()
+        .sort_by_key(timeline_segment_start_seq);
+}
+
+fn trim_timeline_window(
+    state: &mut SessionState,
+    history: &mut TimelineHistory,
+    edge: TrimEdge,
+) -> bool {
+    let mut removed = Vec::new();
+    while history.segments.len() > TIMELINE_WINDOW_SEGMENTS {
+        let candidate = match edge {
+            TrimEdge::Oldest => history
+                .segments
+                .iter()
+                .position(|segment| !timeline_segment_is_active(segment)),
+            TrimEdge::Newest => history
+                .segments
+                .iter()
+                .rposition(|segment| !timeline_segment_is_active(segment)),
+        };
+        let Some(candidate) = candidate else {
+            break;
+        };
+        if let Some(segment) = history.segments.remove(candidate) {
+            removed.push(segment);
+        }
+    }
+    if removed.is_empty() {
+        return false;
+    }
+
+    let retained_ids = history
+        .segments
+        .iter()
+        .flat_map(timeline_items)
+        .map(|item| item.id.clone())
+        .collect::<HashSet<_>>();
+    let removed_items = removed
+        .iter()
+        .flat_map(timeline_items)
+        .filter(|item| !retained_ids.contains(&item.id))
+        .map(|item| item.preview.clone())
+        .collect::<Vec<_>>();
+    let removed_turns = removed
+        .iter()
+        .filter_map(|segment| match segment {
+            TimelineSegment::Turn { segment } => Some(segment.turn_id.clone()),
+            TimelineSegment::Session { .. } => None,
+        })
+        .collect::<HashSet<_>>();
+    let retained_turns = history
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            TimelineSegment::Turn { segment } => Some(segment.turn_id.clone()),
+            TimelineSegment::Session { .. } => None,
+        })
+        .collect::<HashSet<_>>();
+    let snapshot = Arc::make_mut(&mut state.snapshot);
+    snapshot.projection.transcript.retain(|item| {
+        !removed_items
+            .iter()
+            .any(|removed| same_timeline_item(item, removed))
+    });
+    snapshot.projection.workflows.retain(|workflow| {
+        !removed_turns.contains(&workflow.turn_id) || retained_turns.contains(&workflow.turn_id)
+    });
+    state.transcript_revision = state.transcript_revision.wrapping_add(1);
+    history.oldest = history
+        .segments
+        .iter()
+        .flat_map(timeline_items)
+        .min_by_key(|item| item.seq)
+        .map(timeline_cursor);
+    history.newest = history
+        .segments
+        .iter()
+        .flat_map(timeline_items)
+        .max_by_key(|item| item.seq)
+        .map(timeline_cursor);
+    true
+}
+
+fn rebuild_timeline_lookup(history: &mut TimelineHistory) {
+    history.loaded_items = history
+        .segments
+        .iter()
+        .flat_map(timeline_items)
+        .map(|item| item.id.clone())
+        .collect();
+    history.tool_details.clear();
+    for item in history.segments.iter().flat_map(timeline_items) {
+        let Some(detail) = &item.detail else {
+            continue;
+        };
+        for tool_use_id in transcript_tool_ids(&item.preview) {
+            let entries = history.tool_details.entry(tool_use_id).or_default();
+            if !entries.contains(&detail.item_id) {
+                entries.push(detail.item_id.clone());
+            }
+        }
+    }
+}
+
+fn timeline_cursor(item: &atman_proto::TimelineItem) -> TimelineCursor {
+    TimelineCursor {
+        seq: item.seq,
+        item_id: item.id.clone(),
+    }
+}
+
+fn timeline_segment_id(segment: &TimelineSegment) -> &atman_proto::TimelineSegmentId {
+    match segment {
+        TimelineSegment::Turn { segment } => &segment.id,
+        TimelineSegment::Session { segment } => &segment.id,
+    }
+}
+
+fn timeline_segment_is_active(segment: &TimelineSegment) -> bool {
+    matches!(
+        segment,
+        TimelineSegment::Turn {
+            segment: atman_proto::TimelineTurnSegment {
+                state: atman_proto::TimelineTurnState::Active,
+                ..
+            }
+        }
+    )
+}
+
+fn timeline_segment_start_seq(segment: &TimelineSegment) -> u64 {
+    match segment {
+        TimelineSegment::Turn { segment } => segment.start_seq,
+        TimelineSegment::Session { segment } => segment.start_seq,
+    }
+}
+
 fn oldest_cursor(page: &SessionTimelinePage) -> Option<TimelineCursor> {
     page.segments
         .iter()
         .flat_map(timeline_items)
         .min_by_key(|item| item.seq)
-        .map(|item| TimelineCursor {
-            seq: item.seq,
-            item_id: item.id.clone(),
-        })
+        .map(timeline_cursor)
+}
+
+fn newest_cursor(page: &SessionTimelinePage) -> Option<TimelineCursor> {
+    page.segments
+        .iter()
+        .flat_map(timeline_items)
+        .max_by_key(|item| item.seq)
+        .map(timeline_cursor)
 }
 
 fn timeline_item_ids(page: &SessionTimelinePage) -> HashSet<TimelineItemId> {
@@ -1383,20 +1639,6 @@ fn timeline_tool_details(page: &SessionTimelinePage) -> HashMap<String, Vec<Time
         }
     }
     details
-}
-
-fn merge_tool_details(
-    target: &mut HashMap<String, Vec<TimelineItemId>>,
-    source: HashMap<String, Vec<TimelineItemId>>,
-) {
-    for (tool_use_id, item_ids) in source {
-        let target_ids = target.entry(tool_use_id).or_default();
-        for item_id in item_ids {
-            if !target_ids.contains(&item_id) {
-                target_ids.push(item_id);
-            }
-        }
-    }
 }
 
 fn same_timeline_item(
@@ -2115,6 +2357,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 8]
         );
+    }
+
+    #[test]
+    fn timeline_window_evicts_complete_segments_without_dropping_active_tail() {
+        let source = projection(
+            serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789abc"))
+                .unwrap(),
+            Revision(3),
+        );
+        let mut page = timeline_page(&source, 1, true, true);
+        page.segments = (1..=60)
+            .map(|seq| timeline_page(&source, seq, true, false).segments.remove(0))
+            .collect();
+        let active_turn = atman_proto::TurnId(uuid::Uuid::from_u128(61));
+        let mut active = timeline_page(&source, 61, false, false).segments.remove(0);
+        let TimelineSegment::Turn { segment } = &mut active else {
+            panic!("expected turn segment");
+        };
+        segment.state = atman_proto::TimelineTurnState::Active;
+        segment.turn_id = active_turn;
+        page.segments.push(active);
+
+        let snapshot = snapshot_from_timeline(&page).unwrap();
+        let mut state = SessionState::new(snapshot, &page.daemon_generation).unwrap();
+        state.bounded_transcript = true;
+        let mut history = TimelineHistory {
+            oldest: oldest_cursor(&page),
+            newest: newest_cursor(&page),
+            has_older: true,
+            has_newer: false,
+            segments: page.segments.clone().into(),
+            loaded_items: timeline_item_ids(&page),
+            tool_details: timeline_tool_details(&page),
+        };
+
+        assert!(trim_timeline_window(
+            &mut state,
+            &mut history,
+            TrimEdge::Newest
+        ));
+        rebuild_timeline_lookup(&mut history);
+
+        assert_eq!(history.segments.len(), TIMELINE_WINDOW_SEGMENTS);
+        assert!(history.segments.iter().any(timeline_segment_is_active));
+        assert_eq!(
+            state.projection().transcript.len(),
+            TIMELINE_WINDOW_SEGMENTS
+        );
+        assert_eq!(history.loaded_items.len(), TIMELINE_WINDOW_SEGMENTS);
     }
 
     #[test]
