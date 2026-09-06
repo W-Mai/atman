@@ -734,8 +734,13 @@ export type ProjectionChange =
       [k: string]: unknown
     }
   | {
-      interactions: InteractionProjection
-      type: 'interactions_set'
+      interaction: InteractionItem
+      type: 'interaction_upsert'
+      [k: string]: unknown
+    }
+  | {
+      target: InteractionTarget
+      type: 'interaction_remove'
       [k: string]: unknown
     }
   | {
@@ -751,6 +756,68 @@ export type ProjectionChange =
   | {
       type: 'usage_set'
       usage: UsageProjection
+      [k: string]: unknown
+    }
+export type InteractionItem =
+  | {
+      prompt: PendingPromptProjection
+      type: 'prompt'
+      [k: string]: unknown
+    }
+  | {
+      approval: ApprovalRequestProjection
+      type: 'approval'
+      [k: string]: unknown
+    }
+  | {
+      group: ApprovalGroupProjection
+      type: 'approval_group'
+      [k: string]: unknown
+    }
+  | {
+      form: PendingFormProjection
+      type: 'form'
+      [k: string]: unknown
+    }
+  | {
+      review: CompactReviewProjection
+      type: 'compact_review'
+      [k: string]: unknown
+    }
+  | {
+      interjection: InterjectionProjection
+      type: 'interjection'
+      [k: string]: unknown
+    }
+export type InteractionTarget =
+  | {
+      prompt_id: PromptId
+      type: 'prompt'
+      [k: string]: unknown
+    }
+  | {
+      approval_id: string
+      type: 'approval'
+      [k: string]: unknown
+    }
+  | {
+      group_id: string
+      type: 'approval_group'
+      [k: string]: unknown
+    }
+  | {
+      form_id: string
+      type: 'form'
+      [k: string]: unknown
+    }
+  | {
+      review_id: string
+      type: 'compact_review'
+      [k: string]: unknown
+    }
+  | {
+      interjection_id: string
+      type: 'interjection'
       [k: string]: unknown
     }
 export type SessionSignal =

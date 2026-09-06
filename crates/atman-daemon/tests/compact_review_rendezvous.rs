@@ -181,7 +181,7 @@ async fn cancelled_compact_review_reports_abandoned_without_replacing_others() {
         .session_updates(&session_id, "alice", before.cursor, None)
         .await
         .unwrap();
-    let pending_states = updates
+    let review_changes = updates
         .events
         .iter()
         .flat_map(|event| match &event.event {
@@ -189,18 +189,17 @@ async fn cancelled_compact_review_reports_abandoned_without_replacing_others() {
             _ => &[],
         })
         .filter_map(|change| match change {
-            atman_proto::ProjectionChange::InteractionsSet { interactions } => Some(
-                interactions
-                    .compact_reviews
-                    .iter()
-                    .map(|review| review.id.as_str())
-                    .collect::<Vec<_>>(),
-            ),
+            atman_proto::ProjectionChange::InteractionUpsert {
+                interaction: atman_proto::InteractionItem::CompactReview { review },
+            } => Some(format!("upsert:{}", review.id)),
+            atman_proto::ProjectionChange::InteractionRemove {
+                target: atman_proto::InteractionTarget::CompactReview { review_id },
+            } => Some(format!("remove:{review_id}")),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        pending_states,
-        [vec!["first"], vec!["first", "second"], vec!["second"]]
+        review_changes,
+        ["upsert:first", "upsert:second", "remove:first"]
     );
 }

@@ -174,7 +174,7 @@ async fn dropped_form_wait_is_abandoned_without_removing_another_request() {
         .session_updates(&session_id, "alice", before.cursor, None)
         .await
         .unwrap();
-    let pending_states = updates
+    let form_changes = updates
         .events
         .iter()
         .flat_map(|event| match &event.event {
@@ -182,19 +182,18 @@ async fn dropped_form_wait_is_abandoned_without_removing_another_request() {
             _ => &[],
         })
         .filter_map(|change| match change {
-            atman_proto::ProjectionChange::InteractionsSet { interactions } => Some(
-                interactions
-                    .forms
-                    .iter()
-                    .map(|form| form.id.as_str())
-                    .collect::<Vec<_>>(),
-            ),
+            atman_proto::ProjectionChange::InteractionUpsert {
+                interaction: atman_proto::InteractionItem::Form { form },
+            } => Some(format!("upsert:{}", form.id)),
+            atman_proto::ProjectionChange::InteractionRemove {
+                target: atman_proto::InteractionTarget::Form { form_id },
+            } => Some(format!("remove:{form_id}")),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        pending_states,
-        [vec!["first"], vec!["first", "second"], vec!["second"]]
+        form_changes,
+        ["upsert:first", "upsert:second", "remove:first"]
     );
 }
 

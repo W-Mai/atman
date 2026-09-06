@@ -775,6 +775,40 @@ pub struct InteractionProjection {
     pub interjections: Vec<InterjectionProjection>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InteractionItem {
+    Prompt {
+        prompt: PendingPromptProjection,
+    },
+    Approval {
+        approval: Box<ApprovalRequestProjection>,
+    },
+    ApprovalGroup {
+        group: ApprovalGroupProjection,
+    },
+    Form {
+        form: PendingFormProjection,
+    },
+    CompactReview {
+        review: CompactReviewProjection,
+    },
+    Interjection {
+        interjection: InterjectionProjection,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InteractionTarget {
+    Prompt { prompt_id: crate::PromptId },
+    Approval { approval_id: Uuid },
+    ApprovalGroup { group_id: Uuid },
+    Form { form_id: String },
+    CompactReview { review_id: String },
+    Interjection { interjection_id: Uuid },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct InterjectionProjection {
     pub id: Uuid,
@@ -1125,8 +1159,11 @@ pub enum ProjectionChange {
     TrustSet {
         trust: TrustProjection,
     },
-    InteractionsSet {
-        interactions: InteractionProjection,
+    InteractionUpsert {
+        interaction: InteractionItem,
+    },
+    InteractionRemove {
+        target: InteractionTarget,
     },
     ResourceUpsert {
         resource: ResourceProjection,

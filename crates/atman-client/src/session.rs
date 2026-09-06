@@ -1129,7 +1129,8 @@ fn apply_envelope(
                             | ProjectionChange::WorkflowUpsert { .. }
                             | ProjectionChange::WorkflowRemove { .. }
                             | ProjectionChange::CompactionsReplace { .. }
-                            | ProjectionChange::InteractionsSet { .. }
+                            | ProjectionChange::InteractionUpsert { .. }
+                            | ProjectionChange::InteractionRemove { .. }
                     )
                 }),
                 resources: delta.changes.iter().any(|change| {
@@ -1205,8 +1206,11 @@ fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
         ProjectionChange::PlansReplace { plans } => projection.plans.clone_from(plans),
         ProjectionChange::ContextSet { context } => projection.context.clone_from(context),
         ProjectionChange::TrustSet { trust } => projection.trust.clone_from(trust),
-        ProjectionChange::InteractionsSet { interactions } => {
-            projection.interactions.clone_from(interactions)
+        ProjectionChange::InteractionUpsert { interaction } => {
+            upsert_interaction(&mut projection.interactions, interaction)
+        }
+        ProjectionChange::InteractionRemove { target } => {
+            remove_interaction(&mut projection.interactions, target)
         }
         ProjectionChange::ResourceUpsert { resource } => {
             upsert_resource(&mut projection.resources, resource.clone())
@@ -1251,6 +1255,74 @@ fn upsert_resource(
         *existing = resource;
     } else {
         resources.push(resource);
+    }
+}
+
+fn upsert_interaction(
+    interactions: &mut atman_proto::InteractionProjection,
+    interaction: &atman_proto::InteractionItem,
+) {
+    match interaction {
+        atman_proto::InteractionItem::Prompt { prompt } => {
+            interactions.prompts.retain(|item| item.id != prompt.id);
+            interactions.prompts.push(prompt.clone());
+        }
+        atman_proto::InteractionItem::Approval { approval } => {
+            interactions.approvals.retain(|item| item.id != approval.id);
+            interactions.approvals.push(approval.as_ref().clone());
+        }
+        atman_proto::InteractionItem::ApprovalGroup { group } => {
+            interactions
+                .approval_groups
+                .retain(|item| item.id != group.id);
+            interactions.approval_groups.push(group.clone());
+        }
+        atman_proto::InteractionItem::Form { form } => {
+            interactions.forms.retain(|item| item.id != form.id);
+            interactions.forms.push(form.clone());
+            interactions.forms.sort_by_key(|item| item.emitted_at);
+        }
+        atman_proto::InteractionItem::CompactReview { review } => {
+            interactions
+                .compact_reviews
+                .retain(|item| item.id != review.id);
+            interactions.compact_reviews.push(review.clone());
+        }
+        atman_proto::InteractionItem::Interjection { interjection } => {
+            interactions
+                .interjections
+                .retain(|item| item.id != interjection.id);
+            interactions.interjections.push(interjection.clone());
+            interactions
+                .interjections
+                .sort_by_key(|item| item.created_at);
+        }
+    }
+}
+
+fn remove_interaction(
+    interactions: &mut atman_proto::InteractionProjection,
+    target: &atman_proto::InteractionTarget,
+) {
+    match target {
+        atman_proto::InteractionTarget::Prompt { prompt_id } => {
+            interactions.prompts.retain(|item| &item.id != prompt_id)
+        }
+        atman_proto::InteractionTarget::Approval { approval_id } => interactions
+            .approvals
+            .retain(|item| &item.id != approval_id),
+        atman_proto::InteractionTarget::ApprovalGroup { group_id } => interactions
+            .approval_groups
+            .retain(|item| &item.id != group_id),
+        atman_proto::InteractionTarget::Form { form_id } => {
+            interactions.forms.retain(|item| &item.id != form_id)
+        }
+        atman_proto::InteractionTarget::CompactReview { review_id } => interactions
+            .compact_reviews
+            .retain(|item| &item.id != review_id),
+        atman_proto::InteractionTarget::Interjection { interjection_id } => interactions
+            .interjections
+            .retain(|item| &item.id != interjection_id),
     }
 }
 

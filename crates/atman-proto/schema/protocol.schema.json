@@ -2372,6 +2372,118 @@
         }
       }
     },
+    "InteractionItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "prompt",
+            "type"
+          ],
+          "properties": {
+            "prompt": {
+              "$ref": "#/$defs/PendingPromptProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "prompt"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "approval",
+            "type"
+          ],
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/ApprovalRequestProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "approval"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "group",
+            "type"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/ApprovalGroupProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "approval_group"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "form",
+            "type"
+          ],
+          "properties": {
+            "form": {
+              "$ref": "#/$defs/PendingFormProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "form"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "review",
+            "type"
+          ],
+          "properties": {
+            "review": {
+              "$ref": "#/$defs/CompactReviewProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compact_review"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "interjection",
+            "type"
+          ],
+          "properties": {
+            "interjection": {
+              "$ref": "#/$defs/InterjectionProjection"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "interjection"
+              ]
+            }
+          }
+        }
+      ]
+    },
     "InteractionProjection": {
       "type": "object",
       "properties": {
@@ -2412,6 +2524,121 @@
           }
         }
       }
+    },
+    "InteractionTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "prompt_id",
+            "type"
+          ],
+          "properties": {
+            "prompt_id": {
+              "$ref": "#/$defs/PromptId"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "prompt"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "approval_id",
+            "type"
+          ],
+          "properties": {
+            "approval_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "approval"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "group_id",
+            "type"
+          ],
+          "properties": {
+            "group_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "approval_group"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "form_id",
+            "type"
+          ],
+          "properties": {
+            "form_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "form"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "review_id",
+            "type"
+          ],
+          "properties": {
+            "review_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "compact_review"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "interjection_id",
+            "type"
+          ],
+          "properties": {
+            "interjection_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "interjection"
+              ]
+            }
+          }
+        }
+      ]
     },
     "InterjectSessionRequest": {
       "type": "object",
@@ -4644,17 +4871,35 @@
         {
           "type": "object",
           "required": [
-            "interactions",
+            "interaction",
             "type"
           ],
           "properties": {
-            "interactions": {
-              "$ref": "#/$defs/InteractionProjection"
+            "interaction": {
+              "$ref": "#/$defs/InteractionItem"
             },
             "type": {
               "type": "string",
               "enum": [
-                "interactions_set"
+                "interaction_upsert"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "target",
+            "type"
+          ],
+          "properties": {
+            "target": {
+              "$ref": "#/$defs/InteractionTarget"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "interaction_remove"
               ]
             }
           }

@@ -153,7 +153,10 @@ describe('SessionStore', () => {
     }))
     store.applyUpdates(page([event(1, delta(1, [
       { type: 'transcript_append', items: [message] },
-      { type: 'interactions_set', interactions: { interjections: [interjection] } },
+      {
+        type: 'interaction_upsert',
+        interaction: { type: 'interjection', interjection },
+      },
     ]))]))
     expect(observations).toEqual([{ messages: 1, state: 'injected' }])
     expect(store.current.projection.transcript).toEqual([message])

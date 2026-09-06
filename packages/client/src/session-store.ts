@@ -3,6 +3,8 @@ import { EVENT_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION } from './generated/metho
 import type {
   DaemonGeneration,
   GetSessionUpdatesResponse,
+  InteractionItem,
+  InteractionTarget,
   ProjectionChange,
   ProjectionDelta,
   ProjectionEventEnvelope,
@@ -319,8 +321,11 @@ function applyChange(projection: SessionProjection, change: ProjectionChange): v
     case 'trust_set':
       projection.trust = structuredClone(change.trust)
       break
-    case 'interactions_set':
-      projection.interactions = structuredClone(change.interactions)
+    case 'interaction_upsert':
+      upsertInteraction(projection, change.interaction)
+      break
+    case 'interaction_remove':
+      removeInteraction(projection, change.target)
       break
     case 'resource_upsert':
       projection.resources = upsertById(projection.resources ?? [], change.resource)
@@ -352,6 +357,85 @@ function upsertByKey<T>(items: T[], item: T, key: (item: T) => string): T[] {
     next[index] = structuredClone(item)
   }
   return next
+}
+
+function upsertInteraction(projection: SessionProjection, interaction: InteractionItem): void {
+  const current = projection.interactions ?? {}
+  switch (interaction.type) {
+    case 'prompt':
+      current.prompts = upsertByKey(current.prompts ?? [], interaction.prompt, (item) => item.id)
+      break
+    case 'approval':
+      current.approvals = upsertByKey(
+        current.approvals ?? [],
+        interaction.approval,
+        (item) => item.id,
+      )
+      break
+    case 'approval_group':
+      current.approval_groups = upsertByKey(
+        current.approval_groups ?? [],
+        interaction.group,
+        (item) => item.id,
+      )
+      break
+    case 'form':
+      current.forms = upsertByKey(current.forms ?? [], interaction.form, (item) => item.id)
+        .sort((left, right) => left.emitted_at.localeCompare(right.emitted_at))
+      break
+    case 'compact_review':
+      current.compact_reviews = upsertByKey(
+        current.compact_reviews ?? [],
+        interaction.review,
+        (item) => item.id,
+      )
+      break
+    case 'interjection':
+      current.interjections = upsertByKey(
+        current.interjections ?? [],
+        interaction.interjection,
+        (item) => item.id,
+      ).sort((left, right) => left.created_at.localeCompare(right.created_at))
+      break
+    default:
+      assertNever(interaction)
+  }
+  projection.interactions = current
+}
+
+function removeInteraction(projection: SessionProjection, target: InteractionTarget): void {
+  const current = projection.interactions ?? {}
+  switch (target.type) {
+    case 'prompt':
+      current.prompts = (current.prompts ?? []).filter((item) => item.id !== target.prompt_id)
+      break
+    case 'approval':
+      current.approvals = (current.approvals ?? []).filter(
+        (item) => item.id !== target.approval_id,
+      )
+      break
+    case 'approval_group':
+      current.approval_groups = (current.approval_groups ?? []).filter(
+        (item) => item.id !== target.group_id,
+      )
+      break
+    case 'form':
+      current.forms = (current.forms ?? []).filter((item) => item.id !== target.form_id)
+      break
+    case 'compact_review':
+      current.compact_reviews = (current.compact_reviews ?? []).filter(
+        (item) => item.id !== target.review_id,
+      )
+      break
+    case 'interjection':
+      current.interjections = (current.interjections ?? []).filter(
+        (item) => item.id !== target.interjection_id,
+      )
+      break
+    default:
+      assertNever(target)
+  }
+  projection.interactions = current
 }
 
 function reconcileError(

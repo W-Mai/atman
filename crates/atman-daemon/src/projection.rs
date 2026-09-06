@@ -6,14 +6,14 @@ use atman_proto::{
     ApprovalPolicyProjection, ApprovalProvenanceProjection, ApprovalRequestProjection,
     ApprovalScopeProjection, ApprovalState, ApprovalTarget, CompactionOperationId,
     CompactionOutcome, CompactionProjection, ContextProjection, ContextUsageBucketProjection,
-    EventCursor, FlowRunId, ImageDetail, InteractionProjection, InterjectionProjection,
-    InterjectionSource, LlmCallPurpose, LlmCallScope, LlmUsageProjection, McpServerProjection,
-    McpServerStateProjection, McpToolProjection, McpTransportProjection, MessageOrigin,
-    MessagePart, MessageProjection, MessageRole, NameSource, NoticeLevel, PlanProjection,
-    PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId, ResourceKind,
-    ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection, SessionId,
-    SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection, TodoState,
-    TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
+    EventCursor, FlowRunId, ImageDetail, InteractionItem, InteractionProjection, InteractionTarget,
+    InterjectionProjection, InterjectionSource, LlmCallPurpose, LlmCallScope, LlmUsageProjection,
+    McpServerProjection, McpServerStateProjection, McpToolProjection, McpTransportProjection,
+    MessageOrigin, MessagePart, MessageProjection, MessageRole, NameSource, NoticeLevel,
+    PlanProjection, PlanStepProjection, ProjectionChange, ProjectionDelta, ResourceId,
+    ResourceKind, ResourceProjection, ResourceState, Revision, RunLifecycle, RunProjection,
+    SessionId, SessionLifecycle, SessionMetadataProjection, SessionProjection, TodoProjection,
+    TodoState, TranscriptItem, TrustEscalation, TrustMode, TrustPolicyAction, TrustProjection,
     TrustRiskOverrides, TrustTheme, TrustTierOverrides, TurnId, UsageProjection,
     WorkflowFanoutMode, WorkflowNodeKind, WorkflowNodeProjection, WorkflowNodeState,
     WorkflowProjection, WorkflowStatementKind,
@@ -185,13 +185,33 @@ impl SessionProjector {
             });
         }
 
-        let previous_interactions = self.projection.interactions.clone();
-        self.projection.interactions.prompts.clear();
-        self.projection.interactions.forms.clear();
-        self.projection.interactions.compact_reviews.clear();
+        for prompt in self.projection.interactions.prompts.drain(..) {
+            changes.push(ProjectionChange::InteractionRemove {
+                target: InteractionTarget::Prompt {
+                    prompt_id: prompt.id,
+                },
+            });
+        }
+        for form in self.projection.interactions.forms.drain(..) {
+            changes.push(ProjectionChange::InteractionRemove {
+                target: InteractionTarget::Form { form_id: form.id },
+            });
+        }
+        for review in self.projection.interactions.compact_reviews.drain(..) {
+            changes.push(ProjectionChange::InteractionRemove {
+                target: InteractionTarget::CompactReview {
+                    review_id: review.id,
+                },
+            });
+        }
         for interjection in &mut self.projection.interactions.interjections {
             if interjection.state == atman_proto::InterjectionState::Pending {
                 interjection.state = atman_proto::InterjectionState::Cancelled;
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::Interjection {
+                        interjection: interjection.clone(),
+                    },
+                });
             }
         }
         for approval in &mut self.projection.interactions.approvals {
@@ -200,12 +220,12 @@ impl SessionProjector {
                 ApprovalState::Evaluating | ApprovalState::Pending
             ) {
                 approval.state = ApprovalState::Cancelled;
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::Approval {
+                        approval: Box::new(approval.clone()),
+                    },
+                });
             }
-        }
-        if self.projection.interactions != previous_interactions {
-            changes.push(ProjectionChange::InteractionsSet {
-                interactions: self.projection.interactions.clone(),
-            });
         }
     }
 
@@ -968,20 +988,18 @@ impl SessionProjector {
                 kind,
                 payload,
             } => {
+                let prompt = atman_proto::PendingPromptProjection {
+                    id: atman_proto::PromptId(*prompt_id),
+                    kind: kind.clone(),
+                    payload: payload.clone(),
+                };
                 self.projection
                     .interactions
                     .prompts
                     .retain(|item| item.id.0 != *prompt_id);
-                self.projection
-                    .interactions
-                    .prompts
-                    .push(atman_proto::PendingPromptProjection {
-                        id: atman_proto::PromptId(*prompt_id),
-                        kind: kind.clone(),
-                        payload: payload.clone(),
-                    });
-                changes.push(ProjectionChange::InteractionsSet {
-                    interactions: self.projection.interactions.clone(),
+                self.projection.interactions.prompts.push(prompt.clone());
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::Prompt { prompt },
                 });
             }
             Event::PromptResolved { prompt_id, .. } => {
@@ -991,8 +1009,10 @@ impl SessionProjector {
                     .prompts
                     .retain(|item| item.id.0 != *prompt_id);
                 if before != self.projection.interactions.prompts.len() {
-                    changes.push(ProjectionChange::InteractionsSet {
-                        interactions: self.projection.interactions.clone(),
+                    changes.push(ProjectionChange::InteractionRemove {
+                        target: InteractionTarget::Prompt {
+                            prompt_id: atman_proto::PromptId(*prompt_id),
+                        },
                     });
                 }
             }
@@ -1002,13 +1022,13 @@ impl SessionProjector {
                     .interactions
                     .forms
                     .retain(|item| item.id != form.id);
-                self.projection.interactions.forms.push(form);
+                self.projection.interactions.forms.push(form.clone());
                 self.projection
                     .interactions
                     .forms
                     .sort_by_key(|item| item.emitted_at);
-                changes.push(ProjectionChange::InteractionsSet {
-                    interactions: self.projection.interactions.clone(),
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::Form { form },
                 });
             }
             Event::FormResolved { form_id, .. } => {
@@ -1018,8 +1038,10 @@ impl SessionProjector {
                     .forms
                     .retain(|item| item.id != *form_id);
                 if before != self.projection.interactions.forms.len() {
-                    changes.push(ProjectionChange::InteractionsSet {
-                        interactions: self.projection.interactions.clone(),
+                    changes.push(ProjectionChange::InteractionRemove {
+                        target: InteractionTarget::Form {
+                            form_id: form_id.clone(),
+                        },
                     });
                 }
             }
@@ -1029,9 +1051,12 @@ impl SessionProjector {
                     .interactions
                     .compact_reviews
                     .retain(|item| item.id != review.id);
-                self.projection.interactions.compact_reviews.push(review);
-                changes.push(ProjectionChange::InteractionsSet {
-                    interactions: self.projection.interactions.clone(),
+                self.projection
+                    .interactions
+                    .compact_reviews
+                    .push(review.clone());
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::CompactReview { review },
                 });
             }
             Event::CompactReviewResolved { review_id, .. } => {
@@ -1041,8 +1066,10 @@ impl SessionProjector {
                     .compact_reviews
                     .retain(|item| item.id != *review_id);
                 if before != self.projection.interactions.compact_reviews.len() {
-                    changes.push(ProjectionChange::InteractionsSet {
-                        interactions: self.projection.interactions.clone(),
+                    changes.push(ProjectionChange::InteractionRemove {
+                        target: InteractionTarget::CompactReview {
+                            review_id: review_id.clone(),
+                        },
                     });
                 }
             }
@@ -1055,13 +1082,13 @@ impl SessionProjector {
                 self.projection
                     .interactions
                     .interjections
-                    .push(interjection);
+                    .push(interjection.clone());
                 self.projection
                     .interactions
                     .interjections
                     .sort_by_key(|item| item.created_at);
-                changes.push(ProjectionChange::InteractionsSet {
-                    interactions: self.projection.interactions.clone(),
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::Interjection { interjection },
                 });
             }
             Event::PermissionRequestCreated { payload }
@@ -1090,9 +1117,12 @@ impl SessionProjector {
                     .interactions
                     .approval_groups
                     .retain(|item| item.id != group.id);
-                self.projection.interactions.approval_groups.push(group);
-                changes.push(ProjectionChange::InteractionsSet {
-                    interactions: self.projection.interactions.clone(),
+                self.projection
+                    .interactions
+                    .approval_groups
+                    .push(group.clone());
+                changes.push(ProjectionChange::InteractionUpsert {
+                    interaction: InteractionItem::ApprovalGroup { group },
                 });
             }
             Event::LlmCall {
@@ -1431,9 +1461,14 @@ impl SessionProjector {
             .interactions
             .approvals
             .retain(|item| item.id != approval.id);
-        self.projection.interactions.approvals.push(approval);
-        changes.push(ProjectionChange::InteractionsSet {
-            interactions: self.projection.interactions.clone(),
+        self.projection
+            .interactions
+            .approvals
+            .push(approval.clone());
+        changes.push(ProjectionChange::InteractionUpsert {
+            interaction: InteractionItem::Approval {
+                approval: Box::new(approval),
+            },
         });
     }
 
@@ -4501,7 +4536,9 @@ mod tests {
                             assert!(items.iter().all(|item| matches!(item, TranscriptItem::Message { message, .. } if message.origin == MessageOrigin::Interjection)));
                             assert!(delta.changes.iter().any(|change| matches!(
                                 change,
-                                ProjectionChange::InteractionsSet { .. }
+                                ProjectionChange::InteractionUpsert {
+                                    interaction: InteractionItem::Interjection { .. }
+                                }
                             )));
                         }
                         let cursor = EventCursor(client.cursor().0 + 1);
