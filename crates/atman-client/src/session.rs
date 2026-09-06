@@ -87,7 +87,7 @@ impl ReconcileError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionState {
-    snapshot: SessionSnapshot,
+    snapshot: Arc<SessionSnapshot>,
     transcript_revision: u64,
     resources_revision: u64,
 }
@@ -100,14 +100,14 @@ impl SessionState {
         validate_snapshot(&snapshot, expected_generation)?;
         let transcript_revision = snapshot.projection.revision.0;
         Ok(Self {
-            snapshot,
+            snapshot: Arc::new(snapshot),
             transcript_revision,
             resources_revision: transcript_revision,
         })
     }
 
     pub fn snapshot(&self) -> &SessionSnapshot {
-        &self.snapshot
+        self.snapshot.as_ref()
     }
 
     pub fn projection(&self) -> &SessionProjection {
@@ -130,42 +130,23 @@ impl SessionState {
         &mut self,
         response: &GetSessionUpdatesResponse,
     ) -> Result<AppliedUpdates, ReconcileError> {
-        if response.daemon_generation != self.snapshot.daemon_generation {
-            return Err(ReconcileError::DaemonGeneration {
-                expected: self.snapshot.daemon_generation.clone(),
-                received: response.daemon_generation.clone(),
-            });
-        }
-        if let Some(gap) = &response.resync_required {
-            return Err(ReconcileError::ResyncRequired(gap.clone()));
-        }
-        let starting_cursor = self.snapshot.cursor;
-        let mut next = self.clone();
+        validate_updates(&self.snapshot, response)?;
+        let snapshot = Arc::make_mut(&mut self.snapshot);
         let mut applied = 0;
         let mut signals = Vec::new();
         for envelope in &response.events {
-            if envelope.cursor <= next.snapshot.cursor {
+            if envelope.cursor <= snapshot.cursor {
                 continue;
             }
-            let changes = apply_envelope(&mut next.snapshot, envelope, &mut signals)?;
+            let changes = apply_validated_envelope(snapshot, envelope, &mut signals);
             if changes.transcript {
-                next.transcript_revision = next.transcript_revision.wrapping_add(1);
+                self.transcript_revision = self.transcript_revision.wrapping_add(1);
             }
             if changes.resources {
-                next.resources_revision = next.resources_revision.wrapping_add(1);
+                self.resources_revision = self.resources_revision.wrapping_add(1);
             }
             applied += 1;
         }
-        if response.next_cursor > next.snapshot.cursor
-            || (response.next_cursor > starting_cursor
-                && response.next_cursor != next.snapshot.cursor)
-        {
-            return Err(ReconcileError::PageCursor {
-                actual: next.snapshot.cursor,
-                declared: response.next_cursor,
-            });
-        }
-        *self = next;
         Ok(AppliedUpdates {
             applied,
             signals,
@@ -356,13 +337,16 @@ impl SessionClient {
         response: GetSessionUpdatesResponse,
     ) -> Result<RefreshOutcome, SessionClientError> {
         let capabilities = self.client.capabilities();
-        let mut next = current.clone();
+        let previous_cursor = current.cursor();
+        let previous_transcript_revision = current.transcript_revision;
+        let previous_resources_revision = current.resources_revision;
+        let mut next = current;
         match next.apply_updates(&response) {
             Ok(applied) => {
                 let applied_events = response
                     .events
                     .iter()
-                    .filter(|event| event.cursor > current.cursor())
+                    .filter(|event| event.cursor > previous_cursor)
                     .cloned()
                     .collect::<Vec<_>>();
                 let outcome = RefreshOutcome::Applied {
@@ -370,7 +354,7 @@ impl SessionClient {
                     signals: applied.signals.clone(),
                     has_more: applied.has_more,
                 };
-                if next != current {
+                if applied.applied > 0 {
                     self.state.send_replace(next);
                 }
                 for signal in applied.signals {
@@ -396,8 +380,8 @@ impl SessionClient {
                     .await?;
                 validate_session(&snapshot, &self.session_id)?;
                 let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
-                next.transcript_revision = current.transcript_revision.wrapping_add(1);
-                next.resources_revision = current.resources_revision.wrapping_add(1);
+                next.transcript_revision = previous_transcript_revision.wrapping_add(1);
+                next.resources_revision = previous_resources_revision.wrapping_add(1);
                 self.state.send_replace(next.clone());
                 let _ = self.updates.send(SessionUpdate::Reset(Box::new(next)));
                 Ok(RefreshOutcome::Reconnected)
@@ -411,8 +395,8 @@ impl SessionClient {
                     .await?;
                 validate_session(&snapshot, &self.session_id)?;
                 let mut next = SessionState::new(snapshot, &capabilities.daemon_generation)?;
-                next.transcript_revision = current.transcript_revision.wrapping_add(1);
-                next.resources_revision = current.resources_revision.wrapping_add(1);
+                next.transcript_revision = previous_transcript_revision.wrapping_add(1);
+                next.resources_revision = previous_resources_revision.wrapping_add(1);
                 self.state.send_replace(next.clone());
                 let _ = self.updates.send(SessionUpdate::Reset(Box::new(next)));
                 Ok(RefreshOutcome::Resynced)
@@ -1082,42 +1066,79 @@ fn validate_session(
     Ok(())
 }
 
-fn apply_envelope(
+fn validate_updates(
+    snapshot: &SessionSnapshot,
+    response: &GetSessionUpdatesResponse,
+) -> Result<(), ReconcileError> {
+    if response.daemon_generation != snapshot.daemon_generation {
+        return Err(ReconcileError::DaemonGeneration {
+            expected: snapshot.daemon_generation.clone(),
+            received: response.daemon_generation.clone(),
+        });
+    }
+    if let Some(gap) = &response.resync_required {
+        return Err(ReconcileError::ResyncRequired(gap.clone()));
+    }
+    let starting_cursor = snapshot.cursor;
+    let mut cursor = snapshot.cursor;
+    let mut revision = snapshot.projection.revision;
+    for envelope in &response.events {
+        if envelope.cursor <= cursor {
+            continue;
+        }
+        if envelope.schema_version != PROJECTION_EVENT_SCHEMA_VERSION {
+            return Err(ReconcileError::EventSchema {
+                expected: PROJECTION_EVENT_SCHEMA_VERSION,
+                received: envelope.schema_version,
+            });
+        }
+        if envelope.daemon_generation != snapshot.daemon_generation {
+            return Err(ReconcileError::DaemonGeneration {
+                expected: snapshot.daemon_generation.clone(),
+                received: envelope.daemon_generation.clone(),
+            });
+        }
+        if envelope.session_id != snapshot.projection.metadata.id {
+            return Err(ReconcileError::Session {
+                expected: snapshot.projection.metadata.id.clone(),
+                received: envelope.session_id.clone(),
+            });
+        }
+        if let ServerEvent::ResyncRequired { gap } = &envelope.event {
+            return Err(ReconcileError::ResyncRequired(gap.clone()));
+        }
+        let expected_cursor = EventCursor(cursor.0.saturating_add(1));
+        if envelope.cursor != expected_cursor {
+            return Err(ReconcileError::CursorGap {
+                current: cursor,
+                received: envelope.cursor,
+            });
+        }
+        if let ServerEvent::ProjectionDelta { delta } = &envelope.event {
+            validate_delta(revision, delta)?;
+            revision = delta.revision;
+        }
+        cursor = envelope.cursor;
+    }
+    if response.next_cursor > cursor
+        || (response.next_cursor > starting_cursor && response.next_cursor != cursor)
+    {
+        return Err(ReconcileError::PageCursor {
+            actual: cursor,
+            declared: response.next_cursor,
+        });
+    }
+    Ok(())
+}
+
+fn apply_validated_envelope(
     snapshot: &mut SessionSnapshot,
     envelope: &ProjectionEventEnvelope,
     signals: &mut Vec<SessionSignal>,
-) -> Result<SliceChanges, ReconcileError> {
-    if envelope.schema_version != PROJECTION_EVENT_SCHEMA_VERSION {
-        return Err(ReconcileError::EventSchema {
-            expected: PROJECTION_EVENT_SCHEMA_VERSION,
-            received: envelope.schema_version,
-        });
-    }
-    if envelope.daemon_generation != snapshot.daemon_generation {
-        return Err(ReconcileError::DaemonGeneration {
-            expected: snapshot.daemon_generation.clone(),
-            received: envelope.daemon_generation.clone(),
-        });
-    }
-    if envelope.session_id != snapshot.projection.metadata.id {
-        return Err(ReconcileError::Session {
-            expected: snapshot.projection.metadata.id.clone(),
-            received: envelope.session_id.clone(),
-        });
-    }
-    if let ServerEvent::ResyncRequired { gap } = &envelope.event {
-        return Err(ReconcileError::ResyncRequired(gap.clone()));
-    }
-    let expected_cursor = EventCursor(snapshot.cursor.0.saturating_add(1));
-    if envelope.cursor != expected_cursor {
-        return Err(ReconcileError::CursorGap {
-            current: snapshot.cursor,
-            received: envelope.cursor,
-        });
-    }
+) -> SliceChanges {
     let changes = match &envelope.event {
         ServerEvent::ProjectionDelta { delta } => {
-            apply_delta(&mut snapshot.projection, delta)?;
+            apply_validated_delta(&mut snapshot.projection, delta);
             SliceChanges {
                 transcript: delta.changes.iter().any(|change| {
                     matches!(
@@ -1146,11 +1167,11 @@ fn apply_envelope(
             signals.push(signal.clone());
             SliceChanges::default()
         }
-        ServerEvent::ResyncRequired { .. } => unreachable!("handled before cursor validation"),
+        ServerEvent::ResyncRequired { .. } => unreachable!("validated before applying updates"),
         ServerEvent::Heartbeat => SliceChanges::default(),
     };
     snapshot.cursor = envelope.cursor;
-    Ok(changes)
+    changes
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1159,13 +1180,10 @@ struct SliceChanges {
     resources: bool,
 }
 
-fn apply_delta(
-    projection: &mut SessionProjection,
-    delta: &ProjectionDelta,
-) -> Result<(), ReconcileError> {
-    if delta.base_revision != projection.revision {
+fn validate_delta(revision: Revision, delta: &ProjectionDelta) -> Result<(), ReconcileError> {
+    if delta.base_revision != revision {
         return Err(ReconcileError::RevisionBase {
-            expected: projection.revision,
+            expected: revision,
             received: delta.base_revision,
         });
     }
@@ -1175,11 +1193,14 @@ fn apply_delta(
             received: delta.revision,
         });
     }
+    Ok(())
+}
+
+fn apply_validated_delta(projection: &mut SessionProjection, delta: &ProjectionDelta) {
     for change in &delta.changes {
         apply_change(projection, change);
     }
     projection.revision = delta.revision;
-    Ok(())
 }
 
 fn apply_change(projection: &mut SessionProjection, change: &ProjectionChange) {
@@ -1407,6 +1428,7 @@ mod tests {
     #[test]
     fn exact_delta_applies_transactionally() {
         let mut state = state();
+        let snapshot = Arc::as_ptr(&state.snapshot);
         let response = GetSessionUpdatesResponse {
             daemon_generation: state.snapshot.daemon_generation.clone(),
             events: vec![envelope(
@@ -1430,6 +1452,37 @@ mod tests {
         assert_eq!(state.cursor(), EventCursor(8));
         assert_eq!(state.projection().revision, Revision(4));
         assert_eq!(state.projection().goal.as_deref(), Some("Converge"));
+        assert_eq!(Arc::as_ptr(&state.snapshot), snapshot);
+    }
+
+    #[test]
+    fn cloned_state_preserves_the_previous_snapshot_on_update() {
+        let mut state = state();
+        let previous = state.clone();
+        assert!(Arc::ptr_eq(&state.snapshot, &previous.snapshot));
+        let response = GetSessionUpdatesResponse {
+            daemon_generation: state.snapshot.daemon_generation.clone(),
+            events: vec![envelope(
+                &state,
+                8,
+                ProjectionDelta {
+                    base_revision: Revision(3),
+                    revision: Revision(4),
+                    changes: vec![ProjectionChange::GoalSet {
+                        goal: Some("new goal".into()),
+                    }],
+                },
+            )],
+            next_cursor: EventCursor(8),
+            has_more: false,
+            resync_required: None,
+        };
+
+        state.apply_updates(&response).unwrap();
+
+        assert!(!Arc::ptr_eq(&state.snapshot, &previous.snapshot));
+        assert_eq!(state.projection().goal.as_deref(), Some("new goal"));
+        assert_eq!(previous.projection().goal, None);
     }
 
     #[test]
