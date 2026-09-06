@@ -20,6 +20,11 @@ import type {
   GetEventsRequest,
   GetEventsResponse,
   GetSessionSnapshotRequest,
+  GetSessionTimelineAfterRequest,
+  GetSessionTimelineAroundRequest,
+  GetSessionTimelineBeforeRequest,
+  GetSessionTimelineItemDetailRequest,
+  GetSessionTimelineTailRequest,
   GetSessionUpdatesRequest,
   GetSessionUpdatesResponse,
   ImportSessionMessagesRequest,
@@ -77,6 +82,8 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
   SessionSnapshot,
+  SessionTimelineItemDetail,
+  SessionTimelinePage,
   SetSessionGoalRequest,
   SetSessionGoalResponse,
   StartRunRequest,
@@ -324,6 +331,36 @@ export interface RpcMethodMap {
     params: GetSessionUpdatesRequest
     result: GetSessionUpdatesResponse
   }
+  'session.history.tail': {
+    kind: 'query'
+    revision: 1
+    params: GetSessionTimelineTailRequest
+    result: SessionTimelinePage
+  }
+  'session.history.before': {
+    kind: 'query'
+    revision: 1
+    params: GetSessionTimelineBeforeRequest
+    result: SessionTimelinePage
+  }
+  'session.history.after': {
+    kind: 'query'
+    revision: 1
+    params: GetSessionTimelineAfterRequest
+    result: SessionTimelinePage
+  }
+  'session.history.around': {
+    kind: 'query'
+    revision: 1
+    params: GetSessionTimelineAroundRequest
+    result: SessionTimelinePage
+  }
+  'session.history.item_detail': {
+    kind: 'query'
+    revision: 1
+    params: GetSessionTimelineItemDetailRequest
+    result: SessionTimelineItemDetail
+  }
   'resolve_prompt': {
     kind: 'command'
     revision: 2
@@ -446,6 +483,11 @@ export const RPC_METHODS = {
   'get_events': { kind: 'query', revision: 1 },
   'session.get_snapshot': { kind: 'query', revision: 1 },
   'session.get_updates': { kind: 'query', revision: 1 },
+  'session.history.tail': { kind: 'query', revision: 1 },
+  'session.history.before': { kind: 'query', revision: 1 },
+  'session.history.after': { kind: 'query', revision: 1 },
+  'session.history.around': { kind: 'query', revision: 1 },
+  'session.history.item_detail': { kind: 'query', revision: 1 },
   'resolve_prompt': { kind: 'command', revision: 2 },
   'form.submit': { kind: 'command', revision: 1 },
   'session.compact': { kind: 'command', revision: 1 },

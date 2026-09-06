@@ -1,17 +1,19 @@
 use atman_proto::{
     AutoNameSessionResponse, CancelRunResponse, CapabilitiesRequest, CapabilitiesResponse,
     CompactSessionResponse, DaemonGeneration, EventCursor, GetSessionSnapshotRequest,
-    GetSessionUpdatesRequest, ImportSessionMessagesResponse, InspectResourceResponse,
-    InstallSuggestedFlowResponse, InterjectSessionResponse, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, ListProjectsRequest, ListResourcesResponse, ListSessionsRequest,
-    MethodCapability, MoveSessionResponse, PermissionRpcAction, PermissionRpcScope, PingResponse,
-    ProtocolLimits, ReleaseResourceResponse, ReloadSessionMcpResponse, RenameSessionResponse,
-    RequestId, ResizeTerminalResourceResponse, ResolveCompactReviewResponse, ResolvePromptResponse,
-    RetainResourceResponse, RpcMethod, RpcMethodDescriptor, RunFlowResponse,
-    SanitizeSessionAttachmentsResponse, SendMessageResponse, SetSessionGoalResponse,
-    StartRunResponse, SubmitFormResponse, SuggestFlowResponse, SuggestFlowStatus,
-    TerminateResourceResponse, UpdateSessionTodosResponse, UpdateSessionTrustResponse,
-    method_descriptor, methods, rpc,
+    GetSessionTimelineAfterRequest, GetSessionTimelineAroundRequest,
+    GetSessionTimelineBeforeRequest, GetSessionTimelineItemDetailRequest,
+    GetSessionTimelineTailRequest, GetSessionUpdatesRequest, ImportSessionMessagesResponse,
+    InspectResourceResponse, InstallSuggestedFlowResponse, InterjectSessionResponse, JsonRpcError,
+    JsonRpcRequest, JsonRpcResponse, ListProjectsRequest, ListResourcesResponse,
+    ListSessionsRequest, MethodCapability, MoveSessionResponse, PermissionRpcAction,
+    PermissionRpcScope, PingResponse, ProtocolLimits, ReleaseResourceResponse,
+    ReloadSessionMcpResponse, RenameSessionResponse, RequestId, ResizeTerminalResourceResponse,
+    ResolveCompactReviewResponse, ResolvePromptResponse, RetainResourceResponse, RpcMethod,
+    RpcMethodDescriptor, RunFlowResponse, SanitizeSessionAttachmentsResponse, SendMessageResponse,
+    SetSessionGoalResponse, StartRunResponse, SubmitFormResponse, SuggestFlowResponse,
+    SuggestFlowStatus, TerminateResourceResponse, UpdateSessionTodosResponse,
+    UpdateSessionTrustResponse, method_descriptor, methods, rpc,
 };
 use serde_json::json;
 use std::future::Future;
@@ -151,6 +153,7 @@ pub mod provider_config;
 pub mod run;
 mod session_actor;
 pub mod state;
+mod timeline;
 pub mod unix;
 
 pub use session_actor::{RenameSessionCommit, RunCancellationCommit};
@@ -194,6 +197,11 @@ pub const SUPPORTED_METHODS: &[RpcMethodDescriptor] = &[
     method_descriptor::<rpc::GetEvents>(),
     method_descriptor::<rpc::GetSessionSnapshot>(),
     method_descriptor::<rpc::GetSessionUpdates>(),
+    method_descriptor::<rpc::GetSessionTimelineTail>(),
+    method_descriptor::<rpc::GetSessionTimelineBefore>(),
+    method_descriptor::<rpc::GetSessionTimelineAfter>(),
+    method_descriptor::<rpc::GetSessionTimelineAround>(),
+    method_descriptor::<rpc::GetSessionTimelineItemDetail>(),
     method_descriptor::<rpc::ResolvePrompt>(),
     method_descriptor::<rpc::SubmitForm>(),
     method_descriptor::<rpc::CompactSession>(),
@@ -1261,6 +1269,91 @@ async fn dispatch_as_inner(
             },
             Err(error) => JsonRpcResponse::err(id, error),
         },
+        methods::GET_SESSION_TIMELINE_TAIL => {
+            match parse_params::<rpc::GetSessionTimelineTail>(req.params) {
+                Ok(GetSessionTimelineTailRequest { session_id, budget }) => match state
+                    .session_timeline_tail(&session_id, principal_id, budget)
+                    .await
+                {
+                    Ok(page) => method_response::<rpc::GetSessionTimelineTail>(id, page),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::GET_SESSION_TIMELINE_BEFORE => {
+            match parse_params::<rpc::GetSessionTimelineBefore>(req.params) {
+                Ok(GetSessionTimelineBeforeRequest {
+                    session_id,
+                    before,
+                    budget,
+                }) => match state
+                    .session_timeline_before(&session_id, principal_id, before, budget)
+                    .await
+                {
+                    Ok(page) => method_response::<rpc::GetSessionTimelineBefore>(id, page),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::GET_SESSION_TIMELINE_AFTER => {
+            match parse_params::<rpc::GetSessionTimelineAfter>(req.params) {
+                Ok(GetSessionTimelineAfterRequest {
+                    session_id,
+                    after,
+                    budget,
+                }) => match state
+                    .session_timeline_after(&session_id, principal_id, after, budget)
+                    .await
+                {
+                    Ok(page) => method_response::<rpc::GetSessionTimelineAfter>(id, page),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::GET_SESSION_TIMELINE_AROUND => {
+            match parse_params::<rpc::GetSessionTimelineAround>(req.params) {
+                Ok(GetSessionTimelineAroundRequest {
+                    session_id,
+                    anchor,
+                    budget,
+                }) => match state
+                    .session_timeline_around(&session_id, principal_id, anchor, budget)
+                    .await
+                {
+                    Ok(page) => method_response::<rpc::GetSessionTimelineAround>(id, page),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
+        methods::GET_SESSION_TIMELINE_ITEM_DETAIL => {
+            match parse_params::<rpc::GetSessionTimelineItemDetail>(req.params) {
+                Ok(GetSessionTimelineItemDetailRequest {
+                    session_id,
+                    item_id,
+                }) => match state
+                    .session_timeline_item_detail(&session_id, principal_id, item_id)
+                    .await
+                {
+                    Ok(detail) => method_response::<rpc::GetSessionTimelineItemDetail>(id, detail),
+                    Err(error) => {
+                        JsonRpcResponse::err(id, JsonRpcError::application(error.to_string()))
+                    }
+                },
+                Err(error) => JsonRpcResponse::err(id, error),
+            }
+        }
         methods::LIST_RESOURCES => match parse_params::<rpc::ListResources>(req.params) {
             Ok(params) => match state
                 .session_snapshot(&params.session_id, principal_id)

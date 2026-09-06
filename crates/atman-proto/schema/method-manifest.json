@@ -633,6 +633,91 @@
       }
     },
     {
+      "name": "session.history.tail",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionTimelineTailRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionTimelineTailRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionTimelinePage",
+        "schema": {
+          "$ref": "#/$defs/SessionTimelinePage"
+        }
+      }
+    },
+    {
+      "name": "session.history.before",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionTimelineBeforeRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionTimelineBeforeRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionTimelinePage",
+        "schema": {
+          "$ref": "#/$defs/SessionTimelinePage"
+        }
+      }
+    },
+    {
+      "name": "session.history.after",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionTimelineAfterRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionTimelineAfterRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionTimelinePage",
+        "schema": {
+          "$ref": "#/$defs/SessionTimelinePage"
+        }
+      }
+    },
+    {
+      "name": "session.history.around",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionTimelineAroundRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionTimelineAroundRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionTimelinePage",
+        "schema": {
+          "$ref": "#/$defs/SessionTimelinePage"
+        }
+      }
+    },
+    {
+      "name": "session.history.item_detail",
+      "kind": "query",
+      "revision": 1,
+      "params": {
+        "rust_type": "GetSessionTimelineItemDetailRequest",
+        "schema": {
+          "$ref": "#/$defs/GetSessionTimelineItemDetailRequest"
+        }
+      },
+      "result": {
+        "rust_type": "SessionTimelineItemDetail",
+        "schema": {
+          "$ref": "#/$defs/SessionTimelineItemDetail"
+        }
+      }
+    },
+    {
       "name": "resolve_prompt",
       "kind": "command",
       "revision": 2,

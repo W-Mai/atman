@@ -12,7 +12,8 @@ use atman_proto::{
     ProjectionEventEnvelope, PromptId, PromptResolutionStatus, ResolvePermissionRequestsResponse,
     ResourceId, ResourceKind, ResourceState, ResourceTerminationStatus, ResyncRequired,
     RunCancellationStatus, ServerEvent, SessionId, SessionNotification, SessionProjection,
-    SessionSignal, SessionSummary, TerminalResizeStatus, TrustProjection,
+    SessionSignal, SessionSummary, SessionTimelineBudget, SessionTimelineItemDetail,
+    SessionTimelinePage, TerminalResizeStatus, TimelineCursor, TimelineItemId, TrustProjection,
 };
 use atman_runtime::stream::StreamFrame;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -661,6 +662,71 @@ impl SessionActorHandle {
         crate::projection::redacted_updates(&updates, redactor.as_deref())
     }
 
+    pub async fn timeline_tail(
+        &self,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        let page = request(&self.tx, |reply| Command::TimelineTail { budget, reply }).await??;
+        crate::projection::redacted_timeline_page(&page, self.session.sink().redactor().as_deref())
+    }
+
+    pub async fn timeline_before(
+        &self,
+        before: TimelineCursor,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        let page = request(&self.tx, |reply| Command::TimelineBefore {
+            before,
+            budget,
+            reply,
+        })
+        .await??;
+        crate::projection::redacted_timeline_page(&page, self.session.sink().redactor().as_deref())
+    }
+
+    pub async fn timeline_after(
+        &self,
+        after: TimelineCursor,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        let page = request(&self.tx, |reply| Command::TimelineAfter {
+            after,
+            budget,
+            reply,
+        })
+        .await??;
+        crate::projection::redacted_timeline_page(&page, self.session.sink().redactor().as_deref())
+    }
+
+    pub async fn timeline_around(
+        &self,
+        anchor: TimelineItemId,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        let page = request(&self.tx, |reply| Command::TimelineAround {
+            anchor,
+            budget,
+            reply,
+        })
+        .await??;
+        crate::projection::redacted_timeline_page(&page, self.session.sink().redactor().as_deref())
+    }
+
+    pub async fn timeline_item_detail(
+        &self,
+        item_id: TimelineItemId,
+    ) -> Result<SessionTimelineItemDetail> {
+        let detail = request(&self.tx, |reply| Command::TimelineItemDetail {
+            item_id,
+            reply,
+        })
+        .await??;
+        crate::projection::redacted_timeline_item_detail(
+            &detail,
+            self.session.sink().redactor().as_deref(),
+        )
+    }
+
     pub async fn subscribe_updates(
         &self,
     ) -> Result<(
@@ -865,6 +931,29 @@ enum Command {
         after_cursor: EventCursor,
         limit: Option<usize>,
         reply: oneshot::Sender<Result<GetSessionUpdatesResponse>>,
+    },
+    TimelineTail {
+        budget: SessionTimelineBudget,
+        reply: oneshot::Sender<Result<SessionTimelinePage>>,
+    },
+    TimelineBefore {
+        before: TimelineCursor,
+        budget: SessionTimelineBudget,
+        reply: oneshot::Sender<Result<SessionTimelinePage>>,
+    },
+    TimelineAfter {
+        after: TimelineCursor,
+        budget: SessionTimelineBudget,
+        reply: oneshot::Sender<Result<SessionTimelinePage>>,
+    },
+    TimelineAround {
+        anchor: TimelineItemId,
+        budget: SessionTimelineBudget,
+        reply: oneshot::Sender<Result<SessionTimelinePage>>,
+    },
+    TimelineItemDetail {
+        item_id: TimelineItemId,
+        reply: oneshot::Sender<Result<SessionTimelineItemDetail>>,
     },
     SubscribeUpdates {
         reply: oneshot::Sender<broadcast::Receiver<ProjectionEventEnvelope>>,
@@ -1277,6 +1366,55 @@ impl SessionActor {
                     .map(|()| self.updates_response(after_cursor, limit));
                 let _ = reply.send(result);
             }
+            Command::TimelineTail { budget, reply } => {
+                let result = self.timeline_catalog().map(|catalog| catalog.tail(&budget));
+                let _ = reply.send(result);
+            }
+            Command::TimelineBefore {
+                before,
+                budget,
+                reply,
+            } => {
+                let result = self
+                    .timeline_catalog()
+                    .map(|catalog| catalog.before(before, &budget));
+                let _ = reply.send(result);
+            }
+            Command::TimelineAfter {
+                after,
+                budget,
+                reply,
+            } => {
+                let result = self
+                    .timeline_catalog()
+                    .map(|catalog| catalog.after(after, &budget));
+                let _ = reply.send(result);
+            }
+            Command::TimelineAround {
+                anchor,
+                budget,
+                reply,
+            } => {
+                let result = self
+                    .timeline_catalog()
+                    .and_then(|catalog| catalog.around(anchor, &budget));
+                let _ = reply.send(result);
+            }
+            Command::TimelineItemDetail { item_id, reply } => {
+                let session_id = self.session_id.clone();
+                let result = self.timeline_catalog().and_then(|catalog| {
+                    let item = catalog
+                        .detail(&item_id)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("timeline item not found: {}", item_id.0))?;
+                    Ok(SessionTimelineItemDetail {
+                        session_id,
+                        item_id,
+                        item,
+                    })
+                });
+                let _ = reply.send(result);
+            }
             Command::SubscribeUpdates { reply } => {
                 let _ = reply.send(self.updates_tx.subscribe());
             }
@@ -1315,6 +1453,16 @@ impl SessionActor {
                 let _ = reply.send(result);
             }
         }
+    }
+
+    fn timeline_catalog(&mut self) -> Result<crate::timeline::TimelineCatalog<'_>> {
+        self.refresh_watch_projections();
+        let target_seq = self.session.sink().published_seq();
+        self.catch_up_through(target_seq)?;
+        Ok(crate::timeline::TimelineCatalog::from_projection(
+            self.event_cursor,
+            self.projection.projection(),
+        ))
     }
 
     fn publish(&mut self) {

@@ -1583,10 +1583,34 @@ pub(crate) fn redacted_projection(
     projection: &SessionProjection,
     redactor: Option<&atman_runtime::redact::Redactor>,
 ) -> anyhow::Result<SessionProjection> {
+    redact_json_value(projection, redactor)
+}
+
+pub(crate) fn redacted_timeline_page(
+    page: &atman_proto::SessionTimelinePage,
+    redactor: Option<&atman_runtime::redact::Redactor>,
+) -> anyhow::Result<atman_proto::SessionTimelinePage> {
+    redact_json_value(page, redactor)
+}
+
+pub(crate) fn redacted_timeline_item_detail(
+    detail: &atman_proto::SessionTimelineItemDetail,
+    redactor: Option<&atman_runtime::redact::Redactor>,
+) -> anyhow::Result<atman_proto::SessionTimelineItemDetail> {
+    redact_json_value(detail, redactor)
+}
+
+fn redact_json_value<T>(
+    value: &T,
+    redactor: Option<&atman_runtime::redact::Redactor>,
+) -> anyhow::Result<T>
+where
+    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
     let Some(redactor) = redactor else {
-        return Ok(projection.clone());
+        return Ok(value.clone());
     };
-    let mut value = serde_json::to_value(projection)?;
+    let mut value = serde_json::to_value(value)?;
     redactor.redact_json(&mut value);
     Ok(serde_json::from_value(value)?)
 }

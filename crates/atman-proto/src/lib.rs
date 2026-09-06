@@ -351,6 +351,11 @@ pub mod methods {
     pub const GET_EVENTS: &str = "get_events";
     pub const GET_SESSION_SNAPSHOT: &str = "session.get_snapshot";
     pub const GET_SESSION_UPDATES: &str = "session.get_updates";
+    pub const GET_SESSION_TIMELINE_TAIL: &str = "session.history.tail";
+    pub const GET_SESSION_TIMELINE_BEFORE: &str = "session.history.before";
+    pub const GET_SESSION_TIMELINE_AFTER: &str = "session.history.after";
+    pub const GET_SESSION_TIMELINE_AROUND: &str = "session.history.around";
+    pub const GET_SESSION_TIMELINE_ITEM_DETAIL: &str = "session.history.item_detail";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
     pub const SUBMIT_FORM: &str = "form.submit";
     pub const COMPACT_SESSION: &str = "session.compact";
@@ -404,6 +409,11 @@ pub mod methods {
         super::method_descriptor::<super::rpc::GetEvents>(),
         super::method_descriptor::<super::rpc::GetSessionSnapshot>(),
         super::method_descriptor::<super::rpc::GetSessionUpdates>(),
+        super::method_descriptor::<super::rpc::GetSessionTimelineTail>(),
+        super::method_descriptor::<super::rpc::GetSessionTimelineBefore>(),
+        super::method_descriptor::<super::rpc::GetSessionTimelineAfter>(),
+        super::method_descriptor::<super::rpc::GetSessionTimelineAround>(),
+        super::method_descriptor::<super::rpc::GetSessionTimelineItemDetail>(),
         super::method_descriptor::<super::rpc::ResolvePrompt>(),
         super::method_descriptor::<super::rpc::SubmitForm>(),
         super::method_descriptor::<super::rpc::CompactSession>(),
@@ -1913,6 +1923,41 @@ pub mod rpc {
         Query,
         GetSessionUpdatesRequest,
         GetSessionUpdatesResponse
+    );
+    method!(
+        GetSessionTimelineTail,
+        methods::GET_SESSION_TIMELINE_TAIL,
+        Query,
+        GetSessionTimelineTailRequest,
+        SessionTimelinePage
+    );
+    method!(
+        GetSessionTimelineBefore,
+        methods::GET_SESSION_TIMELINE_BEFORE,
+        Query,
+        GetSessionTimelineBeforeRequest,
+        SessionTimelinePage
+    );
+    method!(
+        GetSessionTimelineAfter,
+        methods::GET_SESSION_TIMELINE_AFTER,
+        Query,
+        GetSessionTimelineAfterRequest,
+        SessionTimelinePage
+    );
+    method!(
+        GetSessionTimelineAround,
+        methods::GET_SESSION_TIMELINE_AROUND,
+        Query,
+        GetSessionTimelineAroundRequest,
+        SessionTimelinePage
+    );
+    method!(
+        GetSessionTimelineItemDetail,
+        methods::GET_SESSION_TIMELINE_ITEM_DETAIL,
+        Query,
+        GetSessionTimelineItemDetailRequest,
+        SessionTimelineItemDetail
     );
     method!(
         ResolvePrompt,

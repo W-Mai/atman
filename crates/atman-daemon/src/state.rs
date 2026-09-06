@@ -8,7 +8,8 @@ use atman_proto::{
     CloseSessionResponse, DaemonGeneration, DeleteSessionResponse, EventCursor, FlowRunId,
     GetSessionUpdatesResponse, ListProjectsResponse, ProjectSummary, PromptId, ResourceState,
     ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SessionCloseStatus, SessionDeleteStatus, SessionId,
-    SessionSnapshot, SessionStatus, SessionSummary,
+    SessionSnapshot, SessionStatus, SessionSummary, SessionTimelineBudget,
+    SessionTimelineItemDetail, SessionTimelinePage, TimelineCursor, TimelineItemId,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -462,6 +463,69 @@ impl DaemonState {
             cursor,
             projection,
         })
+    }
+
+    pub async fn session_timeline_tail(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        self.get_or_load_actor(id, principal)
+            .await?
+            .timeline_tail(budget)
+            .await
+    }
+
+    pub async fn session_timeline_before(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+        before: TimelineCursor,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        self.get_or_load_actor(id, principal)
+            .await?
+            .timeline_before(before, budget)
+            .await
+    }
+
+    pub async fn session_timeline_after(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+        after: TimelineCursor,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        self.get_or_load_actor(id, principal)
+            .await?
+            .timeline_after(after, budget)
+            .await
+    }
+
+    pub async fn session_timeline_around(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+        anchor: TimelineItemId,
+        budget: SessionTimelineBudget,
+    ) -> Result<SessionTimelinePage> {
+        self.get_or_load_actor(id, principal)
+            .await?
+            .timeline_around(anchor, budget)
+            .await
+    }
+
+    pub async fn session_timeline_item_detail(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        principal: &str,
+        item_id: TimelineItemId,
+    ) -> Result<SessionTimelineItemDetail> {
+        self.get_or_load_actor(id, principal)
+            .await?
+            .timeline_item_detail(item_id)
+            .await
     }
 
     pub async fn session_updates(

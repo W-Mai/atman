@@ -208,6 +208,27 @@
       "$ref": "#/$defs/GetSessionUpdatesResponse"
     },
     {
+      "$ref": "#/$defs/GetSessionTimelineTailRequest"
+    },
+    {
+      "$ref": "#/$defs/SessionTimelinePage"
+    },
+    {
+      "$ref": "#/$defs/GetSessionTimelineBeforeRequest"
+    },
+    {
+      "$ref": "#/$defs/GetSessionTimelineAfterRequest"
+    },
+    {
+      "$ref": "#/$defs/GetSessionTimelineAroundRequest"
+    },
+    {
+      "$ref": "#/$defs/GetSessionTimelineItemDetailRequest"
+    },
+    {
+      "$ref": "#/$defs/SessionTimelineItemDetail"
+    },
+    {
       "$ref": "#/$defs/ResolvePromptRequest"
     },
     {
@@ -2086,6 +2107,105 @@
           "$ref": "#/$defs/SessionId"
         }
       }
+    },
+    "GetSessionTimelineAfterRequest": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/SessionTimelineBudget"
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id",
+            "after"
+          ],
+          "properties": {
+            "after": {
+              "$ref": "#/$defs/TimelineCursor"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            }
+          }
+        }
+      ]
+    },
+    "GetSessionTimelineAroundRequest": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/SessionTimelineBudget"
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id",
+            "anchor"
+          ],
+          "properties": {
+            "anchor": {
+              "$ref": "#/$defs/TimelineItemId"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            }
+          }
+        }
+      ]
+    },
+    "GetSessionTimelineBeforeRequest": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/SessionTimelineBudget"
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id",
+            "before"
+          ],
+          "properties": {
+            "before": {
+              "$ref": "#/$defs/TimelineCursor"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            }
+          }
+        }
+      ]
+    },
+    "GetSessionTimelineItemDetailRequest": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "item_id"
+      ],
+      "properties": {
+        "item_id": {
+          "$ref": "#/$defs/TimelineItemId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "GetSessionTimelineTailRequest": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/SessionTimelineBudget"
+        },
+        {
+          "type": "object",
+          "required": [
+            "session_id"
+          ],
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            }
+          }
+        }
+      ]
     },
     "GetSessionUpdatesRequest": {
       "type": "object",
@@ -6786,6 +6906,95 @@
         }
       }
     },
+    "SessionTimelineBudget": {
+      "type": "object",
+      "properties": {
+        "byte_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "minimum": 0
+        },
+        "turn_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "minimum": 0
+        }
+      }
+    },
+    "SessionTimelineItemDetail": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "item_id",
+        "item"
+      ],
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/TranscriptItem"
+        },
+        "item_id": {
+          "$ref": "#/$defs/TimelineItemId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
+    "SessionTimelinePage": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "as_of_cursor",
+        "projection_revision",
+        "older",
+        "newer",
+        "serialized_bytes"
+      ],
+      "properties": {
+        "as_of_cursor": {
+          "$ref": "#/$defs/EventCursor"
+        },
+        "live": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TimelineLiveState"
+            }
+          ]
+        },
+        "newer": {
+          "$ref": "#/$defs/TimelineRemaining"
+        },
+        "older": {
+          "$ref": "#/$defs/TimelineRemaining"
+        },
+        "projection_revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TimelineSegment"
+          }
+        },
+        "serialized_bytes": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      }
+    },
     "SetSessionGoalRequest": {
       "type": "object",
       "required": [
@@ -7167,6 +7376,285 @@
           "$ref": "#/$defs/ResourceTerminationStatus"
         }
       }
+    },
+    "TimelineCursor": {
+      "type": "object",
+      "required": [
+        "seq",
+        "item_id"
+      ],
+      "properties": {
+        "item_id": {
+          "$ref": "#/$defs/TimelineItemId"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "TimelineDetailRef": {
+      "type": "object",
+      "required": [
+        "item_id"
+      ],
+      "properties": {
+        "item_id": {
+          "$ref": "#/$defs/TimelineItemId"
+        }
+      }
+    },
+    "TimelineItem": {
+      "type": "object",
+      "required": [
+        "id",
+        "seq",
+        "kind",
+        "preview"
+      ],
+      "properties": {
+        "detail": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TimelineDetailRef"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/TimelineItemId"
+        },
+        "kind": {
+          "$ref": "#/$defs/TimelineItemKind"
+        },
+        "preview": {
+          "$ref": "#/$defs/TranscriptItem"
+        },
+        "run_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/FlowRunId"
+            }
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "turn_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/TurnId"
+            }
+          ]
+        }
+      }
+    },
+    "TimelineItemId": {
+      "type": "string"
+    },
+    "TimelineItemKind": {
+      "type": "string",
+      "enum": [
+        "message",
+        "diff",
+        "file_edit",
+        "activity_summary",
+        "compaction",
+        "mermaid",
+        "notice",
+        "extension"
+      ]
+    },
+    "TimelineLiveState": {
+      "type": "object",
+      "required": [
+        "lifecycle",
+        "interactions"
+      ],
+      "properties": {
+        "active_turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnId"
+          }
+        },
+        "interactions": {
+          "$ref": "#/$defs/InteractionProjection"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/SessionLifecycle"
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResourceProjection"
+          }
+        }
+      }
+    },
+    "TimelineRemaining": {
+      "type": "object",
+      "required": [
+        "has_more"
+      ],
+      "properties": {
+        "estimated_segments": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "minimum": 0
+        },
+        "has_more": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TimelineSegment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "segment",
+            "type"
+          ],
+          "properties": {
+            "segment": {
+              "$ref": "#/$defs/TimelineTurnSegment"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "turn"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "segment",
+            "type"
+          ],
+          "properties": {
+            "segment": {
+              "$ref": "#/$defs/TimelineSessionSegment"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "session"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "TimelineSegmentId": {
+      "type": "string"
+    },
+    "TimelineSessionSegment": {
+      "type": "object",
+      "required": [
+        "id",
+        "start_seq",
+        "latest_seq",
+        "revision"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TimelineSegmentId"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TimelineItem"
+          }
+        },
+        "latest_seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "start_seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        }
+      }
+    },
+    "TimelineTurnSegment": {
+      "type": "object",
+      "required": [
+        "id",
+        "turn_id",
+        "start_seq",
+        "latest_seq",
+        "revision",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/TimelineSegmentId"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TimelineItem"
+          }
+        },
+        "latest_seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "start_seq": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "#/$defs/TimelineTurnState"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "workflow": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/WorkflowProjection"
+            }
+          ]
+        }
+      }
+    },
+    "TimelineTurnState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "complete"
+      ]
     },
     "TodoMutation": {
       "oneOf": [

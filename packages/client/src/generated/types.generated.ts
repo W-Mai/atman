@@ -69,6 +69,13 @@ export type AtmanDaemonProtocolPayloads =
   | GetSessionSnapshotRequest
   | GetSessionUpdatesRequest
   | GetSessionUpdatesResponse
+  | GetSessionTimelineTailRequest
+  | SessionTimelinePage
+  | GetSessionTimelineBeforeRequest
+  | GetSessionTimelineAfterRequest
+  | GetSessionTimelineAroundRequest
+  | GetSessionTimelineItemDetailRequest
+  | SessionTimelineItemDetail
   | ResolvePromptRequest
   | ResolvePromptResponse
   | SubmitFormRequest
@@ -923,6 +930,48 @@ export type NotificationStack =
       type: 'coalesce'
       [k: string]: unknown
     }
+export type GetSessionTimelineTailRequest = SessionTimelineBudget & {
+  session_id: SessionId
+  [k: string]: unknown
+}
+export type TimelineSegment =
+  | {
+      segment: TimelineTurnSegment
+      type: 'turn'
+      [k: string]: unknown
+    }
+  | {
+      segment: TimelineSessionSegment
+      type: 'session'
+      [k: string]: unknown
+    }
+export type TimelineSegmentId = string
+export type TimelineItemId = string
+export type TimelineItemKind =
+  | 'message'
+  | 'diff'
+  | 'file_edit'
+  | 'activity_summary'
+  | 'compaction'
+  | 'mermaid'
+  | 'notice'
+  | 'extension'
+export type TimelineTurnState = 'active' | 'complete'
+export type GetSessionTimelineBeforeRequest = SessionTimelineBudget & {
+  before: TimelineCursor
+  session_id: SessionId
+  [k: string]: unknown
+}
+export type GetSessionTimelineAfterRequest = SessionTimelineBudget & {
+  after: TimelineCursor
+  session_id: SessionId
+  [k: string]: unknown
+}
+export type GetSessionTimelineAroundRequest = SessionTimelineBudget & {
+  anchor: TimelineItemId
+  session_id: SessionId
+  [k: string]: unknown
+}
 export type PromptResolutionStatus = 'resolved' | 'already_resolved' | 'abandoned' | 'not_found'
 export type FormSubmission =
   | {
@@ -1928,6 +1977,83 @@ export interface ResyncRequired {
   reason: string
   requested_after: EventCursor
   snapshot_revision: Revision
+  [k: string]: unknown
+}
+export interface SessionTimelineBudget {
+  byte_budget?: number | null
+  turn_budget?: number | null
+  [k: string]: unknown
+}
+export interface SessionTimelinePage {
+  as_of_cursor: EventCursor
+  live?: null | TimelineLiveState
+  newer: TimelineRemaining
+  older: TimelineRemaining
+  projection_revision: Revision
+  segments?: TimelineSegment[]
+  serialized_bytes: number
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface TimelineLiveState {
+  active_turns?: TurnId[]
+  interactions: InteractionProjection
+  lifecycle: SessionLifecycle
+  resources?: ResourceProjection[]
+  [k: string]: unknown
+}
+export interface TimelineRemaining {
+  estimated_segments?: number | null
+  has_more: boolean
+  [k: string]: unknown
+}
+export interface TimelineTurnSegment {
+  id: TimelineSegmentId
+  items?: TimelineItem[]
+  latest_seq: number
+  revision: Revision
+  start_seq: number
+  state: TimelineTurnState
+  turn_id: TurnId
+  workflow?: null | WorkflowProjection
+  [k: string]: unknown
+}
+export interface TimelineItem {
+  detail?: null | TimelineDetailRef
+  id: TimelineItemId
+  kind: TimelineItemKind
+  preview: TranscriptItem
+  run_id?: null | FlowRunId
+  seq: number
+  turn_id?: null | TurnId
+  [k: string]: unknown
+}
+export interface TimelineDetailRef {
+  item_id: TimelineItemId
+  [k: string]: unknown
+}
+export interface TimelineSessionSegment {
+  id: TimelineSegmentId
+  items?: TimelineItem[]
+  latest_seq: number
+  revision: Revision
+  start_seq: number
+  [k: string]: unknown
+}
+export interface TimelineCursor {
+  item_id: TimelineItemId
+  seq: number
+  [k: string]: unknown
+}
+export interface GetSessionTimelineItemDetailRequest {
+  item_id: TimelineItemId
+  session_id: SessionId
+  [k: string]: unknown
+}
+export interface SessionTimelineItemDetail {
+  item: TranscriptItem
+  item_id: TimelineItemId
+  session_id: SessionId
   [k: string]: unknown
 }
 export interface ResolvePromptRequest {

@@ -39,6 +39,11 @@ async fn capabilities_are_typed_and_match_the_registry() {
     );
     assert!(capabilities.supports::<atman_proto::rpc::GetSessionSnapshot>());
     assert!(capabilities.supports::<atman_proto::rpc::GetSessionUpdates>());
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionTimelineTail>());
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionTimelineBefore>());
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionTimelineAfter>());
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionTimelineAround>());
+    assert!(capabilities.supports::<atman_proto::rpc::GetSessionTimelineItemDetail>());
     assert!(capabilities.supports::<atman_proto::rpc::RunFlow>());
     assert!(capabilities.supports::<atman_proto::rpc::ListProjects>());
     assert!(capabilities.supports::<atman_proto::rpc::CloseSession>());
@@ -234,6 +239,43 @@ async fn imported_messages_are_canonical_and_command_retries_are_idempotent() {
         .await
         .unwrap();
     assert_eq!(snapshot.projection.transcript.len(), 2);
+
+    let timeline = dispatch(
+        state.clone(),
+        JsonRpcRequest::for_method::<atman_proto::rpc::GetSessionTimelineTail>(
+            3,
+            &atman_proto::GetSessionTimelineTailRequest {
+                session_id: session_id.clone(),
+                budget: atman_proto::SessionTimelineBudget {
+                    turn_budget: Some(1),
+                    byte_budget: None,
+                },
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::GetSessionTimelineTail>()
+    .unwrap();
+    let item = match &timeline.segments[0] {
+        atman_proto::TimelineSegment::Turn { segment } => &segment.items[0],
+        atman_proto::TimelineSegment::Session { segment } => &segment.items[0],
+    };
+    let detail = dispatch(
+        state,
+        JsonRpcRequest::for_method::<atman_proto::rpc::GetSessionTimelineItemDetail>(
+            4,
+            &atman_proto::GetSessionTimelineItemDetailRequest {
+                session_id,
+                item_id: item.id.clone(),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .into_method_output::<atman_proto::rpc::GetSessionTimelineItemDetail>()
+    .unwrap();
+    assert_eq!(detail.item.seq(), item.seq);
 }
 
 #[tokio::test]
