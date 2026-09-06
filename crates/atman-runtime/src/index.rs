@@ -352,6 +352,14 @@ impl AnchorIndex {
             rusqlite::params![session_id],
         )?;
         tx.execute(
+            "DELETE FROM timeline_runs WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM timeline_event_owners WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.execute(
             "DELETE FROM event_index_coverage WHERE session_id = ?",
             rusqlite::params![session_id],
         )?;
@@ -397,14 +405,40 @@ impl AnchorIndex {
             "INSERT OR REPLACE INTO events_fts (rowid, text_content) VALUES (?, ?)",
             rusqlite::params![id, row.text_content],
         )?;
-        if let Some(turn_id) = row.turn_id {
+        if let (Some(turn_id), Some(flow_run_id)) = (row.turn_id, row.flow_run_id) {
+            tx.execute(
+                "INSERT INTO timeline_runs (session_id, flow_run_id, turn_id) VALUES (?, ?, ?) \
+                 ON CONFLICT(session_id, flow_run_id) DO UPDATE SET turn_id = excluded.turn_id",
+                rusqlite::params![row.session_id, flow_run_id, turn_id],
+            )?;
+        }
+        let effective_turn = match row.turn_id {
+            Some(turn_id) => Some(turn_id.to_owned()),
+            None => match row.flow_run_id {
+                Some(flow_run_id) => tx
+                    .query_row(
+                        "SELECT turn_id FROM timeline_runs \
+                         WHERE session_id = ? AND flow_run_id = ?",
+                        rusqlite::params![row.session_id, flow_run_id],
+                        |query| query.get::<_, String>(0),
+                    )
+                    .optional()?,
+                None => None,
+            },
+        };
+        if let Some(turn_id) = effective_turn {
             tx.execute(
                 "INSERT INTO timeline_turns (session_id, turn_id, start_seq, latest_seq) \
                  VALUES (?, ?, ?, ?) \
                  ON CONFLICT(session_id, turn_id) DO UPDATE SET \
                  start_seq = MIN(start_seq, excluded.start_seq), \
                  latest_seq = MAX(latest_seq, excluded.latest_seq)",
-                rusqlite::params![row.session_id, turn_id, row.seq, row.seq],
+                rusqlite::params![row.session_id, &turn_id, row.seq, row.seq],
+            )?;
+            tx.execute(
+                "INSERT INTO timeline_event_owners (session_id, seq, turn_id) VALUES (?, ?, ?) \
+                 ON CONFLICT(session_id, seq) DO UPDATE SET turn_id = excluded.turn_id",
+                rusqlite::params![row.session_id, row.seq, turn_id],
             )?;
         }
         if let Some(boundary) = boundary {
@@ -458,6 +492,54 @@ impl AnchorIndex {
             },
         )?;
         collect(rows)
+    }
+
+    pub fn read_events_for_turns(
+        &self,
+        session_id: &str,
+        turns: &[ProjectTurnRow],
+    ) -> Result<Vec<ProjectEventRow>> {
+        let Some(first_seq) = turns.iter().map(|turn| turn.start_seq).min() else {
+            return Ok(Vec::new());
+        };
+        let latest_seq = turns
+            .iter()
+            .map(|turn| turn.latest_seq)
+            .max()
+            .unwrap_or(first_seq);
+        let mut params = vec![rusqlite::types::Value::from(session_id.to_owned())];
+        let owners = sql_membership(
+            "o.turn_id",
+            turns.iter().map(|turn| turn.turn_id.as_str()),
+            &mut params,
+        );
+        params.push(i64::try_from(first_seq).unwrap_or(i64::MAX).into());
+        params.push(i64::try_from(latest_seq).unwrap_or(i64::MAX).into());
+        let sql = format!(
+            "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
+             FROM events e LEFT JOIN timeline_event_owners o \
+             ON o.session_id = e.session_id AND o.seq = e.seq \
+             WHERE e.session_id = ? AND ({owners} OR \
+             (o.turn_id IS NULL AND e.seq BETWEEN ? AND ?)) ORDER BY e.seq"
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), project_event_row_from)?;
+        collect(rows)
+    }
+
+    pub fn turn_start_for_event(&self, session_id: &str, seq: u64) -> Result<Option<u64>> {
+        let conn = self.conn();
+        let start_seq = conn
+            .query_row(
+                "SELECT t.start_seq FROM timeline_event_owners o \
+                 JOIN timeline_turns t ON t.session_id = o.session_id AND t.turn_id = o.turn_id \
+                 WHERE o.session_id = ? AND o.seq = ?",
+                rusqlite::params![session_id, i64::try_from(seq).unwrap_or(i64::MAX),],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(start_seq.map(|value| value as u64))
     }
 
     pub fn validated_event_coverage(
@@ -817,6 +899,22 @@ CREATE TABLE IF NOT EXISTS timeline_turns (
 CREATE INDEX IF NOT EXISTS timeline_turns_keyset
 ON timeline_turns(session_id, start_seq);
 
+CREATE TABLE IF NOT EXISTS timeline_runs (
+    session_id  TEXT NOT NULL,
+    flow_run_id TEXT NOT NULL,
+    turn_id     TEXT NOT NULL,
+    PRIMARY KEY (session_id, flow_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS timeline_event_owners (
+    session_id TEXT    NOT NULL,
+    seq        INTEGER NOT NULL,
+    turn_id    TEXT    NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS timeline_event_owners_turn
+ON timeline_event_owners(session_id, turn_id, seq);
+
 CREATE TABLE IF NOT EXISTS event_index_coverage (
     session_id  TEXT    PRIMARY KEY,
     seq         INTEGER NOT NULL,
@@ -941,6 +1039,8 @@ mod tests {
             "spec_entries_fts",
             "spec_deviations",
             "spec_deviations_fts",
+            "timeline_event_owners",
+            "timeline_runs",
             "timeline_turns",
         ] {
             assert!(
@@ -1065,6 +1165,44 @@ mod tests {
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].turn_id, "turn-1");
         assert_eq!(before[0].latest_seq, 3);
+    }
+
+    #[test]
+    fn run_owned_events_extend_their_turn_without_leaking_interleaved_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(
+            &idx,
+            "sess-a",
+            1,
+            "flow_start",
+            Some("turn-1"),
+            Some("run-1"),
+            "",
+        );
+        seed_project_event(
+            &idx,
+            "sess-a",
+            2,
+            "flow_start",
+            Some("turn-2"),
+            Some("run-2"),
+            "",
+        );
+        seed_project_event(&idx, "sess-a", 3, "flow_node_end", None, Some("run-1"), "");
+        seed_project_event(&idx, "sess-a", 4, "flow_node_end", None, Some("run-2"), "");
+
+        let first = idx.read_turns_before("sess-a", Some(2), 1).unwrap();
+        assert_eq!(first[0].turn_id, "turn-1");
+        assert_eq!(first[0].latest_seq, 3);
+        let events = idx.read_events_for_turns("sess-a", &first).unwrap();
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(idx.turn_start_for_event("sess-a", 3).unwrap(), Some(1));
+        assert_eq!(idx.turn_start_for_event("sess-a", 2).unwrap(), Some(2));
+        assert_eq!(idx.turn_start_for_event("sess-a", 99).unwrap(), None);
     }
 
     #[test]
