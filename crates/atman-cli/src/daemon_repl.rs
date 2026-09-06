@@ -21,7 +21,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             client.create_session(Some(project_root), None).await?
         }
     };
-    run_boot_flow(&session).await;
+    run_boot_flow(&client, &session).await;
 
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_reader(input_tx);
@@ -55,6 +55,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             continue;
         }
         submit(
+            &client,
             &session,
             trimmed,
             &mut attachments,
@@ -111,7 +112,7 @@ fn spawn_input_reader(input_tx: tokio::sync::mpsc::UnboundedSender<String>) {
     });
 }
 
-async fn run_boot_flow(session: &SessionClient) {
+async fn run_boot_flow(client: &Client, session: &SessionClient) {
     let Ok(config_dir) = atman_runtime::storage::config_dir() else {
         return;
     };
@@ -129,7 +130,7 @@ async fn run_boot_flow(session: &SessionClient) {
         )
         .await;
     match response {
-        Ok(response) => match wait_run(session, &response.run_id).await {
+        Ok(response) => match wait_run(client, session, &response.run_id).await {
             Ok(run) => print_run(&run),
             Err(error) => eprintln!("[atman] boot flow error: {error:#}"),
         },
@@ -138,6 +139,7 @@ async fn run_boot_flow(session: &SessionClient) {
 }
 
 async fn submit(
+    client: &Client,
     session: &SessionClient,
     line: &str,
     attachments: &mut Vec<PathBuf>,
@@ -157,7 +159,7 @@ async fn submit(
     match session.send_message(text, None, images).await {
         Ok(response) => {
             attachments.clear();
-            match wait_run_with_input(session, &response.run_id, input_rx, pushback).await {
+            match wait_run_with_input(client, session, &response.run_id, input_rx, pushback).await {
                 Ok(run) => print_run(&run),
                 Err(error) => eprintln!("error: {error:#}"),
             }
@@ -174,6 +176,7 @@ async fn submit(
 }
 
 async fn wait_run_with_input(
+    client: &Client,
     session: &SessionClient,
     run_id: &FlowRunId,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -181,6 +184,7 @@ async fn wait_run_with_input(
 ) -> Result<RunProjection> {
     loop {
         if let Some(run) = terminal_run(session, run_id) {
+            crate::wait_for_durable_run_events(client, session.session_id(), run_id, &run).await?;
             return Ok(run);
         }
         tokio::select! {
@@ -230,9 +234,14 @@ async fn handle_interjection(session: &SessionClient, run_id: &FlowRunId, input:
     true
 }
 
-async fn wait_run(session: &SessionClient, run_id: &FlowRunId) -> Result<RunProjection> {
+async fn wait_run(
+    client: &Client,
+    session: &SessionClient,
+    run_id: &FlowRunId,
+) -> Result<RunProjection> {
     loop {
         if let Some(run) = terminal_run(session, run_id) {
+            crate::wait_for_durable_run_events(client, session.session_id(), run_id, &run).await?;
             return Ok(run);
         }
         session

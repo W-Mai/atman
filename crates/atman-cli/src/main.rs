@@ -529,7 +529,7 @@ async fn follow_daemon_run(
     if let Some(completed) =
         terminal_run_projection(&session.current().projection().runs, &run.run_id).cloned()
     {
-        wait_for_durable_run_events(client, run, &completed).await?;
+        wait_for_durable_run_events(client, &run.session_id, &run.run_id, &completed).await?;
         return Ok(());
     }
     let Some(mut events) = client
@@ -545,7 +545,7 @@ async fn follow_daemon_run(
         if let Some(completed) =
             terminal_run_projection(&session.current().projection().runs, &run.run_id).cloned()
         {
-            wait_for_durable_run_events(client, run, &completed).await?;
+            wait_for_durable_run_events(client, &run.session_id, &run.run_id, &completed).await?;
             return Ok(());
         }
     }
@@ -584,7 +584,7 @@ async fn wait_daemon_run(
             terminal_run_projection(&session.current().projection().runs, &run.run_id)
         {
             let completed = projection.clone();
-            wait_for_durable_run_events(client, run, &completed).await?;
+            wait_for_durable_run_events(client, &run.session_id, &run.run_id, &completed).await?;
             return Ok(completed);
         }
         session
@@ -597,12 +597,13 @@ async fn wait_daemon_run(
     }
 }
 
-async fn wait_for_durable_run_events(
+pub(crate) async fn wait_for_durable_run_events(
     client: &atman_client::Client,
-    run: &atman_proto::RunFlowResponse,
+    session_id: &atman_proto::SessionId,
+    run_id: &atman_proto::FlowRunId,
     completed: &atman_proto::RunProjection,
 ) -> Result<()> {
-    let run_id = run.run_id.to_string();
+    let run_id = run_id.to_string();
     let turn_id = completed
         .turn_id
         .as_ref()
@@ -613,7 +614,7 @@ async fn wait_for_durable_run_events(
     let mut saw_turn_end = turn_id.is_none();
     loop {
         let page = client
-            .get_events(run.session_id.clone(), Some(cursor))
+            .get_events(session_id.clone(), Some(cursor))
             .await
             .context("wait for durable daemon run events")?;
         if page.has_more && page.next_cursor.0 <= cursor {
