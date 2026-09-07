@@ -1062,7 +1062,9 @@ impl Session {
             project_index,
             global_trust,
             None,
+            false,
         )?
+        .expect("full replay always returns a session")
         .session)
     }
 
@@ -1073,13 +1075,37 @@ impl Session {
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         global_trust: crate::trust::TrustConfig,
     ) -> Result<RestoredSession, SessionOpenError> {
-        Self::restore_existing_with_context_trust_and_observer(
+        Ok(Self::restore_existing_with_context_trust_and_observer(
             root,
             sid,
             redactor,
             project_index,
             global_trust,
             None,
+            false,
+        )?
+        .expect("full replay always returns a session"))
+    }
+
+    /// Restores the active context from its latest indexed checkpoint.
+    ///
+    /// Returns `Ok(None)` when the index cannot prove a complete checkpoint-to-tail
+    /// suffix, allowing callers to fall back to the full replay path.
+    pub fn restore_existing_bounded_with_context_and_trust(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: std::sync::Arc<crate::index::AnchorIndex>,
+        global_trust: crate::trust::TrustConfig,
+    ) -> Result<Option<RestoredSession>, SessionOpenError> {
+        Self::restore_existing_with_context_trust_and_observer(
+            root,
+            sid,
+            redactor,
+            Some(project_index),
+            global_trust,
+            None,
+            true,
         )
     }
 
@@ -1098,7 +1124,9 @@ impl Session {
             project_index,
             global_trust,
             Some(observer),
+            false,
         )?
+        .expect("full replay always returns a session")
         .session)
     }
 
@@ -1109,14 +1137,19 @@ impl Session {
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         global_trust: crate::trust::TrustConfig,
         observer: Option<&mut dyn TranscriptReplayObserver>,
-    ) -> Result<RestoredSession, SessionOpenError> {
-        let restored = Self::restore_existing_with_context_inner(
+        bounded: bool,
+    ) -> Result<Option<RestoredSession>, SessionOpenError> {
+        let Some(restored) = Self::restore_existing_with_context_inner(
             root,
             sid,
             redactor,
             project_index,
             observer,
-        )?;
+            bounded,
+        )?
+        else {
+            return Ok(None);
+        };
         let path = trust_path(&restored.session.dir);
         let trust = if let Some(trust) =
             load_session_trust(&restored.session.dir).map_err(|source| SessionOpenError::Trust {
@@ -1134,7 +1167,7 @@ impl Session {
             global_trust
         };
         restored.session.trust.send_replace(trust);
-        Ok(restored)
+        Ok(Some(restored))
     }
 
     pub fn open_existing_with_context(
@@ -1158,7 +1191,8 @@ impl Session {
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
         observer: Option<&mut dyn TranscriptReplayObserver>,
-    ) -> Result<RestoredSession, SessionOpenError> {
+        bounded: bool,
+    ) -> Result<Option<RestoredSession>, SessionOpenError> {
         let id = SessionId::parse(sid).map_err(|_| SessionOpenError::InvalidId {
             sid: sid.to_string(),
         })?;
@@ -1173,7 +1207,18 @@ impl Session {
             });
         }
         let events_path = dir.join("events.jsonl");
-        let replay = SessionReplay::from_path(&events_path, observer)?;
+        let replay = if bounded {
+            let Some(index) = project_index.as_deref() else {
+                return Ok(None);
+            };
+            let Some(replay) = SessionReplay::from_indexed_checkpoint(&events_path, index, sid)?
+            else {
+                return Ok(None);
+            };
+            replay
+        } else {
+            SessionReplay::from_path(&events_path, observer)?
+        };
         let writer = EventWriter::spawn_full(
             &dir,
             redactor.clone(),
@@ -1251,12 +1296,22 @@ impl Session {
             writer: std::sync::Mutex::new(Some(writer)),
             sink: sink.clone(),
             context: std::sync::Mutex::new(std::sync::Arc::new(ContextState::from_stream(
-                crate::message_stream::MessageStream::with_initial(
-                    events_handle,
-                    view.selection.context_id,
-                    view.compacted,
-                    view.raw,
-                ),
+                if bounded {
+                    crate::message_stream::MessageStream::with_initial_lazy_raw(
+                        events_handle,
+                        view.selection.context_id,
+                        view.compacted,
+                        view.raw,
+                        events_path,
+                    )
+                } else {
+                    crate::message_stream::MessageStream::with_initial(
+                        events_handle,
+                        view.selection.context_id,
+                        view.compacted,
+                        view.raw,
+                    )
+                },
                 compaction,
                 context_sink,
             ))),
@@ -1289,7 +1344,7 @@ impl Session {
             fs_access_mode: Mutex::new(None),
             project_index: std::sync::RwLock::new(project_index),
         };
-        Ok(RestoredSession { session, events })
+        Ok(Some(RestoredSession { session, events }))
     }
 
     pub fn open_ephemeral() -> Self {
@@ -3753,6 +3808,63 @@ mod tests {
             std::sync::Mutex::new(vec![crate::event::EventEnvelope::new(1, checkpoint)]),
         ));
         assert_eq!(&*replay.window(), replacement.as_slice());
+    }
+
+    #[tokio::test]
+    async fn bounded_restore_keeps_hot_window_small_and_full_history_lazy() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = std::sync::Arc::new(
+            crate::index::AnchorIndex::open_project(&dir.path().join("project")).unwrap(),
+        );
+        let session = Session::open_with_context(dir.path(), None, Some(index.clone())).unwrap();
+        let sid = session.id().to_string();
+        let old = Message::user_text(TurnId::now(), "old raw message");
+        session.append_message(old, None);
+        let retained = Message::assistant_text(TurnId::now(), "checkpoint window");
+        session.sink().emit(Event::Checkpoint {
+            session_id: sid.clone(),
+            flow_run_id: None,
+            messages: vec![retained],
+            window_tokens: 4,
+        });
+        session.append_message(Message::user_text(TurnId::now(), "latest suffix"), None);
+        session.flush_writer().await.unwrap();
+        session.shutdown().await;
+        crate::event_log::reader::reset_parse_attempts();
+
+        let restored = Session::restore_existing_bounded_with_context_and_trust(
+            dir.path(),
+            &sid,
+            None,
+            index,
+            crate::trust::TrustConfig::default(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(restored.events.len(), 2);
+        assert_eq!(crate::event_log::reader::parse_attempts(), 0);
+        assert_eq!(
+            restored
+                .session
+                .messages()
+                .iter()
+                .map(Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["checkpoint window", "latest suffix"]
+        );
+        assert_eq!(crate::event_log::reader::parse_attempts(), 0);
+        assert_eq!(
+            restored
+                .session
+                .messages_full()
+                .iter()
+                .map(Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["old raw message", "latest suffix"]
+        );
+        assert_eq!(crate::event_log::reader::parse_attempts(), 3);
+        restored.session.shutdown().await;
     }
 
     #[tokio::test]

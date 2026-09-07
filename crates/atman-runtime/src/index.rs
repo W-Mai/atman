@@ -271,6 +271,71 @@ impl AnchorIndex {
         collect(rows)
     }
 
+    pub fn read_events_before_descending(
+        &self,
+        session_id: &str,
+        before_seq: Option<u64>,
+        limit: usize,
+        filter: EventFilter<'_>,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let conn = self.conn();
+        let mut params = vec![session_id.to_string().into()];
+        let predicate = filter.predicate(&mut params);
+        let sql = format!(
+            "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
+             FROM events WHERE session_id = ? AND {predicate} AND seq < ? \
+             ORDER BY seq DESC LIMIT ?"
+        );
+        params.push(
+            before_seq
+                .map_or(i64::MAX, |seq| i64::try_from(seq).unwrap_or(i64::MAX))
+                .into(),
+        );
+        params.push((limit as i64).into());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), project_event_row_from)?;
+        collect(rows)
+    }
+
+    pub fn read_events_from_seq(
+        &self,
+        session_id: &str,
+        start_seq: u64,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
+             FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, i64::try_from(start_seq).unwrap_or(i64::MAX),],
+            project_event_row_from,
+        )?;
+        collect(rows)
+    }
+
+    pub fn has_contiguous_event_range(
+        &self,
+        session_id: &str,
+        start_seq: u64,
+        end_seq: u64,
+    ) -> Result<bool> {
+        if start_seq > end_seq {
+            return Ok(false);
+        }
+        let conn = self.conn();
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE session_id = ? AND seq BETWEEN ? AND ?",
+            rusqlite::params![
+                session_id,
+                i64::try_from(start_seq).unwrap_or(i64::MAX),
+                i64::try_from(end_seq).unwrap_or(i64::MAX),
+            ],
+            |row| row.get::<_, u64>(0),
+        )?;
+        Ok(count == end_seq.saturating_sub(start_seq).saturating_add(1))
+    }
+
     pub fn count_search_hits(&self, query: &str, session_filter: Option<&str>) -> Result<u64> {
         let conn = self.conn();
         if let Some(pattern) = parse_regex_query(query) {
@@ -2037,6 +2102,35 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].seq, 1);
         assert_eq!(rows[1].seq, 3);
+    }
+
+    #[test]
+    fn event_suffix_queries_preserve_reverse_lookup_and_forward_replay_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        for seq in 1..=6 {
+            let kind = if seq % 2 == 0 {
+                "checkpoint"
+            } else {
+                "user_msg"
+            };
+            seed_project_event(&idx, "s1", seq, kind, None, None, "");
+        }
+
+        let descending = idx
+            .read_events_before_descending("s1", Some(6), 2, EventFilter::Kinds(&["checkpoint"]))
+            .unwrap();
+        assert_eq!(
+            descending.iter().map(|row| row.seq).collect::<Vec<_>>(),
+            [4, 2]
+        );
+        let suffix = idx.read_events_from_seq("s1", 4).unwrap();
+        assert_eq!(
+            suffix.iter().map(|row| row.seq).collect::<Vec<_>>(),
+            [4, 5, 6]
+        );
+        assert!(idx.has_contiguous_event_range("s1", 1, 6).unwrap());
+        assert!(!idx.has_contiguous_event_range("s1", 2, 7).unwrap());
     }
 
     #[test]

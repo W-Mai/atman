@@ -750,15 +750,32 @@ impl RunLauncher {
         let (_, project_index, trust) = self.session_context(state, &project_root)?;
         let repair_index = project_index.clone();
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let restored = atman_runtime::Session::restore_existing_with_context_and_trust(
-            state.data_dir(),
-            &session_id.to_string(),
-            redactor,
-            project_index,
-            trust,
-        )
-        .with_context(|| format!("opening existing session {session_id}"))?;
-        if let Some(index) = repair_index {
+        let loaded = crate::projection_snapshot::load(session_id, &session_dir)?;
+        let bounded = if let Some(index) = project_index.clone() {
+            atman_runtime::Session::restore_existing_bounded_with_context_and_trust(
+                state.data_dir(),
+                &session_id.to_string(),
+                redactor.clone(),
+                index,
+                trust.clone(),
+            )
+            .with_context(|| format!("opening indexed session {session_id}"))?
+        } else {
+            None
+        };
+        let recovered_from_checkpoint = bounded.is_some();
+        let restored = match bounded {
+            Some(restored) => restored,
+            None => atman_runtime::Session::restore_existing_with_context_and_trust(
+                state.data_dir(),
+                &session_id.to_string(),
+                redactor,
+                project_index,
+                trust,
+            )
+            .with_context(|| format!("opening existing session {session_id}"))?,
+        };
+        if !recovered_from_checkpoint && let Some(index) = repair_index {
             let events_path = session_dir.join("events.jsonl");
             let needs_backfill =
                 match index.recover_event_coverage(&session_id.to_string(), &events_path) {
@@ -778,7 +795,6 @@ impl RunLauncher {
                 eprintln!("warning: failed to backfill timeline index for {session_id}: {error:#}");
             }
         }
-        let loaded = crate::projection_snapshot::load(session_id, &session_dir)?;
         let recovered_without_snapshot = loaded.is_none();
         let (mut projection, mut event_cursor) = match loaded {
             Some(loaded) => (loaded.projector, loaded.event_cursor),
@@ -813,7 +829,7 @@ impl RunLauncher {
                 .0
                 .saturating_sub(previous_revision),
         );
-        if recovered_without_snapshot {
+        if recovered_without_snapshot && !recovered_from_checkpoint {
             match futures::executor::block_on(restored.session.flush_writer()) {
                 Some(watermark) => {
                     if let Err(error) = crate::projection_snapshot::save(

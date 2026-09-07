@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::compaction::is_compaction_summary;
@@ -50,6 +51,8 @@ struct Acc {
     full_raw: Vec<(u64, Message)>,
     full_positions: HashMap<u64, usize>,
     replayed: usize,
+    raw_replayed: usize,
+    raw_complete: bool,
     projection_revision: u64,
     ownership: FlowOwnership,
     full_cache: Arc<Vec<Message>>,
@@ -60,6 +63,7 @@ pub struct MessageStream {
     context_id: Option<ContextId>,
     events: Arc<Mutex<Vec<EventEnvelope>>>,
     acc: Mutex<Acc>,
+    raw_source: Option<PathBuf>,
 }
 
 impl MessageStream {
@@ -74,6 +78,8 @@ impl MessageStream {
                 full_raw: Vec::new(),
                 full_positions: HashMap::new(),
                 replayed: 0,
+                raw_replayed: 0,
+                raw_complete: true,
                 projection_revision: 0,
                 ownership: FlowOwnership::default(),
                 full_cache: Arc::clone(&empty),
@@ -82,6 +88,7 @@ impl MessageStream {
                     start: 0,
                 },
             }),
+            raw_source: None,
         }
     }
 
@@ -90,6 +97,26 @@ impl MessageStream {
         context_id: Option<ContextId>,
         compacted: Vec<(u64, Message)>,
         raw: Vec<(u64, Message)>,
+    ) -> Self {
+        Self::with_initial_state(events, context_id, compacted, raw, None)
+    }
+
+    pub(crate) fn with_initial_lazy_raw(
+        events: Arc<Mutex<Vec<EventEnvelope>>>,
+        context_id: Option<ContextId>,
+        compacted: Vec<(u64, Message)>,
+        raw: Vec<(u64, Message)>,
+        raw_source: PathBuf,
+    ) -> Self {
+        Self::with_initial_state(events, context_id, compacted, raw, Some(raw_source))
+    }
+
+    fn with_initial_state(
+        events: Arc<Mutex<Vec<EventEnvelope>>>,
+        context_id: Option<ContextId>,
+        compacted: Vec<(u64, Message)>,
+        raw: Vec<(u64, Message)>,
+        raw_source: Option<PathBuf>,
     ) -> Self {
         let full: Arc<Vec<Message>> = Arc::new(raw.iter().map(|(_, msg)| msg.clone()).collect());
         let window_messages: Arc<Vec<Message>> =
@@ -114,11 +141,14 @@ impl MessageStream {
                 full_raw: raw,
                 full_positions,
                 replayed: 0,
+                raw_replayed: 0,
+                raw_complete: raw_source.is_none(),
                 projection_revision,
                 ownership: FlowOwnership::default(),
                 full_cache: full,
                 window_cache: window,
             }),
+            raw_source,
         }
     }
 
@@ -143,7 +173,9 @@ impl MessageStream {
             replay.compacted,
             replay.raw,
         );
-        stream.acc.get_mut().expect("acc poisoned").replayed = history.len();
+        let acc = stream.acc.get_mut().expect("acc poisoned");
+        acc.replayed = history.len();
+        acc.raw_replayed = history.len();
         Ok(stream)
     }
 
@@ -175,13 +207,17 @@ impl MessageStream {
             base: Some(base),
             inheritance,
         });
-        let mut stream = Self::with_initial(
+        let raw_source = self.raw_source.clone();
+        let mut stream = Self::with_initial_state(
             self.events.clone(),
             Some(context_id),
             compacted,
             acc.full_raw.clone(),
+            raw_source,
         );
-        stream.acc.get_mut().expect("acc poisoned").replayed = batch.records().len();
+        let child_acc = stream.acc.get_mut().expect("acc poisoned");
+        child_acc.replayed = batch.records().len();
+        child_acc.raw_replayed = batch.records().len();
         drop(batch);
         (stream, sink)
     }
@@ -201,6 +237,7 @@ impl MessageStream {
     pub fn full_messages(&self) -> Arc<Vec<Message>> {
         let events = self.events.lock().expect("events poisoned");
         let mut acc = self.acc.lock().expect("acc poisoned");
+        self.materialize_full_raw_locked(&events, &mut acc);
         self.ensure_fresh_locked(&events, &mut acc);
         Arc::clone(&acc.full_cache)
     }
@@ -213,7 +250,7 @@ impl MessageStream {
     }
 
     fn ensure_fresh_locked(&self, events: &[EventEnvelope], acc: &mut Acc) {
-        if acc.replayed >= events.len() {
+        if acc.replayed >= events.len() && acc.raw_replayed >= events.len() {
             return;
         }
         let mut compacted_changed = false;
@@ -233,6 +270,11 @@ impl MessageStream {
                 &mut acc.compacted,
                 &mut acc.compacted_positions,
             );
+        }
+        for ev in &events[acc.raw_replayed..] {
+            if ev.context_id != self.context_id {
+                continue;
+            }
             if let Some((message, flow_run_id)) = ev.event.context_message()
                 && crate::projection::message_window::message_belongs_to_root(
                     flow_run_id,
@@ -253,6 +295,7 @@ impl MessageStream {
             }
         }
         acc.replayed = events.len();
+        acc.raw_replayed = events.len();
 
         if compacted_changed {
             let compacted = acc
@@ -280,6 +323,50 @@ impl MessageStream {
         if compacted_changed || full_changed {
             acc.projection_revision = acc.projection_revision.saturating_add(1);
         }
+    }
+
+    fn materialize_full_raw_locked(&self, events: &[EventEnvelope], acc: &mut Acc) {
+        if acc.raw_complete {
+            return;
+        }
+        let Some(path) = &self.raw_source else {
+            acc.raw_complete = true;
+            return;
+        };
+        let loaded = (|| -> std::io::Result<Vec<(u64, Message)>> {
+            let mut history = crate::event_log::reader::read_event_envelopes(path)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let disk_seq = history.last().map(|event| event.seq).unwrap_or(0);
+            history.extend(events.iter().filter(|event| event.seq > disk_seq).cloned());
+            let through_seq = history.iter().map(|event| event.seq).max().unwrap_or(0);
+            let target = match &self.context_id {
+                Some(context_id) => ContextBase::Context {
+                    context_id: context_id.clone(),
+                    through_seq,
+                },
+                None => ContextBase::LegacyRoot { through_seq },
+            };
+            Ok(crate::projection::context::replay_context(history.iter(), &target)?.raw)
+        })();
+        match loaded {
+            Ok(raw) => {
+                acc.full_raw = raw;
+                acc.full_positions =
+                    crate::projection::message_window::message_positions(&acc.full_raw);
+                acc.full_cache = Arc::new(
+                    acc.full_raw
+                        .iter()
+                        .map(|(_, message)| message.clone())
+                        .collect(),
+                );
+                acc.raw_replayed = events.len();
+            }
+            Err(error) => crate::notify!(
+                warn,
+                "could not materialize complete raw message history: {error}"
+            ),
+        }
+        acc.raw_complete = true;
     }
 }
 
@@ -1079,6 +1166,79 @@ mod tests {
         assert_eq!(full.len(), 2);
         assert_eq!(full[0].text_concat(), "dead user");
         assert_eq!(full[1].text_concat(), "dead assistant");
+    }
+
+    #[test]
+    fn bounded_stream_materializes_lossless_raw_history_only_when_requested() {
+        let turn = TurnId::now();
+        let old = Message::user_text(turn.clone(), "old raw message");
+        let retained = Message::assistant_text(turn.clone(), "retained window message");
+        let latest = Message::user_text(turn, "latest raw message");
+        let history = [
+            EventEnvelope::new(
+                1,
+                Event::UserMsg {
+                    turn_id: old.turn_id.clone(),
+                    flow_run_id: None,
+                    message: old,
+                },
+            ),
+            EventEnvelope::new(
+                2,
+                Event::Checkpoint {
+                    session_id: "session".into(),
+                    flow_run_id: None,
+                    messages: vec![retained.clone()],
+                    window_tokens: 8,
+                },
+            ),
+            EventEnvelope::new(
+                3,
+                Event::UserMsg {
+                    turn_id: latest.turn_id.clone(),
+                    flow_run_id: None,
+                    message: latest.clone(),
+                },
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(
+            &path,
+            history
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let stream = MessageStream::with_initial_lazy_raw(
+            Arc::new(Mutex::new(Vec::new())),
+            None,
+            vec![(2, retained), (3, latest.clone())],
+            vec![(3, latest)],
+            path,
+        );
+
+        assert!(!stream.acc.lock().unwrap().raw_complete);
+        assert_eq!(
+            stream
+                .window()
+                .iter()
+                .map(Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["retained window message", "latest raw message"]
+        );
+        assert!(!stream.acc.lock().unwrap().raw_complete);
+        assert_eq!(
+            stream
+                .full_messages()
+                .iter()
+                .map(Message::text_concat)
+                .collect::<Vec<_>>(),
+            ["old raw message", "latest raw message"]
+        );
+        assert!(stream.acc.lock().unwrap().raw_complete);
     }
 
     #[test]

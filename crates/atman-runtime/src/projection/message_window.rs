@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-use crate::event::{self, Event, FlowRunId};
+use crate::event::{self, Event, EventEnvelope, FlowRunId};
 #[cfg(test)]
 use crate::event_log::reader::parse_json_lines;
 use crate::event_log::reader::read_event_envelopes;
@@ -218,11 +218,15 @@ pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, Sess
 
 pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
+    Ok(all_messages_with_seq(&envelopes))
+}
+
+pub(crate) fn all_messages_with_seq(envelopes: &[EventEnvelope]) -> Vec<(u64, Message)> {
     let spawned_flow_ids =
         FlowOwnership::from_events(envelopes.iter().map(|env| &env.event)).spawned;
     let mut messages = Vec::new();
     let mut positions = HashMap::new();
-    for env in &envelopes {
+    for env in envelopes {
         if let Some((message, flow_run_id)) = env.event.context_message()
             && message_belongs_to_root(flow_run_id, &spawned_flow_ids)
         {
@@ -237,7 +241,7 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
             apply_attachment_degradation(&mut messages, &positions, patch);
         }
     }
-    Ok(messages)
+    messages
 }
 
 #[cfg(test)]

@@ -116,6 +116,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Large-session runtime recovery** — daemon actors restore the active message window from the latest indexed checkpoint instead of replaying the complete event log. Explicit full-history reads remain lossless and materialize lazily, while recent-turn context reads use bounded indexed pages.
+
 - **Tail-first session browsing** — bounded timeline reads validate the indexed log tail without walking every event sequence, and read-only history attachment no longer starts a competing full actor replay in the background.
 
 - **Bounded recovery and history ordering** — cold session recovery persists a covered projection snapshot, indexed tail reads avoid replaying complete logs, inline notices retain their timeline position, and search or prepend reconciliation preserves the visible anchor without changing the model context.

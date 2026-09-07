@@ -130,7 +130,7 @@ pub(crate) fn context_snapshot_from_records(
     context_snapshot_from_selected(records.iter().map(|record| &record.envelope), selection)
 }
 
-fn context_snapshot_from_selected<'a>(
+pub(crate) fn context_snapshot_from_selected<'a>(
     events: impl Iterator<Item = &'a EventEnvelope> + Clone,
     selection: &crate::projection::context::ContextSelection,
 ) -> ContextSnapshot {

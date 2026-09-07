@@ -236,9 +236,9 @@ impl Tool for MemoryRecentTurns {
     fn description(&self) -> Option<&str> {
         Some(
             "Return the last N Message values (user + assistant + tool_result) from the \
-             current session's event log so a flow can hand the code agent a sliding \
-             history window. `items` remain lossless; `excerpt_chars` additionally returns \
-             a bounded recent-first text excerpt. Reads from disk; cost O(events file size).",
+             current session so a flow can hand the code agent a sliding history window. \
+             `items` remain lossless; `excerpt_chars` additionally returns a bounded \
+             recent-first text excerpt.",
         )
     }
 
@@ -280,7 +280,16 @@ impl Tool for MemoryRecentTurns {
                 }
                 return Ok(recent_turns_value(0, 0, Vec::new(), excerpt_chars));
             }
-            if let Some(context) = ctx.context() {
+            let bound_context = ctx.context();
+            let uses_active_session_context =
+                ctx.session_runtime()
+                    .zip(bound_context)
+                    .is_some_and(|(session, context)| {
+                        std::sync::Arc::ptr_eq(&session.context(), context)
+                    });
+            if (!uses_active_session_context || ctx.history_store.is_none())
+                && let Some(context) = bound_context
+            {
                 let msgs = context.messages_full();
                 let (total, recent) = crate::history_store::recent_turn_messages(&msgs, n);
                 if let Some(cb) = &ctx.on_memory_recent {

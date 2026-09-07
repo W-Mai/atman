@@ -217,6 +217,35 @@ where
     ))
 }
 
+/// Replays a bounded suffix whose first selected record is a complete checkpoint.
+///
+/// The checkpoint already materializes inherited ancestry, so callers only need
+/// to prove the selected context identity and supply later records in sequence.
+pub(crate) fn replay_checkpoint_suffix(
+    events: &[EventEnvelope],
+    context_id: Option<ContextId>,
+) -> io::Result<ContextReplay> {
+    let through_seq = events.iter().map(|event| event.seq).max().unwrap_or(0);
+    let selection = ContextSelection {
+        context_id: context_id.clone(),
+        cutoffs: HashMap::from([(context_id, through_seq)]),
+    };
+    let checkpoint = events
+        .iter()
+        .find(|event| selection.includes(event))
+        .ok_or_else(|| invalid("checkpoint suffix is empty"))?;
+    match &checkpoint.event {
+        Event::Checkpoint { flow_run_id, .. }
+            if checkpoint.context_id.is_some() || flow_run_id.is_none() => {}
+        _ => {
+            return Err(invalid(
+                "checkpoint suffix does not start at a root checkpoint",
+            ));
+        }
+    }
+    Ok(replay_selected_context(events.iter(), selection))
+}
+
 fn replay_selected_context<'a>(
     events: impl Iterator<Item = &'a EventEnvelope> + Clone,
     selection: ContextSelection,
@@ -322,6 +351,32 @@ mod tests {
             .iter()
             .map(|(_, message)| message.text_concat())
             .collect()
+    }
+
+    #[test]
+    fn checkpoint_suffix_replays_materialized_prefix_without_lineage_history() {
+        let sink = EventSink::new();
+        let context_id = ContextId::now();
+        let scoped = sink.clone().with_context(context_id.clone());
+        let retained = Message::user_text(TurnId::now(), "retained checkpoint message");
+        scoped.emit(Event::Checkpoint {
+            session_id: "session".into(),
+            flow_run_id: None,
+            messages: vec![retained],
+            window_tokens: 12,
+        });
+        push(&scoped, "new suffix", None);
+        push(&sink, "other context", None);
+
+        let replay =
+            replay_checkpoint_suffix(&sink.snapshot_envelopes(), Some(context_id)).unwrap();
+
+        assert_eq!(
+            texts(replay.window()),
+            ["retained checkpoint message", "new suffix"]
+        );
+        assert_eq!(texts(&replay.raw), ["new suffix"]);
+        assert!(replay.checkpoint_epoch.is_some());
     }
 
     #[tokio::test]

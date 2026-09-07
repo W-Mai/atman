@@ -302,6 +302,40 @@ impl HistoryStore for HistoryStoreImpl {
     }
 
     fn recent(&self, n: usize) -> Result<(u64, u64, Vec<Message>), RuntimeError> {
+        if let (Some(index), Some(session_id)) = (&self.project_index, &self.current_session_id) {
+            let message_count = index
+                .count_events(session_id, EventFilter::Messages(&[]))
+                .map_err(|error| {
+                    RuntimeError::ToolFailed(format!("memory.recent_turns count: {error}"))
+                })?;
+            let turn_count = index
+                .count_turns_before(session_id, None)
+                .map_err(|error| {
+                    RuntimeError::ToolFailed(format!("memory.recent_turns turns: {error}"))
+                })?;
+            let turns = index
+                .read_turns_before(session_id, None, n)
+                .map_err(|error| {
+                    RuntimeError::ToolFailed(format!("memory.recent_turns page: {error}"))
+                })?;
+            let rows = index
+                .read_events_for_turns(session_id, &turns, None)
+                .map_err(|error| {
+                    RuntimeError::ToolFailed(format!("memory.recent_turns events: {error}"))
+                })?;
+            let envelopes = rows
+                .into_iter()
+                .map(|row| serde_json::from_str::<EventEnvelope>(&row.payload))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    RuntimeError::ToolFailed(format!("memory.recent_turns decode: {error}"))
+                })?;
+            let items = crate::projection::message_window::all_messages_with_seq(&envelopes)
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect();
+            return Ok((message_count, turn_count, items));
+        }
         let msgs = if let Some(session) = &self.session {
             session.messages_full().to_vec()
         } else if let Some(session_id) = &self.current_session_id {
