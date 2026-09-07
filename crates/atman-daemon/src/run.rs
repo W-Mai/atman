@@ -858,7 +858,8 @@ impl RunLauncher {
         let Some(index) = project_index else {
             return Ok(None);
         };
-        let Some(coverage) = index.recover_event_coverage(&session_id.to_string(), &events_path)?
+        let Some(coverage) =
+            index.recover_timeline_coverage(&session_id.to_string(), &events_path)?
         else {
             return Ok(None);
         };

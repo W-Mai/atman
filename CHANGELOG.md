@@ -116,6 +116,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Tail-first session browsing** — bounded timeline reads validate the indexed log tail without walking every event sequence, and read-only history attachment no longer starts a competing full actor replay in the background.
+
 - **Bounded recovery and history ordering** — cold session recovery persists a covered projection snapshot, indexed tail reads avoid replaying complete logs, inline notices retain their timeline position, and search or prepend reconciliation preserves the visible anchor without changing the model context.
 
 - **Shared interaction presentation** — auto-resolved permission audits stay out of approval modals, concurrent decisions converge through one terminal result, and workflow updates preserve each client's collapsed or expanded state.

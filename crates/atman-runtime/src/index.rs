@@ -677,7 +677,44 @@ impl AnchorIndex {
         session_id: &str,
         events_path: &Path,
     ) -> Result<Option<EventIndexCoverage>> {
-        let (mut coverage, max_seq, indexed_payload) = {
+        let Some(mut coverage) = self.validated_event_tail(session_id, events_path)? else {
+            return Ok(None);
+        };
+        coverage.start_seq = self.contiguous_event_suffix_start(session_id, coverage.seq)?;
+        Ok(Some(coverage))
+    }
+
+    /// Validates the indexed log boundary without walking every indexed sequence.
+    ///
+    /// Timeline pagination only needs a trustworthy tail watermark and the oldest
+    /// indexed sequence. Full contiguous coverage remains available through
+    /// [`Self::validated_event_coverage`] for repair paths.
+    pub fn validated_timeline_coverage(
+        &self,
+        session_id: &str,
+        events_path: &Path,
+    ) -> Result<Option<EventIndexCoverage>> {
+        let Some(mut coverage) = self.validated_event_tail(session_id, events_path)? else {
+            return Ok(None);
+        };
+        coverage.start_seq = {
+            let conn = self.conn();
+            conn.query_row(
+                "SELECT MIN(seq) FROM events WHERE session_id = ?",
+                rusqlite::params![session_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .map_or(coverage.seq, |seq| seq as u64)
+        };
+        Ok(Some(coverage))
+    }
+
+    fn validated_event_tail(
+        &self,
+        session_id: &str,
+        events_path: &Path,
+    ) -> Result<Option<EventIndexCoverage>> {
+        let (coverage, max_seq, indexed_payload) = {
             let conn = self.conn();
             let coverage = conn
                 .query_row(
@@ -747,7 +784,6 @@ impl AnchorIndex {
         if hasher.finalize().to_hex().as_str() != coverage.line_digest {
             return Ok(None);
         }
-        coverage.start_seq = self.contiguous_event_suffix_start(session_id, coverage.seq)?;
         Ok(Some(coverage))
     }
 
@@ -779,15 +815,38 @@ impl AnchorIndex {
         session_id: &str,
         events_path: &Path,
     ) -> Result<Option<EventIndexCoverage>> {
-        if let Some(coverage) = self.validated_event_coverage(session_id, events_path)? {
-            return Ok(Some(coverage));
+        if !self.recover_event_tail(session_id, events_path)? {
+            return Ok(None);
+        }
+        self.validated_event_coverage(session_id, events_path)
+    }
+
+    /// Recovers the tail boundary used by timeline pagination without a full
+    /// sequence-contiguity scan.
+    pub fn recover_timeline_coverage(
+        &self,
+        session_id: &str,
+        events_path: &Path,
+    ) -> Result<Option<EventIndexCoverage>> {
+        if !self.recover_event_tail(session_id, events_path)? {
+            return Ok(None);
+        }
+        self.validated_timeline_coverage(session_id, events_path)
+    }
+
+    fn recover_event_tail(&self, session_id: &str, events_path: &Path) -> Result<bool> {
+        if self
+            .validated_event_tail(session_id, events_path)?
+            .is_some()
+        {
+            return Ok(true);
         }
         let Some(line) = last_event_log_line(events_path)? else {
-            return Ok(None);
+            return Ok(false);
         };
         let envelope = match serde_json::from_slice::<crate::event::EventEnvelope>(&line.payload) {
             Ok(envelope) => envelope,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(false),
         };
         let indexed_payload = {
             let conn = self.conn();
@@ -797,20 +856,20 @@ impl AnchorIndex {
                 |row| row.get::<_, Option<i64>>(0),
             )?;
             if max_seq.map(|seq| seq as u64) != Some(envelope.seq) {
-                return Ok(None);
+                return Ok(false);
             }
             conn.query_row(
                 "SELECT payload FROM events WHERE session_id = ? AND seq = ?",
-                rusqlite::params![session_id, i64::try_from(envelope.seq).unwrap_or(i64::MAX),],
+                rusqlite::params![session_id, i64::try_from(envelope.seq).unwrap_or(i64::MAX)],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
         };
         let Some(indexed_payload) = indexed_payload else {
-            return Ok(None);
+            return Ok(false);
         };
         if indexed_payload.as_bytes() != line.payload {
-            return Ok(None);
+            return Ok(false);
         }
         let line_digest = blake3::hash(&line.payload).to_hex().to_string();
         {
@@ -832,7 +891,7 @@ impl AnchorIndex {
                 ],
             )?;
         }
-        self.validated_event_coverage(session_id, events_path)
+        Ok(true)
     }
 
     pub fn find_project_events_around(
@@ -1665,6 +1724,64 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn timeline_coverage_validates_the_tail_without_scanning_for_internal_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_path = dir.path().join("events.jsonl");
+        let first = r#"{"type":"turn_start","turn_id":"00000000-0000-0000-0000-000000000001","seq":1,"ts":"2026-07-05T00:00:00Z"}"#;
+        let last = r#"{"type":"turn_end","turn_id":"00000000-0000-0000-0000-000000000001","seq":3,"ts":"2026-07-05T00:00:01Z"}"#;
+        let durable = format!("{first}\n{last}\n");
+        std::fs::write(&events_path, durable.as_bytes()).unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        for (seq, kind, payload) in [(1, "turn_start", first), (3, "turn_end", last)] {
+            idx.insert_project_event_raw(ProjectEventInsert {
+                session_id: "sess-a",
+                seq,
+                ts: "2026-07-05T00:00:00Z",
+                kind,
+                turn_id: Some("00000000-0000-0000-0000-000000000001"),
+                flow_run_id: None,
+                text_content: "",
+                payload_json: payload,
+            })
+            .unwrap();
+        }
+        let line_start = first.len() as u64 + 1;
+        let digest = blake3::hash(last.as_bytes()).to_hex().to_string();
+        idx.insert_project_event_at_boundary(
+            ProjectEventInsert {
+                session_id: "sess-a",
+                seq: 3,
+                ts: "2026-07-05T00:00:01Z",
+                kind: "turn_end",
+                turn_id: Some("00000000-0000-0000-0000-000000000001"),
+                flow_run_id: None,
+                text_content: "",
+                payload_json: last,
+            },
+            EventLogBoundary {
+                line_start,
+                line_end: line_start + last.len() as u64,
+                log_offset: durable.len() as u64,
+                line_digest: &digest,
+            },
+        )
+        .unwrap();
+
+        let timeline = idx
+            .validated_timeline_coverage("sess-a", &events_path)
+            .unwrap()
+            .unwrap();
+        let repair = idx
+            .validated_event_coverage("sess-a", &events_path)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(timeline.start_seq, 1);
+        assert_eq!(timeline.seq, 3);
+        assert_eq!(repair.start_seq, 3);
     }
 
     #[test]

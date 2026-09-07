@@ -484,10 +484,7 @@ impl DaemonState {
             )
             .await
         {
-            Ok(Some(page)) => {
-                self.warm_session_actor(id.clone(), principal.to_owned());
-                return Ok(page);
-            }
+            Ok(Some(page)) => return Ok(page),
             Ok(None) => {}
             Err(error) => eprintln!(
                 "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
@@ -600,10 +597,7 @@ impl DaemonState {
             )
             .await
         {
-            Ok(Some(page)) => {
-                self.warm_session_actor(id.clone(), principal.to_owned());
-                return Ok(page);
-            }
+            Ok(Some(page)) => return Ok(page),
             Ok(None) => {}
             Err(error) => eprintln!(
                 "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
@@ -1379,15 +1373,6 @@ impl DaemonState {
                 .context("join session replay task")?
         })
         .await
-    }
-
-    fn warm_session_actor(self: &std::sync::Arc<Self>, session_id: SessionId, principal: String) {
-        let state = self.clone();
-        drop(tokio::spawn(async move {
-            if let Err(error) = state.get_or_load_actor(&session_id, &principal).await {
-                eprintln!("warning: background session replay failed for {session_id}: {error:#}");
-            }
-        }));
     }
 
     pub(crate) async fn terminate_resource(
@@ -2260,6 +2245,58 @@ mod tests {
             serde_json::to_vec(&session.sink().snapshot_envelopes()).unwrap(),
             events_before
         );
+    }
+
+    #[tokio::test]
+    async fn indexed_timeline_tail_does_not_warm_a_session_actor() {
+        let root = tempfile::tempdir().unwrap();
+        let project_root = root.path().join("project");
+        let config_dir = root.path().join("config");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[storage]\nscope = \"global\"\n",
+        )
+        .unwrap();
+        let launcher = Arc::new(
+            crate::run::RunLauncher::new(project_root.clone(), Some(config_dir), None).unwrap(),
+        );
+        let state = Arc::new(DaemonState::new(data_dir));
+        state.set_launcher(launcher.clone());
+        let session_id = launcher
+            .create_session(state.clone(), project_root.to_str(), None, "owner")
+            .await
+            .unwrap();
+        let session = state
+            .authorized_actor(&session_id, "owner")
+            .unwrap()
+            .runtime_session();
+        let turn_id = atman_runtime::event::TurnId::now();
+        session.append_message(
+            atman_runtime::message::Message::user_text(turn_id, "recent"),
+            None,
+        );
+        session.flush_writer().await.unwrap();
+        assert!(state.unload_session_if_idle(&session_id).await.unwrap());
+        assert!(state.authorized_actor(&session_id, "owner").is_none());
+
+        let page = state
+            .session_timeline_tail(
+                &session_id,
+                "owner",
+                SessionTimelineBudget {
+                    turn_budget: Some(1),
+                    byte_budget: Some(64 * 1024),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.segments.len(), 1);
+        tokio::task::yield_now().await;
+        assert!(state.authorized_actor(&session_id, "owner").is_none());
     }
 
     #[tokio::test]
