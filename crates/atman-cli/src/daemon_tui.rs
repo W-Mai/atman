@@ -102,8 +102,8 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             bookmarks.insert(session_id, bookmark);
         }
         let Some(next) = next else {
-            let summary = load_exit_summary(&client, &summary_session).await;
             drop(_terminal_guard);
+            let summary = load_exit_summary(&client, &summary_session).await;
             print!("{}", exit_summary_card(&summary));
             return Ok(());
         };
