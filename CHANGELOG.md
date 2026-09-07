@@ -42,7 +42,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
-- **Bounded session timeline** — the TUI attaches to a bounded tail of complete turns, loads older history through keyset pages, jumps around indexed search results, retains per-session viewport bookmarks, and fetches heavy tool or diff details only when opened.
+- **Bounded session timeline** — the TUI attaches to a bounded tail of complete turns, loads older history through keyset pages, shows animated loading and remaining-turn feedback, jumps around indexed search results, retains per-session viewport bookmarks, and fetches heavy tool or diff details only when opened.
 
 - **Session-scoped runtime hosts** — each loaded session owns one actor, runtime generation, MCP supervisor, and provider lifecycle shared by concurrent runs without sharing invocation environments. Idle actors flush and unload independently while the daemon remains available to other clients.
 

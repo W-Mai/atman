@@ -49,6 +49,8 @@ pub(crate) async fn run_frames(
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
+    app.has_older_history = handle.initial_has_older_history;
+    app.older_history_segments = handle.initial_older_history_segments;
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
@@ -190,7 +192,8 @@ pub(crate) async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.app.has_active_animation() => {
+            _ = animation_tick.tick(), if app.app.has_active_animation()
+                || app.wm.modals.session_switcher.loading => {
                 app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
             _ = intro_tick.tick(), if app.app.startup_intro.is_some() => {
@@ -1293,6 +1296,7 @@ pub(crate) async fn run_frames(
                     app.app.scroll_up((-scroll_delta) as u32);
                     if app.app.near_history_start()
                         && let Some(tx) = &handle.control_tx
+                        && app.app.begin_older_history_load()
                     {
                         let _ = tx.send(TuiControl::LoadOlderHistory);
                     }
@@ -1531,6 +1535,9 @@ pub(crate) async fn run_frames(
                                 scope,
                             );
                             app.wm.modals.session_switcher.open_with(rows, scope);
+                            app.wm.modals.session_switcher.set_loading(
+                                app.app.session.is_none() && handle.control_tx.is_some(),
+                            );
                         }
                         TuiCommand::SessionListUpdated { scope, rows } => {
                             app.app.session_rows = rows.clone();
@@ -1540,6 +1547,12 @@ pub(crate) async fn run_frames(
                                 app.wm.modals.session_switcher.set_rows(rows);
                             }
                         }
+                        TuiCommand::OlderHistoryLoadFinished {
+                            has_more,
+                            remaining_segments,
+                        } => app
+                            .app
+                            .finish_older_history_load(has_more, remaining_segments),
                         TuiCommand::HistorySearchResult { query, result } => {
                             match result {
                                 Ok(hits) => {
@@ -1977,6 +1990,10 @@ fn apply_daemon_update(
     match update {
         atman_client::SessionUpdate::Reset(next) => {
             let next = *next;
+            app.app.finish_older_history_load(
+                next.has_older_history(),
+                next.estimated_older_segments(),
+            );
             let projected =
                 crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
             *state = Some(next);
@@ -2000,7 +2017,10 @@ fn apply_daemon_update(
         atman_client::SessionUpdate::HistoryPrepended {
             state: next,
             loaded_items: _,
+            remaining_segments,
         } => {
+            app.app
+                .finish_older_history_load(next.has_older_history(), remaining_segments);
             app.app.preserve_scroll_for_history_change();
             let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
                 &next,
@@ -2015,6 +2035,8 @@ fn apply_daemon_update(
             loaded_items: _,
             has_more,
         } => {
+            app.app.has_older_history = next.has_older_history();
+            app.app.older_history_segments = next.estimated_older_segments();
             if has_more || !app.app.follow_tail {
                 app.app.preserve_scroll_for_history_change();
             }
@@ -2030,6 +2052,10 @@ fn apply_daemon_update(
             state: next,
             anchor_seq,
         } => {
+            app.app.finish_older_history_load(
+                next.has_older_history(),
+                next.estimated_older_segments(),
+            );
             let projected =
                 crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
             *state = Some(next);

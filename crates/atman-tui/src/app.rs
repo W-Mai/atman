@@ -899,6 +899,9 @@ pub struct AppState {
     pub scroll_offset: u32,
     pub follow_tail: bool,
     preserve_scroll_on_prepend: bool,
+    pub history_loading: bool,
+    pub has_older_history: bool,
+    pub older_history_segments: Option<u64>,
     pub should_quit: bool,
     pub streaming: bool,
     pub was_streaming: bool,
@@ -1928,7 +1931,23 @@ impl AppState {
     }
 
     pub fn has_active_animation(&self) -> bool {
-        self.items.has_active_animation()
+        self.items.has_active_animation() || self.history_loading
+    }
+
+    pub fn begin_older_history_load(&mut self) -> bool {
+        if self.history_loading || !self.has_older_history {
+            return false;
+        }
+        self.history_loading = true;
+        self.mark_visual_dirty();
+        true
+    }
+
+    pub fn finish_older_history_load(&mut self, has_more: bool, remaining_segments: Option<u64>) {
+        self.history_loading = false;
+        self.has_older_history = has_more;
+        self.older_history_segments = remaining_segments;
+        self.mark_visual_dirty();
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -4638,6 +4657,20 @@ mod tests {
             atman_runtime::model_registry::remove_provider_catalog("test-codex");
             atman_runtime::model_registry::remove_provider_catalog("test-compatible");
         }
+    }
+
+    #[test]
+    fn older_history_load_is_single_flight_and_drives_animation() {
+        let mut app = AppState::new("session".into(), None);
+        app.has_older_history = true;
+
+        assert!(app.begin_older_history_load());
+        assert!(!app.begin_older_history_load());
+        assert!(app.has_active_animation());
+
+        app.finish_older_history_load(true, Some(12));
+        assert!(!app.history_loading);
+        assert_eq!(app.older_history_segments, Some(12));
     }
 
     #[test]

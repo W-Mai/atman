@@ -264,6 +264,10 @@ pub enum TuiCommand {
         scope: session_switcher::SessionScope,
         rows: Vec<SessionPickerRow>,
     },
+    OlderHistoryLoadFinished {
+        has_more: bool,
+        remaining_segments: Option<u64>,
+    },
     HistorySearchResult {
         query: String,
         result: Result<Vec<history_search_modal::HistoryHit>, String>,
@@ -396,6 +400,8 @@ pub struct TuiHandle {
     pub boot_toasts: Vec<app::ToastNote>,
     pub initial_transcript_bookmark: Option<app::TranscriptBookmark>,
     pub transcript_bookmark_tx: Option<tokio::sync::oneshot::Sender<app::TranscriptBookmark>>,
+    pub initial_has_older_history: bool,
+    pub initial_older_history_segments: Option<u64>,
 }
 
 impl TuiHandle {
@@ -439,6 +445,8 @@ impl TuiHandle {
             boot_toasts: Vec::new(),
             initial_transcript_bookmark: None,
             transcript_bookmark_tx: None,
+            initial_has_older_history: false,
+            initial_older_history_segments: None,
         }
     }
 
@@ -481,6 +489,8 @@ impl TuiHandle {
             boot_toasts: Vec::new(),
             initial_transcript_bookmark: None,
             transcript_bookmark_tx: None,
+            initial_has_older_history: state.has_older_history(),
+            initial_older_history_segments: state.estimated_older_segments(),
         }
     }
 }

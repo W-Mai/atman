@@ -62,6 +62,7 @@ impl SessionSortMode {
 #[derive(Default)]
 pub struct SessionSwitcher {
     pub open: bool,
+    pub loading: bool,
     pub scope: SessionScope,
     pub all_rows: Vec<SessionPickerRow>,
     pub rows: Vec<SessionPickerRow>,
@@ -99,11 +100,17 @@ impl SessionSwitcher {
     pub fn set_rows(&mut self, rows: Vec<SessionPickerRow>) {
         self.all_rows = rows;
         self.selected = 0;
+        self.loading = false;
         self.rebuild_view();
+    }
+
+    pub fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
     }
 
     pub fn close(&mut self) {
         self.open = false;
+        self.loading = false;
         self.rows.clear();
         self.all_rows.clear();
         self.filter.clear();
@@ -406,12 +413,35 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         } else {
             area.height
         };
+        if self.loading {
+            let loading_area = Rect {
+                x: area.x.saturating_add(2),
+                y: area.y,
+                width: area.width.saturating_sub(4),
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(
+                        "{}  refreshing sessions…",
+                        crate::output::spinner_char(app.animation_frame)
+                    ),
+                    Style::default().fg(t.subtle_fg.into()),
+                )))
+                .style(Style::default().bg(t.modal_bg.into())),
+                loading_area,
+            );
+        }
         if self.rows.is_empty() {
-            let hint = match self.scope {
-                SessionScope::Project => {
-                    "no sessions found in this project · press Tab to see all projects"
+            let hint = if self.loading {
+                String::new()
+            } else {
+                match self.scope {
+                    SessionScope::Project => {
+                        "no sessions found in this project · press Tab to see all projects".into()
+                    }
+                    SessionScope::All => "no other sessions exist yet".into(),
                 }
-                SessionScope::All => "no other sessions exist yet",
             };
             let empty_area = Rect {
                 x: area.x.saturating_add(1),
@@ -630,6 +660,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 let rows = request_session_rows(app, tx, new_scope);
                 self.scope = new_scope;
                 self.set_rows(rows);
+                self.loading = app.session.is_none() && tx.is_some();
             }
             KeyAction::Submit => {
                 if let Some(row) = self.rows.get(self.selected) {
@@ -701,6 +732,18 @@ mod tests {
             updated_at: updated.into(),
             goal: goal.map(|s| s.into()),
         }
+    }
+
+    #[test]
+    fn receiving_session_rows_ends_the_loading_state() {
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(Vec::new(), SessionScope::Project);
+        switcher.set_loading(true);
+
+        switcher.set_rows(vec![row("session", 1)]);
+
+        assert!(!switcher.loading);
+        assert_eq!(switcher.rows.len(), 1);
     }
 
     #[test]

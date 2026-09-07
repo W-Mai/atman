@@ -98,6 +98,8 @@ pub struct SessionState {
     transcript_revision: u64,
     resources_revision: u64,
     bounded_transcript: bool,
+    has_older_history: bool,
+    estimated_older_segments: Option<u64>,
 }
 
 impl SessionState {
@@ -112,6 +114,8 @@ impl SessionState {
             transcript_revision,
             resources_revision: transcript_revision,
             bounded_transcript: false,
+            has_older_history: false,
+            estimated_older_segments: None,
         })
     }
 
@@ -133,6 +137,14 @@ impl SessionState {
 
     pub fn resources_revision(&self) -> u64 {
         self.resources_revision
+    }
+
+    pub fn has_older_history(&self) -> bool {
+        self.has_older_history
+    }
+
+    pub fn estimated_older_segments(&self) -> Option<u64> {
+        self.estimated_older_segments
     }
 
     pub fn apply_updates(
@@ -192,6 +204,7 @@ pub enum SessionUpdate {
     HistoryPrepended {
         state: SessionState,
         loaded_items: usize,
+        remaining_segments: Option<u64>,
     },
     HistoryAppended {
         state: SessionState,
@@ -283,6 +296,7 @@ struct TimelineHistory {
     oldest: Option<TimelineCursor>,
     newest: Option<TimelineCursor>,
     has_older: bool,
+    estimated_older_segments: Option<u64>,
     has_newer: bool,
     segments: VecDeque<TimelineSegment>,
     loaded_items: HashSet<TimelineItemId>,
@@ -294,6 +308,7 @@ struct TimelineHistory {
 pub struct HistoryLoadOutcome {
     pub loaded_items: usize,
     pub has_more: bool,
+    pub remaining_segments: Option<u64>,
 }
 
 impl SessionClient {
@@ -358,10 +373,13 @@ impl SessionClient {
         let session_id = snapshot.projection.metadata.id.clone();
         let mut state = SessionState::new(snapshot, &capabilities.daemon_generation)?;
         state.bounded_transcript = true;
+        state.has_older_history = page.older.has_more;
+        state.estimated_older_segments = page.older.estimated_segments;
         let history = TimelineHistory {
             oldest: oldest_cursor(&page),
             newest: newest_cursor(&page),
             has_older: page.older.has_more,
+            estimated_older_segments: page.older.estimated_segments,
             has_newer: page.newer.has_more,
             segments: page.segments.clone().into(),
             loaded_items: timeline_item_ids(&page),
@@ -407,6 +425,7 @@ impl SessionClient {
             return Ok(HistoryLoadOutcome {
                 loaded_items: 0,
                 has_more: false,
+                remaining_segments: None,
             });
         };
         let _refresh_guard = self.refresh_lock.lock().await;
@@ -415,6 +434,7 @@ impl SessionClient {
             return Ok(HistoryLoadOutcome {
                 loaded_items: 0,
                 has_more: false,
+                remaining_segments: None,
             });
         };
         let page = self
@@ -438,6 +458,11 @@ impl SessionClient {
         merge_segments(&mut history.segments, &page);
         history.oldest = oldest_cursor(&page).or(history.oldest.clone());
         history.has_older = page.older.has_more;
+        history.estimated_older_segments = page.older.estimated_segments;
+        let history_metadata_changed = next.has_older_history != history.has_older
+            || next.estimated_older_segments != history.estimated_older_segments;
+        next.has_older_history = history.has_older;
+        next.estimated_older_segments = history.estimated_older_segments;
         let trimmed = trim_timeline_window(&mut next, &mut history, TrimEdge::Newest);
         if trimmed {
             history.has_newer = true;
@@ -450,16 +475,18 @@ impl SessionClient {
                 .map(timeline_cursor);
         }
         rebuild_timeline_lookup(&mut history);
-        if loaded_items > 0 || trimmed {
+        if loaded_items > 0 || trimmed || history_metadata_changed {
             self.state.send_replace(next.clone());
             let _ = self.updates.send(SessionUpdate::HistoryPrepended {
                 state: next,
                 loaded_items,
+                remaining_segments: history.estimated_older_segments,
             });
         }
         Ok(HistoryLoadOutcome {
             loaded_items,
             has_more: history.has_older,
+            remaining_segments: history.estimated_older_segments,
         })
     }
 
@@ -468,6 +495,7 @@ impl SessionClient {
             return Ok(HistoryLoadOutcome {
                 loaded_items: 0,
                 has_more: false,
+                remaining_segments: None,
             });
         };
         let _refresh_guard = self.refresh_lock.lock().await;
@@ -476,6 +504,7 @@ impl SessionClient {
             return Ok(HistoryLoadOutcome {
                 loaded_items: 0,
                 has_more: false,
+                remaining_segments: None,
             });
         };
         let page = self
@@ -502,7 +531,10 @@ impl SessionClient {
         let trimmed = trim_timeline_window(&mut next, &mut history, TrimEdge::Oldest);
         if trimmed {
             history.has_older = true;
+            history.estimated_older_segments = None;
         }
+        next.has_older_history = history.has_older;
+        next.estimated_older_segments = history.estimated_older_segments;
         if history.has_newer {
             history.newest = newest_cursor(&page).or(history.newest.clone());
         }
@@ -518,6 +550,7 @@ impl SessionClient {
         Ok(HistoryLoadOutcome {
             loaded_items,
             has_more: history.has_newer,
+            remaining_segments: None,
         })
     }
 
@@ -550,6 +583,8 @@ impl SessionClient {
             &self.client.capabilities().daemon_generation,
         )?;
         next.bounded_transcript = true;
+        next.has_older_history = page.older.has_more;
+        next.estimated_older_segments = page.older.estimated_segments;
         let pending_authoritative_anchor = page
             .live
             .as_ref()
@@ -559,6 +594,7 @@ impl SessionClient {
             oldest: oldest_cursor(&page),
             newest: newest_cursor(&page),
             has_older: page.older.has_more,
+            estimated_older_segments: page.older.estimated_segments,
             has_newer: page.newer.has_more,
             segments: page.segments.clone().into(),
             loaded_items: timeline_item_ids(&page),
@@ -788,10 +824,13 @@ impl SessionClient {
             validate_timeline_page(&page, &self.session_id, expected_generation)?;
             let mut state = SessionState::new(snapshot_from_timeline(&page)?, expected_generation)?;
             state.bounded_transcript = true;
+            state.has_older_history = page.older.has_more;
+            state.estimated_older_segments = page.older.estimated_segments;
             *history.lock().await = TimelineHistory {
                 oldest: oldest_cursor(&page),
                 newest: newest_cursor(&page),
                 has_older: page.older.has_more,
+                estimated_older_segments: page.older.estimated_segments,
                 has_newer: page.newer.has_more,
                 segments: page.segments.clone().into(),
                 loaded_items: timeline_item_ids(&page),
@@ -2494,6 +2533,7 @@ mod tests {
             oldest: oldest_cursor(&page),
             newest: newest_cursor(&page),
             has_older: true,
+            estimated_older_segments: Some(1),
             has_newer: false,
             segments: page.segments.clone().into(),
             loaded_items: timeline_item_ids(&page),

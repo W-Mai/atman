@@ -622,6 +622,23 @@ impl AnchorIndex {
         collect(rows)
     }
 
+    pub fn count_turns_before(
+        &self,
+        session_id: &str,
+        before_start_seq: Option<u64>,
+    ) -> Result<u64> {
+        let conn = self.conn();
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM timeline_turns WHERE session_id = ? AND start_seq < ?",
+            rusqlite::params![
+                session_id,
+                before_start_seq.map_or(i64::MAX, |seq| { i64::try_from(seq).unwrap_or(i64::MAX) }),
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count as u64)
+    }
+
     pub fn read_events_for_turns(
         &self,
         session_id: &str,
@@ -1531,6 +1548,9 @@ mod tests {
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].turn_id, "turn-1");
         assert_eq!(before[0].latest_seq, 3);
+        assert_eq!(idx.count_turns_before("sess-a", None).unwrap(), 3);
+        assert_eq!(idx.count_turns_before("sess-a", Some(8)).unwrap(), 2);
+        assert_eq!(idx.count_turns_before("sess-a", Some(1)).unwrap(), 0);
     }
 
     #[test]

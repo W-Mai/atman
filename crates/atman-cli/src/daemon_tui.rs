@@ -420,6 +420,10 @@ async fn run_session(
                             let _ = command_tx.send(TuiCommand::SessionListUpdated { scope, rows });
                         }
                         Err(error) => {
+                            let _ = command_tx.send(TuiCommand::SessionListUpdated {
+                                scope,
+                                rows: Vec::new(),
+                            });
                             let _ = control_note_tx
                                 .send(TuiNote::Error(format!("could not list sessions: {error}")));
                         }
@@ -689,13 +693,25 @@ async fn run_session(
                         )));
                     }
                 },
-                TuiControl::LoadOlderHistory => {
-                    if let Err(error) = control_session.load_older_history().await {
+                TuiControl::LoadOlderHistory => match control_session.load_older_history().await {
+                    Ok(outcome) => {
+                        let _ = command_tx.send(TuiCommand::OlderHistoryLoadFinished {
+                            has_more: outcome.has_more,
+                            remaining_segments: outcome.remaining_segments,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = command_tx.send(TuiCommand::OlderHistoryLoadFinished {
+                            has_more: control_session.current().has_older_history(),
+                            remaining_segments: control_session
+                                .current()
+                                .estimated_older_segments(),
+                        });
                         let _ = control_note_tx.send(TuiNote::Error(format!(
                             "could not load older session history: {error}"
                         )));
                     }
-                }
+                },
                 TuiControl::LoadNewerHistory => {
                     if let Err(error) = control_session.load_newer_history().await {
                         let _ = control_note_tx.send(TuiNote::Error(format!(

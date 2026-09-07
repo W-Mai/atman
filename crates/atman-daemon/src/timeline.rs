@@ -309,6 +309,7 @@ pub(crate) fn indexed_page(
     if turns.is_empty() {
         return Ok(None);
     }
+    let oldest_selected_turn = turns.iter().map(|turn| turn.start_seq).min();
     let rows = source.index.read_events_for_turns(
         &session_id.to_string(),
         &turns,
@@ -340,7 +341,14 @@ pub(crate) fn indexed_page(
     let mut page = catalog.tail(budget);
     page.older.has_more |= has_older;
     if page.older.has_more {
-        page.older.estimated_segments = None;
+        page.older.estimated_segments = if source.coverage.start_seq == 1 {
+            let indexed_before = source
+                .index
+                .count_turns_before(&session_id.to_string(), oldest_selected_turn)?;
+            Some(indexed_before.saturating_add(page.older.estimated_segments.unwrap_or_default()))
+        } else {
+            None
+        };
     }
     if !matches!(window, IndexedPageWindow::Tail) {
         page.newer.has_more = true;
@@ -921,6 +929,7 @@ mod tests {
         .unwrap();
         assert!(!tail.live.as_ref().unwrap().head_complete);
         assert!(tail.older.has_more);
+        assert_eq!(tail.older.estimated_segments, Some(1));
         assert_eq!(segment_start_seq(&tail.segments[0]), 2);
 
         let newest = &segment_items(&tail.segments[0])[0];
@@ -938,6 +947,8 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(before.live.is_none());
+        assert!(!before.older.has_more);
+        assert_eq!(before.older.estimated_segments, None);
         assert_eq!(segment_start_seq(&before.segments[0]), 1);
 
         let oldest = &segment_items(&before.segments[0])[0];
@@ -984,8 +995,8 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-
         assert!(page.older.has_more);
+        assert_eq!(page.older.estimated_segments, None);
         assert_eq!(page.segments.len(), 1);
         assert_eq!(segment_start_seq(&page.segments[0]), 2);
     }

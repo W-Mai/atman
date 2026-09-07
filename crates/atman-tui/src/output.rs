@@ -96,7 +96,7 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 const DYNAMIC_SPINNER_MARKER: &str = "\u{e000}";
 pub(crate) const LAYOUT_ANIMATION_FRAME: u32 = u32::MAX;
 
-fn spinner_char(frame: u32) -> &'static str {
+pub(crate) fn spinner_char(frame: u32) -> &'static str {
     if frame == LAYOUT_ANIMATION_FRAME {
         DYNAMIC_SPINNER_MARKER
     } else {

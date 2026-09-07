@@ -646,6 +646,9 @@ impl WindowManager {
                 let scope = crate::session_switcher::SessionScope::Project;
                 let rows = crate::key_handler::request_session_rows(app, control_tx, scope);
                 self.modals.session_switcher.open_with(rows, scope);
+                self.modals
+                    .session_switcher
+                    .set_loading(app.session.is_none() && control_tx.is_some());
             }
             PaletteEntryId::NewSession => {
                 if let Some(tx) = control_tx {
@@ -661,6 +664,9 @@ impl WindowManager {
                 let scope = crate::session_switcher::SessionScope::Project;
                 let rows = crate::key_handler::request_session_rows(app, control_tx, scope);
                 self.modals.session_switcher.open_with(rows, scope);
+                self.modals
+                    .session_switcher
+                    .set_loading(app.session.is_none() && control_tx.is_some());
             }
             PaletteEntryId::SearchHistory => {
                 self.modals.history_search.open();

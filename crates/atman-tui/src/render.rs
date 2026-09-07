@@ -267,7 +267,47 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         }),
         l.status,
     );
-    let transcript_area = transcript_content;
+    let show_history_header = !startup_active
+        && !intro_active
+        && (app.has_older_history || app.history_loading)
+        && transcript_content.height > 1;
+    let (history_header, transcript_area) = if show_history_header {
+        (
+            Some(ratatui::layout::Rect {
+                height: 1,
+                ..transcript_content
+            }),
+            ratatui::layout::Rect {
+                y: transcript_content.y.saturating_add(1),
+                height: transcript_content.height.saturating_sub(1),
+                ..transcript_content
+            },
+        )
+    } else {
+        (None, transcript_content)
+    };
+    if let Some(area) = history_header {
+        let t = crate::theme::theme();
+        let marker = if app.history_loading {
+            output::spinner_char(app.animation_frame)
+        } else {
+            "↑"
+        };
+        let label = match (app.history_loading, app.older_history_segments) {
+            (true, Some(remaining)) => {
+                format!("  {marker}  loading earlier history · ~{remaining} turns remain")
+            }
+            (true, None) => format!("  {marker}  loading earlier history"),
+            (false, Some(remaining)) => {
+                format!("  {marker}  ~{remaining} earlier turns · scroll up to load")
+            }
+            (false, None) => format!("  {marker}  earlier history · scroll up to load"),
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(label)).style(Style::default().fg(t.subtle_fg.into())),
+            area,
+        );
+    }
     app.last_transcript_rect = Some(transcript_area);
     let document_visible_rows = layout::document_visible_rows(transcript_area.height);
     let input_overlay_rows = layout::input_overlay_rows(input_rect, transcript_area);
