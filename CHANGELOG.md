@@ -42,7 +42,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
-- **Bounded session timeline** — the TUI attaches to a bounded tail of complete turns, loads older history through keyset pages, shows animated loading and remaining-turn feedback, jumps around indexed search results, retains per-session viewport bookmarks, and fetches heavy tool or diff details only when opened.
+- **Bounded session timeline** — SDK clients attach to a bounded tail of complete turns by default, the TUI reports daemon connection and recent-history loading phases, older history loads through keyset pages with animated remaining-turn feedback, search jumps preserve their anchor, per-session viewport bookmarks survive switching, and heavy tool or diff details load only when opened.
 
 - **Session-scoped runtime hosts** — each loaded session owns one actor, runtime generation, MCP supervisor, and provider lifecycle shared by concurrent runs without sharing invocation environments. Idle actors flush and unload independently while the daemon remains available to other clients.
 
@@ -115,6 +115,8 @@ All notable changes to atman are documented in this file.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
+
+- **Checkpoint flow ownership and cold restore** — bounded session restoration carries spawned-flow ancestry across the checkpoint boundary, skips full projection snapshots, marks child-context transcript items explicitly, and keeps active workflows, revisions, and event cursors intact in recent-first client snapshots. Cold synchronization reads only the durable tail watermark instead of rebuilding the complete transcript.
 
 - **Large-session runtime recovery** — daemon actors restore the active message window from the latest indexed checkpoint instead of replaying the complete event log. Explicit full-history reads remain lossless and materialize lazily, while recent-turn context reads use bounded indexed pages.
 

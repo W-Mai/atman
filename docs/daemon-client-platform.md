@@ -30,7 +30,7 @@ The daemon currently represents one local operator. Authenticated HTTP clients a
 
 ## Synchronization model
 
-Full-state attachment starts with one complete `SessionSnapshot` and its durable cursor. The TUI uses windowed attachment instead: the initial response combines current non-transcript projection state with a bounded timeline tail. Both modes then read ordered projection envelopes after the response cursor and apply each revision atomically. Duplicate events are ignored, a cursor or revision gap triggers a fresh bounded page or snapshot, and a daemon generation change reconnects through the same authoritative boundary.
+SDK attachment starts from a bounded recent tail by default: the initial response combines current non-transcript projection state with the latest timeline segments and a durable cursor. Consumers that intentionally need the complete materialized transcript can request the explicit full attachment API. Both modes then read ordered projection envelopes after the response cursor and apply each revision atomically. Duplicate events are ignored, a cursor or revision gap triggers a fresh bounded page or snapshot, and a daemon generation change reconnects through the same authoritative boundary.
 
 Durable state converges across every transport pairing:
 
@@ -44,15 +44,15 @@ Approval resolution is compare-and-set by request revision. Concurrent decisions
 
 ## Windowed session history
 
-The TUI initially requests the latest 12 complete turn or session segments with a 256 KiB response budget. Scrolling near the top requests an older keyset page, search jumps request a page centered on the matched sequence, and live events patch the loaded segment by stable identity and revision. The client retains up to 48 nearby segments, preserves a per-session visual bookmark across switching, and follows the tail only while the viewport remains at the bottom.
+The TUI initially requests the latest 12 complete turn or session segments with a 256 KiB response budget. Scrolling near the top requests an older keyset page, search jumps request a page centered on the matched sequence, and live events patch the loaded segment by stable identity and revision. The client retains up to 48 nearby segments, preserves a per-session visual bookmark across switching, and tracks the tail only while the viewport remains at the bottom.
 
-Large tool results, terminal output, and diffs are represented by bounded previews and fetched through `session.history.item_detail` only when the row is expanded or opened fullscreen. Pages never split a visual turn merely to satisfy the byte budget; an oversized segment retains structured items with deferred detail. A validated event index locates historical byte ranges without replaying the file from its beginning. Missing or stale index coverage falls back to a bounded contiguous tail and schedules actor-backed recovery, after which the authoritative page replaces the provisional one without moving the requested anchor.
+Large tool results, terminal output, and diffs are represented by bounded previews and fetched through `session.history.item_detail` only when the row is expanded or opened fullscreen. Pages never split a visual turn merely to satisfy the byte budget; an oversized segment retains structured items with deferred detail. A validated event index locates historical ranges without replaying the file from its beginning. Missing or stale index coverage falls back to a reverse JSONL reader that stops after the requested recent turns; history reads do not start a session actor or rebuild the LLM message window.
 
 Timeline navigation is a presentation read model. `session.history.tail`, `before`, `after`, `around`, `search`, and `item_detail` do not append events, select another context head, change checkpoint epochs, run compaction, or alter provider request construction. The model context remains governed by the Session's context journal and checkpoint mechanism independently of which history pages a client has loaded.
 
 ## Rust SDK
 
-The Rust SDK exposes `UnixTransport` and `HttpTransport`, capability negotiation, typed methods, `SessionClient`, projection watches, ephemeral signal subscriptions, and reconnecting synchronization. See [`crates/atman-client/examples/attach.rs`](../crates/atman-client/examples/attach.rs) for attach, subscribe, synchronize, and send behavior.
+The Rust SDK exposes `UnixTransport` and `HttpTransport`, capability negotiation, typed methods, `SessionClient`, projection watches, ephemeral signal subscriptions, and reconnecting synchronization. `Client::attach_session` loads recent history, while `Client::attach_session_full` is reserved for consumers that require a complete transcript. See [`crates/atman-client/examples/attach.rs`](../crates/atman-client/examples/attach.rs) for attach, subscribe, synchronize, and send behavior.
 
 ```bash
 cargo run -p atman-client --example attach -- "$HOME/.local/share/atman/run/atman.sock"
@@ -62,7 +62,7 @@ The data directory can differ by platform or `ATMAN_DATA_DIR`; pass the socket p
 
 ## TypeScript SDK
 
-`@atman/client` exposes `FetchTransport`, `AtmanClient`, generated method and projection types, `SessionClient`, and a framework-neutral subscription store. See [`packages/client/examples/attach.ts`](../packages/client/examples/attach.ts).
+`@atman/client` exposes `FetchTransport`, `AtmanClient`, generated method and projection types, `SessionClient`, and a framework-neutral subscription store. `attachSession` loads recent history, while `attachSessionFull` explicitly materializes the complete transcript. See [`packages/client/examples/attach.ts`](../packages/client/examples/attach.ts).
 
 ```bash
 ATMAN_DAEMON_TOKEN='<token>' bun run packages/client/examples/attach.ts
