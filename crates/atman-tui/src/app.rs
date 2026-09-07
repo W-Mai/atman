@@ -902,6 +902,8 @@ pub struct AppState {
     pub history_loading: bool,
     pub has_older_history: bool,
     pub older_history_segments: Option<u64>,
+    pub newer_history_loading: bool,
+    pub has_newer_history: bool,
     pub should_quit: bool,
     pub streaming: bool,
     pub was_streaming: bool,
@@ -1931,7 +1933,7 @@ impl AppState {
     }
 
     pub fn has_active_animation(&self) -> bool {
-        self.items.has_active_animation() || self.history_loading
+        self.items.has_active_animation() || self.history_loading || self.newer_history_loading
     }
 
     pub fn begin_older_history_load(&mut self) -> bool {
@@ -1947,6 +1949,21 @@ impl AppState {
         self.history_loading = false;
         self.has_older_history = has_more;
         self.older_history_segments = remaining_segments;
+        self.mark_visual_dirty();
+    }
+
+    pub fn begin_newer_history_load(&mut self) -> bool {
+        if self.newer_history_loading || !self.has_newer_history {
+            return false;
+        }
+        self.newer_history_loading = true;
+        self.mark_visual_dirty();
+        true
+    }
+
+    pub fn finish_newer_history_load(&mut self, has_more: bool) {
+        self.newer_history_loading = false;
+        self.has_newer_history = has_more;
         self.mark_visual_dirty();
     }
 
@@ -2140,7 +2157,7 @@ impl AppState {
         let next = self.scroll_offset.saturating_add(rows);
         if next >= max {
             self.scroll_offset = max;
-            self.follow_tail = true;
+            self.follow_tail = !self.has_newer_history;
         } else {
             self.scroll_offset = next;
         }
@@ -2152,7 +2169,7 @@ impl AppState {
     }
 
     pub fn scroll_to_tail(&mut self) {
-        self.follow_tail = true;
+        self.follow_tail = !self.has_newer_history;
     }
 
     pub(crate) fn preserve_scroll_for_history_change(&mut self) {
@@ -4671,6 +4688,26 @@ mod tests {
         app.finish_older_history_load(true, Some(12));
         assert!(!app.history_loading);
         assert_eq!(app.older_history_segments, Some(12));
+    }
+
+    #[test]
+    fn newer_history_load_is_single_flight_and_keeps_the_window_detached_from_tail() {
+        let mut app = AppState::new("session".into(), None);
+        app.has_newer_history = true;
+        app.resolve_scroll(100, 30, 5, 5);
+        app.scroll_up(10);
+
+        assert!(app.begin_newer_history_load());
+        assert!(!app.begin_newer_history_load());
+        assert!(app.has_active_animation());
+
+        app.scroll_down(100);
+        assert_eq!(app.scroll_offset, app.max_scroll_offset());
+        assert!(!app.follow_tail);
+
+        app.finish_newer_history_load(false);
+        app.scroll_down(1);
+        assert!(app.follow_tail);
     }
 
     #[test]

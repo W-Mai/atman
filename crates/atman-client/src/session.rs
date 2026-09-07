@@ -100,6 +100,7 @@ pub struct SessionState {
     bounded_transcript: bool,
     has_older_history: bool,
     estimated_older_segments: Option<u64>,
+    has_newer_history: bool,
 }
 
 impl SessionState {
@@ -116,6 +117,7 @@ impl SessionState {
             bounded_transcript: false,
             has_older_history: false,
             estimated_older_segments: None,
+            has_newer_history: false,
         })
     }
 
@@ -145,6 +147,10 @@ impl SessionState {
 
     pub fn estimated_older_segments(&self) -> Option<u64> {
         self.estimated_older_segments
+    }
+
+    pub fn has_newer_history(&self) -> bool {
+        self.has_newer_history
     }
 
     pub fn apply_updates(
@@ -375,6 +381,7 @@ impl SessionClient {
         state.bounded_transcript = true;
         state.has_older_history = page.older.has_more;
         state.estimated_older_segments = page.older.estimated_segments;
+        state.has_newer_history = page.newer.has_more;
         let history = TimelineHistory {
             oldest: oldest_cursor(&page),
             newest: newest_cursor(&page),
@@ -474,6 +481,7 @@ impl SessionClient {
                 .max_by_key(|item| item.seq)
                 .map(timeline_cursor);
         }
+        next.has_newer_history = history.has_newer;
         rebuild_timeline_lookup(&mut history);
         if loaded_items > 0 || trimmed || history_metadata_changed {
             self.state.send_replace(next.clone());
@@ -535,6 +543,7 @@ impl SessionClient {
         }
         next.has_older_history = history.has_older;
         next.estimated_older_segments = history.estimated_older_segments;
+        next.has_newer_history = history.has_newer;
         if history.has_newer {
             history.newest = newest_cursor(&page).or(history.newest.clone());
         }
@@ -585,6 +594,7 @@ impl SessionClient {
         next.bounded_transcript = true;
         next.has_older_history = page.older.has_more;
         next.estimated_older_segments = page.older.estimated_segments;
+        next.has_newer_history = page.newer.has_more;
         let pending_authoritative_anchor = page
             .live
             .as_ref()
@@ -826,6 +836,7 @@ impl SessionClient {
             state.bounded_transcript = true;
             state.has_older_history = page.older.has_more;
             state.estimated_older_segments = page.older.estimated_segments;
+            state.has_newer_history = page.newer.has_more;
             *history.lock().await = TimelineHistory {
                 oldest: oldest_cursor(&page),
                 newest: newest_cursor(&page),

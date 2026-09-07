@@ -747,13 +747,21 @@ async fn run_session(
                         )));
                     }
                 },
-                TuiControl::LoadNewerHistory => {
-                    if let Err(error) = control_session.load_newer_history().await {
+                TuiControl::LoadNewerHistory => match control_session.load_newer_history().await {
+                    Ok(outcome) => {
+                        let _ = command_tx.send(TuiCommand::NewerHistoryLoadFinished {
+                            has_more: outcome.has_more,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = command_tx.send(TuiCommand::NewerHistoryLoadFinished {
+                            has_more: control_session.current().has_newer_history(),
+                        });
                         let _ = control_note_tx.send(TuiNote::Error(format!(
                             "could not load newer session history: {error}"
                         )));
                     }
-                }
+                },
                 TuiControl::SearchHistory {
                     query,
                     project_wide,

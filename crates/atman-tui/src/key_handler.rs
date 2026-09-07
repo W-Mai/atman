@@ -1288,6 +1288,7 @@ pub(crate) fn handle_key(
             });
             if app.near_history_end()
                 && let Some(tx) = control_tx
+                && app.begin_newer_history_load()
             {
                 let _ = tx.send(TuiControl::LoadNewerHistory);
             }
@@ -1304,7 +1305,9 @@ pub(crate) fn handle_key(
         }
         KeyAction::End => {
             app.scroll_to_tail();
-            if let Some(tx) = control_tx {
+            if let Some(tx) = control_tx
+                && app.begin_newer_history_load()
+            {
                 let _ = tx.send(TuiControl::LoadNewerHistory);
             }
             *interrupt_prompt = None;

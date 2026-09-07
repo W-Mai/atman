@@ -51,6 +51,7 @@ pub(crate) async fn run_frames(
         .with_trust(handle.trust.clone());
     app.has_older_history = handle.initial_has_older_history;
     app.older_history_segments = handle.initial_older_history_segments;
+    app.has_newer_history = handle.initial_has_newer_history;
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
@@ -1304,6 +1305,7 @@ pub(crate) async fn run_frames(
                     app.app.scroll_down(scroll_delta as u32);
                     if app.app.near_history_end()
                         && let Some(tx) = &handle.control_tx
+                        && app.app.begin_newer_history_load()
                     {
                         let _ = tx.send(TuiControl::LoadNewerHistory);
                     }
@@ -1553,6 +1555,9 @@ pub(crate) async fn run_frames(
                         } => app
                             .app
                             .finish_older_history_load(has_more, remaining_segments),
+                        TuiCommand::NewerHistoryLoadFinished { has_more } => {
+                            app.app.finish_newer_history_load(has_more);
+                        }
                         TuiCommand::HistorySearchResult { query, result } => {
                             match result {
                                 Ok(hits) => {
@@ -1994,6 +1999,7 @@ fn apply_daemon_update(
                 next.has_older_history(),
                 next.estimated_older_segments(),
             );
+            app.app.finish_newer_history_load(next.has_newer_history());
             let projected =
                 crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
             *state = Some(next);
@@ -2021,6 +2027,7 @@ fn apply_daemon_update(
         } => {
             app.app
                 .finish_older_history_load(next.has_older_history(), remaining_segments);
+            app.app.has_newer_history = next.has_newer_history();
             app.app.preserve_scroll_for_history_change();
             let projected = crate::projection_adapter::TuiSessionProjection::try_from_state(
                 &next,
@@ -2037,6 +2044,7 @@ fn apply_daemon_update(
         } => {
             app.app.has_older_history = next.has_older_history();
             app.app.older_history_segments = next.estimated_older_segments();
+            app.app.finish_newer_history_load(has_more);
             if has_more || !app.app.follow_tail {
                 app.app.preserve_scroll_for_history_change();
             }
@@ -2056,6 +2064,7 @@ fn apply_daemon_update(
                 next.has_older_history(),
                 next.estimated_older_segments(),
             );
+            app.app.finish_newer_history_load(next.has_newer_history());
             let projected =
                 crate::projection_adapter::TuiSessionProjection::try_from_state(&next, None, None)?;
             *state = Some(next);
