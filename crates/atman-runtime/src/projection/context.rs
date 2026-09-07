@@ -224,6 +224,7 @@ where
 pub(crate) fn replay_checkpoint_suffix(
     events: &[EventEnvelope],
     context_id: Option<ContextId>,
+    ownership: FlowOwnership,
 ) -> io::Result<ContextReplay> {
     let through_seq = events.iter().map(|event| event.seq).max().unwrap_or(0);
     let selection = ContextSelection {
@@ -243,14 +244,28 @@ pub(crate) fn replay_checkpoint_suffix(
             ));
         }
     }
-    Ok(replay_selected_context(events.iter(), selection))
+    Ok(replay_selected_context_with_ownership(
+        events.iter(),
+        selection,
+        ownership,
+    ))
 }
 
 fn replay_selected_context<'a>(
     events: impl Iterator<Item = &'a EventEnvelope> + Clone,
     selection: ContextSelection,
 ) -> ContextReplay {
-    let ownership = FlowOwnership::from_events(events.clone().map(|envelope| &envelope.event));
+    replay_selected_context_with_ownership(events, selection, FlowOwnership::default())
+}
+
+fn replay_selected_context_with_ownership<'a>(
+    events: impl Iterator<Item = &'a EventEnvelope> + Clone,
+    selection: ContextSelection,
+    mut ownership: FlowOwnership,
+) -> ContextReplay {
+    for envelope in events.clone() {
+        ownership.observe(&envelope.event);
+    }
     let no_exclusions = HashSet::new();
     let mut window = Vec::new();
     let mut positions = HashMap::new();
@@ -368,8 +383,12 @@ mod tests {
         push(&scoped, "new suffix", None);
         push(&sink, "other context", None);
 
-        let replay =
-            replay_checkpoint_suffix(&sink.snapshot_envelopes(), Some(context_id)).unwrap();
+        let replay = replay_checkpoint_suffix(
+            &sink.snapshot_envelopes(),
+            Some(context_id),
+            FlowOwnership::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             texts(replay.window()),

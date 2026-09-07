@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use atman_proto::{EventCursor, FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
+use atman_proto::{EventCursor, FlowRunId as ProtoRunId, Revision, SessionId as ProtoSessionId};
 
 use atman_runtime::event::FlowRunId as RuntimeRunId;
 
@@ -25,6 +25,12 @@ pub(crate) struct IndexedTimelineSource {
     pub metadata: Option<atman_runtime::session_meta::SessionMeta>,
     pub trust: atman_runtime::trust::TrustConfig,
     pub coverage: atman_runtime::index::EventIndexCoverage,
+}
+
+pub(crate) struct JsonlTimelineSource {
+    pub events_path: PathBuf,
+    pub metadata: Option<atman_runtime::session_meta::SessionMeta>,
+    pub trust: atman_runtime::trust::TrustConfig,
 }
 
 pub(crate) struct SessionRuntimeHost {
@@ -750,7 +756,6 @@ impl RunLauncher {
         let (_, project_index, trust) = self.session_context(state, &project_root)?;
         let repair_index = project_index.clone();
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let loaded = crate::projection_snapshot::load(session_id, &session_dir)?;
         let bounded = if let Some(index) = project_index.clone() {
             atman_runtime::Session::restore_existing_bounded_with_context_and_trust(
                 state.data_dir(),
@@ -774,6 +779,11 @@ impl RunLauncher {
                 trust,
             )
             .with_context(|| format!("opening existing session {session_id}"))?,
+        };
+        let loaded = if recovered_from_checkpoint {
+            None
+        } else {
+            crate::projection_snapshot::load(session_id, &session_dir)?
         };
         if !recovered_from_checkpoint && let Some(index) = repair_index {
             let events_path = session_dir.join("events.jsonl");
@@ -799,15 +809,19 @@ impl RunLauncher {
         let (mut projection, mut event_cursor) = match loaded {
             Some(loaded) => (loaded.projector, loaded.event_cursor),
             None => {
-                let projection = crate::projection::SessionProjector::from_events(
+                let projection = crate::projection::SessionProjector::from_events_with_ownership(
                     session_id.clone(),
                     restored.session.meta(),
                     &restored.events,
+                    restored.ownership.clone(),
                 );
-                let event_cursor = EventCursor(projection.projection().revision.0);
+                let event_cursor = EventCursor(restored.session.sink().published_seq());
                 (projection, event_cursor)
             }
         };
+        if recovered_from_checkpoint {
+            projection.rebase_after_rebuild(Revision(event_cursor.0.saturating_sub(1)));
+        }
         let previous_revision = projection.projection().revision.0;
         projection.set_metadata(restored.session.meta());
         projection.set_trust(restored.session.trust_config());
@@ -864,31 +878,57 @@ impl RunLauncher {
         state: &DaemonState,
         session_id: &ProtoSessionId,
     ) -> Result<Option<IndexedTimelineSource>> {
-        let session_dir = state.sessions_root().join(session_id.to_string());
-        let events_path = session_dir.join("events.jsonl");
-        if !events_path.is_file() {
-            return Ok(None);
-        }
-        let project_root = self.session_project(state, &session_dir)?.root;
-        let (_, project_index, fallback_trust) = self.session_context(state, &project_root)?;
+        let (source, project_index) = self.timeline_session_facts(state, session_id)?;
         let Some(index) = project_index else {
             return Ok(None);
         };
         let Some(coverage) =
-            index.recover_timeline_coverage(&session_id.to_string(), &events_path)?
+            index.recover_timeline_coverage(&session_id.to_string(), &source.events_path)?
         else {
             return Ok(None);
         };
         index.materialize_timeline_session(&session_id.to_string())?;
+        Ok(Some(IndexedTimelineSource {
+            index,
+            metadata: source.metadata,
+            trust: source.trust,
+            coverage,
+        }))
+    }
+
+    pub(crate) fn jsonl_timeline_source(
+        &self,
+        state: &DaemonState,
+        session_id: &ProtoSessionId,
+    ) -> Result<JsonlTimelineSource> {
+        self.timeline_session_facts(state, session_id)
+            .map(|(source, _)| source)
+    }
+
+    fn timeline_session_facts(
+        &self,
+        state: &DaemonState,
+        session_id: &ProtoSessionId,
+    ) -> Result<(
+        JsonlTimelineSource,
+        Option<Arc<atman_runtime::index::AnchorIndex>>,
+    )> {
+        let session_dir = state.sessions_root().join(session_id.to_string());
+        let events_path = session_dir.join("events.jsonl");
+        anyhow::ensure!(events_path.is_file(), "session not found: {session_id}");
+        let project_root = self.session_project(state, &session_dir)?.root;
+        let (_, project_index, fallback_trust) = self.session_context(state, &project_root)?;
         let metadata = atman_runtime::session_meta::SessionMeta::load(&session_dir);
         let trust =
             atman_runtime::session::load_session_trust(&session_dir)?.unwrap_or(fallback_trust);
-        Ok(Some(IndexedTimelineSource {
-            index,
-            metadata,
-            trust,
-            coverage,
-        }))
+        Ok((
+            JsonlTimelineSource {
+                events_path,
+                metadata,
+                trust,
+            },
+            project_index,
+        ))
     }
 
     fn append_workspace_reconciliation_events(

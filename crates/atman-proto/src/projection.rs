@@ -170,6 +170,8 @@ pub enum TranscriptItem {
         #[serde(default)]
         run_id: Option<FlowRunId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_run_id: Option<FlowRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         context_id: Option<ContextId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint_index: Option<usize>,

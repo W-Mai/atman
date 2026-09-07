@@ -101,6 +101,25 @@ impl SessionProjector {
         projector
     }
 
+    pub(crate) fn from_events_with_ownership(
+        session_id: SessionId,
+        meta: Option<atman_runtime::session_meta::SessionMeta>,
+        events: &[EventEnvelope],
+        ownership: FlowOwnership,
+    ) -> Self {
+        let mut projector = Self::new(session_id, meta);
+        projector.ownership = ownership;
+        for event in events {
+            projector.apply_envelope_inner(event, false);
+        }
+        projector.projection.workflows = projector
+            .workflows
+            .iter()
+            .map(|(_, workflow)| workflow_projection(workflow))
+            .collect();
+        projector
+    }
+
     pub(crate) fn projection(&self) -> &SessionProjection {
         &self.projection
     }
@@ -470,11 +489,18 @@ impl SessionProjector {
         }
 
         if let Some((message, run_id)) = envelope.event.context_message() {
+            let context_run_id = envelope
+                .context_id
+                .is_none()
+                .then(|| self.ownership.spawned_context_run(run_id))
+                .flatten()
+                .map(|id| FlowRunId(id.0));
             self.append_transcript(
                 TranscriptItem::Message {
                     seq: envelope.seq,
                     ts: envelope.ts,
                     run_id: run_id.map(|id| FlowRunId(id.0)),
+                    context_run_id,
                     context_id: envelope
                         .context_id
                         .as_ref()
@@ -826,6 +852,12 @@ impl SessionProjector {
                 ..
             } => {
                 let run_id = flow_run_id.as_ref().map(|id| FlowRunId(id.0));
+                let context_run_id = envelope
+                    .context_id
+                    .is_none()
+                    .then(|| self.ownership.spawned_context_run(flow_run_id.as_ref()))
+                    .flatten()
+                    .map(|id| FlowRunId(id.0));
                 let replacement = messages
                     .iter()
                     .enumerate()
@@ -833,6 +865,7 @@ impl SessionProjector {
                         seq: envelope.seq,
                         ts: envelope.ts,
                         run_id: run_id.clone(),
+                        context_run_id: context_run_id.clone(),
                         context_id: envelope
                             .context_id
                             .as_ref()
@@ -2744,6 +2777,41 @@ mod tests {
             context_id: None,
             event,
         }
+    }
+
+    #[test]
+    fn seeded_flow_ownership_marks_spawned_messages_without_their_start_event() {
+        let session_id = SessionId(uuid::Uuid::now_v7());
+        let turn_id = RuntimeTurnId::now();
+        let child_run = RuntimeRunId::now();
+        let start = Event::FlowStart {
+            run_id: child_run.clone(),
+            turn_id: Some(turn_id.clone()),
+            flow_name: "child".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: true,
+        };
+        let mut ownership = FlowOwnership::default();
+        ownership.observe(&start);
+        let suffix = [envelope(
+            2,
+            chrono::Utc::now(),
+            Event::AssistantMsg {
+                turn_id: turn_id.clone(),
+                flow_run_id: Some(child_run.clone()),
+                message: Message::assistant_text(turn_id, "child output"),
+            },
+        )];
+
+        let projector =
+            SessionProjector::from_events_with_ownership(session_id, None, &suffix, ownership);
+        let Some(TranscriptItem::Message { context_run_id, .. }) =
+            projector.projection().transcript.first()
+        else {
+            panic!("expected projected child message");
+        };
+        assert_eq!(context_run_id.as_ref().map(|id| id.0), Some(child_run.0));
     }
 
     #[test]

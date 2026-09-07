@@ -760,6 +760,7 @@ pub enum SessionOpenError {
 pub struct RestoredSession {
     pub session: Session,
     pub events: Vec<crate::event::EventEnvelope>,
+    pub ownership: crate::projection::message_window::FlowOwnership,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1232,6 +1233,7 @@ impl Session {
         }
         let view = replay.view;
         let events = replay.events;
+        let ownership = replay.ownership;
         if let Some(last_seq) = replay.last_seq {
             sink.restore_seq(last_seq);
             writer.restore_durable_seq(last_seq);
@@ -1344,7 +1346,11 @@ impl Session {
             fs_access_mode: Mutex::new(None),
             project_index: std::sync::RwLock::new(project_index),
         };
-        Ok(Some(RestoredSession { session, events }))
+        Ok(Some(RestoredSession {
+            session,
+            events,
+            ownership,
+        }))
     }
 
     pub fn open_ephemeral() -> Self {

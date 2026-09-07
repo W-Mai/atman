@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use atman_proto::{
     CloseSessionResponse, DaemonGeneration, DeleteSessionResponse, EventCursor, FlowRunId,
     GetSessionUpdatesResponse, ListProjectsResponse, ProjectSummary, PromptId, ResourceState,
-    ResyncRequired, SNAPSHOT_SCHEMA_VERSION, SearchSessionHistoryResponse, SessionCloseStatus,
-    SessionDeleteStatus, SessionId, SessionSnapshot, SessionStatus, SessionSummary,
-    SessionTimelineBudget, SessionTimelineItemDetail, SessionTimelinePage, TimelineCursor,
-    TimelineItemId,
+    ResyncRequired, Revision, SNAPSHOT_SCHEMA_VERSION, SearchSessionHistoryResponse,
+    SessionCloseStatus, SessionDeleteStatus, SessionId, SessionSnapshot, SessionStatus,
+    SessionSummary, SessionTimelineBudget, SessionTimelineItemDetail, SessionTimelinePage,
+    TimelineCursor, TimelineItemId,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -472,8 +472,19 @@ impl DaemonState {
         principal: &str,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
+        anyhow::ensure!(
+            self.can_read_session(id, principal),
+            "permission denied for session"
+        );
         if let Some(actor) = self.loaded_runtime_session(id, principal)? {
             return actor.timeline_tail(budget).await;
+        }
+        if self.launcher().is_none() {
+            return self
+                .get_or_load_actor(id, principal)
+                .await?
+                .timeline_tail(budget)
+                .await;
         }
         match self
             .indexed_timeline_page(
@@ -487,13 +498,12 @@ impl DaemonState {
             Ok(Some(page)) => return Ok(page),
             Ok(None) => {}
             Err(error) => eprintln!(
-                "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
+                "warning: indexed timeline unavailable for session {id}; reading the JSONL tail: {error:#}"
             ),
         }
-        self.get_or_load_actor(id, principal)
+        self.jsonl_timeline_page(id, crate::timeline::IndexedPageWindow::Tail, budget, true)
             .await?
-            .timeline_tail(budget)
-            .await
+            .ok_or_else(|| anyhow::anyhow!("session {id} has no readable timeline events"))
     }
 
     pub async fn session_timeline_before(
@@ -503,8 +513,16 @@ impl DaemonState {
         before: TimelineCursor,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
-        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
-            return actor.timeline_before(before, budget).await;
+        anyhow::ensure!(
+            self.can_read_session(id, principal),
+            "permission denied for session"
+        );
+        if self.launcher().is_none() {
+            return self
+                .get_or_load_actor(id, principal)
+                .await?
+                .timeline_before(before, budget)
+                .await;
         }
         match self
             .indexed_timeline_page(
@@ -518,13 +536,17 @@ impl DaemonState {
             Ok(Some(page)) => return Ok(page),
             Ok(None) => {}
             Err(error) => eprintln!(
-                "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
+                "warning: indexed timeline unavailable for session {id}; reading the JSONL tail: {error:#}"
             ),
         }
-        self.get_or_load_actor(id, principal)
-            .await?
-            .timeline_before(before, budget)
-            .await
+        self.jsonl_timeline_page(
+            id,
+            crate::timeline::IndexedPageWindow::Before(before),
+            budget,
+            false,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session {id} has no earlier timeline events"))
     }
 
     async fn indexed_timeline_page(
@@ -565,6 +587,94 @@ impl DaemonState {
         .context("join indexed timeline task")?
     }
 
+    async fn jsonl_timeline_page(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        window: crate::timeline::IndexedPageWindow,
+        budget: SessionTimelineBudget,
+        include_live: bool,
+    ) -> Result<Option<SessionTimelinePage>> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+        let state = self.clone();
+        let id = id.clone();
+        let daemon_generation = DaemonGeneration(self.daemon_generation.clone());
+        tokio::task::spawn_blocking(move || {
+            let source = launcher.jsonl_timeline_source(&state, &id)?;
+            let Some(page) = crate::timeline::jsonl_page(
+                &source,
+                &id,
+                daemon_generation,
+                window,
+                &budget,
+                include_live,
+            )?
+            else {
+                return Ok(None);
+            };
+            let redactor = crate::bootstrap::build_redactor(launcher.config_dir.as_deref());
+            Ok(Some(crate::projection::redacted_timeline_page(
+                &page,
+                redactor.as_deref(),
+            )?))
+        })
+        .await
+        .context("join reverse timeline task")?
+    }
+
+    async fn indexed_timeline_detail(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        item_id: TimelineItemId,
+    ) -> Result<Option<SessionTimelineItemDetail>> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+        let state = self.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            let Some(source) = launcher.indexed_timeline_source(&state, &id)? else {
+                return Ok(None);
+            };
+            let Some(detail) = crate::timeline::indexed_detail(&source, &id, &item_id)? else {
+                return Ok(None);
+            };
+            let redactor = crate::bootstrap::build_redactor(launcher.config_dir.as_deref());
+            Ok(Some(crate::projection::redacted_timeline_item_detail(
+                &detail,
+                redactor.as_deref(),
+            )?))
+        })
+        .await
+        .context("join indexed timeline detail task")?
+    }
+
+    async fn jsonl_timeline_detail(
+        self: &std::sync::Arc<Self>,
+        id: &SessionId,
+        item_id: TimelineItemId,
+    ) -> Result<Option<SessionTimelineItemDetail>> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+        let state = self.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            let source = launcher.jsonl_timeline_source(&state, &id)?;
+            let Some(detail) = crate::timeline::jsonl_detail(&source, &id, &item_id)? else {
+                return Ok(None);
+            };
+            let redactor = crate::bootstrap::build_redactor(launcher.config_dir.as_deref());
+            Ok(Some(crate::projection::redacted_timeline_item_detail(
+                &detail,
+                redactor.as_deref(),
+            )?))
+        })
+        .await
+        .context("join reverse timeline detail task")?
+    }
+
     pub async fn session_timeline_after(
         self: &std::sync::Arc<Self>,
         id: &SessionId,
@@ -572,6 +682,32 @@ impl DaemonState {
         after: TimelineCursor,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
+        anyhow::ensure!(
+            self.can_read_session(id, principal),
+            "permission denied for session"
+        );
+        if self.launcher().is_none() {
+            return self
+                .get_or_load_actor(id, principal)
+                .await?
+                .timeline_after(after, budget)
+                .await;
+        }
+        match self
+            .indexed_timeline_page(
+                id,
+                crate::timeline::IndexedPageWindow::After(after.clone()),
+                budget.clone(),
+                false,
+            )
+            .await
+        {
+            Ok(Some(page)) => return Ok(page),
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "warning: indexed timeline unavailable for session {id}; using the live timeline: {error:#}"
+            ),
+        }
         self.get_or_load_actor(id, principal)
             .await?
             .timeline_after(after, budget)
@@ -585,28 +721,62 @@ impl DaemonState {
         anchor: TimelineCursor,
         budget: SessionTimelineBudget,
     ) -> Result<SessionTimelinePage> {
-        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
-            return actor.timeline_around(anchor, budget).await;
+        anyhow::ensure!(
+            self.can_read_session(id, principal),
+            "permission denied for session"
+        );
+        if self.launcher().is_none() {
+            return self
+                .get_or_load_actor(id, principal)
+                .await?
+                .timeline_around(anchor, budget)
+                .await;
         }
-        match self
+        let indexed = match self
             .indexed_timeline_page(
                 id,
                 crate::timeline::IndexedPageWindow::Around(anchor.clone()),
                 budget.clone(),
-                true,
+                false,
             )
             .await
         {
-            Ok(Some(page)) => return Ok(page),
-            Ok(None) => {}
-            Err(error) => eprintln!(
-                "warning: indexed timeline unavailable for session {id}; falling back to replay: {error:#}"
-            ),
-        }
-        self.get_or_load_actor(id, principal)
-            .await?
-            .timeline_around(anchor, budget)
-            .await
+            Ok(page) => page,
+            Err(error) => {
+                eprintln!(
+                    "warning: indexed timeline unavailable for session {id}; reading the JSONL tail: {error:#}"
+                );
+                None
+            }
+        };
+        let mut page = match indexed {
+            Some(page) => page,
+            None => self
+                .jsonl_timeline_page(
+                    id,
+                    crate::timeline::IndexedPageWindow::Around(anchor),
+                    budget,
+                    false,
+                )
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("session {id} has no timeline events near the anchor")
+                })?,
+        };
+        let head = self
+            .session_timeline_tail(
+                id,
+                principal,
+                SessionTimelineBudget {
+                    turn_budget: Some(1),
+                    byte_budget: Some(1),
+                },
+            )
+            .await?;
+        page.as_of_cursor = head.as_of_cursor;
+        page.projection_revision = head.projection_revision;
+        page.live = head.live;
+        Ok(page)
     }
 
     pub async fn session_timeline_item_detail(
@@ -615,10 +785,24 @@ impl DaemonState {
         principal: &str,
         item_id: TimelineItemId,
     ) -> Result<SessionTimelineItemDetail> {
-        self.get_or_load_actor(id, principal)
-            .await?
-            .timeline_item_detail(item_id)
-            .await
+        anyhow::ensure!(
+            self.can_read_session(id, principal),
+            "permission denied for session"
+        );
+        if self.launcher().is_none() {
+            return self
+                .get_or_load_actor(id, principal)
+                .await?
+                .timeline_item_detail(item_id)
+                .await;
+        }
+        if let Some(detail) = self.indexed_timeline_detail(id, item_id.clone()).await? {
+            return Ok(detail);
+        }
+        if let Some(detail) = self.jsonl_timeline_detail(id, item_id.clone()).await? {
+            return Ok(detail);
+        }
+        anyhow::bail!("timeline item not found: {}", item_id.0)
     }
 
     pub async fn search_session_history(
@@ -651,12 +835,21 @@ impl DaemonState {
             return actor.lease()?.updates(after_cursor, limit).await;
         }
 
-        let snapshot = self.session_snapshot(id, principal).await?;
-        if after_cursor == snapshot.cursor {
+        anyhow::ensure!(
+            self.can_read_session(id, principal),
+            "permission denied for session"
+        );
+        let (current_cursor, current_revision) = if self.launcher().is_none() {
+            let snapshot = self.session_snapshot(id, principal).await?;
+            (snapshot.cursor, snapshot.projection.revision)
+        } else {
+            self.cold_timeline_position(id)?
+        };
+        if after_cursor == current_cursor {
             return Ok(GetSessionUpdatesResponse {
                 daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
                 events: Vec::new(),
-                next_cursor: snapshot.cursor,
+                next_cursor: current_cursor,
                 has_more: false,
                 resync_required: None,
             });
@@ -664,15 +857,43 @@ impl DaemonState {
         Ok(GetSessionUpdatesResponse {
             daemon_generation: DaemonGeneration(self.daemon_generation.clone()),
             events: Vec::new(),
-            next_cursor: snapshot.cursor,
+            next_cursor: current_cursor,
             has_more: false,
             resync_required: Some(ResyncRequired {
                 requested_after: after_cursor,
-                available_from: snapshot.cursor,
-                snapshot_revision: snapshot.projection.revision,
+                available_from: current_cursor,
+                snapshot_revision: current_revision,
                 reason: "session is idle and has no retained live update window".into(),
             }),
         })
+    }
+
+    fn cold_timeline_position(&self, id: &SessionId) -> Result<(EventCursor, Revision)> {
+        let launcher = self
+            .launcher()
+            .ok_or_else(|| anyhow::anyhow!("run launcher is not configured"))?;
+        let budget = SessionTimelineBudget {
+            turn_budget: Some(1),
+            byte_budget: Some(1),
+        };
+        let daemon_generation = DaemonGeneration(self.daemon_generation.clone());
+        if let Some(source) = launcher.indexed_timeline_source(self, id)? {
+            return Ok((
+                EventCursor(source.coverage.seq),
+                Revision(source.coverage.seq),
+            ));
+        }
+        let source = launcher.jsonl_timeline_source(self, id)?;
+        let page = crate::timeline::jsonl_page(
+            &source,
+            id,
+            daemon_generation,
+            crate::timeline::IndexedPageWindow::Tail,
+            &budget,
+            true,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("session {id} has no readable timeline events"))?;
+        Ok((page.as_of_cursor, page.projection_revision))
     }
 
     pub(crate) async fn subscribe_session_updates(
@@ -2295,6 +2516,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(page.segments.len(), 1);
+        let updates = state
+            .session_updates(&session_id, "owner", page.as_of_cursor, None)
+            .await
+            .unwrap();
+        assert!(updates.events.is_empty());
+        assert!(updates.resync_required.is_none());
         tokio::task::yield_now().await;
         assert!(state.authorized_actor(&session_id, "owner").is_none());
     }

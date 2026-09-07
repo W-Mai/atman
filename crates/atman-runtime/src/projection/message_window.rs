@@ -11,7 +11,7 @@ use crate::provider;
 use crate::session::SessionOpenError;
 
 /// Maps inline runs to the nearest spawned context boundary.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FlowOwnership {
     pub(crate) known: HashSet<FlowRunId>,
     pub(crate) spawned: HashSet<FlowRunId>,
@@ -82,6 +82,11 @@ impl FlowOwnership {
         }
         // Malformed cyclic ancestry must not grant access to the root context.
         run_id.cloned()
+    }
+
+    pub fn spawned_context_run(&self, run_id: Option<&FlowRunId>) -> Option<FlowRunId> {
+        let context_run = self.context_run(run_id)?;
+        self.spawned.contains(&context_run).then_some(context_run)
     }
 }
 
@@ -1916,6 +1921,13 @@ mod tests {
                         serde_json::from_value(serde_json::to_value(&ownership).unwrap()).unwrap();
                     assert_eq!(restored.context_run(Some(run)), expected);
                 }
+                assert_eq!(ownership.spawned_context_run(Some(&root)), None);
+                assert_eq!(ownership.spawned_context_run(Some(&inline)), None);
+                assert_eq!(
+                    ownership.spawned_context_run(Some(&nested)),
+                    Some(child.clone())
+                );
+                assert_eq!(ownership.spawned_context_run(Some(&unknown)), None);
                 for (owner, text) in [
                     (Some(root.clone()), "root"),
                     (Some(inline.clone()), "inline"),

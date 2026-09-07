@@ -109,6 +109,8 @@ pub struct TimelineLiveState {
     #[serde(default)]
     pub active_turns: Vec<TurnId>,
     #[serde(default)]
+    pub active_workflows: Vec<WorkflowProjection>,
+    #[serde(default)]
     pub compactions: Vec<CompactionProjection>,
     #[serde(default)]
     pub goal: Option<String>,

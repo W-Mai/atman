@@ -29,8 +29,8 @@ use futures::{future::BoxFuture, stream::BoxStream};
 
 pub use http::HttpTransport;
 pub use session::{
-    AppliedUpdates, ReconcileError, RefreshOutcome, SessionClient, SessionClientError,
-    SessionState, SessionUpdate,
+    AppliedUpdates, HistoryLoadOutcome, ReconcileError, RefreshOutcome, SessionClient,
+    SessionClientError, SessionState, SessionUpdate,
 };
 #[cfg(unix)]
 pub use unix::UnixTransport;
@@ -238,21 +238,28 @@ impl Client {
         &self,
         session_id: atman_proto::SessionId,
     ) -> Result<SessionClient, SessionClientError> {
-        SessionClient::attach(self.clone(), session_id).await
-    }
-
-    pub async fn attach_session_windowed(
-        &self,
-        session_id: atman_proto::SessionId,
-    ) -> Result<SessionClient, SessionClientError> {
         if self
             .capabilities()
             .supports::<atman_proto::rpc::GetSessionTimelineTail>()
         {
             SessionClient::attach_windowed(self.clone(), session_id).await
         } else {
-            SessionClient::attach(self.clone(), session_id).await
+            SessionClient::attach_full(self.clone(), session_id).await
         }
+    }
+
+    pub async fn attach_session_windowed(
+        &self,
+        session_id: atman_proto::SessionId,
+    ) -> Result<SessionClient, SessionClientError> {
+        self.attach_session(session_id).await
+    }
+
+    pub async fn attach_session_full(
+        &self,
+        session_id: atman_proto::SessionId,
+    ) -> Result<SessionClient, SessionClientError> {
+        SessionClient::attach_full(self.clone(), session_id).await
     }
 
     pub async fn create_session(

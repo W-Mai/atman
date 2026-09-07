@@ -687,6 +687,71 @@ impl AnchorIndex {
         collect(rows)
     }
 
+    pub fn read_turns_after(
+        &self,
+        session_id: &str,
+        after_start_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<ProjectTurnRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT turn_id, start_seq, latest_seq FROM timeline_turns \
+             WHERE session_id = ? AND start_seq > ? \
+             ORDER BY start_seq ASC LIMIT ?",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                session_id,
+                i64::try_from(after_start_seq).unwrap_or(i64::MAX),
+                limit as i64,
+            ],
+            |row| {
+                Ok(ProjectTurnRow {
+                    turn_id: row.get(0)?,
+                    start_seq: row.get::<_, i64>(1)? as u64,
+                    latest_seq: row.get::<_, i64>(2)? as u64,
+                })
+            },
+        )?;
+        collect(rows)
+    }
+
+    pub fn read_event_at_seq(&self, session_id: &str, seq: u64) -> Result<Option<ProjectEventRow>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
+             FROM events WHERE session_id = ? AND seq = ?",
+            rusqlite::params![session_id, i64::try_from(seq).unwrap_or(i64::MAX)],
+            project_event_row_from,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn estimate_turn_event_bytes(
+        &self,
+        session_id: &str,
+        turn: &ProjectTurnRow,
+        through_seq: u64,
+    ) -> Result<u64> {
+        let conn = self.conn();
+        let bytes = conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(e.payload)), 0) FROM events e \
+             LEFT JOIN timeline_event_owners o \
+             ON o.session_id = e.session_id AND o.seq = e.seq \
+             WHERE e.session_id = ? AND e.seq BETWEEN ? AND ? \
+             AND (o.turn_id = ? OR o.turn_id IS NULL)",
+            rusqlite::params![
+                session_id,
+                i64::try_from(turn.start_seq).unwrap_or(i64::MAX),
+                i64::try_from(through_seq.max(turn.latest_seq)).unwrap_or(i64::MAX),
+                &turn.turn_id,
+            ],
+            |row| row.get::<_, u64>(0),
+        )?;
+        Ok(bytes)
+    }
+
     pub fn count_turns_before(
         &self,
         session_id: &str,
@@ -719,20 +784,22 @@ impl AnchorIndex {
             .max()
             .unwrap_or(first_seq)
             .max(include_unowned_through.unwrap_or(first_seq));
-        let mut params = vec![rusqlite::types::Value::from(session_id.to_owned())];
+        let mut params = vec![
+            rusqlite::types::Value::from(session_id.to_owned()),
+            i64::try_from(first_seq).unwrap_or(i64::MAX).into(),
+            i64::try_from(latest_seq).unwrap_or(i64::MAX).into(),
+        ];
         let owners = sql_membership(
             "o.turn_id",
             turns.iter().map(|turn| turn.turn_id.as_str()),
             &mut params,
         );
-        params.push(i64::try_from(first_seq).unwrap_or(i64::MAX).into());
-        params.push(i64::try_from(latest_seq).unwrap_or(i64::MAX).into());
         let sql = format!(
             "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
              FROM events e LEFT JOIN timeline_event_owners o \
              ON o.session_id = e.session_id AND o.seq = e.seq \
-             WHERE e.session_id = ? AND ({owners} OR \
-             (o.turn_id IS NULL AND e.seq BETWEEN ? AND ?)) ORDER BY e.seq"
+             WHERE e.session_id = ? AND e.seq BETWEEN ? AND ? \
+             AND ({owners} OR o.turn_id IS NULL) ORDER BY e.seq"
         );
         let conn = self.conn();
         let mut stmt = conn.prepare(&sql)?;
@@ -1616,6 +1683,25 @@ mod tests {
         assert_eq!(idx.count_turns_before("sess-a", None).unwrap(), 3);
         assert_eq!(idx.count_turns_before("sess-a", Some(8)).unwrap(), 2);
         assert_eq!(idx.count_turns_before("sess-a", Some(1)).unwrap(), 0);
+
+        let after = idx.read_turns_after("sess-a", 1, 2).unwrap();
+        assert_eq!(
+            after,
+            vec![
+                ProjectTurnRow {
+                    turn_id: "turn-2".into(),
+                    start_seq: 4,
+                    latest_seq: 4,
+                },
+                ProjectTurnRow {
+                    turn_id: "turn-3".into(),
+                    start_seq: 8,
+                    latest_seq: 8,
+                },
+            ]
+        );
+        assert_eq!(idx.read_event_at_seq("sess-a", 4).unwrap().unwrap().seq, 4);
+        assert!(idx.read_event_at_seq("sess-a", 99).unwrap().is_none());
     }
 
     #[test]

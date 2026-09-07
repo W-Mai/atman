@@ -312,7 +312,7 @@ pub struct HistoryLoadOutcome {
 }
 
 impl SessionClient {
-    pub(crate) async fn attach(
+    pub(crate) async fn attach_full(
         client: Client,
         session_id: SessionId,
     ) -> Result<Self, SessionClientError> {
@@ -1516,7 +1516,7 @@ fn snapshot_from_timeline(
         .collect::<Vec<_>>();
     transcript.sort_by_key(atman_proto::TranscriptItem::seq);
     let mut workflow_turns = HashSet::new();
-    let workflows = page
+    let mut workflows = page
         .segments
         .iter()
         .filter_map(|segment| match segment {
@@ -1524,7 +1524,13 @@ fn snapshot_from_timeline(
             TimelineSegment::Session { .. } => None,
         })
         .filter(|workflow| workflow_turns.insert(workflow.turn_id.0))
-        .collect();
+        .collect::<Vec<_>>();
+    workflows.extend(
+        live.active_workflows
+            .iter()
+            .filter(|workflow| workflow_turns.insert(workflow.turn_id.0))
+            .cloned(),
+    );
     Ok(SessionSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         daemon_generation: page.daemon_generation.clone(),
@@ -2306,6 +2312,7 @@ mod tests {
             seq,
             ts: chrono::Utc::now(),
             run_id: None,
+            context_run_id: None,
             context_id: None,
             checkpoint_index: None,
             message: atman_proto::MessageProjection {
@@ -2365,6 +2372,7 @@ mod tests {
                 lifecycle: source.lifecycle,
                 runs: source.runs.clone(),
                 active_turns: Vec::new(),
+                active_workflows: Vec::new(),
                 compactions: source.compactions.clone(),
                 goal: source.goal.clone(),
                 todos: source.todos.clone(),
@@ -2401,6 +2409,7 @@ mod tests {
                     seq: 1,
                     ts: chrono::Utc::now(),
                     run_id: None,
+                    context_run_id: None,
                     context_id: None,
                     checkpoint_index: None,
                     message: atman_proto::MessageProjection {

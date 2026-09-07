@@ -554,7 +554,7 @@ fn transcript(
             ))
         })
         .collect::<HashMap<_, _>>();
-    let subflows = subflow_roots(projection);
+    let mut subflows = subflow_roots(projection);
     let mut subflow_messages =
         HashMap::<atman_proto::FlowRunId, Vec<atman_runtime::Message>>::new();
     let mut workflow_slots = projection
@@ -571,6 +571,7 @@ fn transcript(
         match item {
             atman_proto::TranscriptItem::Message {
                 run_id,
+                context_run_id,
                 message: source,
                 ..
             } => {
@@ -578,7 +579,17 @@ fn transcript(
                 if matches!(source.origin, atman_proto::MessageOrigin::Interjection) {
                     continue;
                 }
-                if let Some(root) = run_id.as_ref().and_then(|run_id| subflows.get(run_id)) {
+                let context_root = context_run_id.clone().or_else(|| {
+                    run_id
+                        .as_ref()
+                        .and_then(|run_id| subflows.get(run_id))
+                        .cloned()
+                });
+                if let Some(root) = context_root {
+                    subflows.entry(root.clone()).or_insert_with(|| root.clone());
+                    if let Some(run_id) = run_id {
+                        subflows.insert(run_id.clone(), root.clone());
+                    }
                     subflow_messages
                         .entry(root.clone())
                         .or_default()
@@ -2131,6 +2142,7 @@ mod tests {
                 seq: 1,
                 ts: now,
                 run_id: None,
+                context_run_id: None,
                 context_id: None,
                 checkpoint_index: None,
                 message: message(
@@ -2154,6 +2166,7 @@ mod tests {
                 seq: 2,
                 ts: now,
                 run_id: Some(run_id.clone()),
+                context_run_id: None,
                 context_id: None,
                 checkpoint_index: None,
                 message: message(
@@ -2179,6 +2192,7 @@ mod tests {
                 seq: 3,
                 ts: now,
                 run_id: Some(run_id),
+                context_run_id: None,
                 context_id: None,
                 checkpoint_index: None,
                 message: message(
@@ -2244,6 +2258,7 @@ mod tests {
                 seq: 7,
                 ts: now,
                 run_id: None,
+                context_run_id: None,
                 context_id: None,
                 checkpoint_index: None,
                 message: message(
@@ -2258,6 +2273,7 @@ mod tests {
                 seq: 8,
                 ts: now,
                 run_id: None,
+                context_run_id: None,
                 context_id: None,
                 checkpoint_index: None,
                 message: message(
@@ -2456,6 +2472,7 @@ mod tests {
             seq: 1,
             ts: now,
             run_id,
+            context_run_id: None,
             context_id: None,
             checkpoint_index: None,
             message: atman_proto::MessageProjection {
@@ -2471,6 +2488,7 @@ mod tests {
                 seq: 2,
                 ts: now,
                 run_id: Some(root_run_id),
+                context_run_id: None,
                 context_id: None,
                 checkpoint_index: None,
                 message: atman_proto::MessageProjection {
@@ -2520,6 +2538,41 @@ mod tests {
         ));
         assert!(transcript.iter().all(|item| {
             !matches!(&item.output, OutputItem::AssistantMd { md, .. } if md == "Implemented")
+        }));
+    }
+
+    #[test]
+    fn explicit_context_owner_prevents_child_output_from_becoming_root_text() {
+        let mut source = projection();
+        let child_run = atman_proto::FlowRunId(uuid::Uuid::now_v7());
+        let turn_id = source.workflows[0].turn_id.clone();
+        source.workflows.clear();
+        source.runs.clear();
+        source.transcript = vec![atman_proto::TranscriptItem::Message {
+            seq: 10,
+            ts: chrono::Utc::now(),
+            run_id: Some(child_run.clone()),
+            context_run_id: Some(child_run),
+            context_id: None,
+            checkpoint_index: None,
+            message: atman_proto::MessageProjection {
+                role: atman_proto::MessageRole::Assistant,
+                origin: atman_proto::MessageOrigin::User,
+                turn_id,
+                parts: vec![atman_proto::MessagePart::Text {
+                    text: "child-only output".into(),
+                }],
+            },
+        }];
+
+        let converted = TuiSessionProjection::try_from(&source).unwrap();
+        let transcript = converted.transcript.as_deref().unwrap();
+        assert!(transcript.iter().any(|item| matches!(
+            &item.output,
+            OutputItem::SubAgentActivity { output, .. } if output == "child-only output"
+        )));
+        assert!(transcript.iter().all(|item| {
+            !matches!(&item.output, OutputItem::AssistantMd { md, .. } if md == "child-only output")
         }));
     }
 

@@ -7567,6 +7567,12 @@
             "$ref": "#/$defs/TurnId"
           }
         },
+        "active_workflows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowProjection"
+          }
+        },
         "compactions": {
           "type": "array",
           "items": {
@@ -7884,6 +7890,16 @@
                 },
                 {
                   "$ref": "#/$defs/ContextId"
+                }
+              ]
+            },
+            "context_run_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/FlowRunId"
                 }
               ]
             },

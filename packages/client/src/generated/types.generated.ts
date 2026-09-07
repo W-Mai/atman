@@ -282,6 +282,7 @@ export type TranscriptItem =
   | {
       checkpoint_index?: number | null
       context_id?: null | ContextId
+      context_run_id?: null | FlowRunId
       message: MessageProjection
       run_id?: null | FlowRunId
       seq: number
@@ -2000,6 +2001,7 @@ export interface SessionTimelinePage {
 }
 export interface TimelineLiveState {
   active_turns?: TurnId[]
+  active_workflows?: WorkflowProjection[]
   compactions?: CompactionProjection[]
   context?: ContextProjection
   goal?: string | null

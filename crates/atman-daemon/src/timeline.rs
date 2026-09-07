@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
 
 use atman_proto::{
     DaemonGeneration, EventCursor, FlowRunId, MessagePart, Revision, RunLifecycle, SessionId,
-    SessionProjection, SessionTimelineBudget, SessionTimelinePage, TimelineCursor,
-    TimelineDetailRef, TimelineItem, TimelineItemId, TimelineItemKind, TimelineLiveState,
-    TimelineRemaining, TimelineSegment, TimelineSegmentId, TimelineSessionSegment,
-    TimelineTurnSegment, TimelineTurnState, TranscriptItem, TurnId,
+    SessionProjection, SessionTimelineBudget, SessionTimelineItemDetail, SessionTimelinePage,
+    TimelineCursor, TimelineDetailRef, TimelineItem, TimelineItemId, TimelineItemKind,
+    TimelineLiveState, TimelineRemaining, TimelineSegment, TimelineSegmentId,
+    TimelineSessionSegment, TimelineTurnSegment, TimelineTurnState, TranscriptItem, TurnId,
 };
+use atman_runtime::projection::message_window::FlowOwnership;
 
 const DEFAULT_TURN_BUDGET: usize = 12;
 const DEFAULT_BYTE_BUDGET: usize = 256 * 1024;
@@ -23,6 +25,7 @@ pub(crate) struct TimelineCatalog<'a> {
 }
 
 enum Window {
+    Head,
     Tail,
     Before(TimelineCursor),
     After(TimelineCursor),
@@ -96,6 +99,12 @@ impl<'a> TimelineCatalog<'a> {
         });
         let mut active_turn_ids = active_turns.into_iter().collect::<Vec<_>>();
         active_turn_ids.sort_by_key(|turn_id| turn_id.0);
+        let active_workflows = projection
+            .workflows
+            .iter()
+            .filter(|workflow| active_turn_ids.contains(&workflow.turn_id))
+            .cloned()
+            .collect();
 
         Self {
             session_id: projection.metadata.id.clone(),
@@ -110,6 +119,7 @@ impl<'a> TimelineCatalog<'a> {
                 lifecycle: projection.lifecycle,
                 runs: projection.runs.clone(),
                 active_turns: active_turn_ids,
+                active_workflows,
                 compactions: projection.compactions.clone(),
                 goal: projection.goal.clone(),
                 todos: projection.todos.clone(),
@@ -125,6 +135,10 @@ impl<'a> TimelineCatalog<'a> {
 
     pub(crate) fn tail(&self, budget: &SessionTimelineBudget) -> SessionTimelinePage {
         self.page(Window::Tail, budget, true)
+    }
+
+    pub(crate) fn head(&self, budget: &SessionTimelineBudget) -> SessionTimelinePage {
+        self.page(Window::Head, budget, false)
     }
 
     pub(crate) fn before(
@@ -165,13 +179,14 @@ impl<'a> TimelineCatalog<'a> {
         include_live: bool,
     ) -> SessionTimelinePage {
         let anchor = match &window {
+            Window::Head => 0,
             Window::Tail => self.segments.len(),
-            Window::Before(cursor) | Window::After(cursor) => {
-                self.segment_index(&cursor.item_id, cursor.seq)
-            }
+            Window::Before(cursor) => self.segment_index(&cursor.item_id, cursor.seq),
+            Window::After(cursor) => self.segment_index(&cursor.item_id, cursor.seq),
             Window::Around(cursor) => self.segment_index(&cursor.item_id, cursor.seq),
         };
         let available = match window {
+            Window::Head => (0, self.segments.len(), Direction::Forward),
             Window::Tail => (0, self.segments.len(), Direction::Backward),
             Window::Before(_) => (0, anchor, Direction::Backward),
             Window::After(_) => (
@@ -267,7 +282,162 @@ impl<'a> TimelineCatalog<'a> {
 pub(crate) enum IndexedPageWindow {
     Tail,
     Before(TimelineCursor),
+    After(TimelineCursor),
     Around(TimelineCursor),
+}
+
+pub(crate) fn jsonl_page(
+    source: &crate::run::JsonlTimelineSource,
+    session_id: &SessionId,
+    daemon_generation: DaemonGeneration,
+    window: IndexedPageWindow,
+    budget: &SessionTimelineBudget,
+    include_live: bool,
+) -> anyhow::Result<Option<SessionTimelinePage>> {
+    let (before_seq, skip_current_turn, marks_newer) = match window {
+        IndexedPageWindow::Tail => (None, false, false),
+        IndexedPageWindow::Before(cursor) => (Some(cursor.seq), true, true),
+        IndexedPageWindow::After(_) => anyhow::bail!("reverse JSONL after pages are unsupported"),
+        IndexedPageWindow::Around(cursor) => (Some(cursor.seq.saturating_add(1)), false, true),
+    };
+    let turn_budget = budget
+        .turn_budget
+        .map_or(DEFAULT_TURN_BUDGET, |value| value.max(1) as usize);
+    let byte_budget = budget
+        .byte_budget
+        .map_or(DEFAULT_BYTE_BUDGET, |value| value.max(1) as usize);
+    let read = read_jsonl_turn_tail(
+        &source.events_path,
+        before_seq,
+        skip_current_turn,
+        turn_budget,
+        byte_budget,
+    )?;
+    if read.events.is_empty() {
+        return Ok(None);
+    }
+    let mut projector = crate::projection::SessionProjector::from_events(
+        session_id.clone(),
+        source.metadata.clone(),
+        &read.events,
+    );
+    projector.set_trust(source.trust.clone());
+    let projection = projector.snapshot();
+    let mut catalog = TimelineCatalog::from_projection(
+        daemon_generation,
+        EventCursor(read.source_seq),
+        &projection,
+    );
+    catalog.live.head_complete = false;
+    let mut page = catalog.tail(budget);
+    page.projection_revision = Revision(read.source_seq);
+    page.older.has_more |= read.has_older;
+    if page.older.has_more {
+        page.older.estimated_segments = None;
+    }
+    if marks_newer {
+        page.newer.has_more = true;
+        page.newer.estimated_segments = None;
+    }
+    if !include_live {
+        page.live = None;
+    }
+    Ok(Some(page))
+}
+
+struct JsonlTailRead {
+    events: Vec<atman_runtime::event::EventEnvelope>,
+    source_seq: u64,
+    has_older: bool,
+}
+
+fn read_jsonl_turn_tail(
+    path: &std::path::Path,
+    before_seq: Option<u64>,
+    mut skip_current_turn: bool,
+    turn_budget: usize,
+    byte_budget: usize,
+) -> anyhow::Result<JsonlTailRead> {
+    const BLOCK_BYTES: u64 = 64 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let mut position = file.metadata()?.len();
+    let mut carry = Vec::new();
+    let mut reversed = Vec::new();
+    let mut source_seq = 0;
+    let mut turn_starts = 0;
+    let mut selected_bytes = 0_usize;
+    let mut has_older = false;
+
+    'blocks: while position > 0 {
+        let start = position.saturating_sub(BLOCK_BYTES);
+        let mut block = vec![0; usize::try_from(position - start)?];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut block)?;
+        block.extend_from_slice(&carry);
+        position = start;
+
+        let complete_start = if start == 0 {
+            0
+        } else if let Some(newline) = block.iter().position(|byte| *byte == b'\n') {
+            newline + 1
+        } else {
+            carry = block;
+            continue;
+        };
+        let mut end = block.len();
+        while end > complete_start {
+            while end > complete_start && block[end - 1] == b'\n' {
+                end -= 1;
+            }
+            if end == complete_start {
+                break;
+            }
+            let line_start = block[complete_start..end]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(complete_start, |offset| complete_start + offset + 1);
+            let line = std::str::from_utf8(&block[line_start..end])?.trim();
+            end = line_start.saturating_sub(1);
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(envelope) = serde_json::from_str::<atman_runtime::event::EventEnvelope>(line)
+            else {
+                continue;
+            };
+            source_seq = source_seq.max(envelope.seq);
+            if before_seq.is_some_and(|before| envelope.seq >= before) {
+                continue;
+            }
+            let starts_turn = matches!(
+                envelope.event,
+                atman_runtime::event::Event::TurnStart { .. }
+            );
+            if skip_current_turn {
+                if starts_turn {
+                    skip_current_turn = false;
+                }
+                continue;
+            }
+            selected_bytes = selected_bytes.saturating_add(line.len());
+            reversed.push(envelope);
+            if starts_turn {
+                turn_starts += 1;
+                if turn_starts >= turn_budget || selected_bytes >= byte_budget {
+                    has_older = reversed.last().is_some_and(|event| event.seq > 1);
+                    break 'blocks;
+                }
+            }
+        }
+        carry = block[..complete_start].to_vec();
+    }
+
+    reversed.reverse();
+    Ok(JsonlTailRead {
+        events: reversed,
+        source_seq,
+        has_older,
+    })
 }
 
 pub(crate) fn indexed_page(
@@ -278,43 +448,107 @@ pub(crate) fn indexed_page(
     budget: &SessionTimelineBudget,
     include_live: bool,
 ) -> anyhow::Result<Option<SessionTimelinePage>> {
-    let (before_start, include_unowned_through) = match window {
-        IndexedPageWindow::Tail => (None, source.coverage.seq),
-        IndexedPageWindow::Before(ref cursor) => {
-            let start = source
-                .index
-                .turn_start_for_event(&session_id.to_string(), cursor.seq)?
-                .unwrap_or(cursor.seq);
-            (Some(start), start.saturating_sub(1))
-        }
-        IndexedPageWindow::Around(ref cursor) => {
-            let start = source
-                .index
-                .turn_start_for_event(&session_id.to_string(), cursor.seq)?
-                .unwrap_or(cursor.seq);
-            (Some(start.saturating_add(1)), cursor.seq)
-        }
-    };
+    let session_key = session_id.to_string();
     let turn_budget = budget
         .turn_budget
         .map_or(DEFAULT_TURN_BUDGET, |value| value.max(1) as usize);
-    let mut turns = source.index.read_turns_before(
-        &session_id.to_string(),
-        before_start,
-        turn_budget.saturating_add(1),
-    )?;
-    let has_older = turns.len() > turn_budget || source.coverage.start_seq > 1;
+    let (mut turns, mut has_older, mut has_newer, include_unowned_through) = match &window {
+        IndexedPageWindow::Tail => (
+            source
+                .index
+                .read_turns_before(&session_key, None, turn_budget.saturating_add(1))?,
+            false,
+            false,
+            source.coverage.seq,
+        ),
+        IndexedPageWindow::Before(cursor) => {
+            let start = source
+                .index
+                .turn_start_for_event(&session_key, cursor.seq)?
+                .unwrap_or(cursor.seq);
+            let turns = source.index.read_turns_before(
+                &session_key,
+                Some(start),
+                turn_budget.saturating_add(1),
+            )?;
+            (turns, false, true, start.saturating_sub(1))
+        }
+        IndexedPageWindow::After(cursor) => {
+            let start = source
+                .index
+                .turn_start_for_event(&session_key, cursor.seq)?
+                .unwrap_or(cursor.seq);
+            let turns = source.index.read_turns_after(
+                &session_key,
+                start,
+                turn_budget.saturating_add(1),
+            )?;
+            let through = turns
+                .iter()
+                .map(|turn| turn.latest_seq)
+                .max()
+                .unwrap_or(start);
+            (turns, true, false, through)
+        }
+        IndexedPageWindow::Around(cursor) => {
+            let start = source
+                .index
+                .turn_start_for_event(&session_key, cursor.seq)?
+                .unwrap_or(cursor.seq);
+            let turns = source.index.read_turns_before(
+                &session_key,
+                Some(start.saturating_add(1)),
+                turn_budget.saturating_add(1),
+            )?;
+            let has_newer = !source
+                .index
+                .read_turns_after(&session_key, start, 1)?
+                .is_empty();
+            (turns, false, has_newer, cursor.seq)
+        }
+    };
+    has_older |= !matches!(window, IndexedPageWindow::After(_))
+        && (turns.len() > turn_budget || source.coverage.start_seq > 1);
+    has_newer |= matches!(window, IndexedPageWindow::After(_)) && turns.len() > turn_budget;
     turns.retain(|turn| turn.start_seq >= source.coverage.start_seq);
     turns.truncate(turn_budget);
+    let byte_budget = budget
+        .byte_budget
+        .map_or(DEFAULT_BYTE_BUDGET as u64, |value| value.max(1));
+    let latest_selected_seq = turns.iter().map(|turn| turn.latest_seq).max();
+    let mut selected_bytes = 0_u64;
+    let mut selected_turns = 0;
+    for turn in &turns {
+        let through_seq = if Some(turn.latest_seq) == latest_selected_seq {
+            include_unowned_through
+        } else {
+            turn.latest_seq
+        };
+        let turn_bytes = source
+            .index
+            .estimate_turn_event_bytes(&session_key, turn, through_seq)?;
+        if selected_turns > 0 && selected_bytes.saturating_add(turn_bytes) > byte_budget {
+            break;
+        }
+        selected_bytes = selected_bytes.saturating_add(turn_bytes);
+        selected_turns += 1;
+    }
+    if selected_turns < turns.len() {
+        if matches!(window, IndexedPageWindow::After(_)) {
+            has_newer = true;
+        } else {
+            has_older = true;
+        }
+        turns.truncate(selected_turns.max(1));
+    }
     if turns.is_empty() {
         return Ok(None);
     }
     let oldest_selected_turn = turns.iter().map(|turn| turn.start_seq).min();
-    let rows = source.index.read_events_for_turns(
-        &session_id.to_string(),
-        &turns,
-        Some(include_unowned_through),
-    )?;
+    let rows =
+        source
+            .index
+            .read_events_for_turns(&session_key, &turns, Some(include_unowned_through))?;
     let events = rows
         .into_iter()
         .map(|row| {
@@ -328,36 +562,161 @@ pub(crate) fn indexed_page(
             Ok(event)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut projector = crate::projection::SessionProjector::from_events(
+    let ownership = indexed_flow_ownership_before(
+        source,
+        &session_key,
+        events.first().map_or(0, |event| event.seq),
+    )?;
+    let mut projector = crate::projection::SessionProjector::from_events_with_ownership(
         session_id.clone(),
         source.metadata.clone(),
         &events,
+        ownership,
     );
     projector.set_trust(source.trust.clone());
     let projection = projector.snapshot();
-    let mut catalog =
-        TimelineCatalog::from_projection(daemon_generation, EventCursor::default(), &projection);
+    let mut catalog = TimelineCatalog::from_projection(
+        daemon_generation,
+        EventCursor(source.coverage.seq),
+        &projection,
+    );
     catalog.live.head_complete = false;
-    let mut page = catalog.tail(budget);
+    let mut page = if matches!(window, IndexedPageWindow::After(_)) {
+        catalog.head(budget)
+    } else {
+        catalog.tail(budget)
+    };
+    page.projection_revision = Revision(source.coverage.seq);
     page.older.has_more |= has_older;
     if page.older.has_more {
         page.older.estimated_segments = if source.coverage.start_seq == 1 {
             let indexed_before = source
                 .index
-                .count_turns_before(&session_id.to_string(), oldest_selected_turn)?;
+                .count_turns_before(&session_key, oldest_selected_turn)?;
             Some(indexed_before.saturating_add(page.older.estimated_segments.unwrap_or_default()))
         } else {
             None
         };
     }
-    if !matches!(window, IndexedPageWindow::Tail) {
-        page.newer.has_more = true;
+    page.newer.has_more |= has_newer;
+    if page.newer.has_more {
         page.newer.estimated_segments = None;
     }
     if !include_live {
         page.live = None;
     }
     Ok(Some(page))
+}
+
+pub(crate) fn indexed_detail(
+    source: &crate::run::IndexedTimelineSource,
+    session_id: &SessionId,
+    item_id: &TimelineItemId,
+) -> anyhow::Result<Option<SessionTimelineItemDetail>> {
+    let Some(seq) = item_seq(item_id) else {
+        return Ok(None);
+    };
+    let Some(row) = source
+        .index
+        .read_event_at_seq(&session_id.to_string(), seq)?
+    else {
+        return Ok(None);
+    };
+    let event = serde_json::from_str::<atman_runtime::event::EventEnvelope>(&row.payload)?;
+    let ownership = indexed_flow_ownership_before(source, &session_id.to_string(), seq)?;
+    let mut projector = crate::projection::SessionProjector::from_events_with_ownership(
+        session_id.clone(),
+        source.metadata.clone(),
+        &[event],
+        ownership,
+    );
+    projector.set_trust(source.trust.clone());
+    let projection = projector.snapshot();
+    let catalog = TimelineCatalog::from_projection(
+        DaemonGeneration(String::new()),
+        EventCursor(source.coverage.seq),
+        &projection,
+    );
+    Ok(catalog
+        .detail(item_id)
+        .cloned()
+        .map(|item| SessionTimelineItemDetail {
+            session_id: session_id.clone(),
+            item_id: item_id.clone(),
+            item,
+        }))
+}
+
+pub(crate) fn jsonl_detail(
+    source: &crate::run::JsonlTimelineSource,
+    session_id: &SessionId,
+    item_id: &TimelineItemId,
+) -> anyhow::Result<Option<SessionTimelineItemDetail>> {
+    let Some(seq) = item_seq(item_id) else {
+        return Ok(None);
+    };
+    let read = read_jsonl_turn_tail(
+        &source.events_path,
+        Some(seq.saturating_add(1)),
+        false,
+        1,
+        usize::MAX,
+    )?;
+    let mut projector = crate::projection::SessionProjector::from_events(
+        session_id.clone(),
+        source.metadata.clone(),
+        &read.events,
+    );
+    projector.set_trust(source.trust.clone());
+    let projection = projector.snapshot();
+    let catalog = TimelineCatalog::from_projection(
+        DaemonGeneration(String::new()),
+        EventCursor(read.source_seq),
+        &projection,
+    );
+    Ok(catalog
+        .detail(item_id)
+        .cloned()
+        .map(|item| SessionTimelineItemDetail {
+            session_id: session_id.clone(),
+            item_id: item_id.clone(),
+            item,
+        }))
+}
+
+fn item_seq(item_id: &TimelineItemId) -> Option<u64> {
+    item_id.0.split(':').nth(1)?.parse().ok()
+}
+
+fn indexed_flow_ownership_before(
+    source: &crate::run::IndexedTimelineSource,
+    session_id: &str,
+    through_seq: u64,
+) -> anyhow::Result<FlowOwnership> {
+    const PAGE_SIZE: usize = 256;
+    let mut ownership = FlowOwnership::default();
+    let mut before = Some(through_seq);
+    loop {
+        let rows = source.index.read_events_before_descending(
+            session_id,
+            before,
+            PAGE_SIZE,
+            atman_runtime::index::EventFilter::Kinds(&["flow_start"]),
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        before = rows.last().map(|row| row.seq);
+        let page_len = rows.len();
+        for row in rows {
+            let event = serde_json::from_str::<atman_runtime::event::EventEnvelope>(&row.payload)?;
+            ownership.observe(&event.event);
+        }
+        if page_len < PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(ownership)
 }
 
 struct SegmentRecord {
@@ -799,6 +1158,7 @@ mod tests {
             seq,
             ts: chrono::Utc::now(),
             run_id: None,
+            context_run_id: None,
             context_id: None,
             checkpoint_index: None,
             message: MessageProjection {
@@ -826,12 +1186,17 @@ mod tests {
         let index = std::sync::Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
         for (event, turn_id) in events {
             let payload = serde_json::to_string(event).unwrap();
+            let kind = match &event.event {
+                atman_runtime::event::Event::FlowStart { .. } => "flow_start",
+                atman_runtime::event::Event::AssistantMsg { .. } => "assistant_msg",
+                _ => "user_msg",
+            };
             index
                 .insert_project_event_raw(ProjectEventInsert {
                     session_id: "00000000-0000-0000-0000-000000000063",
                     seq: i64::try_from(event.seq).unwrap(),
                     ts: &event.ts.to_rfc3339(),
-                    kind: "user_msg",
+                    kind,
                     turn_id: Some(&turn_id.0.to_string()),
                     flow_run_id: None,
                     text_content: "",
@@ -871,6 +1236,65 @@ mod tests {
                 message: atman_runtime::message::Message::user_text(runtime_turn_id, text),
             },
         )
+    }
+
+    #[test]
+    fn reverse_jsonl_reader_keeps_recent_turns_without_parsing_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let turns = [turn(1), turn(2), turn(3)];
+        let mut events = Vec::new();
+        for (index, turn_id) in turns.iter().enumerate() {
+            let start_seq = index as u64 * 2 + 1;
+            events.push(atman_runtime::event::EventEnvelope::new(
+                start_seq,
+                atman_runtime::event::Event::TurnStart {
+                    turn_id: atman_runtime::event::TurnId(turn_id.0),
+                },
+            ));
+            events.push(user_event(start_seq + 1, turn_id, "message"));
+        }
+        let mut bytes = vec![b'x'; 128 * 1024];
+        bytes.push(b'\n');
+        for event in &events {
+            bytes.extend_from_slice(serde_json::to_string(event).unwrap().as_bytes());
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(b"{\"type\":\"partial");
+        std::fs::write(&path, bytes).unwrap();
+
+        let read = read_jsonl_turn_tail(&path, None, false, 2, usize::MAX).unwrap();
+
+        assert_eq!(read.source_seq, 6);
+        assert!(read.has_older);
+        assert_eq!(
+            read.events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [3, 4, 5, 6]
+        );
+
+        let previous = read_jsonl_turn_tail(&path, Some(6), true, 1, usize::MAX).unwrap();
+        assert_eq!(
+            previous
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [3, 4]
+        );
+
+        let byte_limited = read_jsonl_turn_tail(&path, None, false, 3, 1).unwrap();
+        assert!(byte_limited.has_older);
+        assert_eq!(
+            byte_limited
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [5, 6]
+        );
     }
 
     #[test]
@@ -928,6 +1352,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(!tail.live.as_ref().unwrap().head_complete);
+        assert_eq!(tail.as_of_cursor, EventCursor(source.coverage.seq));
         assert!(tail.older.has_more);
         assert_eq!(tail.older.estimated_segments, Some(1));
         assert_eq!(segment_start_seq(&tail.segments[0]), 2);
@@ -968,6 +1393,46 @@ mod tests {
         assert_eq!(segment_start_seq(&around.segments[0]), 1);
         assert!(around.newer.has_more);
         assert!(around.live.is_some());
+
+        let after = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::After(TimelineCursor {
+                seq: oldest.seq,
+                item_id: oldest.id.clone(),
+            }),
+            &budget,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(segment_start_seq(&after.segments[0]), 2);
+        assert!(after.older.has_more);
+        assert!(!after.newer.has_more);
+
+        let detail = indexed_detail(&source, &session_id, &newest.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.item_id, newest.id);
+        assert_eq!(detail.item, newest.preview);
+
+        let byte_limited = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::Tail,
+            &SessionTimelineBudget {
+                turn_budget: Some(2),
+                byte_budget: Some(1),
+            },
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(byte_limited.segments.len(), 1);
+        assert_eq!(segment_start_seq(&byte_limited.segments[0]), 2);
+        assert!(byte_limited.older.has_more);
     }
 
     #[test]
@@ -999,6 +1464,70 @@ mod tests {
         assert_eq!(page.older.estimated_segments, None);
         assert_eq!(page.segments.len(), 1);
         assert_eq!(segment_start_seq(&page.segments[0]), 2);
+    }
+
+    #[test]
+    fn indexed_pages_and_details_keep_spawned_context_identity() {
+        let session_id = SessionId(uuid::Uuid::from_u128(99));
+        let turn_id = turn(1);
+        let child = atman_runtime::event::FlowRunId::now();
+        let events = vec![
+            (
+                atman_runtime::event::EventEnvelope::new(
+                    1,
+                    atman_runtime::event::Event::FlowStart {
+                        turn_id: Some(atman_runtime::event::TurnId(turn_id.0)),
+                        run_id: child.clone(),
+                        flow_name: "child".into(),
+                        spawned: true,
+                        parent_run_id: None,
+                        parent_node_id: None,
+                    },
+                ),
+                turn_id.clone(),
+            ),
+            (
+                atman_runtime::event::EventEnvelope::new(
+                    2,
+                    atman_runtime::event::Event::AssistantMsg {
+                        turn_id: atman_runtime::event::TurnId(turn_id.0),
+                        flow_run_id: Some(child.clone()),
+                        message: atman_runtime::message::Message::assistant_text(
+                            atman_runtime::event::TurnId(turn_id.0),
+                            "child output",
+                        ),
+                    },
+                ),
+                turn_id,
+            ),
+        ];
+        let (_dir, source) = indexed_source(&events);
+        let page = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::Tail,
+            &SessionTimelineBudget {
+                turn_budget: Some(1),
+                byte_budget: None,
+            },
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let item = &segment_items(&page.segments[0])[0];
+        let TranscriptItem::Message { context_run_id, .. } = &item.preview else {
+            panic!("expected message");
+        };
+        assert_eq!(context_run_id.as_ref().map(|id| id.0), Some(child.0));
+
+        let detail = indexed_detail(&source, &session_id, &item.id)
+            .unwrap()
+            .unwrap();
+        let TranscriptItem::Message { context_run_id, .. } = detail.item else {
+            panic!("expected message detail");
+        };
+        assert_eq!(context_run_id.map(|id| id.0), Some(child.0));
     }
 
     #[test]

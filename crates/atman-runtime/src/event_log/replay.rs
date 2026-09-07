@@ -33,6 +33,7 @@ pub struct ReplayBundle {
     pub view: ContextReplay,
     pub context: ContextSnapshot,
     pub events: Vec<crate::event::EventEnvelope>,
+    pub ownership: FlowOwnership,
 }
 
 pub struct SessionReplay;
@@ -143,17 +144,23 @@ impl SessionReplay {
         if events.last().map(|event| event.seq) != Some(coverage.seq) {
             return Ok(None);
         }
-        let view = crate::projection::context::replay_checkpoint_suffix(&events, context_id)
-            .map_err(|source| SessionOpenError::Replay {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let ownership = indexed_flow_ownership_before(index, session_id, checkpoint.seq, path)?;
+        let view = crate::projection::context::replay_checkpoint_suffix(
+            &events,
+            context_id,
+            ownership.clone(),
+        )
+        .map_err(|source| SessionOpenError::Replay {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let context = context_snapshot_from_selected(events.iter(), &view.selection);
         Ok(Some(ReplayBundle {
             last_seq: Some(coverage.seq),
             view,
             context,
             events,
+            ownership,
         }))
     }
 
@@ -196,8 +203,55 @@ impl SessionReplay {
             view,
             context,
             events,
+            ownership,
         })
     }
+}
+
+fn indexed_flow_ownership_before(
+    index: &crate::index::AnchorIndex,
+    session_id: &str,
+    checkpoint_seq: u64,
+    path: &Path,
+) -> Result<FlowOwnership, SessionOpenError> {
+    const PAGE_SIZE: usize = 256;
+    let mut before = Some(checkpoint_seq);
+    let mut starts = Vec::new();
+    loop {
+        let rows = index
+            .read_events_before_descending(
+                session_id,
+                before,
+                PAGE_SIZE,
+                crate::index::EventFilter::Kinds(&["flow_start"]),
+            )
+            .map_err(|source| SessionOpenError::Replay {
+                path: path.to_path_buf(),
+                source: std::io::Error::other(source.to_string()),
+            })?;
+        if rows.is_empty() {
+            break;
+        }
+        before = rows.last().map(|row| row.seq);
+        let page_len = rows.len();
+        for row in rows {
+            starts.push(
+                serde_json::from_str::<crate::event::EventEnvelope>(&row.payload).map_err(
+                    |source| SessionOpenError::Replay {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                    },
+                )?,
+            );
+        }
+        if page_len < PAGE_SIZE {
+            break;
+        }
+    }
+    starts.reverse();
+    Ok(FlowOwnership::from_events(
+        starts.iter().map(|envelope| &envelope.event),
+    ))
 }
 
 pub fn transcript_from_envelopes(
@@ -239,21 +293,37 @@ mod tests {
 
     #[test]
     fn indexed_checkpoint_replay_reads_only_the_checkpoint_suffix() {
-        use crate::event::{EventEnvelope, TurnId};
+        use crate::event::{EventEnvelope, FlowRunId, TurnId};
         use crate::index::{AnchorIndex, EventLogBoundary, ProjectEventInsert};
 
         let turn = TurnId::now();
+        let spawned = FlowRunId::now();
+        let inline = FlowRunId::now();
         let events = [
             EventEnvelope::new(
                 1,
-                Event::UserMsg {
-                    turn_id: turn.clone(),
-                    flow_run_id: None,
-                    message: Message::user_text(turn.clone(), "old raw message"),
+                Event::FlowStart {
+                    turn_id: Some(turn.clone()),
+                    run_id: spawned.clone(),
+                    flow_name: "spawned".into(),
+                    spawned: true,
+                    parent_run_id: None,
+                    parent_node_id: None,
                 },
             ),
             EventEnvelope::new(
                 2,
+                Event::FlowStart {
+                    turn_id: Some(turn.clone()),
+                    run_id: inline.clone(),
+                    flow_name: "inline".into(),
+                    spawned: false,
+                    parent_run_id: Some(spawned),
+                    parent_node_id: Some("0".into()),
+                },
+            ),
+            EventEnvelope::new(
+                3,
                 Event::Checkpoint {
                     session_id: "session".into(),
                     flow_run_id: None,
@@ -262,7 +332,15 @@ mod tests {
                 },
             ),
             EventEnvelope::new(
-                3,
+                4,
+                Event::AssistantMsg {
+                    turn_id: turn.clone(),
+                    flow_run_id: Some(inline),
+                    message: Message::assistant_text(turn.clone(), "spawned suffix"),
+                },
+            ),
+            EventEnvelope::new(
+                5,
                 Event::UserMsg {
                     turn_id: turn.clone(),
                     flow_run_id: None,
@@ -274,7 +352,13 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         let index = AnchorIndex::open_project(dir.path()).unwrap();
         let mut log = Vec::new();
-        for (event, kind) in events.iter().zip(["user_msg", "checkpoint", "user_msg"]) {
+        for (event, kind) in events.iter().zip([
+            "flow_start",
+            "flow_start",
+            "checkpoint",
+            "assistant_msg",
+            "user_msg",
+        ]) {
             let payload = serde_json::to_string(event).unwrap();
             let line_start = log.len() as u64;
             log.extend_from_slice(payload.as_bytes());
@@ -315,7 +399,7 @@ mod tests {
                 .iter()
                 .map(|event| event.seq)
                 .collect::<Vec<_>>(),
-            [2, 3]
+            [3, 4, 5]
         );
         assert_eq!(
             replay
