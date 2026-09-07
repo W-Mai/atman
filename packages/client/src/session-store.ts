@@ -27,6 +27,7 @@ export interface AppliedSessionUpdates {
 }
 
 export interface SessionStoreOptions {
+  boundedTranscript?: boolean
   expectedGeneration?: DaemonGeneration
   expectedSession?: SessionId
   onSubscriberError?: (error: unknown) => void
@@ -34,6 +35,7 @@ export interface SessionStoreOptions {
 
 export class SessionStore {
   #snapshot: SessionSnapshot
+  #boundedTranscript: boolean
   readonly #listeners = new Set<SessionListener>()
   readonly #signalListeners = new Set<SessionSignalListener>()
   readonly #onSubscriberError: (error: unknown) => void
@@ -45,6 +47,7 @@ export class SessionStore {
       validateSession(snapshot, options.expectedSession)
     }
     this.#snapshot = freezeJson(structuredClone(snapshot))
+    this.#boundedTranscript = options.boundedTranscript ?? false
     this.#onSubscriberError = options.onSubscriberError ?? reportSubscriberError
   }
 
@@ -62,11 +65,16 @@ export class SessionStore {
     return () => this.#signalListeners.delete(listener)
   }
 
-  replace(snapshot: SessionSnapshot, expectedGeneration: DaemonGeneration): void {
+  replace(
+    snapshot: SessionSnapshot,
+    expectedGeneration: DaemonGeneration,
+    boundedTranscript = false,
+  ): void {
     validateSnapshot(snapshot, expectedGeneration)
     validateSession(snapshot, this.#snapshot.projection.metadata.id)
     const previous = this.#snapshot
     this.#snapshot = freezeJson(structuredClone(snapshot))
+    this.#boundedTranscript = boundedTranscript
     this.#publish(previous)
   }
 
@@ -106,7 +114,7 @@ export class SessionStore {
       if (envelope.cursor <= next.cursor) {
         continue
       }
-      applyEnvelope(next, envelope, signals)
+      applyEnvelope(next, envelope, signals, this.#boundedTranscript)
       events += 1
     }
     if (
@@ -190,6 +198,7 @@ function applyEnvelope(
   snapshot: SessionSnapshot,
   envelope: ProjectionEventEnvelope,
   signals: SessionSignal[],
+  boundedTranscript: boolean,
 ): void {
   if (envelope.schema_version !== EVENT_SCHEMA_VERSION) {
     throw reconcileError(
@@ -230,7 +239,7 @@ function applyEnvelope(
 
   switch (envelope.event.type) {
     case 'projection_delta':
-      applyDelta(snapshot.projection, envelope.event.delta)
+      applyDelta(snapshot.projection, envelope.event.delta, boundedTranscript)
       break
     case 'signal':
       signals.push(envelope.event.signal)
@@ -243,7 +252,11 @@ function applyEnvelope(
   snapshot.cursor = envelope.cursor
 }
 
-function applyDelta(projection: SessionProjection, delta: ProjectionDelta): void {
+function applyDelta(
+  projection: SessionProjection,
+  delta: ProjectionDelta,
+  boundedTranscript: boolean,
+): void {
   if (delta.base_revision !== projection.revision) {
     throw reconcileError(
       'revision_base',
@@ -259,12 +272,16 @@ function applyDelta(projection: SessionProjection, delta: ProjectionDelta): void
     )
   }
   for (const change of delta.changes) {
-    applyChange(projection, change)
+    applyChange(projection, change, boundedTranscript)
   }
   projection.revision = delta.revision
 }
 
-function applyChange(projection: SessionProjection, change: ProjectionChange): void {
+function applyChange(
+  projection: SessionProjection,
+  change: ProjectionChange,
+  boundedTranscript: boolean,
+): void {
   switch (change.type) {
     case 'metadata_set':
       projection.metadata = structuredClone(change.metadata)
@@ -285,7 +302,9 @@ function applyChange(projection: SessionProjection, change: ProjectionChange): v
       ]
       break
     case 'transcript_replace':
-      projection.transcript = structuredClone(change.items)
+      projection.transcript = boundedTranscript
+        ? replaceBoundedTranscript(projection, change.items)
+        : structuredClone(change.items)
       break
     case 'workflow_upsert':
       projection.workflows = upsertByKey(
@@ -340,6 +359,57 @@ function applyChange(projection: SessionProjection, change: ProjectionChange): v
       break
     default:
       assertNever(change)
+  }
+}
+
+function replaceBoundedTranscript(
+  projection: SessionProjection,
+  replacement: NonNullable<SessionProjection['transcript']> = [],
+): NonNullable<SessionProjection['transcript']> {
+  const runTurns = new Map(
+    (projection.runs ?? [])
+      .filter((run) => run.turn_id != null)
+      .map((run) => [run.id, run.turn_id as string]),
+  )
+  const visibleTurns = new Set(
+    (projection.transcript ?? [])
+      .map((item) => transcriptTurnId(item, runTurns))
+      .filter((turn): turn is string => turn !== undefined),
+  )
+  const minimumSeq = (projection.transcript ?? []).reduce(
+    (minimum, item) => Math.min(minimum, item.seq),
+    Number.POSITIVE_INFINITY,
+  )
+  return structuredClone(
+    (replacement ?? []).filter((item) => {
+      const turn = transcriptTurnId(item, runTurns)
+      return turn === undefined
+        ? minimumSeq === Number.POSITIVE_INFINITY || item.seq >= minimumSeq
+        : visibleTurns.has(turn)
+    }),
+  )
+}
+
+function transcriptTurnId(
+  item: NonNullable<SessionProjection['transcript']>[number],
+  runTurns: ReadonlyMap<string, string>,
+): string | undefined {
+  switch (item.type) {
+    case 'message':
+      return item.message.turn_id
+    case 'file_edit':
+      return item.turn_id ?? (item.run_id ? runTurns.get(item.run_id) : undefined) ?? undefined
+    case 'activity_summary':
+      return item.turn_id
+    case 'diff':
+    case 'compaction':
+      return item.run_id ? runTurns.get(item.run_id) : undefined
+    case 'mermaid':
+    case 'notice':
+    case 'extension':
+      return undefined
+    default:
+      assertNever(item)
   }
 }
 

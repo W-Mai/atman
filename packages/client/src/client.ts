@@ -111,6 +111,13 @@ export class AtmanClient {
     return SessionClient.attach(this, sessionId, options)
   }
 
+  async attachSessionFull(
+    sessionId: SessionId,
+    options: TransportRequestOptions = {},
+  ): Promise<SessionClient> {
+    return SessionClient.attachFull(this, sessionId, options)
+  }
+
   async refreshCapabilities(
     options: TransportRequestOptions = {},
   ): Promise<CapabilitiesResponse> {

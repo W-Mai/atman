@@ -15,6 +15,7 @@ import type {
   ProjectionEventEnvelope,
   ServerEvent,
   SessionSnapshot,
+  SessionTimelinePage,
   TrustProjection,
 } from './generated/types.generated'
 import type { RpcRequestEnvelope } from './transport'
@@ -106,7 +107,129 @@ function result(request: RpcRequestEnvelope, value: unknown) {
   return { jsonrpc: '2.0', id: request.id, result: value } satisfies JsonRpcResponse
 }
 
+function timelinePage(
+  generation: string,
+  seq: number,
+  text: string,
+  hasOlder: boolean,
+  includeLive: boolean,
+): SessionTimelinePage {
+  const turnId = `00000000-0000-0000-0000-${seq.toString().padStart(12, '0')}`
+  const preview = {
+    type: 'message' as const,
+    seq,
+    ts: '2026-09-07T00:00:00Z',
+    message: {
+      role: 'user' as const,
+      origin: 'user' as const,
+      turn_id: turnId,
+      parts: [{ type: 'text' as const, text }],
+    },
+  }
+  return {
+    session_id: sessionId,
+    daemon_generation: generation,
+    as_of_cursor: 20,
+    projection_revision: 7,
+    segments: [{
+      type: 'turn',
+      segment: {
+        id: `turn:${turnId}`,
+        turn_id: turnId,
+        start_seq: seq,
+        latest_seq: seq,
+        revision: seq,
+        state: 'complete',
+        items: [{
+          id: `message:${seq}`,
+          seq,
+          turn_id: turnId,
+          kind: 'message',
+          preview,
+        }],
+      },
+    }],
+    older: { has_more: hasOlder, ...(hasOlder ? { estimated_segments: 1 } : {}) },
+    newer: { has_more: false },
+    serialized_bytes: 1,
+    ...(includeLive ? {
+      live: {
+        head_complete: false,
+        metadata: { id: sessionId, title: 'recent' },
+        lifecycle: 'active',
+        runs: [],
+        active_turns: [turnId],
+        active_workflows: [{ turn_id: turnId, roots: [] }],
+        interactions: {},
+        resources: [],
+      },
+    } : {}),
+  }
+}
+
 describe('SessionClient', () => {
+  test('uses a recent tail by default, preserves the live workflow, and pages older turns', async () => {
+    const transport = new MockTransport((request) => {
+      switch (request.method) {
+        case 'daemon.capabilities':
+          return result(request, capabilities('generation-1', [
+            { name: 'session.history.tail', kind: 'query', revision: 1 },
+            { name: 'session.history.before', kind: 'query', revision: 1 },
+          ]))
+        case 'session.history.tail':
+          return result(request, timelinePage('generation-1', 9, 'recent', true, true))
+        case 'session.history.before':
+          return result(request, timelinePage('generation-1', 1, 'older', false, false))
+        default:
+          throw new Error(`unexpected method ${request.method}`)
+      }
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+    const session = await client.attachSession(sessionId)
+
+    expect(session.history).toEqual({
+      bounded: true,
+      hasOlder: true,
+      estimatedOlderTurns: 1,
+    })
+    expect(session.current.cursor).toBe(20)
+    expect(session.current.projection.workflows?.map((workflow) => workflow.turn_id)).toEqual([
+      '00000000-0000-0000-0000-000000000009',
+    ])
+    expect(await session.loadOlderHistory()).toEqual({
+      loadedItems: 1,
+      hasMore: false,
+      remainingTurns: null,
+    })
+    expect(session.current.projection.transcript?.map((item) => item.seq)).toEqual([1, 9])
+  })
+
+  test('keeps full snapshot attachment explicit', async () => {
+    const transport = new MockTransport((request) => {
+      if (request.method === 'daemon.capabilities') {
+        return result(request, capabilities('generation-1', [
+          { name: 'session.history.tail', kind: 'query', revision: 1 },
+        ]))
+      }
+      if (request.method === 'session.get_snapshot') {
+        return result(request, snapshot('generation-1', 4, 2, 'full'))
+      }
+      throw new Error(`unexpected method ${request.method}`)
+    })
+    const client = await AtmanClient.connect(transport, {
+      name: 'browser-test',
+      version: '1.0.0',
+    })
+
+    const session = await client.attachSessionFull(sessionId)
+
+    expect(session.history.bounded).toBeFalse()
+    expect(session.current.projection.metadata.title).toBe('full')
+  })
+
   test('attaches to one session and rejects a mismatched snapshot identity', async () => {
     const transport = new MockTransport((request) =>
       result(

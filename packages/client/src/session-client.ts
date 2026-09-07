@@ -1,4 +1,5 @@
 import {
+  AtmanProtocolError,
   AtmanTransportError,
   SessionCommandError,
   SessionReconcileError,
@@ -39,6 +40,7 @@ import type {
   SessionId,
   SessionSignal,
   SessionSnapshot,
+  SessionTimelinePage,
   SetSessionGoalResponse,
   StartRunResponse,
   SubmitFormResponse,
@@ -46,9 +48,12 @@ import type {
   TerminateResourceResponse,
   TodoMutation,
   TrustProjection,
+  TimelineCursor,
+  TimelineItem,
   UpdateSessionTodosResponse,
   UpdateSessionTrustResponse,
 } from './generated/types.generated'
+import { SNAPSHOT_SCHEMA_VERSION } from './generated/methods.generated'
 import { SessionStore, type SessionView } from './session-store'
 import type { TransportRequestOptions } from './transport'
 import type { AtmanClient } from './client'
@@ -56,6 +61,8 @@ import type { AtmanClient } from './client'
 const DEFAULT_POLL_INTERVAL_MS = 250
 const DEFAULT_MIN_RECONNECT_DELAY_MS = 100
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 3_000
+const DEFAULT_HISTORY_TURNS = 12
+const DEFAULT_HISTORY_BYTES = 256 * 1024
 
 export type RefreshOutcome =
   | {
@@ -92,22 +99,58 @@ export interface ResolvePermissionsOptions extends TransportRequestOptions {
   reason?: string | null
 }
 
+export interface SessionHistoryState {
+  bounded: boolean
+  hasOlder: boolean
+  estimatedOlderTurns: number | null
+}
+
+export interface HistoryLoadOutcome {
+  loadedItems: number
+  hasMore: boolean
+  remainingTurns: number | null
+}
+
+interface TimelineHistory {
+  oldest: TimelineCursor | undefined
+  hasOlder: boolean
+  estimatedOlderTurns: number | null
+  loadedItems: Set<string>
+}
+
 export class SessionClient {
   readonly #client: AtmanClient
   readonly #sessionId: SessionId
   readonly #store: SessionStore
+  #history: TimelineHistory | undefined
   #operationTail: Promise<void> = Promise.resolve()
 
-  private constructor(client: AtmanClient, sessionId: SessionId, snapshot: SessionSnapshot) {
+  private constructor(
+    client: AtmanClient,
+    sessionId: SessionId,
+    snapshot: SessionSnapshot,
+    history?: TimelineHistory,
+  ) {
     this.#client = client
     this.#sessionId = sessionId
     this.#store = new SessionStore(snapshot, {
+      boundedTranscript: history !== undefined,
       expectedGeneration: client.capabilities.daemon_generation,
       expectedSession: sessionId,
     })
+    this.#history = history
   }
 
   static async attach(
+    client: AtmanClient,
+    sessionId: SessionId,
+    options: TransportRequestOptions = {},
+  ): Promise<SessionClient> {
+    const loaded = await loadSessionState(client, sessionId, options)
+    return new SessionClient(client, sessionId, loaded.snapshot, loaded.history)
+  }
+
+  static async attachFull(
     client: AtmanClient,
     sessionId: SessionId,
     options: TransportRequestOptions = {},
@@ -126,6 +169,20 @@ export class SessionClient {
 
   get current(): SessionView {
     return this.#store.current
+  }
+
+  get history(): SessionHistoryState {
+    return {
+      bounded: this.#history !== undefined,
+      hasOlder: this.#history?.hasOlder ?? false,
+      estimatedOlderTurns: this.#history?.estimatedOlderTurns ?? null,
+    }
+  }
+
+  async loadOlderHistory(
+    options: TransportRequestOptions = {},
+  ): Promise<HistoryLoadOutcome> {
+    return this.#exclusive(() => this.#loadOlderHistory(options))
   }
 
   subscribe(listener: Parameters<SessionStore['subscribe']>[0]): () => void {
@@ -768,22 +825,73 @@ export class SessionClient {
       capabilities = await this.#client.refreshCapabilities(options)
     }
 
-    let snapshot = await this.#client.call(
-      'session.get_snapshot',
-      { session_id: this.#sessionId },
-      options,
-    )
-    if (snapshot.daemon_generation !== capabilities.daemon_generation) {
+    let loaded = await loadSessionState(this.#client, this.#sessionId, options)
+    if (loaded.snapshot.daemon_generation !== capabilities.daemon_generation) {
       capabilities = await this.#client.refreshCapabilities(options)
-      if (snapshot.daemon_generation !== capabilities.daemon_generation) {
-        snapshot = await this.#client.call(
-          'session.get_snapshot',
-          { session_id: this.#sessionId },
-          options,
-        )
+      if (loaded.snapshot.daemon_generation !== capabilities.daemon_generation) {
+        loaded = await loadSessionState(this.#client, this.#sessionId, options)
       }
     }
-    this.#store.replace(snapshot, capabilities.daemon_generation)
+    this.#history = loaded.history
+    this.#store.replace(
+      loaded.snapshot,
+      capabilities.daemon_generation,
+      loaded.history !== undefined,
+    )
+  }
+
+  async #loadOlderHistory(options: TransportRequestOptions): Promise<HistoryLoadOutcome> {
+    const history = this.#history
+    if (!history?.hasOlder || !history.oldest) {
+      return { loadedItems: 0, hasMore: false, remainingTurns: null }
+    }
+    const page = await this.#client.call(
+      'session.history.before',
+      {
+        session_id: this.#sessionId,
+        before: history.oldest,
+        ...historyBudget(),
+      },
+      options,
+    )
+    validateTimelinePage(
+      page,
+      this.#sessionId,
+      this.#client.capabilities.daemon_generation,
+    )
+    const next = structuredClone(this.#store.current) as SessionSnapshot
+    const transcript = [...(next.projection.transcript ?? [])]
+    const workflows = [...(next.projection.workflows ?? [])]
+    let loadedItems = 0
+    for (const item of timelineItems(page)) {
+      if (history.loadedItems.has(item.id)) {
+        continue
+      }
+      history.loadedItems.add(item.id)
+      transcript.push(structuredClone(item.preview))
+      loadedItems += 1
+    }
+    for (const segment of page.segments ?? []) {
+      if (segment.type !== 'turn' || !segment.segment.workflow) {
+        continue
+      }
+      const workflow = segment.segment.workflow
+      if (!workflows.some((existing) => existing.turn_id === workflow.turn_id)) {
+        workflows.push(structuredClone(workflow))
+      }
+    }
+    transcript.sort((left, right) => left.seq - right.seq)
+    next.projection.transcript = transcript
+    next.projection.workflows = workflows
+    history.oldest = oldestCursor(page) ?? history.oldest
+    history.hasOlder = page.older.has_more
+    history.estimatedOlderTurns = page.older.estimated_segments ?? null
+    this.#store.replace(next, next.daemon_generation, true)
+    return {
+      loadedItems,
+      hasMore: history.hasOlder,
+      remainingTurns: history.estimatedOlderTurns,
+    }
   }
 
   async #synchronizeConnection(
@@ -885,6 +993,120 @@ export class SessionClient {
       release()
     }
   }
+}
+
+async function loadSessionState(
+  client: AtmanClient,
+  sessionId: SessionId,
+  options: TransportRequestOptions,
+): Promise<{ snapshot: SessionSnapshot; history?: TimelineHistory }> {
+  if (!client.supports('session.history.tail')) {
+    const snapshot = await client.call(
+      'session.get_snapshot',
+      { session_id: sessionId },
+      options,
+    )
+    return { snapshot }
+  }
+  const page = await client.call(
+    'session.history.tail',
+    { session_id: sessionId, ...historyBudget() },
+    options,
+  )
+  validateTimelinePage(page, sessionId, client.capabilities.daemon_generation)
+  return { snapshot: snapshotFromTimeline(page), history: timelineHistory(page) }
+}
+
+function historyBudget(): { turn_budget: number; byte_budget: number } {
+  return { turn_budget: DEFAULT_HISTORY_TURNS, byte_budget: DEFAULT_HISTORY_BYTES }
+}
+
+function validateTimelinePage(
+  page: SessionTimelinePage,
+  expectedSession: SessionId,
+  expectedGeneration: DaemonGeneration,
+): void {
+  if (page.session_id !== expectedSession) {
+    throw new SessionReconcileError(
+      'session',
+      `timeline page belongs to session ${page.session_id}, expected ${expectedSession}`,
+      { expected: expectedSession, received: page.session_id },
+    )
+  }
+  if (page.daemon_generation !== expectedGeneration) {
+    throw new SessionReconcileError(
+      'daemon_generation',
+      `timeline page belongs to daemon generation ${page.daemon_generation}, expected ${expectedGeneration}`,
+      { expected: expectedGeneration, received: page.daemon_generation },
+    )
+  }
+}
+
+function snapshotFromTimeline(page: SessionTimelinePage): SessionSnapshot {
+  const live = page.live
+  if (!live) {
+    throw new AtmanProtocolError('timeline tail page has no live state')
+  }
+  const transcript = timelineItems(page)
+    .map((item) => structuredClone(item.preview))
+    .sort((left, right) => left.seq - right.seq)
+  const workflows = (page.segments ?? []).flatMap((segment) =>
+    segment.type === 'turn' && segment.segment.workflow
+      ? [structuredClone(segment.segment.workflow)]
+      : [],
+  )
+  const workflowTurns = new Set(workflows.map((workflow) => workflow.turn_id))
+  for (const workflow of live.active_workflows ?? []) {
+    if (!workflowTurns.has(workflow.turn_id)) {
+      workflows.push(structuredClone(workflow))
+      workflowTurns.add(workflow.turn_id)
+    }
+  }
+  return {
+    schema_version: SNAPSHOT_SCHEMA_VERSION,
+    daemon_generation: page.daemon_generation,
+    cursor: page.as_of_cursor,
+    projection: {
+      revision: page.projection_revision,
+      metadata: structuredClone(live.metadata),
+      lifecycle: live.lifecycle,
+      runs: structuredClone(live.runs ?? []),
+      transcript,
+      workflows,
+      compactions: structuredClone(live.compactions ?? []),
+      todos: structuredClone(live.todos ?? []),
+      plans: structuredClone(live.plans ?? []),
+      interactions: structuredClone(live.interactions),
+      resources: structuredClone(live.resources ?? []),
+      ...(live.goal !== undefined ? { goal: live.goal } : {}),
+      ...(live.context !== undefined
+        ? { context: structuredClone(live.context) }
+        : {}),
+      ...(live.trust !== undefined ? { trust: structuredClone(live.trust) } : {}),
+      ...(live.usage !== undefined ? { usage: structuredClone(live.usage) } : {}),
+    },
+  }
+}
+
+function timelineHistory(page: SessionTimelinePage): TimelineHistory {
+  return {
+    oldest: oldestCursor(page),
+    hasOlder: page.older.has_more,
+    estimatedOlderTurns: page.older.estimated_segments ?? null,
+    loadedItems: new Set(timelineItems(page).map((item) => item.id)),
+  }
+}
+
+function timelineItems(page: SessionTimelinePage): TimelineItem[] {
+  return (page.segments ?? []).flatMap((segment) => segment.segment.items ?? [])
+}
+
+function oldestCursor(page: SessionTimelinePage): TimelineCursor | undefined {
+  const oldest = timelineItems(page).reduce<TimelineItem | undefined>(
+    (current, item) => (!current || item.seq < current.seq ? item : current),
+    undefined,
+  )
+  return oldest ? { seq: oldest.seq, item_id: oldest.id } : undefined
 }
 
 function receivedGeneration(error: SessionReconcileError): DaemonGeneration | undefined {

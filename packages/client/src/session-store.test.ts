@@ -71,6 +71,48 @@ function page(
 }
 
 describe('SessionStore', () => {
+  test('keeps transcript replacements inside the loaded history window', () => {
+    const visible: TranscriptItem = {
+      type: 'message',
+      seq: 8,
+      ts: '2026-09-07T00:00:00Z',
+      message: {
+        role: 'user',
+        origin: 'user',
+        turn_id: 'turn-2',
+        parts: [{ type: 'text', text: 'visible' }],
+      },
+    }
+    const hidden: TranscriptItem = {
+      type: 'message',
+      seq: 1,
+      ts: '2026-09-06T00:00:00Z',
+      message: {
+        role: 'user',
+        origin: 'user',
+        turn_id: 'turn-1',
+        parts: [{ type: 'text', text: 'outside window' }],
+      },
+    }
+    const store = new SessionStore(snapshot({
+      projection: {
+        revision: 0,
+        lifecycle: 'idle',
+        metadata: { id: sessionId, title: 'bounded' },
+        transcript: [visible],
+        runs: [],
+        resources: [],
+      },
+    }), { boundedTranscript: true })
+
+    store.applyUpdates(page([event(1, delta(1, [{
+      type: 'transcript_replace',
+      items: [hidden, visible],
+    }]))]))
+
+    expect(store.current.projection.transcript).toEqual([visible])
+  })
+
   test('reconciles active compaction progress by operation identity', () => {
     const store = new SessionStore(snapshot())
     const active: CompactionProjection = {
