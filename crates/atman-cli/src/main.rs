@@ -1067,7 +1067,12 @@ async fn cmd_session_show(sid: String) -> Result<()> {
     );
     println!("revision:   {}", projection.revision.0);
     println!("cursor:     {}", state.cursor().0);
-    println!("messages:   {}", projection.transcript.len());
+    println!(
+        "messages:   {}",
+        summary
+            .as_ref()
+            .map_or(projection.transcript.len(), |summary| summary.message_count)
+    );
     println!("runs:       {}", projection.runs.len());
     println!("resources:  {}", projection.resources.len());
     if let Some(summary) = summary {
