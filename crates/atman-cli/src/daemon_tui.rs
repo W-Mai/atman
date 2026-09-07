@@ -87,6 +87,7 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             transcript_bookmark,
         } = current;
         let session_id = session.session_id().clone();
+        let summary_session = session.clone();
         let (next, bookmark) = run_session(
             client.clone(),
             session,
@@ -101,11 +102,143 @@ pub(crate) async fn run(resume: Option<String>) -> Result<()> {
             bookmarks.insert(session_id, bookmark);
         }
         let Some(next) = next else {
+            let summary = load_exit_summary(&client, &summary_session).await;
+            drop(_terminal_guard);
+            print!("{}", exit_summary_card(&summary));
             return Ok(());
         };
         onboarding_recommended = false;
         current = next;
     }
+}
+
+struct SessionExitSummary {
+    id: String,
+    title: String,
+    project_root: String,
+    message_count: usize,
+    goal: Option<String>,
+    plan: Option<(String, usize, usize)>,
+    done_todos: usize,
+    pending_todos: usize,
+}
+
+async fn load_exit_summary(client: &Client, session: &SessionClient) -> SessionExitSummary {
+    let state = session.current();
+    let projection = state.projection();
+    let id = projection.metadata.id.to_string();
+    let message_count = client
+        .list_sessions(None, Some(id.clone()), None)
+        .await
+        .ok()
+        .and_then(|summaries| {
+            summaries
+                .into_iter()
+                .find(|summary| summary.id == projection.metadata.id)
+        })
+        .map(|summary| summary.message_count)
+        .unwrap_or_else(|| {
+            projection
+                .transcript
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item,
+                        atman_proto::TranscriptItem::Message { message, .. }
+                            if message.role == atman_proto::MessageRole::User
+                                && message.origin == atman_proto::MessageOrigin::User
+                    )
+                })
+                .count()
+        });
+    let plan = projection
+        .plans
+        .iter()
+        .max_by_key(|plan| plan.updated_at)
+        .map(|plan| {
+            (
+                plan.title.clone(),
+                plan.steps.iter().filter(|step| step.done).count(),
+                plan.steps.len(),
+            )
+        });
+    SessionExitSummary {
+        id,
+        title: if projection.metadata.title.is_empty() {
+            "Untitled session".into()
+        } else {
+            projection.metadata.title.clone()
+        },
+        project_root: projection
+            .metadata
+            .project_root
+            .clone()
+            .unwrap_or_else(|| "-".into()),
+        message_count,
+        goal: projection.goal.clone(),
+        plan,
+        done_todos: projection
+            .todos
+            .iter()
+            .filter(|todo| todo.state == atman_proto::TodoState::Done)
+            .count(),
+        pending_todos: projection
+            .todos
+            .iter()
+            .filter(|todo| todo.state == atman_proto::TodoState::Pending)
+            .count(),
+    }
+}
+
+fn exit_summary_card(summary: &SessionExitSummary) -> String {
+    let plan = summary
+        .plan
+        .as_ref()
+        .map(|(title, done, total)| format!("{} ({done}/{total})", truncate_summary(title, 40)))
+        .unwrap_or_else(|| "(none)".into());
+    let lines = vec![
+        " ∴ ATMAN".to_owned(),
+        format!(" name      {}", truncate_summary(&summary.title, 60)),
+        format!(" project   {}", truncate_summary(&summary.project_root, 80)),
+        format!(" session   {}", summary.id),
+        format!(" messages  {}", summary.message_count),
+        format!(
+            " goal      {}",
+            truncate_summary(summary.goal.as_deref().unwrap_or("(none)"), 50)
+        ),
+        format!(" plan      {plan}"),
+        format!(
+            " todos     {} done · {} pending",
+            summary.done_todos, summary.pending_todos
+        ),
+        String::new(),
+        format!(" resume    atman --continue {}", summary.id),
+    ];
+    let width = lines
+        .iter()
+        .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or_default()
+        .max(40);
+    let mut card = format!("\n╭{}╮\n", "─".repeat(width + 4));
+    for line in lines {
+        let line_width = unicode_width::UnicodeWidthStr::width(line.as_str());
+        card.push_str(&format!(
+            "│  {line}{}  │\n",
+            " ".repeat(width.saturating_sub(line_width))
+        ));
+    }
+    card.push_str(&format!("╰{}╯\n\n", "─".repeat(width + 4)));
+    card
+}
+
+fn truncate_summary(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 async fn run_session(
@@ -1323,4 +1456,36 @@ fn daemon_pid() -> Result<Option<u32>> {
     let pid_path = atman_daemon::pidfile::default_pid_path()?;
     Ok(atman_daemon::pidfile::read_pid(&pid_path)?
         .filter(|pid| atman_daemon::pidfile::is_alive(*pid)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_summary_is_boxed_and_keeps_resume_identity() {
+        let summary = SessionExitSummary {
+            id: "29b03fb0-36c3-4d40-82a3-3889c06733e7".into(),
+            title: "会话摘要".into(),
+            project_root: "/workspace/example".into(),
+            message_count: 12,
+            goal: Some("完成 daemon client".into()),
+            plan: Some(("收尾".into(), 2, 3)),
+            done_todos: 4,
+            pending_todos: 1,
+        };
+
+        let card = exit_summary_card(&summary);
+        assert!(card.contains("∴ ATMAN"));
+        assert!(card.contains("messages  12"));
+        assert!(card.contains("plan      收尾 (2/3)"));
+        assert!(card.contains("todos     4 done · 1 pending"));
+        assert!(card.contains("atman --continue 29b03fb0-36c3-4d40-82a3-3889c06733e7"));
+        let widths = card
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(unicode_width::UnicodeWidthStr::width)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(widths.len(), 1);
+    }
 }
