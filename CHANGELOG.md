@@ -116,6 +116,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Checkpoint history pagination** — history pages resolve unowned checkpoint and compaction cursors through the turn interval that contains them, preventing oversized recent turns from being returned repeatedly when loading earlier history.
+
 - **Checkpoint flow ownership and cold restore** — bounded session restoration carries spawned-flow ancestry across the checkpoint boundary, skips full projection snapshots, marks child-context transcript items explicitly, and keeps active workflows, revisions, and event cursors intact in recent-first client snapshots. Cold synchronization reads only the durable tail watermark instead of rebuilding the complete transcript.
 
 - **Large-session runtime recovery** — daemon actors restore the active message window from the latest indexed checkpoint instead of replaying the complete event log. Explicit full-history reads remain lossless and materialize lazily, while recent-turn context reads use bounded indexed pages.

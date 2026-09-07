@@ -1436,6 +1436,101 @@ mod tests {
     }
 
     #[test]
+    fn indexed_before_excludes_the_turn_containing_an_unowned_checkpoint_cursor() {
+        let session_id = SessionId(uuid::Uuid::from_u128(99));
+        let first = turn(1);
+        let second = turn(2);
+        let events = vec![
+            (user_event(1, &first, "first"), first),
+            (user_event(2, &second, "second"), second.clone()),
+        ];
+        let (_dir, mut source) = indexed_source(&events);
+        let runtime_turn_id = atman_runtime::event::TurnId(second.0);
+        let checkpoint = atman_runtime::event::EventEnvelope::new(
+            3,
+            atman_runtime::event::Event::Checkpoint {
+                session_id: session_id.to_string(),
+                flow_run_id: None,
+                messages: vec![atman_runtime::message::Message::user_text(
+                    runtime_turn_id.clone(),
+                    "checkpoint second",
+                )],
+                window_tokens: 4,
+            },
+        );
+        let turn_end = atman_runtime::event::EventEnvelope::new(
+            4,
+            atman_runtime::event::Event::TurnEnd {
+                turn_id: runtime_turn_id,
+            },
+        );
+        for (event, kind, owner) in [
+            (&checkpoint, "checkpoint", None),
+            (&turn_end, "turn_end", Some(second.0.to_string())),
+        ] {
+            let payload = serde_json::to_string(event).unwrap();
+            source
+                .index
+                .insert_project_event_raw(ProjectEventInsert {
+                    session_id: &session_id.to_string(),
+                    seq: i64::try_from(event.seq).unwrap(),
+                    ts: &event.ts.to_rfc3339(),
+                    kind,
+                    turn_id: owner.as_deref(),
+                    flow_run_id: None,
+                    text_content: "",
+                    payload_json: &payload,
+                })
+                .unwrap();
+        }
+        source
+            .index
+            .materialize_timeline_session(&session_id.to_string())
+            .unwrap();
+        source.coverage.seq = 4;
+        let budget = SessionTimelineBudget {
+            turn_budget: Some(1),
+            byte_budget: Some(1),
+        };
+
+        let tail = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::Tail,
+            &budget,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let checkpoint_item = &segment_items(&tail.segments[0])[0];
+        assert_eq!(checkpoint_item.seq, 3);
+
+        let before = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::Before(TimelineCursor {
+                seq: checkpoint_item.seq,
+                item_id: checkpoint_item.id.clone(),
+            }),
+            &budget,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(segment_start_seq(&before.segments[0]), 1);
+        assert!(
+            before
+                .segments
+                .iter()
+                .flat_map(segment_items)
+                .all(|item| item.seq < checkpoint_item.seq)
+        );
+    }
+
+    #[test]
     fn indexed_pages_exclude_turns_crossing_the_validated_suffix() {
         let session_id = SessionId(uuid::Uuid::from_u128(99));
         let incomplete = turn(1);

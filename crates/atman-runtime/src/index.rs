@@ -809,7 +809,7 @@ impl AnchorIndex {
 
     pub fn turn_start_for_event(&self, session_id: &str, seq: u64) -> Result<Option<u64>> {
         let conn = self.conn();
-        let start_seq = conn
+        let direct = conn
             .query_row(
                 "SELECT t.start_seq FROM timeline_event_owners o \
                  JOIN timeline_turns t ON t.session_id = o.session_id AND t.turn_id = o.turn_id \
@@ -818,7 +818,22 @@ impl AnchorIndex {
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        Ok(start_seq.map(|value| value as u64))
+        if let Some(start_seq) = direct {
+            return Ok(Some(start_seq as u64));
+        }
+        let covering = conn
+            .query_row(
+                "SELECT start_seq FROM timeline_turns WHERE session_id = ? \
+                 AND start_seq <= ? AND latest_seq >= ? ORDER BY start_seq DESC LIMIT 1",
+                rusqlite::params![
+                    session_id,
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(covering.map(|value| value as u64))
     }
 
     pub fn validated_event_coverage(
@@ -1726,19 +1741,21 @@ mod tests {
             Some("run-2"),
             "",
         );
-        seed_project_event(&idx, "sess-a", 3, "flow_node_end", None, Some("run-1"), "");
-        seed_project_event(&idx, "sess-a", 4, "flow_node_end", None, Some("run-2"), "");
+        seed_project_event(&idx, "sess-a", 3, "context_compact", None, None, "");
+        seed_project_event(&idx, "sess-a", 4, "flow_node_end", None, Some("run-1"), "");
+        seed_project_event(&idx, "sess-a", 5, "flow_node_end", None, Some("run-2"), "");
 
         let first = idx.read_turns_before("sess-a", Some(2), 1).unwrap();
         assert_eq!(first[0].turn_id, "turn-1");
-        assert_eq!(first[0].latest_seq, 3);
+        assert_eq!(first[0].latest_seq, 4);
         let events = idx.read_events_for_turns("sess-a", &first, None).unwrap();
         assert_eq!(
             events.iter().map(|event| event.seq).collect::<Vec<_>>(),
-            vec![1, 3]
+            vec![1, 3, 4]
         );
-        assert_eq!(idx.turn_start_for_event("sess-a", 3).unwrap(), Some(1));
+        assert_eq!(idx.turn_start_for_event("sess-a", 4).unwrap(), Some(1));
         assert_eq!(idx.turn_start_for_event("sess-a", 2).unwrap(), Some(2));
+        assert_eq!(idx.turn_start_for_event("sess-a", 3).unwrap(), Some(2));
         assert_eq!(idx.turn_start_for_event("sess-a", 99).unwrap(), None);
     }
 
