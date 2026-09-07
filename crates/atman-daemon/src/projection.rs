@@ -369,6 +369,33 @@ impl SessionProjector {
         }
         self.run_turns
             .insert(atman_runtime::event::FlowRunId(run_id.0), turn_id.clone());
+        let runtime_run_id = atman_runtime::event::FlowRunId(run_id.0);
+        let workflow_index = if let Some(index) = self
+            .workflows
+            .iter()
+            .position(|(existing, _)| existing == &turn_id)
+        {
+            index
+        } else {
+            self.workflows.push((
+                turn_id.clone(),
+                RuntimeWorkflowProjection::new(turn_id.clone()),
+            ));
+            self.workflows.len() - 1
+        };
+        self.workflows[workflow_index].1.apply_event_at(
+            &Event::FlowStart {
+                run_id: runtime_run_id,
+                turn_id: Some(turn_id.clone()),
+                flow_name: flow_name.clone(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+            started_at,
+        );
+        let workflow = workflow_projection(&self.workflows[workflow_index].1);
+        upsert_workflow(&mut self.projection.workflows, workflow.clone());
         let run = RunProjection {
             id: run_id,
             turn_id: Some(TurnId(turn_id.0)),
@@ -388,12 +415,16 @@ impl SessionProjector {
             self.projection.lifecycle = SessionLifecycle::Active;
             return self.commit(vec![
                 ProjectionChange::RunUpsert { run },
+                ProjectionChange::WorkflowUpsert { workflow },
                 ProjectionChange::LifecycleSet {
                     lifecycle: SessionLifecycle::Active,
                 },
             ]);
         }
-        self.commit(vec![ProjectionChange::RunUpsert { run }])
+        self.commit(vec![
+            ProjectionChange::RunUpsert { run },
+            ProjectionChange::WorkflowUpsert { workflow },
+        ])
     }
 
     pub(crate) fn append_compaction_text(
@@ -2896,15 +2927,28 @@ mod tests {
         }
 
         let mut registered = SessionProjector::new(sid, None);
-        registered.register_run(
-            FlowRunId(first_run.0),
-            first_turn.clone(),
-            "first".into(),
-            at,
-        );
+        let admission = registered
+            .register_run(
+                FlowRunId(first_run.0),
+                first_turn.clone(),
+                "first".into(),
+                at,
+            )
+            .unwrap();
+        assert!(admission.changes.iter().any(|change| matches!(
+            change,
+            ProjectionChange::WorkflowUpsert { workflow }
+                if workflow.turn_id.0 == first_turn.0
+        )));
         assert_eq!(
             registered.projection().runs[0].turn_id,
             Some(TurnId(first_turn.0))
+        );
+        assert_eq!(registered.projection().workflows.len(), 1);
+        assert_eq!(registered.projection().workflows[0].roots.len(), 1);
+        assert_eq!(
+            registered.projection().workflows[0].roots[0].id,
+            first_run.to_string()
         );
         registered.apply_envelope(&events[1]);
         let mut legacy_start = events[2].clone();
@@ -2913,6 +2957,7 @@ mod tests {
         }
         registered.apply_envelope(&legacy_start);
         assert_eq!(registered.run_turns.get(&first_run), Some(&first_turn));
+        assert_eq!(registered.projection().workflows[0].roots.len(), 1);
         let mut legacy_run = serde_json::to_value(&registered.projection().runs[0]).unwrap();
         legacy_run.as_object_mut().unwrap().remove("turn_id");
         assert!(
