@@ -168,8 +168,8 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
     let mut daemon = DaemonChild(
         Command::new(env!("CARGO_BIN_EXE_atman-daemon"))
             .current_dir(&project_dir)
-            .env("ATMAN_TEST_DATA_DIR", &data_dir)
-            .env("ATMAN_TEST_CONFIG_DIR", &config_dir)
+            .env("ATMAN_DATA_DIR", &data_dir)
+            .env("ATMAN_CONFIG_DIR", &config_dir)
             .env("ATMAN_DAEMON_CONFIG_PATH", config_dir.join("daemon.toml"))
             .env("ATMAN_DAEMON_PORT", port.to_string())
             .stdin(Stdio::null())
