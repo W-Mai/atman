@@ -91,8 +91,13 @@ impl SessionProjector {
     ) -> Self {
         let mut projector = Self::new(session_id, meta);
         for event in events {
-            projector.apply_envelope(event);
+            projector.apply_envelope_inner(event, false);
         }
+        projector.projection.workflows = projector
+            .workflows
+            .iter()
+            .map(|(_, workflow)| workflow_projection(workflow))
+            .collect();
         projector
     }
 
@@ -411,6 +416,14 @@ impl SessionProjector {
     }
 
     pub(crate) fn apply_envelope(&mut self, envelope: &EventEnvelope) -> Option<ProjectionDelta> {
+        self.apply_envelope_inner(envelope, true)
+    }
+
+    fn apply_envelope_inner(
+        &mut self,
+        envelope: &EventEnvelope,
+        materialize_workflows: bool,
+    ) -> Option<ProjectionDelta> {
         if envelope.seq <= self.last_runtime_seq {
             return None;
         }
@@ -1208,12 +1221,20 @@ impl SessionProjector {
             _ => {}
         }
 
-        for workflow in self.apply_workflow_event(envelope) {
-            upsert_workflow(&mut self.projection.workflows, workflow.clone());
-            changes.push(ProjectionChange::WorkflowUpsert { workflow });
+        let changed_workflows = self.apply_workflow_event(envelope);
+        if materialize_workflows {
+            for index in changed_workflows {
+                let workflow = workflow_projection(&self.workflows[index].1);
+                upsert_workflow(&mut self.projection.workflows, workflow.clone());
+                changes.push(ProjectionChange::WorkflowUpsert { workflow });
+            }
+            return self.commit(changes);
         }
-
-        self.commit(changes)
+        if changes.is_empty() && changed_workflows.is_empty() {
+            return None;
+        }
+        self.projection.revision.0 = self.projection.revision.0.saturating_add(1);
+        None
     }
 
     pub(crate) fn set_metadata(
@@ -1472,7 +1493,7 @@ impl SessionProjector {
         });
     }
 
-    fn apply_workflow_event(&mut self, envelope: &EventEnvelope) -> Vec<WorkflowProjection> {
+    fn apply_workflow_event(&mut self, envelope: &EventEnvelope) -> Vec<usize> {
         if matches!(
             &envelope.event,
             Event::PermissionGroupCreated { .. }
@@ -1482,11 +1503,12 @@ impl SessionProjector {
             return self
                 .workflows
                 .iter_mut()
-                .filter_map(|(_, workflow)| {
+                .enumerate()
+                .filter_map(|(index, (_, workflow))| {
                     workflow
                         .apply_event_at(&envelope.event, envelope.ts)
                         .changed()
-                        .then(|| workflow_projection(workflow))
+                        .then_some(index)
                 })
                 .collect();
         }
@@ -1502,22 +1524,23 @@ impl SessionProjector {
         self.run_turns
             .entry(run_id.clone())
             .or_insert_with(|| turn_id.clone());
-        let workflow = if let Some((_, workflow)) = self
+        let index = if let Some(index) = self
             .workflows
-            .iter_mut()
-            .find(|(existing, _)| existing == &turn_id)
+            .iter()
+            .position(|(existing, _)| existing == &turn_id)
         {
-            workflow
+            index
         } else {
             self.workflows
                 .push((turn_id.clone(), RuntimeWorkflowProjection::new(turn_id)));
-            &mut self.workflows.last_mut().expect("workflow inserted").1
+            self.workflows.len() - 1
         };
-        if workflow
+        if self.workflows[index]
+            .1
             .apply_event_at(&envelope.event, envelope.ts)
             .changed()
         {
-            vec![workflow_projection(workflow)]
+            vec![index]
         } else {
             Vec::new()
         }
