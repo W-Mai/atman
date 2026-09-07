@@ -11,34 +11,25 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootStepId {
-    OpenSession,
-    BuildExecutor,
-    RegisterProviders,
-    AttachMcp,
-    AttachMemory,
-    LoadTodos,
+    ConnectDaemon,
+    ResolveSession,
+    LoadRecentHistory,
     Ready,
 }
 
 impl BootStepId {
     pub const ALL: &'static [BootStepId] = &[
-        BootStepId::OpenSession,
-        BootStepId::BuildExecutor,
-        BootStepId::RegisterProviders,
-        BootStepId::AttachMcp,
-        BootStepId::AttachMemory,
-        BootStepId::LoadTodos,
+        BootStepId::ConnectDaemon,
+        BootStepId::ResolveSession,
+        BootStepId::LoadRecentHistory,
         BootStepId::Ready,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::OpenSession => "open session",
-            Self::BuildExecutor => "build executor",
-            Self::RegisterProviders => "register providers",
-            Self::AttachMcp => "attach mcp servers",
-            Self::AttachMemory => "attach memory stores",
-            Self::LoadTodos => "load todos + plans",
+            Self::ConnectDaemon => "connect daemon",
+            Self::ResolveSession => "resolve session",
+            Self::LoadRecentHistory => "load recent history",
             Self::Ready => "ready",
         }
     }

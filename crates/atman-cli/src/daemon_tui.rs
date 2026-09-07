@@ -49,24 +49,59 @@ impl RetainedSessions {
 pub(crate) async fn run(resume: Option<String>) -> Result<()> {
     crate::load_model_config_from_disk();
     let mut onboarding_recommended = atman_runtime::model_registry::is_first_run();
-    let client = connect_local_daemon_as("atman-tui").await?;
-    crate::load_model_config_from_disk();
     let project_root = std::env::current_dir()?.to_string_lossy().into_owned();
     let show_startup = resume.is_none();
-    let first = match resume {
-        Some(prefix) => {
-            let session_id = resolve_session_prefix(&client, &prefix).await?;
-            client.attach_session_windowed(session_id).await?
-        }
-        None => {
-            client
-                .create_session(Some(project_root.clone()), None)
-                .await?
-        }
-    };
-
     let _terminal_guard = atman_tui::terminal_guard::TerminalGuard::install()?;
-    let _sink_guard = atman_runtime::notify::ScopedSink::tui();
+    let (toast_collector, toast_buf) = atman_runtime::notify::ToastCollector::new();
+    let _sink_guard =
+        atman_runtime::notify::ScopedSink::replace_with(std::sync::Arc::new(toast_collector));
+    let (boot_tx, boot_rx) = tokio::sync::mpsc::unbounded_channel();
+    let initialize = tokio::spawn(async move {
+        use atman_runtime::workflow::NodeStatus;
+        use atman_tui::boot_animation::{BootProgress, BootStepId};
+
+        let _ = boot_tx.send(BootProgress::Start(BootStepId::ConnectDaemon));
+        let client = connect_local_daemon_as("atman-tui").await?;
+        let _ = boot_tx.send(BootProgress::Finish(
+            BootStepId::ConnectDaemon,
+            NodeStatus::Ok,
+        ));
+        crate::load_model_config_from_disk();
+
+        let _ = boot_tx.send(BootProgress::Start(BootStepId::ResolveSession));
+        let resolved = match resume {
+            Some(prefix) => Some(resolve_session_prefix(&client, &prefix).await?),
+            None => None,
+        };
+        let _ = boot_tx.send(BootProgress::Finish(
+            BootStepId::ResolveSession,
+            NodeStatus::Ok,
+        ));
+
+        let _ = boot_tx.send(BootProgress::Start(BootStepId::LoadRecentHistory));
+        let first = match resolved {
+            Some(session_id) => client.attach_session(session_id).await?,
+            None => client.create_session(Some(project_root), None).await?,
+        };
+        let _ = boot_tx.send(BootProgress::Finish(
+            BootStepId::LoadRecentHistory,
+            NodeStatus::Ok,
+        ));
+        let _ = boot_tx.send(BootProgress::Start(BootStepId::Ready));
+        let _ = boot_tx.send(BootProgress::Finish(BootStepId::Ready, NodeStatus::Ok));
+        Ok::<_, anyhow::Error>((client, first))
+    });
+    let (terminal, _) = atman_tui::boot_animation::run_boot_animation(
+        boot_rx,
+        env!("CARGO_PKG_VERSION").into(),
+        Vec::new(),
+        toast_buf,
+    )
+    .await?;
+    drop(terminal);
+    let (client, first) = initialize
+        .await
+        .context("join daemon TUI initialization")??;
     let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(RetainedSessions::default()));
     sessions.lock().await.insert(first.clone());
     let mut bookmarks = std::collections::HashMap::<
