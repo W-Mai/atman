@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Model-initiated image reading** — `image.read` imports a permission-checked local PNG, JPEG, GIF, or WebP into the session attachment store and supplies it as visual input on the next model call while preserving parallel tool-result ordering.
 - **Collapsible working summaries** — Working groups default to a three-row intent ticker with fixed progress and edit metrics; the collapsed ticker only applies a subtle fade when content is clipped, tool titles toggle content visibility, and clicks inside content independently toggle full detail.
 - **Streaming single-line summaries** — compact thinking and tool rows join processed content into a syntax-colored ticker with a fixed left-faded to right-bright gradient; new content advances the viewport and completed rows remain still.
 - **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.

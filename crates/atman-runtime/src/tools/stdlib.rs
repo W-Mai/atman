@@ -878,7 +878,16 @@ impl Tool for DispatchAll {
             let (auto_batch, serial_batch, mut out_slots) = partition_and_gate(prepared, ctx).await;
             run_auto_parallel(auto_batch, ctx, &mut out_slots).await;
             run_serial(serial_batch, ctx, &mut out_slots).await;
-            let out: Vec<Value> = out_slots.into_iter().flatten().collect();
+            let outcomes: Vec<DispatchOutcome> = out_slots.into_iter().flatten().collect();
+            let mut out = Vec::with_capacity(
+                outcomes.len()
+                    + outcomes
+                        .iter()
+                        .map(|outcome| outcome.followups.len())
+                        .sum::<usize>(),
+            );
+            out.extend(outcomes.iter().map(|outcome| outcome.tool_result.clone()));
+            out.extend(outcomes.into_iter().flat_map(|outcome| outcome.followups));
             Ok(Value::List(out))
         })
     }
@@ -1061,12 +1070,27 @@ struct Approved {
     call_ctx: ToolCtx,
 }
 
+#[derive(Clone)]
+struct DispatchOutcome {
+    tool_result: Value,
+    followups: Vec<Value>,
+}
+
+impl DispatchOutcome {
+    fn tool_result(message: crate::message::Message) -> Self {
+        Self {
+            tool_result: Value::Message(message),
+            followups: Vec::new(),
+        }
+    }
+}
+
 async fn partition_and_gate(
     prepared: Vec<PreparedEntry>,
     ctx: &ToolCtx,
-) -> (Vec<Approved>, Vec<Approved>, Vec<Option<Value>>) {
+) -> (Vec<Approved>, Vec<Approved>, Vec<Option<DispatchOutcome>>) {
     let total = prepared.len();
-    let mut out_slots: Vec<Option<Value>> = vec![None; total];
+    let mut out_slots: Vec<Option<DispatchOutcome>> = vec![None; total];
     struct ReadyEntry {
         index: usize,
         id: String,
@@ -1084,7 +1108,7 @@ async fn partition_and_gate(
     for entry in prepared {
         match entry {
             PreparedEntry::Failed { index, msg } => {
-                out_slots[index] = Some(Value::Message(emit_tool_result(ctx, &msg)));
+                out_slots[index] = Some(DispatchOutcome::tool_result(emit_tool_result(ctx, &msg)));
             }
             PreparedEntry::Ready {
                 index,
@@ -1148,32 +1172,92 @@ async fn partition_and_gate(
             Err(reason) => {
                 let msg =
                     build_error_result(ctx, &r.id, &format!("tool `{}` denied: {reason}", r.name));
-                out_slots[r.index] = Some(Value::Message(emit_tool_result(ctx, &msg)));
+                out_slots[r.index] =
+                    Some(DispatchOutcome::tool_result(emit_tool_result(ctx, &msg)));
             }
         }
     }
     (auto_batch, serial_batch, out_slots)
 }
 
-async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
+async fn run_auto_parallel(
+    batch: Vec<Approved>,
+    ctx: &ToolCtx,
+    out_slots: &mut [Option<DispatchOutcome>],
+) {
     use futures::StreamExt;
 
     let mut pending = futures::stream::FuturesUnordered::new();
     for a in batch {
         pending.push(async move {
-            let result = a.tool.call(a.call_args, &a.call_ctx).await;
-            (a.index, a.id, a.name, result)
+            let Approved {
+                index,
+                id,
+                name,
+                tool,
+                call_args,
+                call_ctx,
+            } = a;
+            let result = tool.call(call_args, &call_ctx).await;
+            (index, id, name, tool, result)
         });
     }
-    while let Some((index, id, name, result)) = pending.next().await {
-        out_slots[index] = Some(finish_dispatch(ctx, &id, &name, result));
+    while let Some((index, id, name, tool, result)) = pending.next().await {
+        out_slots[index] = Some(finish_dispatch_outcome(
+            ctx,
+            &id,
+            &name,
+            tool.as_ref(),
+            result,
+        ));
     }
 }
 
-async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
+async fn run_serial(
+    batch: Vec<Approved>,
+    ctx: &ToolCtx,
+    out_slots: &mut [Option<DispatchOutcome>],
+) {
     for a in batch {
-        let result = a.tool.call(a.call_args, &a.call_ctx).await;
-        out_slots[a.index] = Some(finish_dispatch(ctx, &a.id, &a.name, result));
+        let Approved {
+            index,
+            id,
+            name,
+            tool,
+            call_args,
+            call_ctx,
+        } = a;
+        let result = tool.call(call_args, &call_ctx).await;
+        out_slots[index] = Some(finish_dispatch_outcome(
+            ctx,
+            &id,
+            &name,
+            tool.as_ref(),
+            result,
+        ));
+    }
+}
+
+fn finish_dispatch_outcome(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    tool: &dyn Tool,
+    result: ToolResult,
+) -> DispatchOutcome {
+    let followups = result
+        .as_ref()
+        .ok()
+        .map(|value| {
+            tool.model_followups(value, ctx)
+                .into_iter()
+                .map(Value::Message)
+                .collect()
+        })
+        .unwrap_or_default();
+    DispatchOutcome {
+        tool_result: finish_dispatch(ctx, id, name, result),
+        followups,
     }
 }
 
@@ -1579,6 +1663,84 @@ mod tests {
         fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
             Box::pin(async { panic!("unexposed tool must not execute") })
         }
+    }
+
+    struct FollowupProbeTool(&'static str);
+
+    impl Tool for FollowupProbeTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn model_followups(&self, result: &Value, _ctx: &ToolCtx) -> Vec<crate::message::Message> {
+            let Value::Str(label) = result else {
+                return Vec::new();
+            };
+            let mut message = crate::message::Message::user_text(
+                crate::event::TurnId::now(),
+                format!("followup:{label}"),
+            );
+            message.origin = crate::message::MessageOrigin::Internal;
+            vec![message]
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move { Ok(Value::Str(self.0.to_string())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_places_followups_after_the_complete_tool_result_batch() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(FollowupProbeTool("probe.first")));
+        registry.register(std::sync::Arc::new(FollowupProbeTool("probe.second")));
+        let ctx = authorized_ctx(std::sync::Arc::new(registry));
+        let uses = Value::List(
+            ["probe.first", "probe.second"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    Value::Struct(vec![
+                        ("id".into(), Value::Str(format!("call-{index}"))),
+                        ("name".into(), Value::Str(name.into())),
+                        ("input".into(), Value::Struct(Vec::new())),
+                    ])
+                })
+                .collect(),
+        );
+
+        let Value::List(messages) = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected messages")
+        };
+
+        assert_eq!(messages.len(), 4);
+        assert!(messages[..2].iter().all(
+            |value| matches!(value, Value::Message(message) if message.role == crate::message::MessageRole::Tool)
+        ));
+        assert_eq!(
+            messages[2..]
+                .iter()
+                .map(|value| match value {
+                    Value::Message(message) => message.text_concat(),
+                    _ => panic!("expected message"),
+                })
+                .collect::<Vec<_>>(),
+            ["followup:probe.first", "followup:probe.second"]
+        );
     }
 
     #[tokio::test]

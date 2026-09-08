@@ -116,6 +116,8 @@ to the flow as invocation-local `env("effort")` data. `llm.call`, `llm.extract`,
 explicitly passes `effort: env("effort")`; inheriting the invocation environment
 alone does not change a request.
 
+Models with image input enabled can also call `image.read(path: "...")` to inspect a local PNG, JPEG, GIF, or WebP file during an agent run. The tool imports at most 20 MiB through the session attachment store and supplies the image to the next model call without placing base64 in the textual tool result.
+
 Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
 
 ```toml

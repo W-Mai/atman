@@ -680,6 +680,9 @@ pub trait Tool: Send + Sync {
     ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
         Ok(crate::permission::ResourceProvenance::none())
     }
+    fn model_followups(&self, _result: &Value, _ctx: &ToolCtx) -> Vec<crate::message::Message> {
+        Vec::new()
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult>;
     fn preview_call<'a>(
         &'a self,

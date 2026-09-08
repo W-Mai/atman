@@ -20,6 +20,7 @@ pub mod git_workspace;
 pub mod git_worktree;
 pub mod help;
 pub mod hunk;
+pub mod image;
 pub mod llm_call;
 pub mod llm_classify;
 pub mod llm_extract;
@@ -48,6 +49,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(anchor::AnchorWrite));
     reg.register(Arc::new(anchor::AnchorUndo));
     reg.register(Arc::new(fs::FsRead));
+    reg.register(Arc::new(image::ImageRead));
     reg.register(Arc::new(tool_output::OutputRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
