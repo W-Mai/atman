@@ -702,7 +702,7 @@ fn parse_ident_expr(input: ParseStream) -> Result<Expr> {
         let mut path = vec![first];
         while input.peek(Token![.]) {
             input.parse::<Token![.]>()?;
-            let seg = to_ident(input.parse::<syn::Ident>()?);
+            let seg = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(input)?);
             path.push(seg);
         }
         if input.peek(token::Paren) {

@@ -22,6 +22,7 @@ impl Tool for LlmCallTool {
                     "llm.call: no tool registry available".into(),
                 ));
             };
+            super::mcp::await_requested_tools(&args, ctx).await?;
             let llm_args = parse_llm_args_from_toolargs(&args, registry)?;
             let v = dispatch_llm(llm_args, ctx).await;
             match v {

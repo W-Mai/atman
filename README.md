@@ -247,7 +247,7 @@ See [`examples/`](examples/) for the canonical flows covering agent loops, code 
 
 ## Tools
 
-55+ built-in tools across 15 categories. Plus any MCP server (filesystem, browser, lark-cli, siyuan-note, playwright, …) configured in `mcp.toml` is auto-connected at boot and exposed through the same tool interface.
+55+ built-in tools across 15 categories. Plus any MCP server configured in `mcp_servers.json` is auto-connected at boot and exposed through the same tool interface. Each `llm.call` waits for only the MCP servers referenced by its resolved `tools` argument; `"mcp.*"` waits for all enabled servers.
 
 | Category | Tools | Tier |
 |---|---|---|
@@ -413,7 +413,7 @@ Yes, when configured with file-editing tools. Use `contract.scope` to statically
 Those are LLM-driven chat-first agents. atman is orchestration-driven: you write the flow, the flow decides what happens next, the LLM executes what it's assigned. This makes runs reproducible, auditable, and scriptable.
 
 **What is MCP?**
-Model Context Protocol. atman is an MCP consumer — any MCP server you configure in `mcp.toml` is auto-connected at boot and its tools appear alongside the built-in ones.
+Model Context Protocol. atman is an MCP consumer — any MCP server you configure in `mcp_servers.json` is auto-connected at boot and its tools appear alongside the built-in ones.
 
 ## Contributing
 

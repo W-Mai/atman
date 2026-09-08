@@ -25,6 +25,7 @@ pub mod llm_call;
 pub mod llm_classify;
 pub mod llm_extract;
 pub mod llm_generate_branches;
+pub mod mcp;
 pub mod memory;
 pub mod memory_stubs;
 pub mod permission;
@@ -50,6 +51,10 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(anchor::AnchorUndo));
     reg.register(Arc::new(fs::FsRead));
     reg.register(Arc::new(image::ImageRead));
+    reg.register(Arc::new(mcp::McpStatus));
+    reg.register(Arc::new(mcp::McpTools));
+    reg.register(Arc::new(mcp::McpAwait));
+    reg.register(Arc::new(mcp::McpCall));
     reg.register(Arc::new(tool_output::OutputRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));

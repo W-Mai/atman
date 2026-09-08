@@ -234,6 +234,23 @@ atman flow test ~/.config/atman/commands/hello.at
 
 First run writes `hello.at.snap.json`. Subsequent runs compare the current output to the snapshot; mismatches print one line per drift case and exit non-zero. Re-run with `--bless` when the change is intended.
 
+### MCP readiness and direct calls
+
+An `llm.call` that includes `"mcp.jira.search"`, `"mcp.jira.*"`, or `"mcp.*"` waits for the referenced server set before building the provider request. At code can inspect or invoke a server without an LLM:
+
+```at
+ready = mcp.await(server: "jira")
+tools = mcp.tools(server: "jira")
+result = mcp.call(server: "jira", tool: "search", input: {query: "open"})
+```
+
+The CLI supports the same direct operation with JSON input. Tools declaring the MCP `readOnlyHint` annotation can run directly; tools without that declaration require the explicit write override:
+
+```bash
+atman mcp call jira search '{"query":"open"}'
+atman mcp call jira update_issue '{"key":"PROJ-1","summary":"Updated"}' --allow-write
+```
+
 ## 8. Session discovery and spec state
 
 Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`.

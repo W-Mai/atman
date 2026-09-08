@@ -144,6 +144,15 @@ enum McpAction {
     Resources { name: String },
     /// List prompts provided by an MCP server.
     Prompts { name: String },
+    /// Call an MCP tool directly.
+    Call {
+        name: String,
+        tool: String,
+        #[arg(default_value = "{}")]
+        input: String,
+        #[arg(long)]
+        allow_write: bool,
+    },
     /// Import MCP servers from a JSON file (Claude Desktop / Cursor / Cline format).
     Import { file: PathBuf },
 }
@@ -7003,6 +7012,46 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                 Err(e) => println!("  (prompts not supported: {e})"),
             }
         }
+        McpAction::Call {
+            name,
+            tool,
+            input,
+            allow_write,
+        } => {
+            let configs = load_mcp_configs();
+            let Some(cfg) = configs.iter().find(|config| config.name == name) else {
+                anyhow::bail!("MCP server \"{}\" not found", name);
+            };
+            if cfg.disabled {
+                anyhow::bail!("MCP server \"{}\" is disabled", name);
+            }
+            let client = connect_mcp_client(cfg).await?;
+            let snapshot = client.tool_snapshot();
+            let schema = snapshot
+                .tools
+                .iter()
+                .find(|candidate| candidate.name == tool)
+                .ok_or_else(|| anyhow::anyhow!("MCP tool \"{}.{}\" not found", name, tool))?;
+            let read_only = schema
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint)
+                == Some(true);
+            if !read_only && !allow_write {
+                anyhow::bail!(
+                    "MCP tool \"{}.{}\" is not declared read-only; pass --allow-write to call it",
+                    name,
+                    tool
+                );
+            }
+            let arguments: serde_json::Value = serde_json::from_str(&input)
+                .with_context(|| "MCP tool input must be a JSON object")?;
+            if !arguments.is_object() {
+                anyhow::bail!("MCP tool input must be a JSON object");
+            }
+            let result = client.call_tool(&tool, arguments).await?;
+            println!("{}", serde_json::to_string_pretty(&result.to_json())?);
+        }
         McpAction::Import { file } => {
             let text = std::fs::read_to_string(&file)
                 .map_err(|e| anyhow::anyhow!("read {}: {e}", file.display()))?;
@@ -7649,6 +7698,32 @@ mod tests {
         assert_eq!(args[0].0, "input");
         assert!(matches!(&args[0].1, Value::Str(value) if value == "inspect this"));
         assert_eq!(source_dir, Some(project_commands));
+    }
+
+    #[test]
+    fn mcp_call_cli_accepts_json_and_explicit_write_override() {
+        let cli = Cli::try_parse_from([
+            "atman",
+            "mcp",
+            "call",
+            "jira",
+            "search",
+            r#"{"query":"open"}"#,
+            "--allow-write",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Mcp {
+                action: McpAction::Call {
+                    name,
+                    tool,
+                    input,
+                    allow_write: true,
+                }
+            }) if name == "jira" && tool == "search" && input == r#"{"query":"open"}"#
+        ));
     }
 
     #[test]

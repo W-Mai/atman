@@ -45,6 +45,8 @@
 - Connect external tool servers via stdio/http/sse.
 - Tools registered as `mcp.{server}.{tool}` in the ToolRegistry.
 - `"mcp.*"` in a flow's tool list includes all MCP tools.
+- `llm.call` waits for statically or dynamically resolved MCP tool selectors before building the provider request.
+- `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call` support direct inspection and invocation from At code.
 - Hot-reload: toggle/remove servers without restart.
 
 ## Lifecycle Hooks

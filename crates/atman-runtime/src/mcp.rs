@@ -67,6 +67,16 @@ pub struct McpToolSchema {
     pub description: Option<String>,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<McpToolAnnotations>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct McpToolAnnotations {
+    #[serde(default, rename = "readOnlyHint")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, rename = "destructiveHint")]
+    pub destructive_hint: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

@@ -101,11 +101,16 @@ pub fn spawn_mcp_boot(
             .map(|hub| hub.load_mcp())
             .unwrap_or_default(),
     };
-    let retained_namespaces = configs
+    let mut retained_namespaces = configs
         .iter()
         .filter(|config| !config.disabled)
         .map(|config| atman_runtime::mcp::mcp_tool_namespace(&config.name))
         .collect::<Vec<_>>();
+    retained_namespaces.extend(
+        atman_runtime::tools::mcp::CONTROL_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_string()),
+    );
     executor
         .tools
         .retain_namespaces("mcp.", &retained_namespaces);

@@ -247,5 +247,7 @@ fn render_mcp() -> String {
 
     out.push_str("\nIn a flow, include MCP tools with `\"mcp.*\"` in the `tools` list:\n\n");
     out.push_str("```\nllm.call(\n    tools: [fs.read, \"mcp.*\"]\n)\n```\n");
+    out.push_str("\n`llm.call` waits for the MCP servers referenced by its resolved `tools` argument before validating tool names. Direct At code can inspect and invoke MCP without an LLM:\n\n");
+    out.push_str("```\nmcp.await(server: \"jira\")\nmcp.status(server: \"jira\")\nmcp.tools(server: \"jira\")\nmcp.call(server: \"jira\", tool: \"search\", input: {query: \"open\"})\n```\n");
     out
 }

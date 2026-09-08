@@ -336,7 +336,12 @@ pub fn resolve_tool_specs_from_values(
                     let mut matches: Vec<_> = tools
                         .names()
                         .into_iter()
-                        .filter(|tool_name| tool_name.starts_with(&prefix))
+                        .filter(|tool_name| {
+                            tool_name.starts_with(&prefix)
+                                && !(prefix == "mcp."
+                                    && crate::tools::mcp::CONTROL_TOOL_NAMES
+                                        .contains(&tool_name.as_str()))
+                        })
                         .collect();
                     matches.sort_unstable();
                     for tool_name in matches {
@@ -533,12 +538,12 @@ mod tests {
         ];
         let left = resolve_tool_specs_from_values(
             &selectors,
-            &registry(&["mcp.zeta", "native.read", "mcp.alpha"]),
+            &registry(&["mcp.zeta", "native.read", "mcp.status", "mcp.alpha"]),
         )
         .unwrap();
         let right = resolve_tool_specs_from_values(
             &selectors,
-            &registry(&["mcp.alpha", "mcp.zeta", "native.read"]),
+            &registry(&["mcp.alpha", "mcp.status", "mcp.zeta", "native.read"]),
         )
         .unwrap();
 

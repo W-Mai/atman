@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Deterministic MCP invocation** — `llm.call` waits for its resolved MCP tool selectors before constructing a provider request; At code can inspect readiness and call tools through `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`, while `atman mcp call` supports guarded direct JSON invocation.
 - **Project-local commands** — slash commands, completion, and flow discovery load `<project>/.atman/commands/*.at` before user-level commands and report each command's scope and source path.
 - **Model-initiated image reading** — `image.read` imports a permission-checked local PNG, JPEG, GIF, or WebP into the session attachment store and supplies it as visual input on the next model call while preserving parallel tool-result ordering.
 - **Collapsible working summaries** — Working groups default to a three-row intent ticker with fixed progress and edit metrics; the collapsed ticker only applies a subtle fade when content is clipped, tool titles toggle content visibility, and clicks inside content independently toggle full detail.
