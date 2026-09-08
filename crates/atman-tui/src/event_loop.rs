@@ -815,6 +815,11 @@ pub(crate) async fn run_frames(
                                 {
                                     if let Some(tool_use_id) = node_id
                                         .strip_prefix(crate::output::TOOL_CALL_REGION_PREFIX)
+                                        .or_else(|| {
+                                            node_id.strip_prefix(
+                                                crate::output::TOOL_DETAIL_REGION_PREFIX,
+                                            )
+                                        })
                                     {
                                         app.app.cycle_tool_call_disclosure(
                                             panel_idx,

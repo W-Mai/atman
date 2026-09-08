@@ -119,48 +119,25 @@ impl<'a> RenderCtx<'a> {
         &'a crate::app::OutputItem,
         crate::app::OutputRevision,
     )> {
-        if let Some(detail) = self.detached_task_details.get(handle) {
-            return Some((
-                usize::MAX,
-                &detail.item,
-                crate::app::OutputRevision {
-                    id: detail.revision,
-                    semantic: detail.revision,
-                    layout: detail.revision,
-                    source_generation: detail.revision,
-                    ..Default::default()
-                },
-            ));
-        }
-        if let Some(&index) = self.handle_index.get(handle)
-            && let Some(item) = self.items.get(index)
-            && item.handle() == Some(handle)
-        {
-            return Some((
-                index,
-                item,
-                self.item_revisions.get(index).copied().unwrap_or_default(),
-            ));
-        }
-        self.items
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, item)| {
-                let crate::app::OutputItem::ToolDispatch { calls } = item else {
-                    return None;
-                };
-                calls.iter().find_map(|call| {
-                    let detail = call.detail.as_deref()?;
-                    (detail.handle() == Some(handle)).then(|| {
-                        (
-                            index,
-                            detail,
-                            self.item_revisions.get(index).copied().unwrap_or_default(),
-                        )
-                    })
-                })
-            })
+        let (index, item) = crate::app::resolve_task_detail(
+            handle,
+            self.items,
+            self.handle_index,
+            self.detached_task_details,
+        )?;
+        let revision = if index == usize::MAX {
+            let revision = self.detached_task_details.get(handle)?.revision;
+            crate::app::OutputRevision {
+                id: revision,
+                semantic: revision,
+                layout: revision,
+                source_generation: revision,
+                ..Default::default()
+            }
+        } else {
+            self.item_revisions.get(index).copied().unwrap_or_default()
+        };
+        Some((index, item, revision))
     }
 }
 

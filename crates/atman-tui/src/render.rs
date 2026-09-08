@@ -441,6 +441,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             &app.activity_nodes,
             &app.items,
             &app.handle_index,
+            &app.detached_task_details,
             app.task_panel_collapsed,
             &app.task_panel_collapsed_groups,
             &hover,

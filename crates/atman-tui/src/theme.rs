@@ -103,6 +103,9 @@ pub struct Theme {
     pub work_detail_bg: ThemeColor,
     pub work_output_bg: ThemeColor,
     pub work_hover_bg: ThemeColor,
+    pub work_title_fg: ThemeColor,
+    pub work_action_fg: ThemeColor,
+    pub work_meta_fg: ThemeColor,
     pub user_msg_bg: ThemeColor,
     pub note_info_bg: ThemeColor,
     pub note_warn_bg: ThemeColor,
@@ -137,6 +140,9 @@ impl Theme {
             work_detail_bg: ThemeColor(Color::Rgb(23, 26, 32)),
             work_output_bg: ThemeColor(Color::Rgb(20, 23, 28)),
             work_hover_bg: ThemeColor(Color::Rgb(34, 39, 48)),
+            work_title_fg: ThemeColor(Color::Rgb(138, 144, 154)),
+            work_action_fg: ThemeColor(Color::Rgb(212, 216, 224)),
+            work_meta_fg: ThemeColor(Color::Rgb(106, 112, 122)),
             user_msg_bg: ThemeColor(Color::Rgb(38, 42, 54)),
             note_info_bg: ThemeColor(Color::Rgb(20, 26, 34)),
             note_warn_bg: ThemeColor(Color::Rgb(38, 30, 16)),
@@ -171,6 +177,9 @@ impl Theme {
             work_detail_bg: ThemeColor(Color::Rgb(225, 227, 231)),
             work_output_bg: ThemeColor(Color::Rgb(240, 241, 242)),
             work_hover_bg: ThemeColor(Color::Rgb(217, 226, 231)),
+            work_title_fg: ThemeColor(Color::Rgb(78, 84, 94)),
+            work_action_fg: ThemeColor(Color::Rgb(28, 30, 34)),
+            work_meta_fg: ThemeColor(Color::Rgb(112, 118, 128)),
             user_msg_bg: ThemeColor(Color::Rgb(220, 225, 235)),
             note_info_bg: ThemeColor(Color::Rgb(220, 232, 244)),
             note_warn_bg: ThemeColor(Color::Rgb(248, 236, 210)),
@@ -349,6 +358,24 @@ mod tests {
             assert_ne!(theme.work_bg, theme.work_detail_bg);
             assert_ne!(theme.work_detail_bg, theme.work_output_bg);
             assert_ne!(theme.work_bg, theme.work_hover_bg);
+        }
+    }
+
+    #[test]
+    fn work_foreground_contrast_follows_action_title_meta_hierarchy() {
+        let contrast = |foreground: ThemeColor, background: ThemeColor| {
+            let luminance = |color: ThemeColor| {
+                let (red, green, blue) = color.rgb();
+                0.2126 * f64::from(red) + 0.7152 * f64::from(green) + 0.0722 * f64::from(blue)
+            };
+            (luminance(foreground) - luminance(background)).abs()
+        };
+        for theme in [Theme::dark(), Theme::light()] {
+            let action = contrast(theme.work_action_fg, theme.work_bg);
+            let title = contrast(theme.work_title_fg, theme.work_bg);
+            let meta = contrast(theme.work_meta_fg, theme.work_bg);
+            assert!(action > title, "actions must lead structural titles");
+            assert!(title > meta, "structural titles must lead metadata");
         }
     }
 

@@ -146,6 +146,7 @@ pub fn render(
     activity_nodes: &[ActivityNode],
     items: &[crate::app::OutputItem],
     handle_index: &std::collections::HashMap<String, usize>,
+    detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
     collapsed: bool,
     collapsed_groups: &std::collections::HashSet<TaskKind>,
     hover: &TaskPanelHover,
@@ -392,8 +393,13 @@ pub fn render(
             let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
 
             // compute content lines (used for both collapsed summary and expanded view)
-            let content_lines: Vec<String> =
-                compute_content_lines(snap, activity_nodes, items, handle_index);
+            let content_lines: Vec<String> = compute_content_lines(
+                snap,
+                activity_nodes,
+                items,
+                handle_index,
+                detached_task_details,
+            );
             let watcher_lines: Vec<String> = if let Some(hub) = watch_hub {
                 let watchers = hub.list_watchers_for_handle(&snap.source_handle);
                 if watchers.is_empty() {
@@ -892,27 +898,21 @@ pub fn compute_content_lines(
     activity_nodes: &[ActivityNode],
     items: &[crate::app::OutputItem],
     handle_index: &std::collections::HashMap<String, usize>,
+    detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
 ) -> Vec<String> {
-    let item = handle_index
-        .get(&snap.source_handle)
-        .and_then(|&index| items.get(index));
+    let item = crate::app::resolve_task_detail(
+        &snap.source_handle,
+        items,
+        handle_index,
+        detached_task_details,
+    )
+    .map(|(_, item)| item);
     match snap.kind {
         TaskKind::Flow => {
             // Async sub-agents (flow.spawn) appear as SubAgentActivity items;
             // background flows appear as activity nodes. Try both.
-            if let Some(crate::app::OutputItem::SubAgentActivity { output, .. }) = item {
-                let mut found: Vec<String> = Vec::new();
-                for line in output.lines().rev() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        found.push(trimmed.to_string());
-                        if found.len() >= 3 {
-                            break;
-                        }
-                    }
-                }
-                found.reverse();
-                return found;
+            if let Some(item @ crate::app::OutputItem::SubAgentActivity { .. }) = item {
+                return crate::app::task_detail_tail_lines(item, 3);
             }
             let sub = activity_nodes
                 .iter()
@@ -920,49 +920,9 @@ pub fn compute_content_lines(
                 .find(|n| n.run_id == snap.source_handle && n.status == ActivityStatus::Running);
             sub.map(|n| vec![n.label.clone()]).unwrap_or_default()
         }
-        TaskKind::Bash => {
-            let mut found: Vec<String> = Vec::new();
-            if let Some(crate::app::OutputItem::Bash { output, .. }) = item {
-                for line in output.lines().rev() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        found.push(trimmed.to_string());
-                        if found.len() >= 3 {
-                            break;
-                        }
-                    }
-                }
-                found.reverse();
-            }
-            found
-        }
-        TaskKind::Terminal => {
-            let mut found: Vec<String> = Vec::new();
-            if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                let cols = screen.cols as usize;
-                let rows = screen.rows as usize;
-                if cols > 0 && rows > 0 {
-                    for r in (0..rows).rev() {
-                        let start = r * cols;
-                        let end = start + cols;
-                        let line: String = screen
-                            .cells
-                            .get(start..end)
-                            .map(|cells| cells.iter().map(|c| c.chars.as_str()).collect::<String>())
-                            .unwrap_or_default();
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            found.push(trimmed.to_string());
-                            if found.len() >= 3 {
-                                break;
-                            }
-                        }
-                    }
-                    found.reverse();
-                }
-            }
-            found
-        }
+        TaskKind::Bash | TaskKind::Terminal => item
+            .map(|item| crate::app::task_detail_tail_lines(item, 3))
+            .unwrap_or_default(),
     }
 }
 
@@ -1139,6 +1099,64 @@ mod tests {
     }
 
     #[test]
+    fn terminal_summary_resolves_detached_live_screen_content() {
+        use atman_runtime::task_registry::{TaskKind, TaskStatus};
+
+        let mut cells = vec![atman_runtime::tools::term::TerminalCell::default(); 40];
+        for (index, ch) in "terminal live".chars().enumerate() {
+            cells[20 + index].chars = ch.to_string();
+        }
+        let snapshot = TaskSnapshot {
+            id: TaskId::default(),
+            kind: TaskKind::Terminal,
+            label: "python".into(),
+            command: Some("python".into()),
+            status: TaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            ended_at: None,
+            source_handle: "term-detached".into(),
+            session_id: "s".into(),
+            workspace_id: None,
+            flow_run_id: None,
+            termination: None,
+        };
+        let detached = std::collections::HashMap::from([(
+            "term-detached".into(),
+            crate::app::DetachedTaskDetail {
+                item: crate::app::OutputItem::Terminal {
+                    handle: "term-detached".into(),
+                    title: None,
+                    command: Some("python".into()),
+                    screen: atman_runtime::tools::term::TerminalScreen {
+                        rows: 2,
+                        cols: 20,
+                        cells,
+                        cursor: None,
+                        alt_screen: false,
+                    },
+                    accumulated_bytes: Vec::new(),
+                    mode: crate::app::TerminalViewMode::Capture,
+                    done: false,
+                    expanded: false,
+                    scroll_offset: None,
+                },
+                revision: 1,
+            },
+        )]);
+
+        assert_eq!(
+            compute_content_lines(
+                &snapshot,
+                &[],
+                &[],
+                &std::collections::HashMap::new(),
+                &detached,
+            ),
+            vec!["terminal live"]
+        );
+    }
+
+    #[test]
     fn hitmap_group_header_not_overlapped_by_task_content() {
         use atman_runtime::task_registry::{TaskKind, TaskStatus};
         use ratatui::backend::TestBackend;
@@ -1216,6 +1234,7 @@ mod tests {
                     &[],
                     &items,
                     &std::collections::HashMap::from([("term_0".to_string(), 0)]),
+                    &std::collections::HashMap::new(),
                     false,
                     &std::collections::HashSet::new(),
                     &hover,

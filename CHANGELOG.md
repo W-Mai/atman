@@ -20,6 +20,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Tool activity hierarchy** — Thinking and working surfaces use explicit action, title, and metadata contrast levels; running tools animate only their status glyph, provider-facing tool schemas require call purposes, streamed purposes appear before final tool-use messages, and missing legacy purposes receive readable action labels.
 - **Responsive execution surfaces** — Bash output is read in bounded frames with queue backpressure and retained-output limits, nested Bash, Terminal, and subflow details resolve through one task-detail path, and stalled child provider calls respond immediately to task cancellation.
 - **Stable transcript state** — LLM completion closes thinking and assistant blocks by stable output identity even when tool drafts intervene, policy-resolved approvals bypass the pending prompt, focused floating panels hide the hardware input cursor, and working headers and tool rows use three-row hover and click regions.
 - **Model-paired context gauge** — context-window measurements stay paired with the model budget that produced them, model switches replace stale numerators with a current estimate, and overflow renders as `100%+` instead of an unbounded percentage.

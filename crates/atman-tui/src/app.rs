@@ -67,7 +67,7 @@ pub struct ToolDraftPreview {
 }
 
 impl ToolDraftPreview {
-    fn push(&mut self, tool: &str, delta: &str) {
+    pub(crate) fn push(&mut self, tool: &str, delta: &str) {
         if self.arguments.len() < 16_384 {
             let mut take = delta.len().min(16_384 - self.arguments.len());
             while !delta.is_char_boundary(take) {
@@ -471,6 +471,95 @@ pub struct OutputRevision {
 pub struct DetachedTaskDetail {
     pub item: OutputItem,
     pub revision: u64,
+}
+
+pub fn resolve_task_detail<'a>(
+    handle: &str,
+    items: &'a [OutputItem],
+    handle_index: &std::collections::HashMap<String, usize>,
+    detached_task_details: &'a std::collections::HashMap<String, DetachedTaskDetail>,
+) -> Option<(usize, &'a OutputItem)> {
+    if let Some(detail) = detached_task_details.get(handle) {
+        return Some((usize::MAX, &detail.item));
+    }
+    if let Some(&index) = handle_index.get(handle)
+        && let Some(item) = items.get(index)
+        && item.handle() == Some(handle)
+    {
+        return Some((index, item));
+    }
+    items.iter().enumerate().rev().find_map(|(index, item)| {
+        let OutputItem::ToolDispatch { calls } = item else {
+            return None;
+        };
+        calls.iter().find_map(|call| {
+            let detail = call.detail.as_deref()?;
+            (detail.handle() == Some(handle)).then_some((index, detail))
+        })
+    })
+}
+
+pub fn task_detail_tail_lines(item: &OutputItem, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let text_lines = |text: &str| {
+        let mut lines = text
+            .lines()
+            .rev()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            })
+            .take(limit)
+            .collect::<Vec<_>>();
+        lines.reverse();
+        lines
+    };
+    match item {
+        OutputItem::Bash { output, .. } | OutputItem::SubAgentActivity { output, .. } => {
+            text_lines(output)
+        }
+        OutputItem::Terminal {
+            screen,
+            accumulated_bytes,
+            mode,
+            ..
+        } => {
+            let mut lines = Vec::new();
+            if *mode == TerminalViewMode::Capture {
+                let cols = screen.cols as usize;
+                let rows = screen.rows as usize;
+                if cols > 0 {
+                    for row in (0..rows).rev() {
+                        let start = row.saturating_mul(cols);
+                        let end = start.saturating_add(cols);
+                        let line = screen.cells.get(start..end).map(|cells| {
+                            cells
+                                .iter()
+                                .filter(|cell| !cell.wide_continuation)
+                                .map(|cell| cell.chars.as_str())
+                                .collect::<String>()
+                        });
+                        let Some(line) = line else { continue };
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            lines.push(trimmed.to_owned());
+                            if lines.len() == limit {
+                                break;
+                            }
+                        }
+                    }
+                    lines.reverse();
+                }
+            }
+            if lines.is_empty() {
+                lines = text_lines(&String::from_utf8_lossy(accumulated_bytes));
+            }
+            lines
+        }
+        _ => Vec::new(),
+    }
 }
 
 const TASK_TEXT_BYTES: usize = 256 * 1024;
@@ -4619,7 +4708,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(root_graph.permission_requests.len(), 2);
+        assert_eq!(root_graph.permission_requests.len(), 1);
         assert_eq!(child_graph.permission_requests.len(), 1);
         assert!(root_graph.permission_requests.values().any(|request| {
             request.payload == root_payload && request.payload.policy.rule_id == "rule"
@@ -4628,6 +4717,12 @@ mod tests {
             request.payload == child_payload
                 && request.payload.provenance == PermissionProvenanceSummary::default()
         }));
+        assert!(
+            root_graph
+                .permission_requests
+                .values()
+                .all(|request| { request.payload.tool_use_id != "automatic-tool" })
+        );
         assert!(
             root_graph
                 .permission_requests
@@ -5514,7 +5609,7 @@ mod tests {
     fn hit_test_node_prioritizes_fullscreen_and_keeps_tool_detail_clickable() {
         use crate::output::{
             NodeRegion, TOOL_CALL_REGION_PREFIX, TOOL_DETAIL_FULLSCREEN_REGION_PREFIX,
-            TOOL_FULLSCREEN_REGION_PREFIX,
+            TOOL_DETAIL_REGION_PREFIX, TOOL_FULLSCREEN_REGION_PREFIX,
         };
         use ratatui::layout::Rect;
 
@@ -5525,6 +5620,14 @@ mod tests {
                 panel_item_index: 4,
                 path_key: format!("{TOOL_CALL_REGION_PREFIX}edit-1"),
                 start_row: 1,
+                end_row: 4,
+                col_start: 0,
+                col_end: 80,
+            },
+            NodeRegion {
+                panel_item_index: 4,
+                path_key: format!("{TOOL_DETAIL_REGION_PREFIX}edit-1"),
+                start_row: 4,
                 end_row: 8,
                 col_start: 0,
                 col_end: 80,
@@ -5553,7 +5656,7 @@ mod tests {
         );
         assert_eq!(
             app.hit_test_node(10, 6),
-            Some((4, format!("{TOOL_CALL_REGION_PREFIX}edit-1")))
+            Some((4, format!("{TOOL_DETAIL_REGION_PREFIX}edit-1")))
         );
         assert_eq!(
             app.hit_test_node(77, 6),

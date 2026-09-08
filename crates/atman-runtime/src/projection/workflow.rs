@@ -500,7 +500,11 @@ impl WorkflowProjection {
             Event::PermissionRequestCreated { payload }
             | Event::PermissionRequestTargeted { payload }
             | Event::PermissionRequestDeferred { payload } => {
-                self.apply_permission_inner(payload, WorkflowPermissionState::Pending)
+                if payload.decision_id.is_some() {
+                    PendingDelta::default()
+                } else {
+                    self.apply_permission_inner(payload, WorkflowPermissionState::Pending)
+                }
             }
             Event::PermissionRequestApproved { payload } => {
                 self.apply_permission_inner(payload, WorkflowPermissionState::Approved)
@@ -689,7 +693,11 @@ impl WorkflowProjection {
             StreamFrame::PermissionRequestCreated { payload, .. }
             | StreamFrame::PermissionRequestTargeted { payload, .. }
             | StreamFrame::PermissionRequestDeferred { payload, .. } => {
-                self.apply_permission_inner(payload, WorkflowPermissionState::Pending)
+                if payload.decision_id.is_some() {
+                    PendingDelta::default()
+                } else {
+                    self.apply_permission_inner(payload, WorkflowPermissionState::Pending)
+                }
             }
             StreamFrame::PermissionRequestApproved { payload, .. } => {
                 self.apply_permission_inner(payload, WorkflowPermissionState::Approved)
@@ -1981,6 +1989,44 @@ mod tests {
                 .find_node(&format!("tool:{run_b_text}:shared"))
                 .unwrap()
                 .approval,
+            Some(ApprovalState::Approved)
+        );
+    }
+
+    #[test]
+    fn policy_resolved_creation_never_projects_a_pending_approval() {
+        let run_id = FlowRunId::now();
+        let run_id_text = run_id.0.to_string();
+        let request_id = PermissionRequestId::now();
+        let mut payload = permission_payload(request_id, &run_id, "tool", Utc::now());
+        payload.decision_id = Some("policy-decision".into());
+        let node_id = format!("tool:{run_id_text}:tool");
+
+        let mut live = projection_for_run(&run_id_text);
+        add_tool(&mut live, &run_id_text, "tool");
+        live.apply_stream_frame(&StreamFrame::PermissionRequestCreated {
+            run_id: run_id_text.clone(),
+            payload: payload.clone(),
+        });
+        assert_eq!(live.find_node(&node_id).unwrap().approval, None);
+        live.apply_stream_frame(&StreamFrame::PermissionRequestApproved {
+            run_id: run_id_text.clone(),
+            payload: payload.clone(),
+        });
+        assert_eq!(
+            live.find_node(&node_id).unwrap().approval,
+            Some(ApprovalState::Approved)
+        );
+
+        let mut replay = projection_for_run(&run_id_text);
+        add_tool(&mut replay, &run_id_text, "tool");
+        replay.apply_event(&Event::PermissionRequestCreated {
+            payload: payload.clone(),
+        });
+        assert_eq!(replay.find_node(&node_id).unwrap().approval, None);
+        replay.apply_event(&Event::PermissionRequestApproved { payload });
+        assert_eq!(
+            replay.find_node(&node_id).unwrap().approval,
             Some(ApprovalState::Approved)
         );
     }

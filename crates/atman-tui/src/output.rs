@@ -531,17 +531,7 @@ pub fn render_item_with_regions(
         };
         (lines, regions)
     };
-    if matches!(item, OutputItem::ToolDispatch { .. }) {
-        if lines.last().is_none_or(|line| {
-            line.spans
-                .iter()
-                .any(|span| !span.content.chars().all(char::is_whitespace))
-        }) {
-            lines.push(Line::from(Span::styled(String::new(), RESET)));
-        }
-    } else {
-        ensure_external_document_gap(&mut lines);
-    }
+    ensure_external_document_gap(&mut lines);
     (lines, regions)
 }
 
@@ -1015,7 +1005,7 @@ impl LayoutCache {
         };
         let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
         let rows = lines.len().min(u32::MAX as usize) as u32;
-        let dynamic = dynamic_paint_for_item(item, &lines, &regions, ctx);
+        let dynamic = dynamic_paint_for_item(item, &lines, ctx);
         self.access_clock = self.access_clock.wrapping_add(1);
         self.entries[idx] = ItemCacheEntry {
             revision,
@@ -1645,13 +1635,18 @@ fn render_thinking(
     } else {
         t.work_bg.into()
     };
-    let header_style = Style::default()
-        .fg(t.subtle_fg.into())
+    let header_style = Style::default().fg(t.work_title_fg.into()).bg(bg);
+    let glyph_style = Style::default()
+        .fg(if done {
+            t.success.into()
+        } else {
+            t.accent.into()
+        })
         .bg(bg)
-        .add_modifier(Modifier::DIM);
-    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(t.work_title_fg.into()).bg(bg);
     let hint_style = Style::default()
-        .fg(t.meta_fg.into())
+        .fg(t.work_meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
     let glyph = if done {
@@ -1672,54 +1667,43 @@ fn render_thinking(
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    let header_prefix = crate::width::truncate(
-        &format!("{DOCUMENT_PAD}{glyph}{DOCUMENT_PAD}{label}"),
-        target.saturating_sub(RIGHT_PAD),
-    );
-    let header_used = crate::width::width(header_prefix.as_str());
+    let header_prefix = vec![
+        Span::styled(format!("{glyph}{DOCUMENT_PAD}"), glyph_style),
+        Span::styled(label.to_owned(), header_style),
+    ];
 
     if disclosure == Disclosure::Summary {
-        let body_width = target.saturating_sub(header_used + DOCUMENT_PAD_X * 2);
-        let mut spans = vec![Span::styled(header_prefix, header_style)];
-        if body_width > 0 {
-            let rendered = crate::markdown::render_markdown_with_width(
-                text,
-                panel_width.saturating_sub(4).max(1),
-            );
-            let mut body = Vec::new();
-            for line in rendered.into_iter().filter(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| !span.content.trim().is_empty())
-            }) {
-                if !body.is_empty() {
-                    body.push(Span::styled(" · ", hint_style));
-                }
-                body.extend(
-                    line.spans
-                        .into_iter()
-                        .map(|span| Span::styled(span.content, span.style.patch(body_style))),
-                );
+        let rendered =
+            crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4).max(1));
+        let mut body = Vec::new();
+        for line in rendered.into_iter().filter(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
+        }) {
+            if !body.is_empty() {
+                body.push(Span::styled(" · ", hint_style));
             }
-            spans.push(Span::styled(DOCUMENT_PAD, body_style));
-            spans.extend(crate::width::streaming_ticker_spans(body, body_width, bg));
+            body.extend(
+                line.spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content, body_style.patch(span.style))),
+            );
         }
-        let used = crate::width::spans_width(spans.iter());
-        if used < target {
-            spans.push(Span::styled(" ".repeat(target - used), body_style));
-        }
-        lines.push(Line::from(spans));
+        lines.push(aligned_ticker_document_row_with_control(
+            header_prefix,
+            body,
+            DOCUMENT_PAD,
+            Vec::new(),
+            Vec::new(),
+            target,
+            bg,
+        ));
         lines.push(blank);
         return lines;
     }
 
-    lines.push(line_with_right_pad(
-        "",
-        &header_prefix,
-        target,
-        header_style,
-        header_style,
-    ));
+    lines.push(aligned_document_row(header_prefix, Vec::new(), target, bg));
     lines.push(blank.clone());
 
     let all_lines =
@@ -1739,7 +1723,7 @@ fn render_thinking(
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 2);
         spans.push(Span::styled(DOCUMENT_PAD, body_style));
         for src in &md_line.spans {
-            let style = src.style.patch(body_style);
+            let style = body_style.patch(src.style);
             spans.push(Span::styled(src.content.clone(), style));
         }
         if target > used {
@@ -2042,6 +2026,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
 }
 
 pub const TOOL_CALL_REGION_PREFIX: &str = "__tool_call__:";
+pub const TOOL_DETAIL_REGION_PREFIX: &str = "__tool_detail__:";
 pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
 pub const TOOL_DETAIL_FULLSCREEN_REGION_PREFIX: &str = "__tool_detail_fullscreen__:";
 const TOOL_CONTROL_WIDTH: usize = 3;
@@ -2139,6 +2124,47 @@ fn tool_input_summary(call: &ToolCallView) -> Option<String> {
         }
     }
     None
+}
+
+fn tool_call_display_intent(call: &ToolCallView) -> Option<String> {
+    if !call.intent.is_empty() && call.intent != call.tool {
+        return Some(call.intent.clone());
+    }
+    let streamed = decode_partial_json_string(
+        call.draft_preview.arguments(),
+        atman_runtime::message::TOOL_CALL_INTENT_FIELD,
+    )
+    .and_then(atman_runtime::message::ToolCallIntent::new)
+    .map(|intent| intent.as_str().to_owned());
+    streamed.or_else(|| fallback_tool_call_intent(call))
+}
+
+fn fallback_tool_call_intent(call: &ToolCallView) -> Option<String> {
+    let target = tool_input_summary(call);
+    let file_name = target.as_deref().and_then(|value| {
+        std::path::Path::new(value)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_owned)
+    });
+    let label = match call.tool.as_str() {
+        "fs.read" => format!("read {}", file_name.unwrap_or_else(|| "file".into())),
+        "fs.write" => format!("write {}", file_name.unwrap_or_else(|| "file".into())),
+        "fs.edit" => format!("edit {}", file_name.unwrap_or_else(|| "file".into())),
+        "fs.list" => format!("list {}", target.unwrap_or_else(|| "directory".into())),
+        "fs.grep" => format!("search {}", target.unwrap_or_else(|| "files".into())),
+        tool if tool.starts_with("bash.") => "run command".into(),
+        tool if tool.starts_with("term.") || tool == "terminal" => "run terminal".into(),
+        "flow.spawn" => "start flow".into(),
+        "flow.status" => "inspect flow".into(),
+        "flow.interject" => "guide flow".into(),
+        "flow.kill" => "stop flow".into(),
+        tool => tool
+            .rsplit_once('.')
+            .map(|(_, action)| action.replace('_', " "))
+            .filter(|action| !action.is_empty())?,
+    };
+    Some(label)
 }
 
 fn tool_input_body(call: &ToolCallView) -> Option<String> {
@@ -2379,14 +2405,15 @@ fn aligned_document_row(
 fn aligned_document_row_with_control(
     mut left: Vec<Span<'static>>,
     mut right: Vec<Span<'static>>,
-    control: Vec<Span<'static>>,
+    mut control: Vec<Span<'static>>,
     target: usize,
     background: Color,
 ) -> Line<'static> {
     let horizontal_pad = DOCUMENT_PAD_X.min(target / 2);
     let inner = target.saturating_sub(horizontal_pad * 2);
     let min_left = 3.min(inner);
-    let control_width = crate::width::spans_width(control.iter()).min(inner);
+    control = crate::width::truncate_spans(control, inner, Some(background));
+    let control_width = crate::width::spans_width(control.iter());
     let right_width = crate::width::spans_width(right.iter());
     let right_budget = right_width.min(
         inner
@@ -2425,38 +2452,69 @@ fn aligned_document_row_with_control(
 }
 
 fn aligned_ticker_document_row_with_control(
-    left: Vec<Span<'static>>,
+    mut fixed: Vec<Span<'static>>,
+    ticker: Vec<Span<'static>>,
+    separator: &str,
     mut right: Vec<Span<'static>>,
-    control: Vec<Span<'static>>,
+    mut control: Vec<Span<'static>>,
     target: usize,
     background: Color,
 ) -> Line<'static> {
     let horizontal_pad = DOCUMENT_PAD_X.min(target / 2);
     let inner = target.saturating_sub(horizontal_pad * 2);
-    let min_left = 3.min(inner);
-    let control_width = crate::width::spans_width(control.iter()).min(inner);
+    control = crate::width::truncate_spans(control, inner, Some(background));
+    let control_width = crate::width::spans_width(control.iter());
+    let min_fixed = 3.min(inner.saturating_sub(control_width));
     let right_width = crate::width::spans_width(right.iter());
     let right_budget = right_width.min(
         inner
             .saturating_sub(control_width)
-            .saturating_sub(min_left.saturating_add(1)),
+            .saturating_sub(min_fixed.saturating_add(1)),
     );
     right = crate::width::truncate_spans(right, right_budget, Some(background));
     let right_width = crate::width::spans_width(right.iter());
-    let left_budget = inner
+    let content_budget = inner
         .saturating_sub(control_width)
         .saturating_sub(right_width)
         .saturating_sub(usize::from(!right.is_empty()));
-    let left = crate::width::streaming_ticker_spans(left, left_budget, background);
-    let left_width = crate::width::spans_width(left.iter());
-    let gap = inner.saturating_sub(left_width + right_width + control_width);
+    let separator_width = usize::from(!ticker.is_empty()) * crate::width::width(separator);
+    fixed = crate::width::truncate_spans(fixed, content_budget, Some(background));
+    let fixed_width = crate::width::spans_width(fixed.iter());
+    let ticker_budget = content_budget.saturating_sub(fixed_width);
+    let show_ticker = !ticker.is_empty() && ticker_budget > separator_width;
+    let ticker = if show_ticker {
+        crate::width::streaming_ticker_spans(
+            ticker,
+            ticker_budget.saturating_sub(separator_width),
+            background,
+        )
+    } else {
+        Vec::new()
+    };
+    let ticker_width = crate::width::spans_width(ticker.iter());
+    let used = fixed_width
+        .saturating_add(if show_ticker { separator_width } else { 0 })
+        .saturating_add(ticker_width)
+        .saturating_add(right_width)
+        .saturating_add(control_width);
+    let gap = inner.saturating_sub(used);
 
-    let mut spans = Vec::with_capacity(left.len() + right.len() + control.len() + 3);
+    let mut spans =
+        Vec::with_capacity(fixed.len() + ticker.len() + right.len() + control.len() + 4);
     spans.push(Span::styled(
         " ".repeat(horizontal_pad),
         Style::default().bg(background),
     ));
-    spans.extend(left);
+    spans.extend(fixed);
+    if show_ticker {
+        spans.push(Span::styled(
+            separator.to_owned(),
+            Style::default()
+                .fg(crate::theme::theme().meta_fg.into())
+                .bg(background),
+        ));
+        spans.extend(ticker);
+    }
     if gap > 0 {
         spans.push(Span::styled(
             " ".repeat(gap),
@@ -2561,8 +2619,11 @@ fn render_tool_dispatch(
             )
         });
     let panel_bg: Color = t.work_bg.into();
-    let header_style = Style::default().fg(t.meta_fg.into()).bg(panel_bg);
-    let header_title_style = header_style.add_modifier(Modifier::BOLD);
+    let header_style = Style::default().fg(t.work_meta_fg.into()).bg(panel_bg);
+    let header_title_style = Style::default()
+        .fg(t.work_title_fg.into())
+        .bg(panel_bg)
+        .add_modifier(Modifier::BOLD);
     let running = finished < calls.len();
     let header_glyph = if running {
         spinner_char(ctx.animation_frame)
@@ -2626,9 +2687,7 @@ fn render_tool_dispatch(
             format!("{}ms", elapsed.as_millis())
         };
         let input_tail = if call.applied_edit.is_none() {
-            tool_input_summary(call)
-                .map(|value| format!(" · {value}"))
-                .unwrap_or_default()
+            tool_input_summary(call).unwrap_or_default()
         } else {
             String::new()
         };
@@ -2636,12 +2695,17 @@ fn render_tool_dispatch(
             .draft_preview
             .last_line()
             .filter(|line| !input_tail.contains(*line))
-            .map(|line| format!(" · {line}"))
+            .map(str::to_owned)
             .unwrap_or_default();
         let edit_path = call
             .applied_edit
             .as_ref()
-            .map(|(path, _)| format!(" · {}", crate::width::middle_truncate(path, 22)))
+            .map(|(path, _)| path.clone())
+            .unwrap_or_default();
+        let output_tail = call
+            .detail
+            .as_deref()
+            .and_then(|detail| crate::app::task_detail_tail_lines(detail, 1).pop())
             .unwrap_or_default();
         let has_fullscreen = matches!(
             call.detail.as_deref(),
@@ -2664,18 +2728,31 @@ fn render_tool_dispatch(
             panel_bg
         };
         let glyph_style = Style::default().fg(color.into()).bg(row_bg);
-        let body_style = Style::default().fg(t.tinted_fg.into()).bg(row_bg);
-        let meta_style = Style::default().fg(t.meta_fg.into()).bg(row_bg);
-        let mut left = vec![
+        let action_style = Style::default()
+            .fg(t.work_action_fg.into())
+            .bg(row_bg)
+            .add_modifier(Modifier::BOLD);
+        let meta_style = Style::default().fg(t.work_meta_fg.into()).bg(row_bg);
+        let stream_style = Style::default().fg(t.work_title_fg.into()).bg(row_bg);
+        let mut fixed = vec![
             Span::styled(format!("{glyph}{DOCUMENT_PAD}"), glyph_style),
-            Span::styled(call.intent.clone(), body_style),
+            Span::styled(call.tool.clone(), meta_style),
         ];
-        if !input_tail.is_empty() || !draft_tail.is_empty() || !edit_path.is_empty() {
-            left.push(Span::styled(
-                format!("{input_tail}{draft_tail}{edit_path}"),
-                meta_style,
-            ));
+        if let Some(intent) = tool_call_display_intent(call) {
+            fixed.push(Span::styled(" · ", meta_style));
+            fixed.push(Span::styled(intent, action_style));
         }
+        let mut ticker_parts = Vec::new();
+        for value in [&input_tail, &draft_tail, &edit_path, &output_tail] {
+            if !value.is_empty() && ticker_parts.last() != Some(&value.as_str()) {
+                ticker_parts.push(value.as_str());
+            }
+        }
+        let ticker = if ticker_parts.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span::styled(ticker_parts.join(" · "), stream_style)]
+        };
         let mut right = Vec::new();
         if let Some((_, metrics)) = call.applied_edit.as_ref() {
             right.extend(edit_metric_spans(
@@ -2711,11 +2788,9 @@ fn render_tool_dispatch(
                 Style::default().bg(row_bg),
             )]
         };
-        let mut summary_line =
-            aligned_ticker_document_row_with_control(left, right, control, width, row_bg);
-        if call.status == ToolCallStatus::Running && ctx.animation_frame != LAYOUT_ANIMATION_FRAME {
-            paint_running_foreground(&mut summary_line, ctx.animation_frame, t.accent.into());
-        }
+        let summary_line = aligned_ticker_document_row_with_control(
+            fixed, ticker, " · ", right, control, width, row_bg,
+        );
         let row = lines.len() as u32;
         lines.push(document_blank(width, Style::default().bg(row_bg)));
         lines.push(summary_line);
@@ -2751,6 +2826,7 @@ fn render_tool_dispatch(
             let Some(detail) = tool_input_body(call) else {
                 continue;
             };
+            let detail_start = lines.len() as u32;
             lines.extend(render_tool_input_detail(
                 &detail,
                 call.disclosure,
@@ -2758,6 +2834,14 @@ fn render_tool_dispatch(
                 detail_style,
             ));
             lines.push(document_blank(width, detail_style));
+            regions.push(NodeRegion {
+                panel_item_index: item_index,
+                path_key: format!("{TOOL_DETAIL_REGION_PREFIX}{}", call.id),
+                start_row: detail_start,
+                end_row: lines.len() as u32,
+                col_start: 0,
+                col_end: ctx.panel_width,
+            });
             continue;
         };
 
@@ -2825,6 +2909,14 @@ fn render_tool_dispatch(
             lines.push(line);
         }
         lines.push(document_blank(width, detail_style));
+        regions.push(NodeRegion {
+            panel_item_index: item_index,
+            path_key: format!("{TOOL_DETAIL_REGION_PREFIX}{}", call.id),
+            start_row: detail_start,
+            end_row: lines.len() as u32,
+            col_start: 0,
+            col_end: ctx.panel_width,
+        });
     }
     (lines, regions)
 }
@@ -4649,7 +4741,6 @@ fn compute_elapsed_secs(nodes: &[atman_runtime::workflow::WorkflowNode], running
 fn dynamic_paint_for_item(
     item: &OutputItem,
     lines: &[Line<'static>],
-    regions: &[NodeRegion],
     _ctx: &RenderCtx<'_>,
 ) -> DynamicPaint {
     if !item.has_dynamic_paint() {
@@ -4661,20 +4752,10 @@ fn dynamic_paint_for_item(
             panel_expanded,
             ..
         } => workflow_dynamic_paint(graph, *panel_expanded, lines, 0),
-        OutputItem::ToolDispatch { calls } => DynamicPaint {
+        OutputItem::ToolDispatch { .. } => DynamicPaint {
             active: true,
             elapsed: None,
-            running_rows: calls
-                .iter()
-                .filter(|call| call.status == ToolCallStatus::Running)
-                .filter_map(|call| {
-                    let key = format!("{TOOL_CALL_REGION_PREFIX}{}", call.id);
-                    regions
-                        .iter()
-                        .find(|region| region.path_key == key)
-                        .map(|region| region.start_row.saturating_add(1) as usize)
-                })
-                .collect(),
+            running_rows: Vec::new(),
         },
         _ => DynamicPaint {
             active: true,
@@ -9732,7 +9813,7 @@ mod tests {
         );
         let mut summary_call = call.clone();
         summary_call.disclosure = Disclosure::Summary;
-        let summary_lines = render_tool_dispatch(&[summary_call], &ctx, 7).0;
+        let summary_lines = render_tool_dispatch(&[summary_call.clone()], &ctx, 7).0;
         let (lines, regions) = render_tool_dispatch(&[call], &ctx, 7);
         let line_text = |line: &Line<'_>| {
             line.spans
@@ -9764,10 +9845,16 @@ mod tests {
             .iter()
             .find(|region| region.path_key == format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1"))
             .unwrap();
+        let detail_region = regions
+            .iter()
+            .find(|region| region.path_key == format!("{TOOL_DETAIL_REGION_PREFIX}edit-1"))
+            .unwrap();
         assert_eq!(call_region.start_row, 3);
         assert_eq!(call_region.end_row, call_region.start_row + 3);
         assert_eq!(fullscreen_region.start_row, call_region.start_row);
         assert_eq!(fullscreen_region.end_row, call_region.end_row);
+        assert_eq!(detail_region.start_row, call_region.end_row);
+        assert!(detail_region.end_row > detail_region.start_row);
         assert!(fullscreen_region.col_start > call_region.col_start);
         assert!(line_is_visually_blank(lines.last().unwrap()));
         assert!(
@@ -9799,10 +9886,182 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["edit-1", "edit-2"]
         );
+
+        let (document, _) = render_item_with_regions(
+            &OutputItem::ToolDispatch {
+                calls: vec![summary_call],
+            },
+            &ctx,
+            7,
+        );
+        assert_eq!(
+            crate::width::spans_width(document.last().unwrap().spans.iter()),
+            0
+        );
+        assert_eq!(
+            crate::width::spans_width(document[document.len() - 2].spans.iter()),
+            80
+        );
     }
 
     #[test]
-    fn running_tool_row_has_a_moving_theme_wave() {
+    fn tool_ticker_keeps_identity_and_right_alignment_while_terminal_output_advances() {
+        let screen = atman_runtime::tools::term::parse_ansi_to_screen(
+            "old output\nterminal live output 你好",
+        );
+        let call = ToolCallView {
+            id: "terminal-1".into(),
+            tool: "term.spawn".into(),
+            intent: "执行 Python".into(),
+            input: serde_json::json!({"cmd": "python -c very_long_command_that_must_not_replace_the_tool_identity"}),
+            status: ToolCallStatus::Running,
+            disclosure: Disclosure::Summary,
+            detail: Some(Box::new(OutputItem::Terminal {
+                handle: "term-1".into(),
+                title: None,
+                command: None,
+                screen,
+                accumulated_bytes: Vec::new(),
+                mode: crate::app::TerminalViewMode::Capture,
+                done: false,
+                expanded: false,
+                scroll_offset: None,
+            })),
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: None,
+        };
+        let lines = render_tool_dispatch(
+            &[call],
+            &RenderCtx {
+                panel_width: 80,
+                ..RenderCtx::empty()
+            },
+            0,
+        )
+        .0;
+        let row = &lines[4];
+        let text = plain_line(row);
+
+        assert!(text.contains("term.spawn · 执行 Python"));
+        assert!(text.contains("terminal live output 你好"));
+        assert!(text.ends_with("⤢  "));
+        assert_eq!(crate::width::spans_width(row.spans.iter()), 80);
+    }
+
+    #[test]
+    fn streaming_tool_draft_displays_intent_before_the_final_tool_use() {
+        let mut draft_preview = crate::app::ToolDraftPreview::default();
+        draft_preview.push(
+            "fs.read",
+            r#"{"_atman_intent":"读取项目说明","path":"README.md"}"#,
+        );
+        let call = ToolCallView {
+            id: "draft:root:0".into(),
+            tool: "fs.read".into(),
+            intent: "fs.read".into(),
+            input: serde_json::Value::Null,
+            status: ToolCallStatus::Running,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: Some(0),
+            draft_preview,
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: None,
+        };
+
+        let row = &render_tool_dispatch(
+            &[call],
+            &RenderCtx {
+                panel_width: 80,
+                ..RenderCtx::empty()
+            },
+            0,
+        )
+        .0[4];
+        assert!(plain_line(row).contains("fs.read · 读取项目说明"));
+        assert!(row.spans.iter().any(|span| {
+            span.content == "读取项目说明"
+                && span.style.fg == Some(crate::theme::theme().work_action_fg.into())
+        }));
+    }
+
+    #[test]
+    fn missing_tool_intent_uses_a_readable_action_fallback() {
+        let call = ToolCallView {
+            id: "legacy-read".into(),
+            tool: "fs.read".into(),
+            intent: "fs.read".into(),
+            input: serde_json::json!({
+                "limit": 40,
+                "path": "/Users/example/project/docs/context-strategy.md"
+            }),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: Instant::now(),
+            ended_at: Some(Instant::now()),
+        };
+
+        let row = &render_tool_dispatch(
+            &[call],
+            &RenderCtx {
+                panel_width: 100,
+                ..RenderCtx::empty()
+            },
+            0,
+        )
+        .0[4];
+        assert!(plain_line(row).contains("fs.read · read context-strategy.md"));
+    }
+
+    #[test]
+    fn ticker_row_composition_fills_every_requested_display_width() {
+        let background: Color = crate::theme::theme().work_bg.into();
+        for width in 1..=120 {
+            let row = aligned_ticker_document_row_with_control(
+                vec![Span::styled(
+                    "⣿  term.spawn · 执行 Python",
+                    Style::default(),
+                )],
+                vec![Span::styled(
+                    "新内容 abcdefghijklmnopqrstuvwxyz",
+                    Style::default().fg(Color::Cyan),
+                )],
+                " · ",
+                vec![Span::raw("5.1s")],
+                vec![Span::raw("  ⤢")],
+                width,
+                background,
+            );
+            assert_eq!(
+                crate::width::spans_width(row.spans.iter()),
+                width,
+                "row width mismatch at {width} columns"
+            );
+        }
+    }
+
+    #[test]
+    fn running_thinking_spinner_uses_accent_color() {
+        let lines = render_thinking("checking", false, Disclosure::Summary, false, 0, 80, false);
+        let spinner = spinner_char(0);
+        let glyph = lines[1]
+            .spans
+            .iter()
+            .find(|span| span.content.contains(spinner))
+            .unwrap();
+        assert_eq!(glyph.style.fg, Some(crate::theme::theme().accent.into()));
+    }
+
+    #[test]
+    fn tool_row_uses_stable_semantic_foregrounds() {
         let make_call = |status| ToolCallView {
             id: "read-1".into(),
             tool: "fs.read".into(),
@@ -9856,11 +10115,33 @@ mod tests {
             running_0.iter().map(|(_, _, bg)| bg).collect::<Vec<_>>(),
             running_4.iter().map(|(_, _, bg)| bg).collect::<Vec<_>>()
         );
-        assert_ne!(
+        assert_eq!(
             running_0.iter().map(|(_, fg, _)| fg).collect::<Vec<_>>(),
             running_4.iter().map(|(_, fg, _)| fg).collect::<Vec<_>>()
         );
         assert_eq!(colors(ToolCallStatus::Ok, 0), colors(ToolCallStatus::Ok, 4));
+
+        let row = render_tool_dispatch(
+            &[make_call(ToolCallStatus::Running)],
+            &RenderCtx {
+                panel_width: 80,
+                ..RenderCtx::empty()
+            },
+            0,
+        )
+        .0
+        .into_iter()
+        .find(|line| plain_line(line).contains("读取项目文档"))
+        .unwrap();
+        let theme = crate::theme::theme();
+        assert!(row.spans.iter().any(|span| {
+            span.content == "fs.read" && span.style.fg == Some(theme.work_meta_fg.into())
+        }));
+        assert!(row.spans.iter().any(|span| {
+            span.content == "读取项目文档"
+                && span.style.fg == Some(theme.work_action_fg.into())
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
     }
 
     #[test]
@@ -9898,7 +10179,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_running_tool_row_repaints_without_layout_work() {
+    fn cached_running_tool_spinner_repaints_without_recoloring_the_row() {
         fn running_row<'a>(lines: &'a [Line<'static>]) -> &'a Line<'static> {
             lines
                 .iter()
@@ -9961,7 +10242,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_ne!(
+        assert_eq!(
             foregrounds(running_row(&frame_0)),
             foregrounds(running_row(&frame_4))
         );
@@ -9969,6 +10250,15 @@ mod tests {
             backgrounds(running_row(&frame_0)),
             backgrounds(running_row(&frame_4))
         );
+        let header = |lines: &[Line<'static>]| {
+            plain_line(
+                lines
+                    .iter()
+                    .find(|line| plain_line(line).contains("working · 1"))
+                    .unwrap(),
+            )
+        };
+        assert_ne!(header(&frame_0), header(&frame_4));
         assert_eq!(perf_counters().item_renders, 0);
     }
 
@@ -10019,9 +10309,11 @@ mod tests {
 
         assert_eq!(ranges[1].start_row, ranges[0].end_row);
         let separator = &lines[ranges[0].end_row.saturating_sub(1) as usize];
-        assert_eq!(crate::width::spans_width(separator.spans.iter()), 80);
+        assert_eq!(crate::width::spans_width(separator.spans.iter()), 0);
+        let internal_padding = &lines[ranges[0].end_row.saturating_sub(2) as usize];
+        assert_eq!(crate::width::spans_width(internal_padding.spans.iter()), 80);
         assert!(
-            separator
+            internal_padding
                 .spans
                 .iter()
                 .all(|span| span.style.bg == Some(crate::theme::theme().work_bg.into()))
@@ -10059,7 +10351,7 @@ mod tests {
                     .spans
                     .iter()
             ),
-            80
+            0
         );
     }
 

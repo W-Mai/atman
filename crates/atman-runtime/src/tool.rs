@@ -731,19 +731,37 @@ fn decorate_tool_input_schema(schema: &mut serde_json::Value) {
     if root.get("type").and_then(serde_json::Value::as_str) != Some("object") {
         return;
     }
-    let properties = root
-        .entry("properties")
-        .or_insert_with(|| serde_json::Value::Object(Default::default()));
-    let Some(properties) = properties.as_object_mut() else {
-        return;
-    };
-    if properties.contains_key(crate::message::TOOL_CALL_INTENT_FIELD) {
+    if root
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|properties| properties.contains_key(crate::message::TOOL_CALL_INTENT_FIELD))
+    {
         return;
     }
-    properties.insert(
-        crate::message::TOOL_CALL_INTENT_FIELD.into(),
-        tool_call_intent_schema(),
-    );
+    {
+        let properties = root
+            .entry("properties")
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        let Some(properties) = properties.as_object_mut() else {
+            return;
+        };
+        properties.insert(
+            crate::message::TOOL_CALL_INTENT_FIELD.into(),
+            tool_call_intent_schema(),
+        );
+    }
+    let required = root
+        .entry("required")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(required) = required.as_array_mut() else {
+        return;
+    };
+    if !required
+        .iter()
+        .any(|field| field.as_str() == Some(crate::message::TOOL_CALL_INTENT_FIELD))
+    {
+        required.push(crate::message::TOOL_CALL_INTENT_FIELD.into());
+    }
 }
 
 fn tool_spec_call_intent_support(tool_name: &str, tools: &[ToolSpec]) -> Option<bool> {
@@ -1043,9 +1061,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_spec_adds_optional_call_intent_without_mutating_required() {
+    fn tool_spec_requires_call_intent_after_business_fields() {
         let spec = tool_spec(&ObjectTool);
-        assert_eq!(spec.input_schema["required"], serde_json::json!(["value"]));
+        assert_eq!(
+            spec.input_schema["required"],
+            serde_json::json!(["value", "_atman_intent"])
+        );
         assert_eq!(
             spec.input_schema["properties"][crate::message::TOOL_CALL_INTENT_FIELD],
             tool_call_intent_schema()
