@@ -38,6 +38,9 @@ pub enum RuntimeError {
 
     #[error("thinking signature missing")]
     ThinkingSignatureMissing,
+
+    #[error("provider response omitted required tool call intent for {tools}")]
+    ToolCallIntentMissing { tools: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,6 +113,7 @@ impl RuntimeError {
             RuntimeError::ToolFailed(msg) => classify_tool_failed(msg),
             RuntimeError::AttachmentError { .. } => ErrorKind::InvalidRequest,
             RuntimeError::ThinkingSignatureMissing => ErrorKind::InvalidRequest,
+            RuntimeError::ToolCallIntentMissing { .. } => ErrorKind::InvalidRequest,
         }
     }
 }

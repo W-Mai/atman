@@ -42,7 +42,7 @@ impl ScriptedAgentProvider {
                     id: format!("call_{idx}"),
                     name: name.clone(),
                     input: input.clone(),
-                    intent: None,
+                    intent: atman_runtime::message::ToolCallIntent::new("Read requested file"),
                 },
             ],
             Some(AgentTurn::FinalText(t)) => vec![MessagePart::Text { text: t.clone() }],

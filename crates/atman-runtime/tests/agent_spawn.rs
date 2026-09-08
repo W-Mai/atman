@@ -59,7 +59,7 @@ impl ToolLoopProvider {
                     id: "probe-call".into(),
                     name: "probe".into(),
                     input: serde_json::json!({}),
-                    intent: None,
+                    intent: atman_runtime::message::ToolCallIntent::new("Run probe"),
                 }],
                 StopReason::ToolUse,
             )
