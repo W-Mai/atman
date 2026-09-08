@@ -15,6 +15,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Provider-safe message projection** — OpenAI-compatible history replays reasoning-only assistant responses through `reasoning_content`, while OpenAI, Anthropic, and Codex omit history entries that become empty after provider-specific projection instead of sending invalid wire messages.
 - **Spawned message stream roles** — assistant messages appended to isolated child context emit assistant frames instead of tool-result frames, keeping root and child document-flow projection equivalent.
 - **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.
 - **Filesystem diff correlation** — persisted previews retain their originating tool-use identity across concurrent dispatch and resume so edits remain nested in the matching tool row, and new-file previews encode content as insertion hunks.

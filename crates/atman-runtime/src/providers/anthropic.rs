@@ -59,7 +59,10 @@ impl AnthropicProvider {
             .messages
             .iter()
             .map(|m| build_wire_message(m, false, &req.tools))
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         let wire_messages = merge_consecutive_same_role(raw_wire);
         let tools: Vec<WireTool> = req
             .tools
@@ -75,7 +78,7 @@ impl AnthropicProvider {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
             stream,
-            system: req.system.clone(),
+            system: req.system.clone().filter(|system| !system.is_empty()),
             messages: wire_messages,
             tools,
             thinking,
@@ -152,7 +155,7 @@ fn build_wire_message(
     m: &Message,
     apply_cache_control: bool,
     tools: &[crate::tool::ToolSpec],
-) -> Result<WireMessage, RuntimeError> {
+) -> Result<Option<WireMessage>, RuntimeError> {
     let role = match m.role {
         MessageRole::User => "user",
         MessageRole::Assistant => "assistant",
@@ -162,7 +165,7 @@ fn build_wire_message(
     let mut blocks: Vec<ContentPart> = Vec::with_capacity(m.parts.len());
     let last_idx = m.parts.len().saturating_sub(1);
     for (i, part) in m.parts.iter().enumerate() {
-        blocks.push(match part {
+        let block = match part {
             MessagePart::ContextRecord(record) => ContentPart::Text {
                 text: record.render_for_model(),
                 cache_control: if apply_cache_control && i == last_idx {
@@ -211,7 +214,7 @@ fn build_wire_message(
                 thinking,
                 signature,
             } => {
-                if signature.is_none() {
+                if thinking.is_empty() || signature.is_none() {
                     continue;
                 }
                 ContentPart::Thinking {
@@ -228,12 +231,19 @@ fn build_wire_message(
                 content: content.clone(),
                 is_error: *is_error,
             },
-        });
+        };
+        if matches!(&block, ContentPart::Text { text, .. } if text.is_empty()) {
+            continue;
+        }
+        blocks.push(block);
     }
-    Ok(WireMessage {
+    if blocks.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(WireMessage {
         role,
         content: MessageContent::Blocks(blocks),
-    })
+    }))
 }
 
 fn merge_consecutive_same_role(wire: Vec<WireMessage>) -> Vec<WireMessage> {
@@ -887,8 +897,12 @@ mod tests {
             turn_id: crate::event::TurnId::now(),
             origin: crate::message::MessageOrigin::User,
         };
-        let wire =
-            serde_json::to_value(build_wire_message(&message, false, &tools).unwrap()).unwrap();
+        let wire = serde_json::to_value(
+            build_wire_message(&message, false, &tools)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             wire["content"][0]["input"]["_atman_intent"],
             "Inspect provider state"
@@ -915,6 +929,21 @@ mod tests {
                 if input == &serde_json::json!({"value": 1})
                     && intent.as_str() == "Inspect provider state"
         ));
+    }
+
+    #[test]
+    fn unsigned_thinking_only_assistant_is_not_serialized_as_empty_content() {
+        let message = Message {
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Thinking {
+                thinking: "provider-specific reasoning".into(),
+                signature: None,
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: MessageOrigin::User,
+        };
+
+        assert!(build_wire_message(&message, false, &[]).unwrap().is_none());
     }
 
     #[test]

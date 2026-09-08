@@ -1,7 +1,7 @@
 use atman_runtime::event::TurnId;
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
-use atman_runtime::providers::openai::OpenAiProvider;
+use atman_runtime::providers::openai::{OpenAiProvider, OpenAiReasoningFormat};
 use atman_runtime::value::Value;
 use uuid::Uuid;
 
@@ -51,6 +51,18 @@ fn assistant_with_tool_use(text: &str, id: &str, name: &str, input: serde_json::
                 intent: None,
             },
         ],
+        turn_id: tid(),
+        origin: MessageOrigin::User,
+    }
+}
+
+fn assistant_with_thinking(thinking: &str) -> Message {
+    Message {
+        role: MessageRole::Assistant,
+        parts: vec![MessagePart::Thinking {
+            thinking: thinking.to_string(),
+            signature: None,
+        }],
         turn_id: tid(),
         origin: MessageOrigin::User,
     }
@@ -256,4 +268,33 @@ fn compatible_openai_profile_preserves_toggle_protocol() {
         serde_json::from_slice(&provider.wire_body_bytes(&req, false)).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn compatible_openai_profile_replays_thinking_only_assistant() {
+    let provider = provider();
+    let mut req = fixed_request();
+    req.messages = vec![assistant_with_thinking("completed in reasoning")];
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&provider.wire_body_bytes(&req, false)).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["reasoning_content"], "completed in reasoning");
+    assert!(messages[1].get("content").is_none());
+    assert!(messages[1].get("tool_calls").is_none());
+}
+
+#[test]
+fn official_openai_profile_omits_unrepresentable_thinking_only_assistant() {
+    let provider = provider().with_reasoning_format(OpenAiReasoningFormat::Official);
+    let mut req = fixed_request();
+    req.messages = vec![assistant_with_thinking("provider-specific reasoning")];
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&provider.wire_body_bytes(&req, false)).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "system");
 }

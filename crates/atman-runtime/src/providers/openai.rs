@@ -117,16 +117,19 @@ impl OpenAiProvider {
         stream: bool,
     ) -> Result<ChatCompletionsRequest, RuntimeError> {
         let mut wire_messages: Vec<ChatMessage> = Vec::new();
-        if let Some(sys) = &req.system {
+        if let Some(sys) = req.system.as_ref().filter(|system| !system.is_empty()) {
             wire_messages.push(ChatMessage {
                 role: "system",
                 content: Some(ChatContent::Text(sys.clone())),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             });
         }
         for m in &req.messages {
-            wire_messages.push(build_wire_message(m, &req.tools)?);
+            if let Some(message) = build_wire_message(m, &req.tools, self.reasoning_format)? {
+                wire_messages.push(message);
+            }
         }
         let tools: Vec<WireToolSpec> = req
             .tools
@@ -221,44 +224,60 @@ fn compatible_thinking(selection: &ReasoningSelection) -> Option<ThinkingConfig>
 fn build_wire_message(
     m: &Message,
     tools: &[crate::tool::ToolSpec],
-) -> Result<ChatMessage, RuntimeError> {
-    Ok(match m.role {
-        MessageRole::System => ChatMessage {
-            role: "system",
-            content: Some(ChatContent::Text(m.text_concat())),
-            tool_calls: None,
-            tool_call_id: None,
-        },
+    reasoning_format: OpenAiReasoningFormat,
+) -> Result<Option<ChatMessage>, RuntimeError> {
+    let message = match m.role {
+        MessageRole::System => {
+            let text = m.text_concat();
+            if text.is_empty() {
+                return Ok(None);
+            }
+            ChatMessage {
+                role: "system",
+                content: Some(ChatContent::Text(text)),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }
+        }
         MessageRole::Tool => {
             let (id, content) = extract_tool_result(m);
             ChatMessage {
                 role: "tool",
                 content: Some(ChatContent::Text(content)),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some(id),
             }
         }
         MessageRole::Assistant => {
             let (text_parts, tool_uses) = split_assistant_parts(&m.parts, tools);
-            let content = if text_parts.is_empty() {
-                None
-            } else {
-                Some(ChatContent::Text(text_parts.join("")))
-            };
+            let text = text_parts.join("");
+            let content = (!text.is_empty()).then_some(ChatContent::Text(text));
+            let reasoning = (reasoning_format == OpenAiReasoningFormat::CompatibleThinking)
+                .then(|| m.thinking_concat())
+                .filter(|thinking| !thinking.is_empty());
             let tool_calls = if tool_uses.is_empty() {
                 None
             } else {
                 Some(tool_uses)
             };
+            if content.is_none() && reasoning.is_none() && tool_calls.is_none() {
+                return Ok(None);
+            }
             ChatMessage {
                 role: "assistant",
                 content,
+                reasoning_content: reasoning,
                 tool_calls,
                 tool_call_id: None,
             }
         }
         MessageRole::User => {
             let parts = build_user_parts(&m.parts)?;
+            if parts.is_empty() {
+                return Ok(None);
+            }
             let content = if parts.iter().all(|p| matches!(p, ChatPart::Text { .. })) {
                 let joined: String = parts
                     .iter()
@@ -267,6 +286,9 @@ fn build_wire_message(
                         _ => None,
                     })
                     .collect();
+                if joined.is_empty() {
+                    return Ok(None);
+                }
                 Some(ChatContent::Text(joined))
             } else {
                 Some(ChatContent::Parts(parts))
@@ -274,11 +296,13 @@ fn build_wire_message(
             ChatMessage {
                 role: "user",
                 content,
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             }
         }
-    })
+    };
+    Ok(Some(message))
 }
 
 fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError> {
@@ -291,7 +315,9 @@ fn build_user_parts(parts: &[MessagePart]) -> Result<Vec<ChatPart>, RuntimeError
             MessagePart::CompactSummary { summary, .. } => out.push(ChatPart::Text {
                 text: summary.clone(),
             }),
-            MessagePart::Text { text } => out.push(ChatPart::Text { text: text.clone() }),
+            MessagePart::Text { text } if !text.is_empty() => {
+                out.push(ChatPart::Text { text: text.clone() })
+            }
             MessagePart::Image { source } => {
                 let data = crate::attachment_store::image_base64(source)?;
                 let url = format!("data:{};base64,{}", source.media_type, data);
@@ -786,6 +812,12 @@ fn response_to_assistant(
     let mut stop_reason = StopReason::End;
     if let Some(choice) = body.choices.into_iter().next() {
         if let Some(msg) = choice.message {
+            if let Some(reasoning) = msg.reasoning_content {
+                parts.push(MessagePart::Thinking {
+                    thinking: reasoning,
+                    signature: None,
+                });
+            }
             if let Some(content) = msg.content {
                 parts.push(MessagePart::Text { text: content });
             }
@@ -929,6 +961,8 @@ struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<ChatContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<WireToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
@@ -1024,6 +1058,8 @@ struct ChatChoiceMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<RespToolCall>>,
 }
 
@@ -1086,6 +1122,7 @@ mod tests {
                 choices: vec![ChatChoice {
                     message: Some(ChatChoiceMessage {
                         content: None,
+                        reasoning_content: None,
                         tool_calls: Some(vec![RespToolCall {
                             id: "call-1".into(),
                             function: RespFunctionCall {
@@ -1108,6 +1145,33 @@ mod tests {
             [MessagePart::ToolUse { input, intent: Some(intent), .. }]
                 if input == &serde_json::json!({"value": 1})
                     && intent.as_str() == "Inspect provider state"
+        ));
+    }
+
+    #[test]
+    fn non_streaming_response_preserves_reasoning_content() {
+        let assistant = response_to_assistant(
+            ChatCompletionsResponse {
+                choices: vec![ChatChoice {
+                    message: Some(ChatChoiceMessage {
+                        content: None,
+                        reasoning_content: Some("completed in reasoning".into()),
+                        tool_calls: None,
+                    }),
+                    finish_reason: Some("stop".into()),
+                }],
+                usage: None,
+                model: None,
+                id: None,
+            },
+            crate::event::TurnId::now(),
+            &[],
+        );
+
+        assert!(matches!(
+            assistant.message.parts.as_slice(),
+            [MessagePart::Thinking { thinking, signature: None }]
+                if thinking == "completed in reasoning"
         ));
     }
 

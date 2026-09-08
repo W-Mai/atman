@@ -137,7 +137,10 @@ impl CodexProvider {
         Ok(ResponsesRequest {
             model,
             input,
-            instructions: req.system.clone(),
+            instructions: req
+                .system
+                .clone()
+                .filter(|instructions| !instructions.is_empty()),
             tools,
             stream: true,
             store: false,
@@ -200,7 +203,9 @@ fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
     for m in &req.messages {
         match m.role {
             MessageRole::User => {
-                let content = build_user_content(&m.parts)?;
+                let Some(content) = build_user_content(&m.parts)? else {
+                    continue;
+                };
                 items.push(InputItem {
                     role: Some("user".into()),
                     content: Some(content),
@@ -258,7 +263,9 @@ fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
                 }
             }
             MessageRole::System => {
-                let content = build_user_content(&m.parts)?;
+                let Some(content) = build_user_content(&m.parts)? else {
+                    continue;
+                };
                 items.push(InputItem {
                     role: Some(
                         if m.origin == MessageOrigin::Internal
@@ -286,17 +293,20 @@ fn build_input_items(req: &LlmRequest) -> Result<Vec<InputItem>, RuntimeError> {
     Ok(items)
 }
 
-fn build_user_content(parts: &[MessagePart]) -> Result<InputContent, RuntimeError> {
+fn build_user_content(parts: &[MessagePart]) -> Result<Option<InputContent>, RuntimeError> {
     let mut parts_out: Vec<ResponseInputContent> = Vec::new();
     for p in parts {
         match p {
             MessagePart::ContextRecord(record) => {
-                parts_out.push(ResponseInputContent::InputText {
-                    text: record.render_for_model(),
-                });
+                let text = record.render_for_model();
+                if !text.is_empty() {
+                    parts_out.push(ResponseInputContent::InputText { text });
+                }
             }
             MessagePart::Text { text } => {
-                parts_out.push(ResponseInputContent::InputText { text: text.clone() });
+                if !text.is_empty() {
+                    parts_out.push(ResponseInputContent::InputText { text: text.clone() });
+                }
             }
             MessagePart::Image { source } => {
                 let data = crate::attachment_store::image_base64(source)?;
@@ -307,17 +317,21 @@ fn build_user_content(parts: &[MessagePart]) -> Result<InputContent, RuntimeErro
                 });
             }
             MessagePart::CompactSummary { summary, .. } => {
-                parts_out.push(ResponseInputContent::InputText {
-                    text: summary.clone(),
-                });
+                if !summary.is_empty() {
+                    parts_out.push(ResponseInputContent::InputText {
+                        text: summary.clone(),
+                    });
+                }
             }
             _ => {}
         }
     }
     if let [ResponseInputContent::InputText { text }] = parts_out.as_slice() {
-        Ok(InputContent::Text(text.clone()))
+        Ok(Some(InputContent::Text(text.clone())))
+    } else if parts_out.is_empty() {
+        Ok(None)
     } else {
-        Ok(InputContent::Parts(parts_out))
+        Ok(Some(InputContent::Parts(parts_out)))
     }
 }
 
@@ -1276,6 +1290,34 @@ mod tests {
         let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
         assert_eq!(body["prompt_cache_key"], "atman-route");
         assert!(provider.capabilities().prompt_cache_key);
+    }
+
+    #[test]
+    fn responses_request_omits_unrepresentable_empty_messages() {
+        let provider = CodexProvider::new("codex", "token", "account");
+        let mut request = request();
+        for role in [
+            crate::message::MessageRole::User,
+            crate::message::MessageRole::Assistant,
+            crate::message::MessageRole::System,
+        ] {
+            request.messages.push(crate::message::Message {
+                role,
+                parts: vec![crate::message::MessagePart::Thinking {
+                    thinking: "provider-specific reasoning".into(),
+                    signature: None,
+                }],
+                turn_id: crate::event::TurnId::now(),
+                origin: crate::message::MessageOrigin::User,
+            });
+        }
+        request.messages.push(crate::message::Message::user_text(
+            crate::event::TurnId::now(),
+            "",
+        ));
+
+        let body = serde_json::to_value(provider.build_body(&request).unwrap()).unwrap();
+        assert_eq!(body["input"], serde_json::json!([]));
     }
 
     fn request() -> crate::provider::LlmRequest {
