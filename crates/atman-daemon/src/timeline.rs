@@ -97,15 +97,6 @@ impl<'a> TimelineCatalog<'a> {
                 .cmp(&right.start_seq)
                 .then_with(|| left.id.0.cmp(&right.id.0))
         });
-        let mut active_turn_ids = active_turns.into_iter().collect::<Vec<_>>();
-        active_turn_ids.sort_by_key(|turn_id| turn_id.0);
-        let active_workflows = projection
-            .workflows
-            .iter()
-            .filter(|workflow| active_turn_ids.contains(&workflow.turn_id))
-            .cloned()
-            .collect();
-
         Self {
             session_id: projection.metadata.id.clone(),
             daemon_generation,
@@ -113,23 +104,7 @@ impl<'a> TimelineCatalog<'a> {
             projection_revision: projection.revision,
             projection,
             segments,
-            live: TimelineLiveState {
-                head_complete: true,
-                metadata: projection.metadata.clone(),
-                lifecycle: projection.lifecycle,
-                runs: projection.runs.clone(),
-                active_turns: active_turn_ids,
-                active_workflows,
-                compactions: projection.compactions.clone(),
-                goal: projection.goal.clone(),
-                todos: projection.todos.clone(),
-                plans: projection.plans.clone(),
-                context: projection.context.clone(),
-                trust: projection.trust.clone(),
-                interactions: projection.interactions.clone(),
-                resources: projection.resources.clone(),
-                usage: projection.usage.clone(),
-            },
+            live: live_state(projection),
         }
     }
 
@@ -279,6 +254,130 @@ impl<'a> TimelineCatalog<'a> {
     }
 }
 
+pub(crate) fn live_state(projection: &SessionProjection) -> TimelineLiveState {
+    let mut active_turns = projection
+        .runs
+        .iter()
+        .filter(|run| !run_is_terminal(run.state))
+        .filter_map(|run| run.turn_id.clone())
+        .collect::<Vec<_>>();
+    active_turns.sort_by_key(|turn_id| turn_id.0);
+    active_turns.dedup();
+    let active_workflows = projection
+        .workflows
+        .iter()
+        .filter(|workflow| active_turns.contains(&workflow.turn_id))
+        .cloned()
+        .collect();
+    TimelineLiveState {
+        head_complete: true,
+        metadata: projection.metadata.clone(),
+        lifecycle: projection.lifecycle,
+        runs: projection.runs.clone(),
+        active_turns,
+        active_workflows,
+        compactions: projection.compactions.clone(),
+        goal: projection.goal.clone(),
+        todos: projection.todos.clone(),
+        plans: projection.plans.clone(),
+        context: projection.context.clone(),
+        trust: projection.trust.clone(),
+        interactions: projection.interactions.clone(),
+        resources: projection.resources.clone(),
+        usage: projection.usage.clone(),
+    }
+}
+
+pub(crate) fn supplement_live_tail(page: &mut SessionTimelinePage, projection: &SessionProjection) {
+    let latest_indexed_seq = page
+        .segments
+        .iter()
+        .flat_map(|segment| match segment {
+            TimelineSegment::Turn { segment } => segment.items.iter(),
+            TimelineSegment::Session { segment } => segment.items.iter(),
+        })
+        .map(|item| item.seq)
+        .max()
+        .unwrap_or_default();
+    let mut suffix = projection.clone();
+    suffix.transcript.retain(|item| {
+        item.seq() > latest_indexed_seq
+            && !matches!(
+                item,
+                TranscriptItem::Message {
+                    checkpoint_index: Some(_),
+                    ..
+                }
+            )
+    });
+    let catalog = TimelineCatalog::from_projection(
+        page.daemon_generation.clone(),
+        page.as_of_cursor,
+        &suffix,
+    );
+    for record in &catalog.segments {
+        merge_live_segment(&mut page.segments, catalog.materialize_segment(record));
+    }
+    page.segments.sort_by_key(segment_start_seq);
+    page.serialized_bytes = page
+        .segments
+        .iter()
+        .map(|segment| serde_json::to_vec(segment).map_or(0, |bytes| bytes.len() as u64))
+        .sum();
+    page.live = Some(live_state(projection));
+}
+
+fn merge_live_segment(segments: &mut Vec<TimelineSegment>, incoming: TimelineSegment) {
+    let matching = segments
+        .iter_mut()
+        .find(|existing| match (&**existing, &incoming) {
+            (TimelineSegment::Turn { segment: left }, TimelineSegment::Turn { segment: right }) => {
+                left.id == right.id
+            }
+            (
+                TimelineSegment::Session { segment: left },
+                TimelineSegment::Session { segment: right },
+            ) => left.id == right.id,
+            _ => false,
+        });
+    let Some(existing) = matching else {
+        segments.push(incoming);
+        return;
+    };
+    match (existing, incoming) {
+        (
+            TimelineSegment::Turn { segment: existing },
+            TimelineSegment::Turn { segment: incoming },
+        ) => {
+            existing.start_seq = existing.start_seq.min(incoming.start_seq);
+            existing.latest_seq = existing.latest_seq.max(incoming.latest_seq);
+            existing.revision = existing.revision.max(incoming.revision);
+            existing.state = incoming.state;
+            existing.workflow = incoming.workflow.or_else(|| existing.workflow.take());
+            merge_live_items(&mut existing.items, incoming.items);
+        }
+        (
+            TimelineSegment::Session { segment: existing },
+            TimelineSegment::Session { segment: incoming },
+        ) => {
+            existing.start_seq = existing.start_seq.min(incoming.start_seq);
+            existing.latest_seq = existing.latest_seq.max(incoming.latest_seq);
+            existing.revision = existing.revision.max(incoming.revision);
+            merge_live_items(&mut existing.items, incoming.items);
+        }
+        _ => unreachable!("matching timeline segment variants changed"),
+    }
+}
+
+fn merge_live_items(existing: &mut Vec<TimelineItem>, incoming: Vec<TimelineItem>) {
+    for item in incoming {
+        if !existing.iter().any(|candidate| candidate.id == item.id) {
+            existing.push(item);
+        }
+    }
+    existing.sort_by_key(|item| item.seq);
+}
+
 pub(crate) enum IndexedPageWindow {
     Tail,
     Before(TimelineCursor),
@@ -316,10 +415,11 @@ pub(crate) fn jsonl_page(
     if read.events.is_empty() {
         return Ok(None);
     }
-    let mut projector = crate::projection::SessionProjector::from_events(
+    let mut projector = crate::projection::SessionProjector::from_timeline_events(
         session_id.clone(),
         source.metadata.clone(),
         &read.events,
+        FlowOwnership::default(),
     );
     projector.set_trust(source.trust.clone());
     let projection = projector.snapshot();
@@ -562,16 +662,11 @@ pub(crate) fn indexed_page(
             Ok(event)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let ownership = indexed_flow_ownership_before(
-        source,
-        &session_key,
-        events.first().map_or(0, |event| event.seq),
-    )?;
-    let mut projector = crate::projection::SessionProjector::from_events_with_ownership(
+    let mut projector = crate::projection::SessionProjector::from_timeline_events(
         session_id.clone(),
         source.metadata.clone(),
         &events,
-        ownership,
+        FlowOwnership::default(),
     );
     projector.set_trust(source.trust.clone());
     let projection = projector.snapshot();
@@ -624,7 +719,7 @@ pub(crate) fn indexed_detail(
     };
     let event = serde_json::from_str::<atman_runtime::event::EventEnvelope>(&row.payload)?;
     let ownership = indexed_flow_ownership_before(source, &session_id.to_string(), seq)?;
-    let mut projector = crate::projection::SessionProjector::from_events_with_ownership(
+    let mut projector = crate::projection::SessionProjector::from_timeline_events(
         session_id.clone(),
         source.metadata.clone(),
         &[event],
@@ -662,10 +757,11 @@ pub(crate) fn jsonl_detail(
         1,
         usize::MAX,
     )?;
-    let mut projector = crate::projection::SessionProjector::from_events(
+    let mut projector = crate::projection::SessionProjector::from_timeline_events(
         session_id.clone(),
         source.metadata.clone(),
         &read.events,
+        FlowOwnership::default(),
     );
     projector.set_trust(source.trust.clone());
     let projection = projector.snapshot();
@@ -1053,7 +1149,6 @@ fn run_is_terminal(state: RunLifecycle) -> bool {
     )
 }
 
-#[cfg(test)]
 fn segment_start_seq(segment: &TimelineSegment) -> u64 {
     match segment {
         TimelineSegment::Turn { segment } => segment.start_seq,
@@ -1436,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_before_excludes_the_turn_containing_an_unowned_checkpoint_cursor() {
+    fn indexed_timeline_keeps_raw_message_identity_across_checkpoints() {
         let session_id = SessionId(uuid::Uuid::from_u128(99));
         let first = turn(1);
         let second = turn(2);
@@ -1503,16 +1598,23 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let checkpoint_item = &segment_items(&tail.segments[0])[0];
-        assert_eq!(checkpoint_item.seq, 3);
+        let latest_item = &segment_items(&tail.segments[0])[0];
+        assert_eq!(latest_item.seq, 2);
+        assert!(matches!(
+            &latest_item.preview,
+            TranscriptItem::Message {
+                checkpoint_index: None,
+                ..
+            }
+        ));
 
         let before = indexed_page(
             &source,
             &session_id,
             DaemonGeneration("test".into()),
             IndexedPageWindow::Before(TimelineCursor {
-                seq: checkpoint_item.seq,
-                item_id: checkpoint_item.id.clone(),
+                seq: latest_item.seq,
+                item_id: latest_item.id.clone(),
             }),
             &budget,
             false,
@@ -1526,8 +1628,26 @@ mod tests {
                 .segments
                 .iter()
                 .flat_map(segment_items)
-                .all(|item| item.seq < checkpoint_item.seq)
+                .all(|item| item.seq < latest_item.seq)
         );
+
+        let oldest_item = &segment_items(&before.segments[0])[0];
+        let after = indexed_page(
+            &source,
+            &session_id,
+            DaemonGeneration("test".into()),
+            IndexedPageWindow::After(TimelineCursor {
+                seq: oldest_item.seq,
+                item_id: oldest_item.id.clone(),
+            }),
+            &budget,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let returned_latest = &segment_items(&after.segments[0])[0];
+        assert_eq!(returned_latest.id, latest_item.id);
+        assert_eq!(returned_latest.preview, latest_item.preview);
     }
 
     #[test]

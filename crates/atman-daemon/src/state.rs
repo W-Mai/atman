@@ -476,9 +476,6 @@ impl DaemonState {
             self.can_read_session(id, principal),
             "permission denied for session"
         );
-        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
-            return actor.timeline_tail(budget).await;
-        }
         if self.launcher().is_none() {
             return self
                 .get_or_load_actor(id, principal)
@@ -495,15 +492,37 @@ impl DaemonState {
             )
             .await
         {
-            Ok(Some(page)) => return Ok(page),
+            Ok(Some(mut page)) => {
+                if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+                    let (_, projection) = actor.snapshot().await?;
+                    crate::timeline::supplement_live_tail(&mut page, &projection);
+                }
+                return Ok(page);
+            }
             Ok(None) => {}
             Err(error) => eprintln!(
                 "warning: indexed timeline unavailable for session {id}; reading the JSONL tail: {error:#}"
             ),
         }
-        self.jsonl_timeline_page(id, crate::timeline::IndexedPageWindow::Tail, budget, true)
+        if let Some(mut page) = self
+            .jsonl_timeline_page(
+                id,
+                crate::timeline::IndexedPageWindow::Tail,
+                budget.clone(),
+                true,
+            )
             .await?
-            .ok_or_else(|| anyhow::anyhow!("session {id} has no readable timeline events"))
+        {
+            if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+                let (_, projection) = actor.snapshot().await?;
+                crate::timeline::supplement_live_tail(&mut page, &projection);
+            }
+            return Ok(page);
+        }
+        if let Some(actor) = self.loaded_runtime_session(id, principal)? {
+            return actor.timeline_tail(budget).await;
+        }
+        anyhow::bail!("session {id} has no readable timeline events")
     }
 
     pub async fn session_timeline_before(

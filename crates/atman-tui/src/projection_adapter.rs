@@ -1035,22 +1035,32 @@ fn attach_subflows(
             (atman_proto::TurnId, WorkflowNodeProjection, Option<String>),
         >,
     ) {
+        let mut preceding_spawn_tool = None;
         for node in nodes {
-            let parent_tool = match &node.kind {
+            let child_parent_tool = match &node.kind {
                 WorkflowNodeKind::ToolCall { tool_use_id, .. } => Some(tool_use_id.as_str()),
                 _ => parent_tool,
             };
+            if let WorkflowNodeKind::ToolCall {
+                tool_use_id,
+                tool_name,
+                ..
+            } = &node.kind
+                && matches!(tool_name.as_str(), "flow.spawn" | "agent.at")
+            {
+                preceding_spawn_tool = Some(tool_use_id.as_str());
+            }
             if let WorkflowNodeKind::Subflow { run_id, .. } = &node.kind {
                 found.insert(
                     run_id.clone(),
                     (
                         turn_id.clone(),
                         node.clone(),
-                        parent_tool.map(str::to_owned),
+                        parent_tool.or(preceding_spawn_tool).map(str::to_owned),
                     ),
                 );
             }
-            locate(turn_id, &node.children, parent_tool, found);
+            locate(turn_id, &node.children, child_parent_tool, found);
         }
     }
 
@@ -1070,8 +1080,18 @@ fn attach_subflows(
     for root in roots {
         let root_messages = messages.get(&root).cloned().unwrap_or_default();
         let run = projection.runs.iter().find(|run| run.id == root);
+        let node_state = locations.get(&root).map(|(_, node, _)| node.state);
         let (status, done) = run.map_or_else(
-            || ("running".to_owned(), false),
+            || match node_state {
+                Some(atman_proto::WorkflowNodeState::Succeeded) => ("ok".to_owned(), true),
+                Some(atman_proto::WorkflowNodeState::Failed) => ("error".to_owned(), true),
+                Some(atman_proto::WorkflowNodeState::Cancelled) => ("killed".to_owned(), true),
+                Some(
+                    atman_proto::WorkflowNodeState::Pending
+                    | atman_proto::WorkflowNodeState::Running,
+                )
+                | None => ("running".to_owned(), false),
+            },
             |run| match run.state {
                 atman_proto::RunLifecycle::Succeeded => ("ok".to_owned(), true),
                 atman_proto::RunLifecycle::Failed | atman_proto::RunLifecycle::Lost => {
@@ -2435,35 +2455,54 @@ mod tests {
         source.workflows[0].roots[0]
             .children
             .push(WorkflowNodeProjection {
-                id: "spawn-call".into(),
-                kind: WorkflowNodeKind::ToolCall {
-                    tool_use_id: "spawn-1".into(),
-                    tool_name: "agent.at".into(),
-                    args_preview: "implementation".into(),
-                    intent: Some("Implement the change".into()),
-                    result_preview: Some("done".into()),
+                id: "dispatch-all".into(),
+                kind: WorkflowNodeKind::Statement {
+                    kind: atman_proto::WorkflowStatementKind::ToolCall {
+                        path: "dispatch_all".into(),
+                    },
                 },
-                label: "Implement the change".into(),
+                label: "dispatch_all".into(),
                 state: WorkflowNodeState::Succeeded,
                 started_at: Some(now),
                 finished_at: Some(now),
-                output_preview: Some("done".into()),
-                children: vec![WorkflowNodeProjection {
-                    id: child_run_id.0.to_string(),
-                    kind: WorkflowNodeKind::Subflow {
-                        run_id: child_run_id.clone(),
-                        flow_name: "implementation".into(),
+                output_preview: None,
+                children: vec![
+                    WorkflowNodeProjection {
+                        id: "spawn-call".into(),
+                        kind: WorkflowNodeKind::ToolCall {
+                            tool_use_id: "spawn-1".into(),
+                            tool_name: "flow.spawn".into(),
+                            args_preview: "implementation".into(),
+                            intent: Some("Implement the change".into()),
+                            result_preview: Some("done".into()),
+                        },
+                        label: "Implement the change".into(),
+                        state: WorkflowNodeState::Succeeded,
+                        started_at: Some(now),
+                        finished_at: Some(now),
+                        output_preview: Some("done".into()),
+                        children: Vec::new(),
+                        parallel: false,
+                        approval: None,
+                        llm_usage: None,
                     },
-                    label: "implementation".into(),
-                    state: WorkflowNodeState::Succeeded,
-                    started_at: Some(now),
-                    finished_at: Some(now),
-                    output_preview: Some("implemented".into()),
-                    children: Vec::new(),
-                    parallel: false,
-                    approval: None,
-                    llm_usage: None,
-                }],
+                    WorkflowNodeProjection {
+                        id: child_run_id.0.to_string(),
+                        kind: WorkflowNodeKind::Subflow {
+                            run_id: child_run_id.clone(),
+                            flow_name: "implementation".into(),
+                        },
+                        label: "implementation".into(),
+                        state: WorkflowNodeState::Succeeded,
+                        started_at: Some(now),
+                        finished_at: Some(now),
+                        output_preview: Some("implemented".into()),
+                        children: Vec::new(),
+                        parallel: false,
+                        approval: None,
+                        llm_usage: None,
+                    },
+                ],
                 parallel: false,
                 approval: None,
                 llm_usage: None,
@@ -2510,7 +2549,7 @@ mod tests {
             ),
             message(
                 atman_proto::MessageRole::Assistant,
-                Some(child_run_id),
+                Some(child_run_id.clone()),
                 "Implemented",
             ),
         ];
@@ -2539,6 +2578,35 @@ mod tests {
         assert!(transcript.iter().all(|item| {
             !matches!(&item.output, OutputItem::AssistantMd { md, .. } if md == "Implemented")
         }));
+        assert!(
+            transcript
+                .iter()
+                .all(|item| { !matches!(&item.output, OutputItem::SubAgentActivity { .. }) })
+        );
+
+        source.runs.retain(|run| run.id != child_run_id);
+        let converted = TuiSessionProjection::try_from(&source).unwrap();
+        let detail = converted
+            .transcript
+            .as_deref()
+            .unwrap()
+            .iter()
+            .find_map(|item| match &item.output {
+                OutputItem::ToolDispatch { calls } => calls
+                    .iter()
+                    .find(|call| call.id == "spawn-1")
+                    .and_then(|call| call.detail.as_deref()),
+                _ => None,
+            })
+            .expect("historical subflow remains attached without live run metadata");
+        assert!(matches!(
+            detail,
+            OutputItem::SubAgentActivity {
+                status,
+                done: true,
+                ..
+            } if status == "ok"
+        ));
     }
 
     #[test]

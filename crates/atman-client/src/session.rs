@@ -2045,6 +2045,26 @@ fn apply_change(
         ProjectionChange::LifecycleSet { lifecycle } => projection.lifecycle = *lifecycle,
         ProjectionChange::RunUpsert { run } => upsert_run(&mut projection.runs, run.clone()),
         ProjectionChange::RunRemove { run_id } => projection.runs.retain(|run| &run.id != run_id),
+        ProjectionChange::TranscriptAppend { items } if bounded_transcript => {
+            for item in items {
+                if !matches!(
+                    item,
+                    atman_proto::TranscriptItem::Message {
+                        checkpoint_index: Some(_),
+                        ..
+                    }
+                ) && !projection
+                    .transcript
+                    .iter()
+                    .any(|existing| same_timeline_item(existing, item))
+                {
+                    projection.transcript.push(item.clone());
+                }
+            }
+            projection
+                .transcript
+                .sort_by_key(atman_proto::TranscriptItem::seq);
+        }
         ProjectionChange::TranscriptAppend { items } => {
             projection.transcript.extend(items.iter().cloned())
         }
@@ -2180,14 +2200,41 @@ fn replace_bounded_transcript(
         .map(atman_proto::TranscriptItem::seq)
         .min()
         .unwrap_or_default();
-    projection.transcript = replacement
+    let maximum_seq = projection
+        .transcript
         .iter()
-        .filter(|item| match transcript_turn_id(item, &run_turns) {
-            Some(turn_id) => visible_turns.contains(&turn_id),
+        .map(atman_proto::TranscriptItem::seq)
+        .max()
+        .unwrap_or_default();
+    for item in replacement {
+        if matches!(
+            item,
+            atman_proto::TranscriptItem::Message {
+                checkpoint_index: Some(_),
+                ..
+            }
+        ) {
+            continue;
+        }
+        if let Some(existing) = projection
+            .transcript
+            .iter_mut()
+            .find(|existing| same_timeline_item(existing, item))
+        {
+            existing.clone_from(item);
+            continue;
+        }
+        let belongs_to_window = match transcript_turn_id(item, &run_turns) {
+            Some(turn_id) => visible_turns.contains(&turn_id) || item.seq() > maximum_seq,
             None => item.seq() >= minimum_seq,
-        })
-        .cloned()
-        .collect();
+        };
+        if belongs_to_window {
+            projection.transcript.push(item.clone());
+        }
+    }
+    projection
+        .transcript
+        .sort_by_key(atman_proto::TranscriptItem::seq);
 }
 
 fn transcript_turn_id(
@@ -2470,7 +2517,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_bootstrap_and_prepend_preserve_live_revision_and_cursor() {
+    fn timeline_bootstrap_ignores_checkpoint_rewrites_and_preserves_prepend_cursor() {
         let source = projection(
             serde_json::from_value(serde_json::json!("018f7f24-1ab2-7c3d-8e4f-123456789abc"))
                 .unwrap(),
@@ -2482,6 +2529,17 @@ mod tests {
         state.bounded_transcript = true;
         let mut loaded = timeline_item_ids(&tail);
         let before = timeline_page(&source, 1, false, false);
+        let checkpoint_item = |index, turn| {
+            let mut item = timeline_item(8, turn).preview;
+            let atman_proto::TranscriptItem::Message {
+                checkpoint_index, ..
+            } = &mut item
+            else {
+                unreachable!()
+            };
+            *checkpoint_index = Some(index);
+            item
+        };
 
         let replacement = GetSessionUpdatesResponse {
             daemon_generation: tail.daemon_generation.clone(),
@@ -2493,8 +2551,9 @@ mod tests {
                     revision: Revision(4),
                     changes: vec![ProjectionChange::TranscriptReplace {
                         items: vec![
-                            timeline_item(8, atman_proto::TurnId(uuid::Uuid::from_u128(1))).preview,
-                            timeline_item(8, atman_proto::TurnId(uuid::Uuid::from_u128(2))).preview,
+                            checkpoint_item(0, atman_proto::TurnId(uuid::Uuid::from_u128(1))),
+                            checkpoint_item(1, atman_proto::TurnId(uuid::Uuid::from_u128(2))),
+                            timeline_item(3, atman_proto::TurnId(uuid::Uuid::from_u128(3))).preview,
                         ],
                     }],
                 },
@@ -2509,8 +2568,13 @@ mod tests {
         else {
             panic!("expected message");
         };
-        assert_eq!(state.projection().transcript.len(), 1);
+        assert_eq!(state.projection().transcript.len(), 2);
         assert_eq!(message.turn_id.0, uuid::Uuid::from_u128(2));
+        assert!(matches!(
+            &state.projection().transcript[1],
+            atman_proto::TranscriptItem::Message { message, .. }
+                if message.turn_id.0 == uuid::Uuid::from_u128(3)
+        ));
 
         assert_eq!(merge_timeline_page(&mut state, &before, &mut loaded), 1);
         assert_eq!(state.cursor(), EventCursor(8));
@@ -2522,7 +2586,7 @@ mod tests {
                 .iter()
                 .map(atman_proto::TranscriptItem::seq)
                 .collect::<Vec<_>>(),
-            vec![1, 8]
+            vec![1, 2, 3]
         );
     }
 

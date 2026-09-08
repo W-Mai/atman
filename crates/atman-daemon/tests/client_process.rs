@@ -129,6 +129,29 @@ async fn start_run(
         .expect("failed to start flow")
 }
 
+fn assert_windowed_projection_matches(
+    windowed: &atman_proto::SessionProjection,
+    complete: &atman_proto::SessionProjection,
+) {
+    assert!(
+        windowed
+            .transcript
+            .windows(2)
+            .all(|items| items[0].seq() <= items[1].seq())
+    );
+    if let Some(latest) = complete.transcript.last() {
+        assert!(windowed.transcript.contains(latest));
+    }
+    let mut expected = complete.clone();
+    let mut actual = windowed.clone();
+    expected.transcript.clear();
+    expected.workflows.clear();
+    actual.transcript.clear();
+    actual.workflows.clear();
+    actual.revision = expected.revision;
+    assert_eq!(actual, expected);
+}
+
 #[tokio::test]
 async fn client_round_trip_survives_a_real_daemon_reconnect() {
     let temp = tempfile::tempdir().unwrap();
@@ -278,9 +301,9 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
     wait_for_no_forms(&session).await;
     unix_session.refresh_until_current().await.unwrap();
     session.refresh_until_current().await.unwrap();
-    assert_eq!(
+    assert_windowed_projection_matches(
         unix_session.current().projection(),
-        session.current().projection()
+        session.current().projection(),
     );
 
     drop(events);
@@ -292,11 +315,12 @@ async fn client_round_trip_survives_a_real_daemon_reconnect() {
         .attach_session(session_id)
         .await
         .unwrap();
-    assert_eq!(
+    reconnected.refresh_until_current().await.unwrap();
+    assert_windowed_projection_matches(
         reconnected.current().projection(),
-        before_reconnect.projection()
+        before_reconnect.projection(),
     );
-    assert_eq!(reconnected.current().cursor(), before_reconnect.cursor());
+    assert!(reconnected.current().cursor() >= before_reconnect.cursor());
 
     daemon.terminate();
 }

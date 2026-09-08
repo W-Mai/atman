@@ -116,6 +116,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Consistent paged history** — timeline pages preserve raw audit items across LLM checkpoints and context compaction, merge live suffixes when the durable index trails a loaded session, keep historical subflows attached to their originating tool calls with terminal status, and avoid rescanning every preceding flow start.
+
 - **Bidirectional history scrolling** — the TUI keeps a bounded history window detached from the live tail while newer pages remain, serializes downward page requests, and restores follow-tail mode only after the durable tail is reached.
 
 - **Checkpoint history pagination** — history pages resolve unowned checkpoint and compaction cursors through the turn interval that contains them, preventing oversized recent turns from being returned repeatedly when loading earlier history.

@@ -49,6 +49,12 @@ pub(crate) struct RestoredProjection {
     pub event_cursor: EventCursor,
 }
 
+#[derive(Clone, Copy)]
+enum TranscriptView {
+    Context,
+    Audit,
+}
+
 impl SessionProjector {
     pub(crate) fn new(
         session_id: SessionId,
@@ -89,16 +95,13 @@ impl SessionProjector {
         meta: Option<atman_runtime::session_meta::SessionMeta>,
         events: &[EventEnvelope],
     ) -> Self {
-        let mut projector = Self::new(session_id, meta);
-        for event in events {
-            projector.apply_envelope_inner(event, false);
-        }
-        projector.projection.workflows = projector
-            .workflows
-            .iter()
-            .map(|(_, workflow)| workflow_projection(workflow))
-            .collect();
-        projector
+        Self::from_events_in_view(
+            session_id,
+            meta,
+            events,
+            FlowOwnership::default(),
+            TranscriptView::Context,
+        )
     }
 
     pub(crate) fn from_events_with_ownership(
@@ -107,9 +110,36 @@ impl SessionProjector {
         events: &[EventEnvelope],
         ownership: FlowOwnership,
     ) -> Self {
+        Self::from_events_in_view(session_id, meta, events, ownership, TranscriptView::Context)
+    }
+
+    pub(crate) fn from_timeline_events(
+        session_id: SessionId,
+        meta: Option<atman_runtime::session_meta::SessionMeta>,
+        events: &[EventEnvelope],
+        ownership: FlowOwnership,
+    ) -> Self {
+        Self::from_events_in_view(session_id, meta, events, ownership, TranscriptView::Audit)
+    }
+
+    fn from_events_in_view(
+        session_id: SessionId,
+        meta: Option<atman_runtime::session_meta::SessionMeta>,
+        events: &[EventEnvelope],
+        ownership: FlowOwnership,
+        view: TranscriptView,
+    ) -> Self {
         let mut projector = Self::new(session_id, meta);
         projector.ownership = ownership;
         for event in events {
+            if matches!(view, TranscriptView::Audit)
+                && matches!(
+                    &event.event,
+                    Event::ContextCompact { .. } | Event::Checkpoint { .. }
+                )
+            {
+                continue;
+            }
             projector.apply_envelope_inner(event, false);
         }
         projector.projection.workflows = projector
