@@ -21,6 +21,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals.
 - **Tool intent recovery** — Provider responses that omit a required tool-call intent receive one schema-correction retry; repeated omissions keep the flow usable with the existing generated display summary while retaining an empty asserted intent for approval and audit logic.
 - **Tool activity hierarchy** — Thinking and working surfaces use explicit action, title, and metadata contrast levels; running tools animate only their status glyph, provider-facing tool schemas require call purposes, streamed purposes appear before final tool-use messages, and missing legacy purposes receive readable action labels.
 - **Responsive execution surfaces** — Bash output is read in bounded frames with queue backpressure and retained-output limits, nested Bash, Terminal, and subflow details resolve through one task-detail path, and stalled child provider calls respond immediately to task cancellation.

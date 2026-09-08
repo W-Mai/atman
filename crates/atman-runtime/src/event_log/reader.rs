@@ -126,12 +126,16 @@ fn apply_context_record(snapshot: &mut ContextSnapshot, event: &Event) {
         usage,
         ttft_ms,
         tokens_per_second,
+        status,
         run_id,
         ..
     } = event
     else {
         return;
     };
+    if !matches!(status, crate::event::LlmCallStatus::Ok) {
+        return;
+    }
     if context_call_purpose.is_none() && context_call_identity.is_none() && run_id.is_none() {
         return;
     }

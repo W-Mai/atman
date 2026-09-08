@@ -3429,6 +3429,23 @@ mod tests {
     }
 
     #[test]
+    fn replay_context_snapshot_ignores_errored_llm_call_usage() {
+        let dir = TempDir::new().unwrap();
+        let events = [
+            r#"{"type":"llm_call","seq":1,"model":"primary-model","provider":"primary-provider","context_call_purpose":"general","context_call_identity":{"scope":"root","session_id":"session"},"usage":{"input":280000,"cached_input":0,"output":0,"cache_write":0},"usage_source":"estimated","wallclock_ms":1000,"status":{"kind":"errored","message":"rate limited"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:00Z"}"#,
+            r#"{"type":"llm_call","seq":2,"model":"primary-model","provider":"primary-provider","context_call_purpose":"general","context_call_identity":{"scope":"root","session_id":"session"},"usage":{"input":100,"cached_input":400,"output":20,"cache_write":0},"usage_source":"provider","wallclock_ms":1000,"status":{"kind":"ok"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:01Z"}"#,
+        ];
+        write_events(dir.path(), &events);
+
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+
+        assert_eq!(snap.tokens_in, 500);
+        assert_eq!(snap.tokens_out, 20);
+        assert_eq!(snap.usage_buckets.len(), 1);
+        assert_eq!(snap.primary_usage().unwrap().calls, 1);
+    }
+
+    #[test]
     fn replay_context_snapshot_skips_subagent_llm_calls() {
         let dir = TempDir::new().unwrap();
         let events = [

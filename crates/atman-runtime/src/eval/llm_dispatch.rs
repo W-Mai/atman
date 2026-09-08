@@ -504,6 +504,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
             if let Some(session) = ctx.session_runtime.as_ref()
                 && !matches!(context_mode, ContextMode::None)
+                && outcome.is_ok()
+                && response_error.is_none()
             {
                 session.record_context_plan_call(
                     provider.name(),
