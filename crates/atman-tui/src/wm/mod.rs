@@ -546,6 +546,12 @@ impl WindowManager {
         if app.mcp_add_form.is_some() || app.modal_notification.is_some() {
             return (false, Vec::new());
         }
+        if !app.submission_focus
+            && (!app.pending_permissions.is_empty() || !app.pending_permission_groups.is_empty())
+            && crate::key_handler::is_approval_key(action)
+        {
+            return (false, Vec::new());
+        }
         match action {
             crate::keys::KeyAction::CyclePanelForward => {
                 self.cycle_focus(true);

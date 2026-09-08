@@ -1856,6 +1856,34 @@ mod tests {
     }
 
     #[test]
+    fn pending_approval_intercepts_escape_before_focused_flow_panel() {
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        let pending = pending_permission(1);
+        state
+            .app
+            .pending_permissions
+            .insert(pending.request_id.clone(), pending);
+        state.wm.open(
+            "child",
+            crate::wm::ContentKey::Task("child".into()),
+            crate::wm::WindowContent::Task {
+                handle: "child".into(),
+                kind: atman_runtime::TaskKind::Flow,
+            },
+            "child",
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+        );
+
+        let (consumed, commands) = state
+            .wm
+            .dispatch_key(&KeyAction::Escape, &mut state.app, None);
+
+        assert!(!consumed, "approval handling must receive Escape first");
+        assert!(commands.is_empty());
+        assert_eq!(state.wm.panels.len(), 1, "the flow panel must stay open");
+    }
+
+    #[test]
     fn submit_captures_the_current_composer_snapshot() {
         let session = std::sync::Arc::new(atman_runtime::Session::open_ephemeral());
         session
