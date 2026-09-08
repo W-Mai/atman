@@ -234,6 +234,8 @@ pub struct Session {
     pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
     injection_tx: broadcast::Sender<Injection>,
+    submission_queue: Mutex<VecDeque<crate::submission_queue::QueuedSubmission>>,
+    submission_watch: watch::Sender<Vec<crate::submission_queue::QueuedSubmissionView>>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     pending_images: Mutex<Vec<crate::message::ImageSource>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
@@ -967,6 +969,8 @@ impl Session {
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
+            submission_queue: Mutex::new(VecDeque::new()),
+            submission_watch: watch::channel(Vec::new()).0,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -1185,6 +1189,8 @@ impl Session {
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
+            submission_queue: Mutex::new(VecDeque::new()),
+            submission_watch: watch::channel(Vec::new()).0,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -1237,6 +1243,8 @@ impl Session {
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
+            submission_queue: Mutex::new(VecDeque::new()),
+            submission_watch: watch::channel(Vec::new()).0,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -2419,6 +2427,176 @@ impl Session {
             .filter(|i| i.state == InjectionState::Pending)
             .cloned()
             .collect()
+    }
+
+    fn publish_submission_queue(
+        &self,
+        queue: &VecDeque<crate::submission_queue::QueuedSubmission>,
+    ) {
+        self.submission_watch.send_replace(
+            queue
+                .iter()
+                .map(crate::submission_queue::QueuedSubmissionView::from)
+                .collect(),
+        );
+    }
+
+    pub fn enqueue_submission(
+        &self,
+        text: impl Into<String>,
+        images: Vec<crate::message::ImageSource>,
+        invocation_env: crate::InvocationEnv,
+        origin: crate::message::MessageOrigin,
+    ) -> Result<
+        crate::submission_queue::QueuedSubmissionView,
+        crate::submission_queue::SubmissionQueueError,
+    > {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return Err(crate::submission_queue::SubmissionQueueError::EmptyText);
+        }
+        let submission =
+            crate::submission_queue::QueuedSubmission::new(text, images, invocation_env, origin);
+        let view = crate::submission_queue::QueuedSubmissionView::from(&submission);
+        let mut queue = self.submission_queue.lock().unwrap();
+        queue.push_back(submission);
+        self.publish_submission_queue(&queue);
+        Ok(view)
+    }
+
+    pub fn subscribe_queued_submissions(
+        &self,
+    ) -> watch::Receiver<Vec<crate::submission_queue::QueuedSubmissionView>> {
+        self.submission_watch.subscribe()
+    }
+
+    pub fn queued_submissions(&self) -> Vec<crate::submission_queue::QueuedSubmissionView> {
+        self.submission_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(crate::submission_queue::QueuedSubmissionView::from)
+            .collect()
+    }
+
+    pub fn edit_queued_submission(
+        &self,
+        id: &crate::submission_queue::SubmissionId,
+        expected_revision: u64,
+        text: impl Into<String>,
+    ) -> Result<(), crate::submission_queue::SubmissionQueueError> {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return Err(crate::submission_queue::SubmissionQueueError::EmptyText);
+        }
+        let mut queue = self.submission_queue.lock().unwrap();
+        let submission = queue
+            .iter_mut()
+            .find(|submission| submission.id == *id)
+            .ok_or(crate::submission_queue::SubmissionQueueError::NotFound)?;
+        if submission.revision != expected_revision {
+            return Err(crate::submission_queue::SubmissionQueueError::RevisionConflict);
+        }
+        submission.text = text;
+        submission.revision = submission.revision.saturating_add(1);
+        self.publish_submission_queue(&queue);
+        Ok(())
+    }
+
+    pub fn move_queued_submission(
+        &self,
+        id: &crate::submission_queue::SubmissionId,
+        expected_revision: u64,
+        direction: crate::submission_queue::SubmissionMove,
+    ) -> Result<(), crate::submission_queue::SubmissionQueueError> {
+        let mut queue = self.submission_queue.lock().unwrap();
+        let index = queue
+            .iter()
+            .position(|submission| submission.id == *id)
+            .ok_or(crate::submission_queue::SubmissionQueueError::NotFound)?;
+        if queue[index].revision != expected_revision {
+            return Err(crate::submission_queue::SubmissionQueueError::RevisionConflict);
+        }
+        let target = match direction {
+            crate::submission_queue::SubmissionMove::Up => index.checked_sub(1),
+            crate::submission_queue::SubmissionMove::Down => {
+                (index + 1 < queue.len()).then_some(index + 1)
+            }
+        };
+        if let Some(target) = target {
+            queue.swap(index, target);
+            queue[index].revision = queue[index].revision.saturating_add(1);
+            queue[target].revision = queue[target].revision.saturating_add(1);
+            self.publish_submission_queue(&queue);
+        }
+        Ok(())
+    }
+
+    pub fn delete_queued_submission(
+        &self,
+        id: &crate::submission_queue::SubmissionId,
+        expected_revision: u64,
+    ) -> Result<
+        crate::submission_queue::QueuedSubmission,
+        crate::submission_queue::SubmissionQueueError,
+    > {
+        let mut queue = self.submission_queue.lock().unwrap();
+        let index = queue
+            .iter()
+            .position(|submission| submission.id == *id)
+            .ok_or(crate::submission_queue::SubmissionQueueError::NotFound)?;
+        if queue[index].revision != expected_revision {
+            return Err(crate::submission_queue::SubmissionQueueError::RevisionConflict);
+        }
+        let removed = queue
+            .remove(index)
+            .expect("queued submission index came from the same queue");
+        for submission in queue.iter_mut().skip(index) {
+            submission.revision = submission.revision.saturating_add(1);
+        }
+        self.publish_submission_queue(&queue);
+        Ok(removed)
+    }
+
+    pub fn intervene_queued_submission(
+        &self,
+        id: &crate::submission_queue::SubmissionId,
+        expected_revision: u64,
+    ) -> Result<(), crate::submission_queue::SubmissionQueueError> {
+        let mut queue = self.submission_queue.lock().unwrap();
+        let index = queue
+            .iter()
+            .position(|submission| submission.id == *id)
+            .ok_or(crate::submission_queue::SubmissionQueueError::NotFound)?;
+        if queue[index].revision != expected_revision {
+            return Err(crate::submission_queue::SubmissionQueueError::RevisionConflict);
+        }
+        if index > 0 {
+            let mut submission = queue
+                .remove(index)
+                .expect("queued submission index came from the same queue");
+            submission.revision = submission.revision.saturating_add(1);
+            for shifted in queue.iter_mut().take(index) {
+                shifted.revision = shifted.revision.saturating_add(1);
+            }
+            queue.push_front(submission);
+            self.publish_submission_queue(&queue);
+        }
+        drop(queue);
+        self.cancel_flow();
+        Ok(())
+    }
+
+    pub fn pop_queued_submission(&self) -> Option<crate::submission_queue::QueuedSubmission> {
+        let mut queue = self.submission_queue.lock().unwrap();
+        let submission = queue.pop_front();
+        if submission.is_some() {
+            for shifted in queue.iter_mut() {
+                shifted.revision = shifted.revision.saturating_add(1);
+            }
+            self.publish_submission_queue(&queue);
+        }
+        submission
     }
 
     pub fn cancel_flow(&self) {
@@ -3849,5 +4027,103 @@ mod tests {
         // all includes both user1 and summary — compaction NOT applied
         assert_eq!(all.len(), 2, "all messages preserved (no compaction)");
         assert_eq!(all[0].1.text_concat(), "old");
+    }
+
+    #[test]
+    fn queued_submissions_preserve_order_and_publish_lightweight_views() {
+        let session = Session::open_ephemeral();
+        let watch = session.subscribe_queued_submissions();
+        let first = session
+            .enqueue_submission(
+                "first",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let second = session
+            .enqueue_submission(
+                "second",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+
+        session
+            .move_queued_submission(
+                &second.id,
+                second.revision,
+                crate::submission_queue::SubmissionMove::Up,
+            )
+            .unwrap();
+
+        let views = session.queued_submissions();
+        assert_eq!(
+            views
+                .iter()
+                .map(|view| view.text.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        assert_eq!(views[0].revision, 1);
+        assert_eq!(watch.borrow().as_slice(), views.as_slice());
+        assert_eq!(session.pop_queued_submission().unwrap().id, second.id);
+        assert_eq!(session.pop_queued_submission().unwrap().id, first.id);
+        assert!(session.pop_queued_submission().is_none());
+    }
+
+    #[test]
+    fn queued_submission_mutations_reject_stale_revisions() {
+        let session = Session::open_ephemeral();
+        let queued = session
+            .enqueue_submission(
+                "before",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+        session
+            .edit_queued_submission(&queued.id, queued.revision, "after")
+            .unwrap();
+
+        assert_eq!(
+            session
+                .delete_queued_submission(&queued.id, queued.revision)
+                .unwrap_err(),
+            crate::submission_queue::SubmissionQueueError::RevisionConflict
+        );
+        assert_eq!(session.queued_submissions()[0].text, "after");
+    }
+
+    #[test]
+    fn intervening_promotes_submission_and_cancels_current_flow() {
+        let session = Session::open_ephemeral();
+        let cancel = session.flow_cancel_token();
+        session
+            .enqueue_submission(
+                "later",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let urgent = session
+            .enqueue_submission(
+                "urgent",
+                Vec::new(),
+                crate::InvocationEnv::default(),
+                crate::message::MessageOrigin::User,
+            )
+            .unwrap();
+
+        session
+            .intervene_queued_submission(&urgent.id, urgent.revision)
+            .unwrap();
+
+        assert!(cancel.is_cancelled());
+        assert_eq!(session.pop_queued_submission().unwrap().text, "urgent");
+        assert_eq!(session.pop_queued_submission().unwrap().text, "later");
     }
 }

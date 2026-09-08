@@ -10,6 +10,8 @@ pub enum KeyAction {
     Newline,
     HistoryUp,
     HistoryDown,
+    MoveItemUp,
+    MoveItemDown,
     ScrollUp,
     ScrollDown,
     PageUp,
@@ -81,6 +83,8 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Delete, _, _, _) => KeyAction::Delete,
         (Left, _, _, _) => KeyAction::CursorLeft,
         (Right, _, _, _) => KeyAction::CursorRight,
+        (Up, false, _, true) => KeyAction::MoveItemUp,
+        (Down, false, _, true) => KeyAction::MoveItemDown,
         (Up, _, _, _) => KeyAction::HistoryUp,
         (Down, _, _, _) => KeyAction::HistoryDown,
         (PageUp, _, _, _) => KeyAction::PageUp,
@@ -170,6 +174,18 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::Down, KeyModifiers::NONE)),
             KeyAction::HistoryDown
+        );
+    }
+
+    #[test]
+    fn alt_arrow_up_down_map_to_item_reordering() {
+        assert_eq!(
+            map(ke(KeyCode::Up, KeyModifiers::ALT)),
+            KeyAction::MoveItemUp
+        );
+        assert_eq!(
+            map(ke(KeyCode::Down, KeyModifiers::ALT)),
+            KeyAction::MoveItemDown
         );
     }
 

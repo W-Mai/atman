@@ -4,6 +4,32 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalClick {
+    ApproveRequest(usize),
+    DenyRequest(usize),
+    ToggleGroup(atman_runtime::permission::PermissionGroupId),
+    ApproveGroup(atman_runtime::permission::PermissionGroupId),
+    DeferGroup(atman_runtime::permission::PermissionGroupId),
+    ApproveAll,
+    DenyAll,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ApprovalHitMap(pub Vec<(Rect, ApprovalClick)>);
+
+impl ApprovalHitMap {
+    pub fn at(&self, x: u16, y: u16) -> Option<ApprovalClick> {
+        self.0.iter().find_map(|(rect, action)| {
+            (x >= rect.x
+                && x < rect.x.saturating_add(rect.width)
+                && y >= rect.y
+                && y < rect.y.saturating_add(rect.height))
+            .then(|| action.clone())
+        })
+    }
+}
+
 pub fn render(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -19,19 +45,21 @@ pub fn render(
         atman_runtime::permission::PermissionRequestId,
     >,
     selected_group: Option<&atman_runtime::permission::PermissionGroupId>,
-) {
+) -> ApprovalHitMap {
     let pending_len = canonical.len();
     let group_count = groups.len();
     if pending_len == 0 || area.height == 0 {
-        return;
+        return ApprovalHitMap::default();
     }
     let title = if group_count == 0 {
-        format!(" approvals · {pending_len} pending ")
+        format!(" ACTION REQUIRED · {pending_len} pending ")
     } else {
-        format!(" approvals · {pending_len} pending · {group_count} groups ")
+        format!(" ACTION REQUIRED · {pending_len} pending · {group_count} groups ")
     };
+    const HINT: &str =
+        " 1..9 allow · s scope · [/] group · g allow group · f defer · [allow all] [deny all] ";
     let hint = Line::from(Span::styled(
-        " 1..9 accept · s scope · x expand · [/] group · g group · f defer · a all · d deny · Esc deny all ",
+        HINT,
         Style::default().fg(crate::theme::theme().subtle_fg.into()),
     ))
     .right_aligned();
@@ -49,6 +77,7 @@ pub fn render(
         .padding(Padding::horizontal(1));
     let inner_width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(area.height as usize);
+    let mut actions: Vec<(usize, usize, ApprovalClick)> = Vec::new();
     let rows: Vec<(String, Option<String>, String)> = canonical
         .values()
         .filter(|p| !grouped_request_ids.contains(&p.request_id))
@@ -65,12 +94,25 @@ pub fn render(
             };
             let (title, technical) =
                 approval_labels(&p.payload.tool, p.payload.call_intent.as_ref());
+            let risks = if p.payload.provenance.risks.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " · {}",
+                    p.payload
+                        .provenance
+                        .risks
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             (
                 title,
                 technical,
                 format!(
-                    "{}{execution} · {}",
-                    p.request_id,
+                    "{}{execution}{risks}",
                     p.payload.provenance.targets.join(", ")
                 ),
             )
@@ -83,23 +125,48 @@ pub fn render(
             "  "
         };
         let marker = if group.expanded { "▾" } else { "▸" };
+        let group_head = format!(
+            "{selected}{marker}group · {} · {} requests",
+            group.payload.label,
+            group.payload.request_ids.len()
+        );
+        let action_base = crate::width::width(&group_head);
+        let line_index = lines.len();
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{selected}{marker}group {} ", group.group_id),
+                format!("{selected}{marker}group · "),
                 Style::default()
                     .fg(crate::theme::theme().warn.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(
-                    "{} · {} requests · rev {}",
+                    "{} · {} requests",
                     group.payload.label,
-                    group.payload.request_ids.len(),
-                    group.revision
+                    group.payload.request_ids.len()
                 ),
                 Style::default().fg(crate::theme::theme().tinted_fg.into()),
             ),
+            Span::styled(
+                "  details  allow group  defer ",
+                Style::default().fg(crate::theme::theme().subtle_fg.into()),
+            ),
         ]));
+        actions.push((
+            line_index,
+            action_base + 2,
+            ApprovalClick::ToggleGroup(group.group_id.clone()),
+        ));
+        actions.push((
+            line_index,
+            action_base + 11,
+            ApprovalClick::ApproveGroup(group.group_id.clone()),
+        ));
+        actions.push((
+            line_index,
+            action_base + 24,
+            ApprovalClick::DeferGroup(group.group_id.clone()),
+        ));
         if group.expanded {
             for request_id in &group.payload.request_ids {
                 if let Some(request) = canonical.get(request_id) {
@@ -111,7 +178,7 @@ pub fn render(
                         .map(|tool| format!(" · {tool}"))
                         .unwrap_or_default();
                     lines.push(Line::from(Span::styled(
-                        format!("  └ {title}{technical} · {}", request.request_id),
+                        format!("  └ {title}{technical}"),
                         Style::default().fg(crate::theme::theme().subtle_fg.into()),
                     )));
                 }
@@ -130,7 +197,7 @@ pub fn render(
             + 2;
         let detail = crate::width::truncate(
             &detail.replace('\n', " "),
-            inner_width.saturating_sub(head_width),
+            inner_width.saturating_sub(head_width + 14),
         );
         let mut spans = vec![
             Span::styled(
@@ -150,11 +217,24 @@ pub fn render(
                 Style::default().fg(crate::theme::theme().subtle_fg.into()),
             ));
         }
+        let detail_text = format!("  {detail}");
         spans.push(Span::styled(
-            format!("  {detail}"),
+            detail_text.clone(),
             Style::default().fg(crate::theme::theme().tinted_fg.into()),
         ));
+        let action_base = head_width + crate::width::width(&detail_text) - 2;
+        spans.push(Span::styled(
+            "  allow  deny ",
+            Style::default().fg(crate::theme::theme().subtle_fg.into()),
+        ));
+        let line_index = lines.len();
         lines.push(Line::from(spans));
+        actions.push((
+            line_index,
+            action_base + 2,
+            ApprovalClick::ApproveRequest(i),
+        ));
+        actions.push((line_index, action_base + 9, ApprovalClick::DenyRequest(i)));
     }
     if pending_len > 9 {
         lines.push(Line::from(Span::styled(
@@ -162,7 +242,60 @@ pub fn render(
             Style::default().fg(crate::theme::theme().subtle_fg.into()),
         )));
     }
+    let inner = block.inner(area);
+    let mut hitmap = ApprovalHitMap::default();
+    for (line, x_offset, action) in actions {
+        if line >= inner.height as usize {
+            continue;
+        }
+        let label_width = match action {
+            ApprovalClick::ApproveRequest(_) => 5,
+            ApprovalClick::DenyRequest(_) => 4,
+            ApprovalClick::ToggleGroup(_) => 7,
+            ApprovalClick::ApproveGroup(_) => 11,
+            ApprovalClick::DeferGroup(_) => 5,
+            ApprovalClick::ApproveAll | ApprovalClick::DenyAll => 0,
+        };
+        hitmap.0.push((
+            Rect::new(
+                inner
+                    .x
+                    .saturating_add(x_offset.min(u16::MAX as usize) as u16),
+                inner.y + line as u16,
+                label_width,
+                1,
+            ),
+            action,
+        ));
+    }
+    let hint_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(1))
+        .saturating_sub(crate::width::width(HINT) as u16);
+    if let Some(offset) = HINT.find("[allow all]") {
+        hitmap.0.push((
+            Rect::new(
+                hint_x + crate::width::width(&HINT[..offset]) as u16,
+                area.y + area.height.saturating_sub(1),
+                11,
+                1,
+            ),
+            ApprovalClick::ApproveAll,
+        ));
+    }
+    if let Some(offset) = HINT.find("[deny all]") {
+        hitmap.0.push((
+            Rect::new(
+                hint_x + crate::width::width(&HINT[..offset]) as u16,
+                area.y + area.height.saturating_sub(1),
+                10,
+                1,
+            ),
+            ApprovalClick::DenyAll,
+        ));
+    }
     f.render_widget(Paragraph::new(lines).block(block), area);
+    hitmap
 }
 
 fn approval_labels(
@@ -171,7 +304,26 @@ fn approval_labels(
 ) -> (String, Option<String>) {
     match call_intent {
         Some(intent) => (intent.as_str().to_owned(), Some(tool.to_owned())),
-        None => (tool.to_owned(), None),
+        None => (
+            fallback_approval_label(tool).to_owned(),
+            Some(tool.to_owned()),
+        ),
+    }
+}
+
+fn fallback_approval_label(tool: &str) -> &'static str {
+    if tool.starts_with("bash.") || tool.starts_with("terminal.") {
+        "Run command"
+    } else if tool.starts_with("fs.write") || tool.starts_with("fs.edit") {
+        "Modify files"
+    } else if tool.starts_with("fs.") || tool == "image.read" {
+        "Read files"
+    } else if tool.starts_with("web.") || tool.starts_with("http.") {
+        "Access network"
+    } else if tool.starts_with("flow.") {
+        "Start flow"
+    } else {
+        "Allow tool call"
     }
 }
 
@@ -190,7 +342,7 @@ mod tests {
     #[test]
     fn approval_labels_keep_tool_as_legacy_fallback() {
         let (title, technical) = approval_labels("bash.spawn", None);
-        assert_eq!(title, "bash.spawn");
-        assert_eq!(technical, None);
+        assert_eq!(title, "Run command");
+        assert_eq!(technical.as_deref(), Some("bash.spawn"));
     }
 }

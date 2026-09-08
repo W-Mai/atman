@@ -75,6 +75,7 @@ pub mod settings_catalog;
 pub mod storage;
 pub mod stream;
 pub(crate) mod streaming;
+pub mod submission_queue;
 pub mod task_registry;
 pub mod templates;
 pub mod tool;
@@ -116,6 +117,9 @@ pub use provider_lifecycle::{
 pub use session::{
     CompactReviewDecision, CompactReviewMode, CompactReviewRegistry, ContextSnapshot,
     ContextUsageBucket, PendingCompactReview, Session, SessionId,
+};
+pub use submission_queue::{
+    QueuedSubmission, QueuedSubmissionView, SubmissionId, SubmissionMove, SubmissionQueueError,
 };
 pub use task_registry::{
     TaskDisplay, TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,

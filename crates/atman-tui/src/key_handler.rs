@@ -250,16 +250,7 @@ pub(crate) fn handle_approval_key(
     let canonical: Vec<_> = app
         .pending_permissions
         .values()
-        .filter(|p| {
-            p.payload.group_ids.is_empty()
-                || !groups.iter().any(|group| {
-                    group
-                        .payload
-                        .request_ids
-                        .iter()
-                        .any(|id| id == &p.request_id)
-                })
-        })
+        .filter(|p| !app.grouped_permission_request_ids.contains(&p.request_id))
         .cloned()
         .collect();
     let scope = |p: &crate::app::PendingPermission, index: u8| match index {
@@ -305,7 +296,12 @@ pub(crate) fn handle_approval_key(
                         grant_scope: None,
                         reason: Some("denied by user".into()),
                     });
-                    app.push_note(format!("denied {}", p.payload.tool), app::NoteLevel::Warn);
+                    app.push_toast(
+                        format!("denied {}", p.payload.tool),
+                        app::NoteLevel::Warn,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
+                    );
                 }
                 app.deny_arm = None;
                 true
@@ -325,9 +321,11 @@ pub(crate) fn handle_approval_key(
                         }),
                         reason: None,
                     });
-                    app.push_note(
-                        format!("approved {} ({})", p.payload.tool, p.request_id),
+                    app.push_toast(
+                        format!("allowed {}", p.payload.tool),
                         app::NoteLevel::Info,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
                     );
                 }
                 true
@@ -371,7 +369,12 @@ pub(crate) fn handle_approval_key(
                     2 if has_path_scope => "path",
                     _ => "call",
                 };
-                app.push_note(format!("grant scope: {label}"), app::NoteLevel::Info);
+                app.push_toast(
+                    format!("grant scope: {label}"),
+                    app::NoteLevel::Info,
+                    std::time::Duration::from_secs(3),
+                    app::ToastPosition::TopRight,
+                );
                 true
             }
             'x' | 'X' => {
@@ -413,13 +416,15 @@ pub(crate) fn handle_approval_key(
                         reason: (action == atman_runtime::permission::PermissionAction::Deny)
                             .then(|| "denied by user".into()),
                     });
-                    app.push_note(
-                        format!("group {}: {action:?}", group.group_id),
+                    app.push_toast(
+                        format!("permission group: {action:?}"),
                         if action == atman_runtime::permission::PermissionAction::Deny {
                             app::NoteLevel::Warn
                         } else {
                             app::NoteLevel::Info
                         },
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
                     );
                 }
                 app.deny_arm = None;
@@ -451,9 +456,11 @@ pub(crate) fn handle_approval_key(
                         reason: None,
                     });
                 }
-                app.push_note(
-                    format!("approved all {} pending", canonical.len()),
+                app.push_toast(
+                    format!("allowed all {} pending", canonical.len()),
                     app::NoteLevel::Info,
+                    std::time::Duration::from_secs(3),
+                    app::ToastPosition::TopRight,
                 );
                 app.deny_arm = None;
                 true
@@ -472,14 +479,21 @@ pub(crate) fn handle_approval_key(
                             grant_scope: None,
                             reason: Some("denied by user".into()),
                         });
-                        app.push_note(format!("denied {}", p.payload.tool), app::NoteLevel::Warn);
+                        app.push_toast(
+                            format!("denied {}", p.payload.tool),
+                            app::NoteLevel::Warn,
+                            std::time::Duration::from_secs(3),
+                            app::ToastPosition::TopRight,
+                        );
                     }
                     app.deny_arm = None;
                 } else {
                     app.deny_arm = Some(std::time::Instant::now());
-                    app.push_note(
+                    app.push_toast(
                         format!("d + N to deny nth, dd to deny first (of {pending_len})"),
                         app::NoteLevel::Info,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
                     );
                 }
                 true
@@ -513,15 +527,56 @@ pub(crate) fn handle_approval_key(
                 });
             }
             let _ = tx.send(TuiControl::CancelFlow);
-            app.push_note(
+            app.push_toast(
                 format!("denied all {} pending, flow cancelled", canonical.len()),
                 app::NoteLevel::Warn,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
             );
             app.deny_arm = None;
             app.cancel_running_activities();
             true
         }
         _ => false,
+    }
+}
+
+pub(crate) fn dispatch_approval_click(
+    click: crate::approval_bar::ApprovalClick,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    use crate::approval_bar::ApprovalClick;
+    match click {
+        ApprovalClick::ApproveRequest(index) if index < 9 => {
+            let key = KeyAction::Char(char::from(b'1' + index as u8));
+            handle_approval_key(&key, app, control_tx);
+        }
+        ApprovalClick::DenyRequest(index) if index < 9 => {
+            app.deny_arm = Some(std::time::Instant::now());
+            let key = KeyAction::Char(char::from(b'1' + index as u8));
+            handle_approval_key(&key, app, control_tx);
+        }
+        ApprovalClick::ToggleGroup(group_id) => {
+            app.selected_permission_group = Some(group_id);
+            handle_approval_key(&KeyAction::Char('x'), app, control_tx);
+        }
+        ApprovalClick::ApproveGroup(group_id) => {
+            app.selected_permission_group = Some(group_id);
+            handle_approval_key(&KeyAction::Char('g'), app, control_tx);
+        }
+        ApprovalClick::DeferGroup(group_id) => {
+            app.selected_permission_group = Some(group_id);
+            handle_approval_key(&KeyAction::Char('f'), app, control_tx);
+        }
+        ApprovalClick::ApproveAll => {
+            handle_approval_key(&KeyAction::Char('a'), app, control_tx);
+        }
+        ApprovalClick::DenyAll => {
+            app.deny_arm = Some(std::time::Instant::now());
+            handle_approval_key(&KeyAction::Escape, app, control_tx);
+        }
+        _ => {}
     }
 }
 
@@ -848,6 +903,18 @@ pub(crate) fn handle_key(
         }
         return;
     }
+    if app.submission_focus {
+        handle_submission_queue_key(&action, app, control_tx);
+        return;
+    }
+    if matches!(action, KeyAction::BackTab) && !app.queued_submissions.is_empty() {
+        app.submission_focus = true;
+        app.selected_submission = app
+            .selected_submission
+            .min(app.queued_submissions.len().saturating_sub(1));
+        app.popup.close();
+        return;
+    }
     app.wm.sync_modals();
     if let KeyAction::OpenCommandPalette = action {
         app.wm.modals.palette.open();
@@ -935,7 +1002,9 @@ pub(crate) fn handle_key(
             }
         }
     }
-    if !app.pending_permissions.is_empty() && is_approval_key(&action) {
+    if (!app.pending_permissions.is_empty() || !app.pending_permission_groups.is_empty())
+        && is_approval_key(&action)
+    {
         handle_approval_key(&action, app, control_tx);
         return;
     }
@@ -1323,6 +1392,7 @@ pub(crate) fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::BackTab => {}
+        KeyAction::MoveItemUp | KeyAction::MoveItemDown => {}
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
     }
     if edited {
@@ -1341,6 +1411,143 @@ pub(crate) fn input_has_focus(app: &UiState) -> bool {
         && !app.wm.any_modal_open()
         && app.mcp_add_form.is_none()
         && app.modal_notification.is_none()
+        && !app.submission_focus
+}
+
+pub(crate) fn dispatch_submission_queue_action(
+    app: &mut AppState,
+    index: usize,
+    action: crate::submission_queue::QueueAction,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    let Some(submission) = app.queued_submissions.get(index).cloned() else {
+        return;
+    };
+    app.selected_submission = index;
+    app.submission_focus = true;
+    match action {
+        crate::submission_queue::QueueAction::Intervene => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::InterveneQueuedSubmission {
+                    id: submission.id,
+                    expected_revision: submission.revision,
+                });
+            }
+        }
+        crate::submission_queue::QueueAction::Edit => {
+            let mut editor = InputEditor::default();
+            editor.replace_with(&submission.text);
+            app.queued_submission_edit = Some(crate::app::QueuedSubmissionEdit {
+                id: submission.id,
+                revision: submission.revision,
+                editor,
+            });
+        }
+        crate::submission_queue::QueueAction::MoveUp
+        | crate::submission_queue::QueueAction::MoveDown => {
+            let direction = if matches!(action, crate::submission_queue::QueueAction::MoveUp) {
+                atman_runtime::SubmissionMove::Up
+            } else {
+                atman_runtime::SubmissionMove::Down
+            };
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::MoveQueuedSubmission {
+                    id: submission.id,
+                    expected_revision: submission.revision,
+                    direction,
+                });
+            }
+        }
+        crate::submission_queue::QueueAction::Delete => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::DeleteQueuedSubmission {
+                    id: submission.id,
+                    expected_revision: submission.revision,
+                });
+            }
+        }
+    }
+}
+
+fn handle_submission_queue_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    if let Some(edit) = app.queued_submission_edit.as_mut() {
+        match action {
+            KeyAction::Submit => {
+                let text = edit.editor.buf().trim().to_owned();
+                if text.is_empty() {
+                    app.push_toast(
+                        "queued message cannot be empty",
+                        app::NoteLevel::Warn,
+                        std::time::Duration::from_secs(3),
+                        app::ToastPosition::TopRight,
+                    );
+                } else if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::EditQueuedSubmission {
+                        id: edit.id.clone(),
+                        expected_revision: edit.revision,
+                        text,
+                    });
+                    app.queued_submission_edit = None;
+                }
+            }
+            KeyAction::Escape => app.queued_submission_edit = None,
+            KeyAction::Tab | KeyAction::BackTab => {
+                app.queued_submission_edit = None;
+                app.submission_focus = false;
+            }
+            _ => {
+                edit.editor.handle_key(action);
+            }
+        }
+        return;
+    }
+    match action {
+        KeyAction::Tab | KeyAction::BackTab | KeyAction::Escape => {
+            app.submission_focus = false;
+        }
+        KeyAction::HistoryUp => {
+            app.selected_submission = app.selected_submission.saturating_sub(1);
+        }
+        KeyAction::HistoryDown => {
+            app.selected_submission =
+                (app.selected_submission + 1).min(app.queued_submissions.len().saturating_sub(1));
+        }
+        KeyAction::MoveItemUp => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::MoveUp,
+            control_tx,
+        ),
+        KeyAction::MoveItemDown => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::MoveDown,
+            control_tx,
+        ),
+        KeyAction::Submit => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::Intervene,
+            control_tx,
+        ),
+        KeyAction::Char('e') => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::Edit,
+            control_tx,
+        ),
+        KeyAction::Delete => dispatch_submission_queue_action(
+            app,
+            app.selected_submission,
+            crate::submission_queue::QueueAction::Delete,
+            control_tx,
+        ),
+        _ => {}
+    }
 }
 
 // The outgoing tui exits fast; the incoming tui plays the fade+slide
@@ -1796,6 +2003,7 @@ mod tests {
             .insert(second.request_id.clone(), second.clone());
         let selected = app.pending_permissions.values().next().unwrap().clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let transcript_len = app.items.len();
 
         assert!(handle_approval_key(
             &KeyAction::Char('1'),
@@ -1819,6 +2027,8 @@ mod tests {
         );
         assert_eq!(expected_revision, selected.revision);
         assert_eq!(action, atman_runtime::permission::PermissionAction::Approve);
+        assert_eq!(app.items.len(), transcript_len);
+        assert_eq!(app.toasts.len(), 1);
 
         app.pending_permissions.remove(&selected.request_id);
         let remaining = app.pending_permissions.values().next().unwrap().clone();
@@ -1834,6 +2044,53 @@ mod tests {
             selector,
             atman_runtime::permission::PermissionSelector::RequestIds(vec![remaining.request_id])
         );
+    }
+
+    #[test]
+    fn next_queue_focus_intercepts_enter_before_input_and_approvals() {
+        let session = atman_runtime::Session::open_ephemeral();
+        let queued = session
+            .enqueue_submission(
+                "urgent next turn",
+                Vec::new(),
+                atman_runtime::InvocationEnv::default(),
+                atman_runtime::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.queued_submissions = session.queued_submissions();
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = None;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        handle_key(
+            KeyAction::BackTab,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&tx),
+        );
+        assert!(state.app.submission_focus);
+        handle_key(
+            KeyAction::Submit,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&tx),
+        );
+
+        let TuiControl::InterveneQueuedSubmission {
+            id,
+            expected_revision,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected queue intervention control");
+        };
+        assert_eq!(id, queued.id);
+        assert_eq!(expected_revision, queued.revision);
+        assert!(editor.buf().is_empty());
     }
 
     #[test]

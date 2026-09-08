@@ -1664,7 +1664,6 @@ async fn cmd_repl_once(
     switch_target: std::sync::Arc<std::sync::Mutex<Option<PrebuildHandle>>>,
     inherited_terminal: Option<atman_tui::InheritedTerminal>,
 ) -> Result<()> {
-    use std::collections::VecDeque;
     use tokio::sync::mpsc;
 
     let use_tui = tui_mode_requested();
@@ -1714,8 +1713,6 @@ async fn cmd_repl_once(
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
         .await;
-
-    let classifier = build_interjection_classifier();
 
     if let Err(e) = run_boot_flow(&executor, &reporter).await {
         reporter.error(format!("[atman] boot flow error: {e}"));
@@ -1886,6 +1883,58 @@ async fn cmd_repl_once(
                             None,
                         );
                     }
+                    atman_tui::TuiControl::EditQueuedSubmission {
+                        id,
+                        expected_revision,
+                        text,
+                    } => {
+                        if let Err(error) =
+                            session_for_ctrl.edit_queued_submission(&id, expected_revision, text)
+                        {
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::QueueMutationRejected(error.to_string()),
+                            );
+                        }
+                    }
+                    atman_tui::TuiControl::MoveQueuedSubmission {
+                        id,
+                        expected_revision,
+                        direction,
+                    } => {
+                        if let Err(error) = session_for_ctrl.move_queued_submission(
+                            &id,
+                            expected_revision,
+                            direction,
+                        ) {
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::QueueMutationRejected(error.to_string()),
+                            );
+                        }
+                    }
+                    atman_tui::TuiControl::DeleteQueuedSubmission {
+                        id,
+                        expected_revision,
+                    } => {
+                        if let Err(error) =
+                            session_for_ctrl.delete_queued_submission(&id, expected_revision)
+                        {
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::QueueMutationRejected(error.to_string()),
+                            );
+                        }
+                    }
+                    atman_tui::TuiControl::InterveneQueuedSubmission {
+                        id,
+                        expected_revision,
+                    } => {
+                        if let Err(error) =
+                            session_for_ctrl.intervene_queued_submission(&id, expected_revision)
+                        {
+                            let _ = cmd_tx_for_models.send(
+                                atman_tui::TuiCommand::QueueMutationRejected(error.to_string()),
+                            );
+                        }
+                    }
                     atman_tui::TuiControl::ResolvePermission {
                         selector,
                         expected_revision,
@@ -1928,8 +1977,10 @@ async fn cmd_repl_once(
                             ),
                         };
                         if let Err(error) = result {
-                            reporter_for_ctrl
-                                .error(format!("permission decision rejected: {error}"));
+                            let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::Toast {
+                                message: format!("permission decision rejected: {error}"),
+                                level: atman_tui::app::NoteLevel::Error,
+                            });
                         }
                     }
                     atman_tui::TuiControl::AutoNameSession => {
@@ -2345,6 +2396,7 @@ async fn cmd_repl_once(
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
             injection_rx: Some(session.subscribe_injections()),
+            queued_submission_rx: Some(session.subscribe_queued_submissions()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
             startup_intro: intro.clone(),
@@ -2395,12 +2447,11 @@ async fn cmd_repl_once(
         spawn_stream_consumer(&session, printer).await;
         (None, None, None, None)
     };
-    let mut pushback: VecDeque<ReplInput> = VecDeque::new();
     let sid = session.id().to_string();
 
     loop {
-        let mut line = if let Some(l) = pushback.pop_front() {
-            l
+        let mut line = if let Some(submission) = session.pop_queued_submission() {
+            ReplInput::from_queued(submission)
         } else {
             tokio::select! {
                 l = input_rx.recv() => match l {
@@ -2535,14 +2586,12 @@ async fn cmd_repl_once(
             session.clone(),
             &executor,
             &lifecycles,
-            classifier.as_ref(),
             &text,
             line.images.take(),
             line.invocation_env.clone(),
-            atman_runtime::message::MessageOrigin::User,
+            line.origin,
             kind,
             &mut input_rx,
-            &mut pushback,
             &reporter,
         )
         .await;
@@ -2551,8 +2600,11 @@ async fn cmd_repl_once(
             let timeout = std::time::Duration::from_secs(300);
             tokio::select! {
                 biased;
-                Some(line) = input_rx.recv() => {
-                    pushback.push_back(line);
+                Some(mut line) = input_rx.recv() => {
+                    if let Err(error) = line.enqueue(&session) {
+                        line.restore_images(&session);
+                        reporter.error(format!("[atman] could not queue input: {error}"));
+                    }
                     break;
                 }
                 evt = session.watch_hub.wait_for_event(timeout) => {
@@ -2565,14 +2617,12 @@ async fn cmd_repl_once(
                                     session.clone(),
                                     &executor,
                                     &lifecycles,
-                                    classifier.as_ref(),
                                     &event_text,
                                     None,
                                     atman_runtime::InvocationEnv::default(),
                                     atman_runtime::message::MessageOrigin::Watcher,
                                     TurnKind::Bare(route),
                                     &mut input_rx,
-                                    &mut pushback,
                                     &reporter,
                                 )
                                 .await;
@@ -3069,6 +3119,7 @@ struct ReplInput {
     text: String,
     images: Option<Vec<atman_runtime::message::ImageSource>>,
     invocation_env: atman_runtime::InvocationEnv,
+    origin: atman_runtime::message::MessageOrigin,
 }
 
 impl ReplInput {
@@ -3077,6 +3128,7 @@ impl ReplInput {
             text,
             images: None,
             invocation_env: atman_runtime::InvocationEnv::default(),
+            origin: atman_runtime::message::MessageOrigin::User,
         }
     }
 
@@ -3091,7 +3143,33 @@ impl ReplInput {
             text: submission.text,
             images: Some(submission.images),
             invocation_env,
+            origin: atman_runtime::message::MessageOrigin::User,
         }
+    }
+
+    fn from_queued(submission: atman_runtime::QueuedSubmission) -> Self {
+        Self {
+            text: submission.text,
+            images: Some(submission.images),
+            invocation_env: submission.invocation_env,
+            origin: submission.origin,
+        }
+    }
+
+    fn enqueue(
+        &mut self,
+        session: &Session,
+    ) -> Result<atman_runtime::QueuedSubmissionView, atman_runtime::SubmissionQueueError> {
+        let result = session.enqueue_submission(
+            self.text.clone(),
+            self.images.clone().unwrap_or_default(),
+            self.invocation_env.clone(),
+            self.origin,
+        );
+        if result.is_ok() {
+            self.images = None;
+        }
+        result
     }
 
     fn has_images(&self) -> bool {
@@ -3316,16 +3394,12 @@ async fn run_turn_with_interjection(
     session: std::sync::Arc<Session>,
     executor: &Executor,
     lifecycles: &atman_runtime::lifecycle::LifecycleRunner,
-    classifier: Option<
-        &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
-    >,
     raw_line: &str,
     submitted_images: Option<Vec<atman_runtime::message::ImageSource>>,
     invocation_env: atman_runtime::InvocationEnv,
     origin: atman_runtime::message::MessageOrigin,
     kind: TurnKind,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ReplInput>,
-    pushback: &mut std::collections::VecDeque<ReplInput>,
     reporter: &Reporter,
 ) {
     let (text, inline_attachments) = extract_at_paths(raw_line);
@@ -3383,11 +3457,12 @@ async fn run_turn_with_interjection(
         tokio::select! {
             biased;
             r = &mut flow_fut => break r,
-            Some(line) = input_rx.recv() => {
-                if line.has_images()
-                    || !consume_interjection_input(&line, &session, classifier, reporter).await
-                {
-                    pushback.push_back(line);
+            Some(mut line) = input_rx.recv() => {
+                if line.has_images() || !consume_interjection_input(&line, &session, reporter) {
+                    if let Err(error) = line.enqueue(&session) {
+                        line.restore_images(&session);
+                        reporter.error(format!("[atman] could not queue input: {error}"));
+                    }
                 }
             }
         }
@@ -3415,19 +3490,9 @@ async fn run_turn_with_interjection(
     }
 }
 
-/// Returns true if the line was fully consumed as an interjection (`!nudge` / `!course-correct` /
-/// `!redirect` / `!stop`) or reported as a busy-warning, false if it should be pushed back for the
-/// main loop (e.g. `:exit` or a normal command arriving before the current flow finishes).
-async fn consume_interjection_input(
-    line: &str,
-    session: &Session,
-    classifier: Option<
-        &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
-    >,
-    reporter: &Reporter,
-) -> bool {
+/// Returns true only for explicit current-turn controls. Ordinary input is a future full turn.
+fn consume_interjection_input(line: &str, session: &Session, reporter: &Reporter) -> bool {
     use atman_runtime::injection::InjectionLevel;
-    use atman_runtime::injection_classifier::{ClassifierSource, source_tag};
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return true;
@@ -3498,56 +3563,7 @@ async fn consume_interjection_input(
         }
         return true;
     }
-    let Some(classifier) = classifier else {
-        return false;
-    };
-    let cls = classifier.classify(trimmed).await;
-    let source = source_tag(cls.source);
-    match cls.level {
-        InjectionLevel::L4HardStop => {
-            session.cancel_flow();
-            let _ = session.enqueue_injection_with_level(
-                trimmed,
-                InjectionLevel::L4HardStop,
-                cls.redirect_target,
-            );
-            reporter.info(format!("[atman] L4 stop queued ({source}): {trimmed}"));
-        }
-        InjectionLevel::L3Redirect => {
-            let target = cls.redirect_target.clone();
-            match session.enqueue_injection_with_level(
-                trimmed,
-                InjectionLevel::L3Redirect,
-                target.clone(),
-            ) {
-                Ok(id) => reporter.info(format!(
-                    "[atman] L3 redirect queued ({id}, {source}) → {}",
-                    target.as_deref().unwrap_or("<no target>")
-                )),
-                Err(e) => reporter.error(format!("[atman] L3 redirect rejected: {e}")),
-            }
-        }
-        InjectionLevel::L2CourseCorrect => {
-            match session.enqueue_injection_with_level(
-                trimmed,
-                InjectionLevel::L2CourseCorrect,
-                None,
-            ) {
-                Ok(id) => reporter.info(format!(
-                    "[atman] L2 course-correct queued ({id}, {source}): {trimmed}"
-                )),
-                Err(e) => reporter.error(format!("[atman] L2 course-correct rejected: {e}")),
-            }
-        }
-        InjectionLevel::L1Nudge => match session.enqueue_injection(trimmed) {
-            Ok(id) => reporter.info(format!(
-                "[atman] L1 nudge queued ({id}, {source}): {trimmed}"
-            )),
-            Err(e) => reporter.error(format!("[atman] L1 nudge rejected: {e}")),
-        },
-    }
-    let _ = ClassifierSource::Default;
-    true
+    false
 }
 
 fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
@@ -4854,6 +4870,32 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
     let ctrl_task = tokio::spawn(async move {
         while let Some(msg) = ctrl_rx.recv().await {
             match msg {
+                atman_tui::TuiControl::EditQueuedSubmission {
+                    id,
+                    expected_revision,
+                    text,
+                } => {
+                    let _ = ctrl_session.edit_queued_submission(&id, expected_revision, text);
+                }
+                atman_tui::TuiControl::MoveQueuedSubmission {
+                    id,
+                    expected_revision,
+                    direction,
+                } => {
+                    let _ = ctrl_session.move_queued_submission(&id, expected_revision, direction);
+                }
+                atman_tui::TuiControl::DeleteQueuedSubmission {
+                    id,
+                    expected_revision,
+                } => {
+                    let _ = ctrl_session.delete_queued_submission(&id, expected_revision);
+                }
+                atman_tui::TuiControl::InterveneQueuedSubmission {
+                    id,
+                    expected_revision,
+                } => {
+                    let _ = ctrl_session.intervene_queued_submission(&id, expected_revision);
+                }
                 atman_tui::TuiControl::ResolvePermission {
                     selector,
                     expected_revision,
@@ -6025,37 +6067,6 @@ fn attach_memory_stores(
 
 fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
     atman_daemon::bootstrap::load_preview_config(config_dir().ok().as_deref())
-}
-
-fn build_interjection_classifier()
--> Option<std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>> {
-    let mode = atman_runtime::config_hub::ConfigHub::global()
-        .and_then(|hub| hub.interjection_mode())
-        .ok()
-        .flatten();
-    classifier_for_interjection_mode(mode)
-}
-
-fn classifier_for_interjection_mode(
-    mode: Option<atman_runtime::config_hub::InterjectionMode>,
-) -> Option<std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>> {
-    use atman_runtime::config_hub::InterjectionMode;
-    use atman_runtime::injection_classifier::{ComposedClassifier, RuleClassifier};
-
-    match mode {
-        Some(InterjectionMode::Off) => None,
-        Some(InterjectionMode::Rule) | None => Some(std::sync::Arc::new(RuleClassifier::default())),
-        Some(InterjectionMode::Llm) => Some(std::sync::Arc::new(ComposedClassifier::new(
-            RuleClassifier::default(),
-        ))),
-        Some(InterjectionMode::Unknown(value)) => {
-            atman_runtime::notify!(
-                warn,
-                "unknown [interjection] classifier = `{value}` — falling back to rule"
-            );
-            Some(std::sync::Arc::new(RuleClassifier::default()))
-        }
-    }
 }
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
@@ -7624,6 +7635,7 @@ mod tests {
             text: "/agent inspect".into(),
             images: Some(vec![first.clone()]),
             invocation_env: atman_runtime::InvocationEnv::default(),
+            origin: atman_runtime::message::MessageOrigin::User,
         };
         session
             .queue_image_bytes(&[PNG_BYTES, &[0x01]].concat(), Some("second.png"))
@@ -7635,32 +7647,21 @@ mod tests {
     }
 
     #[test]
-    fn interjection_modes_build_expected_classifier() {
-        use atman_runtime::config_hub::InterjectionMode;
+    fn ordinary_active_flow_input_is_not_consumed_as_an_interjection() {
+        let session = Session::open_ephemeral();
+        let reporter = Reporter::Stdout;
 
-        assert!(classifier_for_interjection_mode(Some(InterjectionMode::Off)).is_none());
-        assert_eq!(
-            classifier_for_interjection_mode(None).unwrap().kind(),
-            "rule"
-        );
-        assert_eq!(
-            classifier_for_interjection_mode(Some(InterjectionMode::Rule))
-                .unwrap()
-                .kind(),
-            "rule"
-        );
-        assert_eq!(
-            classifier_for_interjection_mode(Some(InterjectionMode::Llm))
-                .unwrap()
-                .kind(),
-            "composed"
-        );
-        assert_eq!(
-            classifier_for_interjection_mode(Some(InterjectionMode::Unknown("custom".into())))
-                .unwrap()
-                .kind(),
-            "rule"
-        );
+        assert!(!consume_interjection_input(
+            "handle this after the current flow",
+            &session,
+            &reporter,
+        ));
+        assert!(session.list_pending_injections().is_empty());
+        assert!(consume_interjection_input(
+            "!nudge inspect the latest output",
+            &session,
+            &reporter,
+        ));
     }
 
     #[test]

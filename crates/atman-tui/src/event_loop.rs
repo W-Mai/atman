@@ -80,6 +80,9 @@ pub(crate) async fn run_frames(
         app.app.trust = rx.borrow().clone();
         app.app.trust.theme = theme;
     }
+    if let Some(rx) = handle.queued_submission_rx.as_ref() {
+        app.app.queued_submissions = rx.borrow().clone();
+    }
     let mut editor = InputEditor::default();
     if let Some(sess) = handle.session.as_ref() {
         let past: Vec<String> = sess
@@ -152,7 +155,9 @@ pub(crate) async fn run_frames(
             } else {
                 terminal.hide_cursor()?;
             }
-        } else if app.wm.focused_id().is_none() {
+        } else if app.wm.focused_id().is_none()
+            && (!app.app.submission_focus || app.app.queued_submission_edit.is_some())
+        {
             terminal.show_cursor()?;
         } else {
             terminal.hide_cursor()?;
@@ -324,6 +329,8 @@ pub(crate) async fn run_frames(
                         Some(Ok(CtEvent::Paste(s))) => {
                             if app.wm.modals.any_open() {
                                 app.wm.modals.dispatch_paste(&s, &mut app.app, handle.control_tx.as_ref());
+                            } else if let Some(edit) = app.app.queued_submission_edit.as_mut() {
+                                edit.editor.insert_str(&s);
                             } else {
                                 editor.ingest_paste(&s);
                                 interrupt_prompt = None;
@@ -342,6 +349,42 @@ pub(crate) async fn run_frames(
                                 handle.control_tx.as_ref(),
                             );
                             if !consumed {
+                            if let MouseEventKind::Down(MouseButton::Left) = me.kind {
+                                if let Some(click) = app.app.approval_hitmap.at(me.column, me.row) {
+                                    key_handler::dispatch_approval_click(
+                                        click,
+                                        &mut app.app,
+                                        handle.control_tx.as_ref(),
+                                    );
+                                    interrupt_prompt = None;
+                                    break;
+                                }
+                                if let Some((index, action)) = app
+                                    .app
+                                    .submission_queue_hitmap
+                                    .action_at(me.column, me.row)
+                                {
+                                    key_handler::dispatch_submission_queue_action(
+                                        &mut app.app,
+                                        index,
+                                        action,
+                                        handle.control_tx.as_ref(),
+                                    );
+                                    interrupt_prompt = None;
+                                    break;
+                                }
+                                if let Some(index) = app
+                                    .app
+                                    .submission_queue_hitmap
+                                    .row_at(me.column, me.row)
+                                {
+                                    app.app.selected_submission = index;
+                                    app.app.submission_focus = true;
+                                    app.app.queued_submission_edit = None;
+                                    interrupt_prompt = None;
+                                    break;
+                                }
+                            }
                             // Check floating panels/modals BEFORE input_rect so clicks
                             // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
@@ -369,6 +412,8 @@ pub(crate) async fn run_frames(
                                     cw,
                                 );
                                 editor.set_cursor(pos);
+                                app.app.submission_focus = false;
+                                app.app.queued_submission_edit = None;
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 let topmost = app.wm
                                     .hit_test_panel(me.column, me.row)
@@ -1031,6 +1076,10 @@ pub(crate) async fn run_frames(
                                 app.wm.interaction.drag_target = None;
                                 app.wm.interaction.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
+                                app.app.hovered_submission = app
+                                    .app
+                                    .submission_queue_hitmap
+                                    .row_at(me.column, me.row);
                                 let skip_hover = app.app.startup_intro.is_some()
                                     || matches!(
                                         app.app.items.first(),
@@ -1400,6 +1449,40 @@ pub(crate) async fn run_frames(
                     app.app.mark_visual_dirty();
                 }
             }
+            _ = wait_queued_submission_change(handle.queued_submission_rx.as_mut()) => {
+                if let Some(rx) = handle.queued_submission_rx.as_mut() {
+                    let selected_id = app
+                        .app
+                        .queued_submissions
+                        .get(app.app.selected_submission)
+                        .map(|item| item.id.clone());
+                    app.app.queued_submissions = rx.borrow().clone();
+                    if app.app.queued_submissions.is_empty() {
+                        app.app.submission_focus = false;
+                        app.app.selected_submission = 0;
+                        app.app.queued_submission_edit = None;
+                    } else {
+                        app.app.selected_submission = selected_id
+                            .and_then(|id| {
+                                app.app
+                                    .queued_submissions
+                                    .iter()
+                                    .position(|item| item.id == id)
+                            })
+                            .unwrap_or_else(|| {
+                                app.app
+                                    .selected_submission
+                                    .min(app.app.queued_submissions.len() - 1)
+                            });
+                        if app.app.queued_submission_edit.as_ref().is_some_and(|edit| {
+                            !app.app.queued_submissions.iter().any(|item| item.id == edit.id)
+                        }) {
+                            app.app.queued_submission_edit = None;
+                        }
+                    }
+                    app.app.mark_visual_dirty();
+                }
+            }
             inj = recv_injection(handle.injection_rx.as_mut()) => {
                 if let Some(inj) = inj {
                     // Keep only pending injections, drop consumed/cancelled ones.
@@ -1535,6 +1618,22 @@ pub(crate) async fn run_frames(
                                 "MCP servers reloaded",
                                 app::NoteLevel::Success,
                                 std::time::Duration::from_secs(3),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                        TuiCommand::QueueMutationRejected(message) => {
+                            app.app.push_toast(
+                                format!("queue update rejected: {message}"),
+                                app::NoteLevel::Warn,
+                                std::time::Duration::from_secs(4),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                        TuiCommand::Toast { message, level } => {
+                            app.app.push_toast(
+                                message,
+                                level,
+                                std::time::Duration::from_secs(4),
                                 app::ToastPosition::TopRight,
                             );
                         }
@@ -1767,6 +1866,17 @@ pub(crate) async fn wait_plans_change(
 
 pub(crate) async fn wait_trust_change(
     rx: Option<&mut tokio::sync::watch::Receiver<atman_runtime::trust::TrustConfig>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+pub(crate) async fn wait_queued_submission_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::QueuedSubmissionView>>>,
 ) {
     match rx {
         Some(r) => {

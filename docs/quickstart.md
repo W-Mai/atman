@@ -185,6 +185,7 @@ atman> list the .at files under examples/ and pick one to summarise
 
 While a flow is running you can:
 
+- Type a normal message to place it in the ordered `next` queue. Press `Shift+Tab` to focus the queue, use `↑`/`↓` to select, `Alt+↑`/`Alt+↓` to reorder, `e` to edit, `Delete` to remove, or `Enter` to interrupt the current flow and run the selected message next. The same actions are available with the mouse.
 - `!nudge <text>` — L1 nudge (added to context on next chunk boundary).
 - `!course-correct <text>` — L2 (mid-stream restart with the correction).
 - `!redirect <flow>` — L3 (switch to another flow).

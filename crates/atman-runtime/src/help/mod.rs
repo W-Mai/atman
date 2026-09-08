@@ -181,12 +181,6 @@ fn render_config() -> String {
     );
     out.push_str("| `model` | string | `\"gpt-4o-mini\"` | Model for flow suggestions |\n");
 
-    out.push_str("\n## [interjection]\n\n");
-    out.push_str(
-        "| Field | Type | Default | Description |\n|-------|------|---------|-------------|\n",
-    );
-    out.push_str("| `classifier` | string | — | Model for interjection classification |\n");
-
     out
 }
 

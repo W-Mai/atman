@@ -43,6 +43,7 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod states;
 pub mod status;
+pub mod submission_queue;
 pub mod task_panel;
 pub mod terminal_guard;
 pub mod theme;
@@ -102,6 +103,24 @@ pub enum TuiControl {
     UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
     HardStop,
+    EditQueuedSubmission {
+        id: atman_runtime::SubmissionId,
+        expected_revision: u64,
+        text: String,
+    },
+    MoveQueuedSubmission {
+        id: atman_runtime::SubmissionId,
+        expected_revision: u64,
+        direction: atman_runtime::SubmissionMove,
+    },
+    DeleteQueuedSubmission {
+        id: atman_runtime::SubmissionId,
+        expected_revision: u64,
+    },
+    InterveneQueuedSubmission {
+        id: atman_runtime::SubmissionId,
+        expected_revision: u64,
+    },
     ResolvePermission {
         selector: atman_runtime::permission::PermissionSelector,
         expected_revision: u64,
@@ -220,6 +239,11 @@ pub enum TuiCommand {
         ok: bool,
     },
     McpReloaded,
+    QueueMutationRejected(String),
+    Toast {
+        message: String,
+        level: app::NoteLevel,
+    },
     SessionNameUpdated(String),
     McpResourcesResult {
         name: String,
@@ -336,6 +360,8 @@ pub struct TuiHandle {
         Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
     pub injection_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::injection::Injection>>,
+    pub queued_submission_rx:
+        Option<tokio::sync::watch::Receiver<Vec<atman_runtime::QueuedSubmissionView>>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
@@ -376,6 +402,7 @@ impl TuiHandle {
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
             injection_rx: Some(session.subscribe_injections()),
+            queued_submission_rx: Some(session.subscribe_queued_submissions()),
             flow_names: Vec::new(),
             session: Some(session),
             startup_intro: None,

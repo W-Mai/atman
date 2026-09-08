@@ -10,6 +10,7 @@ pub struct StatusInputs<'a> {
     pub waiting_for_llm: bool,
     pub status_notes: &'a std::collections::HashMap<String, String>,
     pub activity: Option<&'a crate::app::ActivityTotals>,
+    pub pending_permissions: usize,
 }
 
 pub fn render_bar<'a>(inputs: StatusInputs<'a>) -> Paragraph<'a> {
@@ -67,6 +68,18 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
             label,
             Style::default()
                 .fg(t.success.into())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if inputs.pending_permissions > 0 {
+        spans.push(Span::raw("  · "));
+        spans.push(Span::styled(
+            format!(
+                "authorization required · {} pending",
+                inputs.pending_permissions
+            ),
+            Style::default()
+                .fg(t.warn.into())
                 .add_modifier(Modifier::BOLD),
         ));
     }

@@ -12,6 +12,8 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Queued next turns** — Normal input submitted during an active flow enters an ordered full-turn queue with keyboard and mouse controls for selection, reordering, editing, removal, and immediate intervention; the queue disappears when empty.
+- **Persistent authorization dock** — Pending permission requests remain visible as an intent-first action surface with targets, execution boundaries, risks, group controls, mouse actions, and a status-bar warning, while decisions report through transient toasts without mutating the transcript.
 - **Deterministic MCP invocation** — `llm.call` waits for its resolved MCP tool selectors before constructing a provider request; At code can inspect readiness and call tools through `mcp.status`, `mcp.tools`, `mcp.await`, and `mcp.call`, while `atman mcp call` supports guarded direct JSON invocation.
 - **Project-local commands** — slash commands, completion, and flow discovery load `<project>/.atman/commands/*.at` before user-level commands and report each command's scope and source path.
 - **Model-initiated image reading** — `image.read` imports a permission-checked local PNG, JPEG, GIF, or WebP into the session attachment store and supplies it as visual input on the next model call while preserving parallel tool-result ordering.

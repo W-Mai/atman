@@ -9,12 +9,12 @@ use crate::ModeColorExt;
 
 pub fn input_paragraph<'a>(
     input: &'a str,
-    _cursor: usize,
     border_color: ratatui::style::Color,
     pending_below: u16,
     scroll_row: u16,
     trust: &'a atman_runtime::trust::TrustConfig,
     reasoning: Option<&'a str>,
+    queued_count: usize,
 ) -> Paragraph<'a> {
     let display = trust.display();
     let mode_color = display.color.ratatui();
@@ -31,7 +31,9 @@ pub fn input_paragraph<'a>(
         title,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
-    let hint_right = if trust.mode == atman_runtime::trust::TrustMode::Eager {
+    let hint_right = if queued_count > 0 {
+        format!(" shift+tab · next · {queued_count} · enter · send ")
+    } else if trust.mode == atman_runtime::trust::TrustMode::Eager {
         let display = trust.theme.escalation_display(trust.escalation);
         format!(
             " escalation: {} {} · Tab to cycle ",

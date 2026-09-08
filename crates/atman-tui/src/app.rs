@@ -824,6 +824,12 @@ pub struct PendingPermissionGroup {
     pub expanded: bool,
 }
 
+pub struct QueuedSubmissionEdit {
+    pub id: atman_runtime::SubmissionId,
+    pub revision: u64,
+    pub editor: crate::input::InputEditor,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: OutputStore,
@@ -859,6 +865,13 @@ pub struct AppState {
     pub grouped_permission_request_ids:
         std::collections::BTreeSet<atman_runtime::permission::PermissionRequestId>,
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
+    pub queued_submissions: Vec<atman_runtime::QueuedSubmissionView>,
+    pub submission_focus: bool,
+    pub selected_submission: usize,
+    pub hovered_submission: Option<usize>,
+    pub queued_submission_edit: Option<QueuedSubmissionEdit>,
+    pub submission_queue_rect: Option<ratatui::layout::Rect>,
+    pub submission_queue_hitmap: crate::submission_queue::QueueHitMap,
     pub yank_mode: bool,
     pub yank_index: usize,
     pub sidebar_mode: crate::sidebar::SidebarMode,
@@ -898,6 +911,7 @@ pub struct AppState {
     pub animation_frame: u32,
     pub deny_arm: Option<std::time::Instant>,
     pub approval_scope_index: u8,
+    pub approval_hitmap: crate::approval_bar::ApprovalHitMap,
     pub selected_permission_group: Option<atman_runtime::permission::PermissionGroupId>,
     pub items_version: u64,
     pub task_snapshots_revision: u64,

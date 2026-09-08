@@ -264,6 +264,7 @@ fn render(
             waiting_for_llm: false,
             status_notes: &std::collections::HashMap::new(),
             activity: None,
+            pending_permissions: 0,
         }),
         l.status,
     );
@@ -272,12 +273,12 @@ fn render(
     f.render_widget(
         crate::input::input_paragraph(
             "",
-            0,
             crate::theme::theme().subtle_fg.into(),
             0,
             0,
             &atman_runtime::trust::TrustConfig::default(),
             None,
+            0,
         ),
         splash.input_slot,
     );

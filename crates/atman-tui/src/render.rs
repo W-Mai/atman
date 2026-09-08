@@ -5,7 +5,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use crate::input::{InputEditor, input_paragraph};
-use crate::{approval_bar, completion, layout, output, sidebar, status};
+use crate::{approval_bar, completion, layout, output, sidebar, status, submission_queue};
 
 pub(crate) trait ModeColorExt {
     fn ratatui(self) -> Color;
@@ -192,6 +192,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         // title + N items + 2 for block borders
         (app.pending_injections.len() as u16).min(5) + 3
     };
+    let submission_rows: u16 = if app.queued_submissions.is_empty() {
+        0
+    } else {
+        (app.queued_submissions.len() as u16).min(5) + 2
+    };
     let attachment_rows: u16 = if editor.pending_images().is_empty() {
         0
     } else {
@@ -254,6 +259,13 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         layout::compute_stacked_rect(l.transcript, input_rect, None, attachment_rows);
     let approvals_rect =
         layout::compute_stacked_rect(l.transcript, input_rect, attachments_rect, approvals_rows);
+    let submission_queue_rect = layout::compute_stacked_rect(
+        l.transcript,
+        input_rect,
+        approvals_rect.or(attachments_rect),
+        submission_rows,
+    );
+    app.submission_queue_rect = submission_queue_rect;
     app.input_rect = Some(input_rect);
     f.render_widget(
         status::render_bar(status::StatusInputs {
@@ -264,6 +276,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             waiting_for_llm: app.waiting_for_llm,
             status_notes: &app.status_notes,
             activity: Some(&app.session_activity),
+            pending_permissions: pending_count,
         }),
         l.status,
     );
@@ -499,7 +512,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if let Some(area) = approvals_rect {
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
-        approval_bar::render(
+        app.approval_hitmap = approval_bar::render(
             f,
             area,
             &app.pending_permissions,
@@ -507,13 +520,32 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             &app.grouped_permission_request_ids,
             app.selected_permission_group.as_ref(),
         );
+    } else {
+        app.approval_hitmap = approval_bar::ApprovalHitMap::default();
+    }
+    if let Some(area) = submission_queue_rect {
+        sanitize_widget_edges(f, area);
+        f.render_widget(ratatui::widgets::Clear, area);
+        app.submission_queue_hitmap = submission_queue::render(
+            f,
+            area,
+            &app.queued_submissions,
+            app.selected_submission,
+            app.submission_focus,
+            app.hovered_submission,
+            app.queued_submission_edit.as_ref(),
+        );
+    } else {
+        app.submission_queue_hitmap = submission_queue::QueueHitMap::default();
     }
     // Render injection queue above approvals bar / input box.
     let injections_rect = if injection_rows > 0 {
         layout::compute_injection_rect(
             l.transcript,
             input_rect,
-            approvals_rect.or(attachments_rect),
+            submission_queue_rect
+                .or(approvals_rect)
+                .or(attachments_rect),
             injection_rows,
         )
     } else {
@@ -573,12 +605,12 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     f.render_widget(
         input_paragraph(
             editor.buf(),
-            editor.cursor(),
             border_color,
             app.pending_below_rows().min(u16::MAX as u32) as u16,
             scroll_row.min(u16::MAX as u32) as u16,
             &app.trust,
             reasoning_badge.as_deref(),
+            app.queued_submissions.len(),
         ),
         input_rect,
     );
@@ -600,7 +632,14 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
     let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
-    if !intro_active
+    if app.submission_focus {
+        if let (Some(_), Some((x, y))) = (
+            app.queued_submission_edit.as_ref(),
+            app.submission_queue_hitmap.edit_origin,
+        ) {
+            f.set_cursor_position((x, y));
+        }
+    } else if !intro_active
         && !ui.wm.modals.onboarding_open
         && !ui.wm.modals.provider_manager.open
         && ui.wm.focused_id().is_none()

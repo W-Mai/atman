@@ -21,7 +21,8 @@
 - **Safety** — Content classification on LLM input/output. Modes: `warn` (log), `deny` (block). Optional auto-rewrite.
 - **Trust modes** — `calm` (Tier::Zero auto), `steady` (Tier::One auto), `eager` (Tier::Two auto), `reckless` (all auto).
 - **Escalation policy** — In Eager mode: `deny`, `ask`, or `allow` for policy decisions that exceed the routine trust level.
-- **Approval queue** — Pending tool calls await user decision (1-9, a=all, d=deny, Esc=deny all+cancel).
+- **Approval queue** — Pending tool calls remain visible with intent, target, execution boundary, and risk details until resolved by keyboard or mouse.
+- **Next-turn queue** — Normal messages submitted during an active flow run as ordered full turns afterward; queued messages can be reordered, edited, removed, or promoted to interrupt the current flow.
 
 ## Compaction
 
