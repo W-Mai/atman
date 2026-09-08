@@ -2029,6 +2029,7 @@ pub const TOOL_CALL_REGION_PREFIX: &str = "__tool_call__:";
 pub const TOOL_DETAIL_REGION_PREFIX: &str = "__tool_detail__:";
 pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
 pub const TOOL_DETAIL_FULLSCREEN_REGION_PREFIX: &str = "__tool_detail_fullscreen__:";
+pub const WORKING_GROUP_REGION_PREFIX: &str = "__working_group__:";
 const TOOL_CONTROL_WIDTH: usize = 3;
 const TOOL_INPUT_PREVIEW_ROWS: usize = 8;
 
@@ -2137,6 +2138,76 @@ fn tool_call_display_intent(call: &ToolCallView) -> Option<String> {
     .and_then(atman_runtime::message::ToolCallIntent::new)
     .map(|intent| intent.as_str().to_owned());
     streamed.or_else(|| fallback_tool_call_intent(call))
+}
+
+fn compact_tool_call_intent(call: &ToolCallView) -> String {
+    let authored = (!call.intent.is_empty() && call.intent != call.tool)
+        .then(|| call.intent.clone())
+        .or_else(|| {
+            decode_partial_json_string(
+                call.draft_preview.arguments(),
+                atman_runtime::message::TOOL_CALL_INTENT_FIELD,
+            )
+            .and_then(atman_runtime::message::ToolCallIntent::new)
+            .map(|intent| intent.as_str().to_owned())
+        });
+    let intent = authored.unwrap_or_else(|| match call.tool.as_str() {
+        "fs.read" => "read file".into(),
+        "fs.write" => "write file".into(),
+        "fs.edit" => "edit file".into(),
+        "fs.list" => "list directory".into(),
+        "fs.grep" => "search files".into(),
+        tool if tool.starts_with("bash.") => "run command".into(),
+        tool if tool.starts_with("term.") || tool == "terminal" => "run terminal".into(),
+        "flow.spawn" => "start flow".into(),
+        "flow.status" => "inspect flow".into(),
+        "flow.interject" => "guide flow".into(),
+        "flow.kill" => "stop flow".into(),
+        tool => tool
+            .rsplit_once('.')
+            .map_or(tool, |(_, action)| action)
+            .replace('_', " "),
+    });
+    intent.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn working_group_key(calls: &[ToolCallView]) -> Option<String> {
+    calls
+        .first()
+        .map(|call| format!("{WORKING_GROUP_REGION_PREFIX}{}", call.id))
+}
+
+fn working_intent_spans(calls: &[ToolCallView], background: Color) -> Vec<Span<'static>> {
+    let t = crate::theme::theme();
+    let mut intents = Vec::new();
+    for call in calls {
+        let intent = compact_tool_call_intent(call);
+        if !intent.is_empty() && intents.last().map(String::as_str) != Some(intent.as_str()) {
+            intents.push(intent);
+        }
+    }
+    let latest = intents.len().saturating_sub(1);
+    let mut spans = Vec::new();
+    for (index, intent) in intents.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                " → ",
+                Style::default().fg(t.work_meta_fg.into()).bg(background),
+            ));
+        }
+        let mut style = Style::default()
+            .fg(if index == latest {
+                t.work_action_fg.into()
+            } else {
+                t.work_title_fg.into()
+            })
+            .bg(background);
+        if index == latest {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(intent, style));
+    }
+    spans
 }
 
 fn fallback_tool_call_intent(call: &ToolCallView) -> Option<String> {
@@ -2593,6 +2664,14 @@ fn paint_running_foreground(line: &mut Line<'static>, animation_frame: u32, acce
     line.spans = out;
 }
 
+fn format_tool_elapsed(elapsed: std::time::Duration) -> String {
+    if elapsed.as_millis() >= 1000 {
+        format!("{:.1}s", elapsed.as_secs_f32())
+    } else {
+        format!("{}ms", elapsed.as_millis())
+    }
+}
+
 fn render_tool_dispatch(
     calls: &[ToolCallView],
     ctx: &RenderCtx<'_>,
@@ -2619,10 +2698,23 @@ fn render_tool_dispatch(
             )
         });
     let panel_bg: Color = t.work_bg.into();
-    let header_style = Style::default().fg(t.work_meta_fg.into()).bg(panel_bg);
+    let group_key = working_group_key(calls);
+    let group_expanded = group_key
+        .as_ref()
+        .is_some_and(|key| ctx.expanded_tools.contains(key));
+    let group_hovered = group_key.as_ref().is_some_and(|key| {
+        ctx.hovered_output_node
+            .is_some_and(|(_, hovered)| hovered == key)
+    });
+    let header_bg = if group_hovered {
+        t.work_hover_bg.into()
+    } else {
+        panel_bg
+    };
+    let header_style = Style::default().fg(t.work_meta_fg.into()).bg(header_bg);
     let header_title_style = Style::default()
         .fg(t.work_title_fg.into())
-        .bg(panel_bg)
+        .bg(header_bg)
         .add_modifier(Modifier::BOLD);
     let running = finished < calls.len();
     let header_glyph = if running {
@@ -2642,7 +2734,7 @@ fn render_tool_dispatch(
     };
     let header_glyph_style = Style::default()
         .fg(header_glyph_color.into())
-        .bg(panel_bg)
+        .bg(header_bg)
         .add_modifier(Modifier::BOLD);
     let mut header_right = vec![Span::styled(
         format!("{finished}/{}", calls.len()),
@@ -2654,20 +2746,52 @@ fn render_tool_dispatch(
             format!(" · {edited_files} {noun} · "),
             header_style,
         ));
-        header_right.extend(edit_metric_spans(insertions, deletions, Some(panel_bg)));
+        header_right.extend(edit_metric_spans(insertions, deletions, Some(header_bg)));
+    }
+    if let Some(started_at) = calls.iter().map(|call| call.started_at).min() {
+        let ended_at = if running {
+            Instant::now()
+        } else {
+            calls
+                .iter()
+                .filter_map(|call| call.ended_at)
+                .max()
+                .unwrap_or_else(Instant::now)
+        };
+        header_right.push(Span::styled(" · ", header_style));
+        header_right.push(Span::styled(
+            format_tool_elapsed(ended_at.saturating_duration_since(started_at)),
+            header_style,
+        ));
     }
     let mut lines = vec![document_blank(width, header_style)];
-    lines.push(aligned_document_row(
+    lines.push(aligned_ticker_document_row_with_control(
         vec![
             Span::styled(format!("{header_glyph}{DOCUMENT_PAD}"), header_glyph_style),
-            Span::styled(format!("working · {}", calls.len()), header_title_style),
+            Span::styled("working", header_title_style),
         ],
+        working_intent_spans(calls, header_bg),
+        " · ",
         header_right,
+        Vec::new(),
         width,
-        panel_bg,
+        header_bg,
     ));
     lines.push(document_blank(width, header_style));
-    let mut regions = Vec::new();
+    let mut regions = group_key
+        .into_iter()
+        .map(|path_key| NodeRegion {
+            panel_item_index: item_index,
+            path_key,
+            start_row: 0,
+            end_row: 3,
+            col_start: 0,
+            col_end: ctx.panel_width,
+        })
+        .collect::<Vec<_>>();
+    if !group_expanded {
+        return (lines, regions);
+    }
 
     for call in calls {
         let (glyph, color) = match call.status {
@@ -2679,12 +2803,10 @@ fn render_tool_dispatch(
             .ended_at
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(call.started_at);
-        let elapsed = if elapsed.as_millis() >= 1000 {
-            format!("{:.1}s", elapsed.as_secs_f32())
-        } else if call.status == ToolCallStatus::Running {
+        let elapsed = if call.status == ToolCallStatus::Running {
             String::new()
         } else {
-            format!("{}ms", elapsed.as_millis())
+            format_tool_elapsed(elapsed)
         };
         let input_tail = if call.applied_edit.is_none() {
             tool_input_summary(call).unwrap_or_default()
@@ -2919,6 +3041,23 @@ fn render_tool_dispatch(
         });
     }
     (lines, regions)
+}
+
+#[cfg(test)]
+fn render_expanded_tool_dispatch(
+    calls: &[ToolCallView],
+    ctx: &RenderCtx<'_>,
+    item_index: usize,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    let mut expanded = ctx.expanded_tools.clone();
+    if let Some(key) = working_group_key(calls) {
+        expanded.insert(key);
+    }
+    let ctx = RenderCtx {
+        expanded_tools: &expanded,
+        ..*ctx
+    };
+    render_tool_dispatch(calls, &ctx, item_index)
 }
 
 fn render_activity_summary(
@@ -9770,6 +9909,130 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_working_group_shows_only_intents_progress_and_edit_totals() {
+        let now = Instant::now();
+        let first = ToolCallView {
+            id: "edit-1".into(),
+            tool: "fs.edit".into(),
+            intent: "修复 working 折叠摘要".into(),
+            input: serde_json::json!({"path": "/private/project/secret-output.rs"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: Some(Box::new(OutputItem::FsDetail {
+                view: FsDetail::Raw {
+                    tool: "fs.edit".into(),
+                    path: Some("/private/project/secret-output.rs".into()),
+                    content: "raw output must stay hidden".into(),
+                    is_error: false,
+                },
+                expanded: false,
+            })),
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: Some((
+                "/private/project/secret-output.rs".into(),
+                atman_runtime::activity::EditMetrics {
+                    hunks: 1,
+                    insertions: 4,
+                    deletions: 1,
+                },
+            )),
+            started_at: now - std::time::Duration::from_secs(2),
+            ended_at: Some(now - std::time::Duration::from_secs(1)),
+        };
+        let second = ToolCallView {
+            id: "bash-1".into(),
+            tool: "bash.spawn".into(),
+            intent: "运行 TUI 测试".into(),
+            input: serde_json::json!({"cmd": "cat /private/project/secret-output.rs"}),
+            status: ToolCallStatus::Running,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: now - std::time::Duration::from_secs(1),
+            ended_at: None,
+        };
+        let calls = vec![first, second];
+        let ctx = RenderCtx {
+            panel_width: 100,
+            ..RenderCtx::empty()
+        };
+        let (lines, regions) = render_tool_dispatch(&calls, &ctx, 3);
+        let rendered = flatten_lines(&lines);
+
+        assert_eq!(lines.len(), 3);
+        assert!(rendered.contains("working · 修复 working 折叠摘要 → 运行 TUI 测试"));
+        assert!(rendered.contains("1/2 · 1 file · +4 −1 ·"));
+        assert!(!rendered.contains("working · 2"));
+        assert!(!rendered.contains("fs.edit"));
+        assert!(!rendered.contains("bash.spawn"));
+        assert!(!rendered.contains("secret-output.rs"));
+        assert!(!rendered.contains("raw output must stay hidden"));
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].path_key, "__working_group__:edit-1");
+        assert_eq!((regions[0].start_row, regions[0].end_row), (0, 3));
+
+        let hovered = (3, regions[0].path_key.clone());
+        let hovered_ctx = RenderCtx {
+            hovered_output_node: Some(&hovered),
+            ..ctx
+        };
+        assert!(
+            render_tool_dispatch(&calls, &hovered_ctx, 3)
+                .0
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg == Some(crate::theme::theme().work_hover_bg.into()))
+        );
+    }
+
+    #[test]
+    fn collapsed_working_intents_advance_only_when_an_intent_is_appended() {
+        let now = Instant::now();
+        let make_call = |id: &str, intent: &str| ToolCallView {
+            id: id.into(),
+            tool: "fs.read".into(),
+            intent: intent.into(),
+            input: serde_json::json!({"path": "/private/hidden"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: now - std::time::Duration::from_millis(5),
+            ended_at: Some(now),
+        };
+        let first = make_call(
+            "read-1",
+            "分析一段很长很长的 working 输出渲染链路以及所有边界条件",
+        );
+        let ctx = RenderCtx {
+            panel_width: 60,
+            animation_frame: 0,
+            ..RenderCtx::empty()
+        };
+        let initial = plain_line(&render_tool_dispatch(std::slice::from_ref(&first), &ctx, 0).0[1]);
+        let later_ctx = RenderCtx {
+            animation_frame: 40,
+            ..ctx
+        };
+        let later =
+            plain_line(&render_tool_dispatch(std::slice::from_ref(&first), &later_ctx, 0).0[1]);
+        let appended = plain_line(
+            &render_tool_dispatch(&[first, make_call("read-2", "运行测试")], &later_ctx, 0).0[1],
+        );
+
+        assert_eq!(initial, later);
+        assert!(appended.contains("运行测试"), "{appended}");
+        assert_ne!(initial, appended);
+        assert!(appended.contains("working"));
+        assert!(appended.contains("2/2"));
+    }
+
+    #[test]
     fn tool_dispatch_uses_document_padding_and_clickable_detail_region() {
         let now = Instant::now();
         let call = ToolCallView {
@@ -9799,7 +10062,12 @@ mod tests {
             started_at: now - std::time::Duration::from_millis(42),
             ended_at: Some(now),
         };
+        let expanded_groups =
+            std::collections::HashSet::from([
+                working_group_key(std::slice::from_ref(&call)).unwrap()
+            ]);
         let ctx = RenderCtx {
+            expanded_tools: &expanded_groups,
             panel_width: 80,
             ..RenderCtx::empty()
         };
@@ -9813,8 +10081,8 @@ mod tests {
         );
         let mut summary_call = call.clone();
         summary_call.disclosure = Disclosure::Summary;
-        let summary_lines = render_tool_dispatch(&[summary_call.clone()], &ctx, 7).0;
-        let (lines, regions) = render_tool_dispatch(&[call], &ctx, 7);
+        let summary_lines = render_expanded_tool_dispatch(&[summary_call.clone()], &ctx, 7).0;
+        let (lines, regions) = render_expanded_tool_dispatch(&[call], &ctx, 7);
         let line_text = |line: &Line<'_>| {
             line.spans
                 .iter()
@@ -9827,8 +10095,8 @@ mod tests {
         assert!(line_is_visually_blank(summary_lines.last().unwrap()));
         assert!(line_is_visually_blank(&summary_lines[2]));
         assert!(line_is_visually_blank(&summary_lines[3]));
-        assert!(line_text(&summary_lines[1]).starts_with("  ⣿  working · 1"));
-        assert!(line_text(&summary_lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
+        assert!(line_text(&summary_lines[1]).starts_with("  ⣿  working · "));
+        assert!(line_text(&summary_lines[1]).ends_with("1/1 · 1 file · +4 −1 · 42ms  "));
         assert!(line_text(&summary_lines[4]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
         let tool_row = line_text(&summary_lines[4]);
         assert!(
@@ -9933,7 +10201,7 @@ mod tests {
             started_at: Instant::now(),
             ended_at: None,
         };
-        let lines = render_tool_dispatch(
+        let lines = render_expanded_tool_dispatch(
             &[call],
             &RenderCtx {
                 panel_width: 80,
@@ -9973,7 +10241,7 @@ mod tests {
             ended_at: None,
         };
 
-        let row = &render_tool_dispatch(
+        let row = &render_expanded_tool_dispatch(
             &[call],
             &RenderCtx {
                 panel_width: 80,
@@ -10009,7 +10277,7 @@ mod tests {
             ended_at: Some(Instant::now()),
         };
 
-        let row = &render_tool_dispatch(
+        let row = &render_expanded_tool_dispatch(
             &[call],
             &RenderCtx {
                 panel_width: 100,
@@ -10082,10 +10350,10 @@ mod tests {
                 animation_frame: frame,
                 ..RenderCtx::empty()
             };
-            let line = render_tool_dispatch(&[make_call(status)], &ctx, 0)
+            let line = render_expanded_tool_dispatch(&[make_call(status)], &ctx, 0)
                 .0
                 .into_iter()
-                .find(|line| plain_line(line).contains("读取项目文档"))
+                .find(|line| plain_line(line).contains("fs.read"))
                 .unwrap();
             line.spans
                 .iter()
@@ -10102,7 +10370,7 @@ mod tests {
                 animation_frame: frame,
                 ..RenderCtx::empty()
             };
-            plain_line(&render_tool_dispatch(&[make_call(status)], &ctx, 0).0[1])
+            plain_line(&render_expanded_tool_dispatch(&[make_call(status)], &ctx, 0).0[1])
         };
 
         let running_0 = colors(ToolCallStatus::Running, 0);
@@ -10121,7 +10389,7 @@ mod tests {
         );
         assert_eq!(colors(ToolCallStatus::Ok, 0), colors(ToolCallStatus::Ok, 4));
 
-        let row = render_tool_dispatch(
+        let row = render_expanded_tool_dispatch(
             &[make_call(ToolCallStatus::Running)],
             &RenderCtx {
                 panel_width: 80,
@@ -10131,7 +10399,7 @@ mod tests {
         )
         .0
         .into_iter()
-        .find(|line| plain_line(line).contains("读取项目文档"))
+        .find(|line| plain_line(line).contains("fs.read"))
         .unwrap();
         let theme = crate::theme::theme();
         assert!(row.spans.iter().any(|span| {
@@ -10203,7 +10471,10 @@ mod tests {
                 ended_at: None,
             }],
         }]);
+        let expanded_groups =
+            std::collections::HashSet::from([format!("{WORKING_GROUP_REGION_PREFIX}read-1")]);
         let ctx = RenderCtx {
+            expanded_tools: &expanded_groups,
             panel_width: 60,
             ..RenderCtx::empty()
         };
@@ -10254,7 +10525,7 @@ mod tests {
             plain_line(
                 lines
                     .iter()
-                    .find(|line| plain_line(line).contains("working · 1"))
+                    .find(|line| plain_line(line).contains("working ·"))
                     .unwrap(),
             )
         };
@@ -10388,7 +10659,7 @@ mod tests {
             unified_diff: None,
             expanded: false,
         }));
-        let lines = render_tool_dispatch(
+        let lines = render_expanded_tool_dispatch(
             &[base, fullscreen],
             &RenderCtx {
                 panel_width: 72,
@@ -10399,7 +10670,7 @@ mod tests {
         .0;
         let rows = lines
             .iter()
-            .filter(|line| plain_line(line).contains("修改文件"))
+            .filter(|line| plain_line(line).contains("fs.edit"))
             .collect::<Vec<_>>();
         let t = crate::theme::theme();
 
@@ -10443,7 +10714,7 @@ mod tests {
             started_at: Instant::now(),
             ended_at: Some(Instant::now()),
         };
-        let lines = render_tool_dispatch(
+        let lines = render_expanded_tool_dispatch(
             &[call],
             &RenderCtx {
                 panel_width: 72,
@@ -10528,7 +10799,8 @@ mod tests {
             tool_input_summary(&call).as_deref(),
             Some("/repo/README.md")
         );
-        let rendered = flatten_lines(&render_tool_dispatch(&[call], &RenderCtx::empty(), 0).0);
+        let rendered =
+            flatten_lines(&render_expanded_tool_dispatch(&[call], &RenderCtx::empty(), 0).0);
         assert!(rendered.contains("/repo/README.md"));
     }
 
@@ -10644,10 +10916,13 @@ mod tests {
         }));
         assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Full);
 
+        let expanded_groups =
+            std::collections::HashSet::from([format!("{WORKING_GROUP_REGION_PREFIX}read-1")]);
         let item = OutputItem::ToolDispatch { calls: vec![call] };
         let (_, regions) = render_item_with_regions(
             &item,
             &RenderCtx {
+                expanded_tools: &expanded_groups,
                 panel_width: 80,
                 ..RenderCtx::empty()
             },
@@ -10691,7 +10966,7 @@ mod tests {
             hovered_output_node: Some(&hovered),
             ..RenderCtx::empty()
         };
-        let (lines, regions) = render_tool_dispatch(&[call, other_call], &ctx, 0);
+        let (lines, regions) = render_expanded_tool_dispatch(&[call, other_call], &ctx, 0);
         let fullscreen = lines
             .iter()
             .flat_map(|line| line.spans.iter())

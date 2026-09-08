@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Collapsible working summaries** — Working groups default to a three-row intent ticker with fixed progress and edit metrics; clicking the full header reveals per-tool rows without exposing raw arguments or output in the collapsed state.
 - **Streaming single-line summaries** — compact thinking and tool rows join processed content into a syntax-colored ticker with a fixed left-faded to right-bright gradient; new content advances the viewport and completed rows remain still.
 - **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.
 - **Streaming edit and compaction output** — provider tool-argument deltas surface allowlisted file content while it is generated, and compaction summaries update incrementally without entering assistant history.

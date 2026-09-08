@@ -2883,6 +2883,21 @@ impl AppState {
         });
     }
 
+    pub fn toggle_working_group_expansion(&mut self, item_index: usize, group_key: &str) {
+        if !group_key.starts_with(crate::output::WORKING_GROUP_REGION_PREFIX)
+            || !matches!(
+                self.items.get(item_index),
+                Some(OutputItem::ToolDispatch { .. })
+            )
+        {
+            return;
+        }
+        if !self.expanded_tools.remove(group_key) {
+            self.expanded_tools.insert(group_key.to_owned());
+        }
+        self.touch_item(item_index, OutputMutation::Interaction);
+    }
+
     fn apply_terminal_chunk_to_dispatch(
         &mut self,
         tool_use_id: &str,
@@ -5502,6 +5517,34 @@ mod tests {
         assert!(app.is_tool_expanded("x"));
         app.toggle_tool_expansion("x");
         assert!(!app.is_tool_expanded("x"));
+    }
+
+    #[test]
+    fn toggle_working_group_expansion_is_scoped_to_its_dispatch() {
+        let now = Instant::now();
+        let mut app =
+            AppState::new("s".into(), None).with_initial_items(vec![OutputItem::ToolDispatch {
+                calls: vec![ToolCallView {
+                    id: "read-1".into(),
+                    tool: "fs.read".into(),
+                    intent: "inspect output".into(),
+                    input: serde_json::json!({"path": "src/output.rs"}),
+                    status: ToolCallStatus::Ok,
+                    disclosure: Disclosure::Summary,
+                    detail: None,
+                    draft_index: None,
+                    draft_preview: Default::default(),
+                    applied_edit: None,
+                    started_at: now,
+                    ended_at: Some(now),
+                }],
+            }]);
+        let key = format!("{}read-1", crate::output::WORKING_GROUP_REGION_PREFIX);
+
+        app.toggle_working_group_expansion(0, &key);
+        assert!(app.expanded_tools.contains(&key));
+        app.toggle_working_group_expansion(0, &key);
+        assert!(!app.expanded_tools.contains(&key));
     }
 
     #[test]

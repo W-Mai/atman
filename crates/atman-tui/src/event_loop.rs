@@ -813,7 +813,14 @@ pub(crate) async fn run_frames(
                                 } else if let Some((panel_idx, node_id)) =
                                     app.app.hit_test_node(me.column, me.row)
                                 {
-                                    if let Some(tool_use_id) = node_id
+                                    if node_id.starts_with(
+                                        crate::output::WORKING_GROUP_REGION_PREFIX,
+                                    ) {
+                                        app.app.toggle_working_group_expansion(
+                                            panel_idx,
+                                            &node_id,
+                                        );
+                                    } else if let Some(tool_use_id) = node_id
                                         .strip_prefix(crate::output::TOOL_CALL_REGION_PREFIX)
                                         .or_else(|| {
                                             node_id.strip_prefix(
