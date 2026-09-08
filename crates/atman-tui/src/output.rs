@@ -1698,6 +1698,7 @@ fn render_thinking(
             Vec::new(),
             target,
             bg,
+            TickerFade::Always,
         ));
         lines.push(blank);
         return lines;
@@ -2382,12 +2383,27 @@ fn tool_disclosure_depth(call: &ToolCallView, panel_width: u16) -> ToolDisclosur
     }
 }
 
-pub(crate) fn next_tool_call_disclosure(call: &ToolCallView, panel_width: u16) -> Disclosure {
+pub(crate) fn toggle_tool_call_content_disclosure(
+    call: &ToolCallView,
+    panel_width: u16,
+) -> Disclosure {
+    match call.disclosure {
+        Disclosure::Summary => match tool_disclosure_depth(call, panel_width) {
+            ToolDisclosureDepth::Summary => Disclosure::Summary,
+            ToolDisclosureDepth::Preview | ToolDisclosureDepth::Full => Disclosure::Preview,
+        },
+        Disclosure::Preview | Disclosure::Full => Disclosure::Summary,
+    }
+}
+
+pub(crate) fn toggle_tool_call_detail_disclosure(
+    call: &ToolCallView,
+    panel_width: u16,
+) -> Disclosure {
     match (call.disclosure, tool_disclosure_depth(call, panel_width)) {
-        (Disclosure::Summary, ToolDisclosureDepth::Summary) => Disclosure::Summary,
-        (Disclosure::Summary, _) => Disclosure::Preview,
         (Disclosure::Preview, ToolDisclosureDepth::Full) => Disclosure::Full,
-        (Disclosure::Preview | Disclosure::Full, _) => Disclosure::Summary,
+        (Disclosure::Full, _) => Disclosure::Preview,
+        _ => call.disclosure,
     }
 }
 
@@ -2522,6 +2538,13 @@ fn aligned_document_row_with_control(
     Line::from(spans)
 }
 
+#[derive(Clone, Copy)]
+enum TickerFade {
+    Always,
+    OverflowOnlySoft,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn aligned_ticker_document_row_with_control(
     mut fixed: Vec<Span<'static>>,
     ticker: Vec<Span<'static>>,
@@ -2530,6 +2553,7 @@ fn aligned_ticker_document_row_with_control(
     mut control: Vec<Span<'static>>,
     target: usize,
     background: Color,
+    fade: TickerFade,
 ) -> Line<'static> {
     let horizontal_pad = DOCUMENT_PAD_X.min(target / 2);
     let inner = target.saturating_sub(horizontal_pad * 2);
@@ -2554,11 +2578,24 @@ fn aligned_ticker_document_row_with_control(
     let ticker_budget = content_budget.saturating_sub(fixed_width);
     let show_ticker = !ticker.is_empty() && ticker_budget > separator_width;
     let ticker = if show_ticker {
-        crate::width::streaming_ticker_spans(
-            ticker,
-            ticker_budget.saturating_sub(separator_width),
-            background,
-        )
+        let viewport_width = ticker_budget.saturating_sub(separator_width);
+        let ticker_width = crate::width::spans_width(ticker.iter());
+        match fade {
+            TickerFade::Always => {
+                crate::width::streaming_ticker_spans(ticker, viewport_width, background)
+            }
+            TickerFade::OverflowOnlySoft if ticker_width > viewport_width => {
+                crate::width::streaming_ticker_spans_with_fade_floor(
+                    ticker,
+                    viewport_width,
+                    background,
+                    0.68,
+                )
+            }
+            TickerFade::OverflowOnlySoft => {
+                crate::width::truncate_spans(ticker, viewport_width, Some(background))
+            }
+        }
     } else {
         Vec::new()
     };
@@ -2776,6 +2813,11 @@ fn render_tool_dispatch(
         Vec::new(),
         width,
         header_bg,
+        if group_expanded {
+            TickerFade::Always
+        } else {
+            TickerFade::OverflowOnlySoft
+        },
     ));
     lines.push(document_blank(width, header_style));
     let mut regions = group_key
@@ -2911,7 +2953,14 @@ fn render_tool_dispatch(
             )]
         };
         let summary_line = aligned_ticker_document_row_with_control(
-            fixed, ticker, " · ", right, control, width, row_bg,
+            fixed,
+            ticker,
+            " · ",
+            right,
+            control,
+            width,
+            row_bg,
+            TickerFade::Always,
         );
         let row = lines.len() as u32;
         lines.push(document_blank(width, Style::default().bg(row_bg)));
@@ -10307,6 +10356,7 @@ mod tests {
                 vec![Span::raw("  ⤢")],
                 width,
                 background,
+                TickerFade::Always,
             );
             assert_eq!(
                 crate::width::spans_width(row.spans.iter()),
@@ -10314,6 +10364,44 @@ mod tests {
                 "row width mismatch at {width} columns"
             );
         }
+    }
+
+    #[test]
+    fn collapsed_working_ticker_only_fades_when_content_is_hidden() {
+        let background: Color = crate::theme::theme().work_bg.into();
+        let visible = aligned_ticker_document_row_with_control(
+            vec![Span::raw("working")],
+            vec![Span::styled(
+                "visible intent",
+                Style::default().fg(Color::Cyan),
+            )],
+            " · ",
+            Vec::new(),
+            Vec::new(),
+            80,
+            background,
+            TickerFade::OverflowOnlySoft,
+        );
+        assert!(visible.spans.iter().any(|span| {
+            span.content.contains("visible intent") && span.style.fg == Some(Color::Cyan)
+        }));
+
+        let hidden = aligned_ticker_document_row_with_control(
+            vec![Span::raw("working")],
+            vec![Span::styled(
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                Style::default().fg(Color::Cyan),
+            )],
+            " · ",
+            Vec::new(),
+            Vec::new(),
+            24,
+            background,
+            TickerFade::OverflowOnlySoft,
+        );
+        assert!(hidden.spans.iter().any(|span| {
+            span.content.contains('z') && span.style.fg.is_some_and(|color| color != Color::Cyan)
+        }));
     }
 
     #[test]
@@ -10735,7 +10823,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_disclosure_skips_indistinguishable_states() {
+    fn tool_title_toggles_content_and_detail_toggles_full_expansion() {
         let base = ToolCallView {
             id: "read-1".into(),
             tool: "fs.read".into(),
@@ -10751,13 +10839,26 @@ mod tests {
             ended_at: Some(Instant::now()),
         };
 
-        assert_eq!(next_tool_call_disclosure(&base, 80), Disclosure::Summary);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&base, 80),
+            Disclosure::Summary
+        );
 
         let mut short = base.clone();
         short.input = serde_json::json!({"path": "README.md"});
-        assert_eq!(next_tool_call_disclosure(&short, 80), Disclosure::Preview);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&short, 80),
+            Disclosure::Preview
+        );
         short.disclosure = Disclosure::Preview;
-        assert_eq!(next_tool_call_disclosure(&short, 80), Disclosure::Summary);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&short, 80),
+            Disclosure::Summary
+        );
+        assert_eq!(
+            toggle_tool_call_detail_disclosure(&short, 80),
+            Disclosure::Preview
+        );
 
         let mut long = base;
         long.detail = Some(Box::new(OutputItem::Bash {
@@ -10771,11 +10872,28 @@ mod tests {
             done: true,
             expanded: false,
         }));
-        assert_eq!(next_tool_call_disclosure(&long, 80), Disclosure::Preview);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&long, 80),
+            Disclosure::Preview
+        );
         long.disclosure = Disclosure::Preview;
-        assert_eq!(next_tool_call_disclosure(&long, 80), Disclosure::Full);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&long, 80),
+            Disclosure::Summary
+        );
+        assert_eq!(
+            toggle_tool_call_detail_disclosure(&long, 80),
+            Disclosure::Full
+        );
         long.disclosure = Disclosure::Full;
-        assert_eq!(next_tool_call_disclosure(&long, 80), Disclosure::Summary);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&long, 80),
+            Disclosure::Summary
+        );
+        assert_eq!(
+            toggle_tool_call_detail_disclosure(&long, 80),
+            Disclosure::Preview
+        );
     }
 
     #[test]
@@ -10891,7 +11009,14 @@ mod tests {
             started_at: now,
             ended_at: Some(now),
         };
-        assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Summary);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&call, 80),
+            Disclosure::Summary
+        );
+        assert_eq!(
+            toggle_tool_call_detail_disclosure(&call, 80),
+            Disclosure::Preview
+        );
 
         call.detail = Some(Box::new(OutputItem::FsDetail {
             view: FsDetail::Read {
@@ -10903,7 +11028,14 @@ mod tests {
             },
             expanded: false,
         }));
-        assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Summary);
+        assert_eq!(
+            toggle_tool_call_content_disclosure(&call, 80),
+            Disclosure::Summary
+        );
+        assert_eq!(
+            toggle_tool_call_detail_disclosure(&call, 80),
+            Disclosure::Preview
+        );
 
         call.detail = Some(Box::new(OutputItem::FsDetail {
             view: FsDetail::List {
@@ -10914,7 +11046,10 @@ mod tests {
             },
             expanded: false,
         }));
-        assert_eq!(next_tool_call_disclosure(&call, 80), Disclosure::Full);
+        assert_eq!(
+            toggle_tool_call_detail_disclosure(&call, 80),
+            Disclosure::Full
+        );
 
         let expanded_groups =
             std::collections::HashSet::from([format!("{WORKING_GROUP_REGION_PREFIX}read-1")]);

@@ -150,6 +150,15 @@ pub fn streaming_ticker_spans(
     max_w: usize,
     background: Color,
 ) -> Vec<Span<'static>> {
+    streaming_ticker_spans_with_fade_floor(spans, max_w, background, 0.22)
+}
+
+pub fn streaming_ticker_spans_with_fade_floor(
+    spans: Vec<Span<'static>>,
+    max_w: usize,
+    background: Color,
+    fade_floor: f64,
+) -> Vec<Span<'static>> {
     if max_w == 0 {
         return Vec::new();
     }
@@ -187,7 +196,8 @@ pub fn streaming_ticker_spans(
             } else {
                 (column as f64 / (max_w - 1) as f64).clamp(0.0, 1.0)
             };
-            let brightness = 0.22 + progress * 0.78;
+            let fade_floor = fade_floor.clamp(0.0, 1.0);
+            let brightness = fade_floor + progress * (1.0 - fade_floor);
             style.fg = Some(crate::theme::ThemeColor::new(background).lerp(foreground, brightness));
         }
         if let Some(last) = out.last_mut()

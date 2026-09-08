@@ -820,15 +820,17 @@ pub(crate) async fn run_frames(
                                             panel_idx,
                                             &node_id,
                                         );
-                                    } else if let Some(tool_use_id) = node_id
-                                        .strip_prefix(crate::output::TOOL_CALL_REGION_PREFIX)
-                                        .or_else(|| {
-                                            node_id.strip_prefix(
-                                                crate::output::TOOL_DETAIL_REGION_PREFIX,
-                                            )
-                                        })
+                                    } else if let Some(tool_use_id) =
+                                        node_id.strip_prefix(crate::output::TOOL_CALL_REGION_PREFIX)
                                     {
-                                        app.app.cycle_tool_call_disclosure(
+                                        app.app.toggle_tool_call_content(
+                                            panel_idx,
+                                            tool_use_id,
+                                        );
+                                    } else if let Some(tool_use_id) = node_id
+                                        .strip_prefix(crate::output::TOOL_DETAIL_REGION_PREFIX)
+                                    {
+                                        app.app.toggle_tool_call_detail(
                                             panel_idx,
                                             tool_use_id,
                                         );
@@ -849,7 +851,7 @@ pub(crate) async fn run_frames(
                                             panel_idx,
                                             tool_use_id,
                                         ) {
-                                            app.app.cycle_tool_call_disclosure(
+                                            app.app.toggle_tool_call_content(
                                                 panel_idx,
                                                 tool_use_id,
                                             );
