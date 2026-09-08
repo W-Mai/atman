@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +20,8 @@ const DEFAULT_MAX_OUTPUT_BYTES: u64 = 10_485_760;
 const RING_BUFFER_BYTES: usize = 65_536;
 const IO_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_OUTPUT_LIMIT: usize = 32_000;
+const STREAM_FRAME_BYTES: usize = 8 * 1024;
+const LOG_QUEUE_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BgHandle {
@@ -749,7 +751,7 @@ async fn run_bg_process(
 ) {
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
-    let (log_tx, log_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (log_tx, log_rx) = mpsc::channel::<Vec<u8>>(LOG_QUEUE_DEPTH);
     let log_writer = tokio::spawn(write_log(log_file, log_rx));
 
     let stdout_reader = stdout.map(|s| {
@@ -922,7 +924,7 @@ fn open_log_file(log_path: &std::path::Path) -> Result<File, String> {
         .map_err(|e| format!("open log: {e}"))
 }
 
-async fn write_log(file: File, mut log_rx: mpsc::UnboundedReceiver<Vec<u8>>) -> Result<(), String> {
+async fn write_log(file: File, mut log_rx: mpsc::Receiver<Vec<u8>>) -> Result<(), String> {
     let mut file = tokio::fs::File::from_std(file);
     while let Some(frame) = log_rx.recv().await {
         file.write_all(&frame)
@@ -935,7 +937,7 @@ async fn write_log(file: File, mut log_rx: mpsc::UnboundedReceiver<Vec<u8>>) -> 
 
 struct ReadStreamCtx {
     output: Arc<Mutex<BgOutput>>,
-    log_tx: mpsc::UnboundedSender<Vec<u8>>,
+    log_tx: mpsc::Sender<Vec<u8>>,
     kind: StreamKind,
     max_output_bytes: u64,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
@@ -945,36 +947,65 @@ struct ReadStreamCtx {
     tool_use_id: Option<String>,
 }
 
-async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
+async fn emit_stream_segment(ctx: &ReadStreamCtx, kind: &str, data: &[u8]) -> bool {
+    if ctx
+        .log_tx
+        .send(framed_output(ctx.kind, data))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let accepted = {
+        let mut output = ctx.output.lock().unwrap();
+        let before = output.total_bytes;
+        let _ = output.push(ctx.kind, data, ctx.max_output_bytes);
+        output.total_bytes.saturating_sub(before) as usize
+    };
+    if accepted == 0 {
+        return true;
+    }
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::BashChunk {
+            handle: ctx.handle.clone(),
+            tool_use_id: ctx.tool_use_id.clone(),
+            kind: kind.to_string(),
+            line: String::from_utf8_lossy(&data[..accepted]).into_owned(),
+            call_intent: ctx.call_intent.clone(),
+            run_id: ctx.flow_run_id.clone(),
+        });
+    }
+    true
+}
+
+async fn read_stream<R: AsyncRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
     let kind_str = match ctx.kind {
         StreamKind::Stdout => "stdout",
         StreamKind::Stderr => "stderr",
     };
-    let mut buf = String::new();
+    let mut read_buf = [0_u8; STREAM_FRAME_BYTES];
+    let mut pending = Vec::with_capacity(STREAM_FRAME_BYTES);
     loop {
-        buf.clear();
-        match reader.read_line(&mut buf).await {
+        match reader.read(&mut read_buf).await {
             Ok(0) => break,
-            Ok(_) => {
-                let data = buf.as_bytes();
-                {
-                    let mut out = ctx.output.lock().unwrap();
-                    let _ = ctx.log_tx.send(framed_output(ctx.kind, data));
-                    let _ = out.push(ctx.kind, data, ctx.max_output_bytes);
-                }
-                if let Some(tx) = &ctx.stream_tx {
-                    let _ = tx.send(crate::stream::StreamFrame::BashChunk {
-                        handle: ctx.handle.clone(),
-                        tool_use_id: ctx.tool_use_id.clone(),
-                        kind: kind_str.to_string(),
-                        line: buf.clone(),
-                        call_intent: ctx.call_intent.clone(),
-                        run_id: ctx.flow_run_id.clone(),
-                    });
+            Ok(read) => {
+                for &byte in &read_buf[..read] {
+                    pending.push(byte);
+                    if (byte == b'\n' || pending.len() == STREAM_FRAME_BYTES)
+                        && !emit_stream_segment(&ctx, kind_str, &pending).await
+                    {
+                        return;
+                    }
+                    if byte == b'\n' || pending.len() == STREAM_FRAME_BYTES {
+                        pending.clear();
+                    }
                 }
             }
             Err(_) => break,
         }
+    }
+    if !pending.is_empty() {
+        let _ = emit_stream_segment(&ctx, kind_str, &pending).await;
     }
 }
 
@@ -2417,9 +2448,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_stream_keeps_complete_log_after_memory_budget_is_exhausted() {
+    async fn read_stream_keeps_complete_log_and_bounds_ui_after_memory_budget_is_exhausted() {
         let output = Arc::new(Mutex::new(BgOutput::default()));
-        let (log_tx, mut log_rx) = mpsc::unbounded_channel();
+        let (log_tx, mut log_rx) = mpsc::channel(4);
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(4);
         let (mut writer, reader) = tokio::io::duplex(1024);
         let input = b"first line\nsecond line\n";
@@ -2448,15 +2479,59 @@ mod tests {
         let frames: Vec<Vec<u8>> = std::iter::from_fn(|| log_rx.try_recv().ok()).collect();
         assert_eq!(frames.concat(), b"[out] first line\n[out] second line\n");
         assert!(output.lock().unwrap().truncated);
-        for _ in 0..2 {
-            let frame = stream_rx.try_recv().expect("streamed bash line");
-            assert!(matches!(
-                frame,
-                crate::stream::StreamFrame::BashChunk {
-                    call_intent: Some(intent),
-                    ..
-                } if intent.as_str() == "检查命令输出"
-            ));
+        let frame = stream_rx.try_recv().expect("streamed retained bash prefix");
+        assert!(matches!(
+            frame,
+            crate::stream::StreamFrame::BashChunk {
+                line,
+                call_intent: Some(intent),
+                ..
+            } if line == "first" && intent.as_str() == "检查命令输出"
+        ));
+        assert!(stream_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn read_stream_splits_newline_free_output_into_bounded_frames() {
+        let output = Arc::new(Mutex::new(BgOutput::default()));
+        let (log_tx, mut log_rx) = mpsc::channel(64);
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(64);
+        let input = vec![b'x'; STREAM_FRAME_BYTES * 3 + 17];
+        let (mut writer, reader) = tokio::io::duplex(input.len() + 1);
+        let expected = input.clone();
+        let write_task = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&input).await.unwrap();
+        });
+
+        read_stream(
+            BufReader::new(reader),
+            ReadStreamCtx {
+                output: Arc::clone(&output),
+                log_tx,
+                kind: StreamKind::Stdout,
+                max_output_bytes: u64::MAX,
+                stream_tx: Some(stream_tx),
+                handle: "test".into(),
+                flow_run_id: None,
+                call_intent: None,
+                tool_use_id: None,
+            },
+        )
+        .await;
+        write_task.await.unwrap();
+
+        let mut streamed = Vec::new();
+        while let Ok(crate::stream::StreamFrame::BashChunk { line, .. }) = stream_rx.try_recv() {
+            assert!(line.len() <= STREAM_FRAME_BYTES);
+            streamed.extend_from_slice(line.as_bytes());
         }
+        assert_eq!(streamed, expected);
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| log_rx.try_recv().ok()).collect();
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.len() <= STREAM_FRAME_BYTES + 7)
+        );
     }
 }

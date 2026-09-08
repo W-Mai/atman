@@ -137,10 +137,14 @@ atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list t
 
 `flow.spawn` can isolate a child flow in a managed Git worktree with `workspace: "auto"` or `workspace: "retain"`. The default is `workspace: "none"`, which preserves the existing working-directory behavior and does not require a Git repository.
 
+Every spawn requires a single-use admission token from `flow.instances()`. Its session-scoped inventory makes existing work visible before another child is created; inventory changes invalidate unused tokens.
+
 ```atman
 flow delegate() -> string {
+    inventory = flow.instances()
     return flow.spawn(
         flow: "subagent.at@implement",
+        spawn_token: inventory.spawn_token,
         async: false,
         workspace: "auto",
     )

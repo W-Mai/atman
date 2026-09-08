@@ -36,11 +36,9 @@ impl WindowComponent for BashPanelContent {
             .task_handle_index
             .get(&self.handle)
             .and_then(|&index| ctx.snapshots.get(index));
-        let item_index = ctx.handle_index.get(&self.handle).copied();
-        let item = item_index.and_then(|index| ctx.items.get(index));
-        let source_generation = item_index
-            .and_then(|index| ctx.item_revisions.get(index))
-            .map_or(0, |revision| revision.source_generation);
+        let detail = ctx.task_detail(&self.handle);
+        let item = detail.as_ref().map(|(_, item, _)| *item);
+        let source_generation = detail.map_or(0, |(_, _, revision)| revision.source_generation);
         use crate::app::OutputItem;
         if let Some(OutputItem::Bash {
             title,
@@ -424,6 +422,7 @@ mod tests {
             prompts: &empty_prompts,
         };
         let handle_index = std::collections::HashMap::from([("bg_s_1".to_string(), 0)]);
+        let detached_task_details = std::collections::HashMap::new();
         let task_handle_index = std::collections::HashMap::from([("bg_s_1".to_string(), 0)]);
         let ctx = RenderCtx {
             window_id: crate::wm::WindowId(1),
@@ -431,6 +430,7 @@ mod tests {
             items: &items,
             item_revisions: &[],
             handle_index: &handle_index,
+            detached_task_details: &detached_task_details,
             task_handle_index: &task_handle_index,
             workflow_run_to_panel: &handle_index,
             task_snapshots_revision: 0,
@@ -455,6 +455,68 @@ mod tests {
             joined.contains("cargo test --workspace"),
             "panel should show the raw command, got:\n{joined}"
         );
+    }
+
+    #[test]
+    fn renders_output_nested_inside_tool_dispatch_without_top_level_handle_index() {
+        let items = [crate::app::OutputItem::ToolDispatch {
+            calls: vec![crate::app::ToolCallView {
+                id: "call-1".into(),
+                tool: "bash.spawn".into(),
+                intent: "Inspect output".into(),
+                input: serde_json::json!({"cmd": "printf nested"}),
+                status: crate::app::ToolCallStatus::Ok,
+                disclosure: crate::app::Disclosure::Summary,
+                detail: Some(Box::new(bash_item(
+                    "bg_nested_1",
+                    "nested output is visible",
+                    true,
+                ))),
+                draft_index: None,
+                draft_preview: crate::app::ToolDraftPreview::default(),
+                applied_edit: None,
+                started_at: std::time::Instant::now(),
+                ended_at: Some(std::time::Instant::now()),
+            }],
+        }];
+        let mut panel = BashPanelContent::new("bg_nested_1".into());
+        let empty_tools = HashSet::new();
+        let empty_mcp = HashSet::new();
+        let empty_resources = std::collections::HashMap::new();
+        let empty_prompts = std::collections::HashMap::new();
+        let empty_indices = std::collections::HashMap::new();
+        let detached_task_details = std::collections::HashMap::new();
+        let browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::Resources,
+            content_revision: 0,
+            resources: &empty_resources,
+            prompts: &empty_prompts,
+        };
+        let ctx = RenderCtx {
+            window_id: crate::wm::WindowId(1),
+            snapshots: &[],
+            items: &items,
+            item_revisions: &[crate::app::OutputRevision::default()],
+            handle_index: &empty_indices,
+            detached_task_details: &detached_task_details,
+            task_handle_index: &empty_indices,
+            workflow_run_to_panel: &empty_indices,
+            task_snapshots_revision: 0,
+            interaction_revision: 0,
+            animation_frame: 0,
+            expanded_tools: &empty_tools,
+            activity_nodes: &[],
+            mcp_servers: &[],
+            expanded_mcp_servers: &empty_mcp,
+            mcp_selected: 0,
+            hovered_mcp_row: &None,
+            mcp_browser: &browser,
+            hovered_history_row: &None,
+        };
+
+        let joined = render(&mut panel, &ctx).join("\n");
+        assert!(joined.contains("nested output is visible"), "{joined}");
+        assert!(joined.contains("cargo test --workspace"), "{joined}");
     }
 
     #[test]

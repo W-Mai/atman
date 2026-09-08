@@ -167,6 +167,13 @@ impl Setup {
             named.push(("workspace".into(), Value::Str(workspace.into())));
         }
         named.extend(extra);
+        named.push((
+            "spawn_token".into(),
+            Value::Str(
+                self.flows
+                    .issue_spawn_permit(self.ctx.flow_identity.as_ref().unwrap()),
+            ),
+        ));
         AgentSpawn
             .call(
                 ToolArgs {
@@ -291,6 +298,14 @@ async fn managed_allocation_failures_do_not_register_flow_or_task() {
                     named: vec![
                         ("flow".into(), Value::Str(setup.flow_ref.clone())),
                         ("workspace".into(), Value::Str("auto".into())),
+                        (
+                            "spawn_token".into(),
+                            Value::Str(
+                                setup
+                                    .flows
+                                    .issue_spawn_permit(setup.ctx.flow_identity.as_ref().unwrap()),
+                            ),
+                        ),
                     ],
                 },
                 &setup.ctx,
@@ -326,6 +341,14 @@ async fn flow_source_failure_happens_before_workspace_allocation() {
                         Value::Str(format!("{}@missing", missing_flow.display())),
                     ),
                     ("workspace".into(), Value::Str("auto".into())),
+                    (
+                        "spawn_token".into(),
+                        Value::Str(
+                            setup
+                                .flows
+                                .issue_spawn_permit(setup.ctx.flow_identity.as_ref().unwrap()),
+                        ),
+                    ),
                 ],
             },
             &setup.ctx,

@@ -191,6 +191,15 @@ async fn wait_for_status(registry: &FlowRegistry, handle: &str) -> FlowRunStatus
         .clone()
 }
 
+fn admitted_args(registry: &FlowRegistry, ctx: &ToolCtx, mut args: ToolArgs) -> ToolArgs {
+    let identity = ctx.flow_identity.as_ref().expect("flow identity");
+    args.named.push((
+        "spawn_token".into(),
+        Value::Str(registry.issue_spawn_permit(identity)),
+    ));
+    args
+}
+
 #[tokio::test]
 async fn sync_and_async_flow_end_observe_terminal_registry_state() {
     for is_async in [false, true] {
@@ -236,7 +245,10 @@ async fn sync_and_async_flow_end_observe_terminal_registry_state() {
             ],
         };
 
-        AgentSpawn.call(args, &ctx).await.unwrap();
+        AgentSpawn
+            .call(admitted_args(&registry, &ctx, args), &ctx)
+            .await
+            .unwrap();
         let terminal_at_flow_end = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Some(envelope) = event_rx.recv().await {
                 if let Event::FlowEnd { run_id, .. } = envelope.event {
@@ -265,7 +277,10 @@ async fn agent_spawn_returns_final_assistant_text_when_no_tools_used() {
             ),
         ],
     };
-    let result = AgentSpawn.call(args, &ctx).await.unwrap();
+    let result = AgentSpawn
+        .call(admitted_args(&registry, &ctx, args), &ctx)
+        .await
+        .unwrap();
     let handle = match result {
         Value::Struct(fields) => fields
             .iter()
@@ -306,7 +321,10 @@ async fn agent_spawn_reports_missing_provider_gracefully() {
             ),
         ],
     };
-    let result = AgentSpawn.call(args, &ctx).await.unwrap();
+    let result = AgentSpawn
+        .call(admitted_args(&registry, &ctx, args), &ctx)
+        .await
+        .unwrap();
     let handle = match result {
         Value::Struct(fields) => fields
             .iter()
@@ -413,20 +431,24 @@ async fn spawned_managed_context_persists_assistant_tool_transactions() {
 
     let result = AgentSpawn
         .call(
-            ToolArgs {
-                positional: Vec::new(),
-                named: vec![
-                    (
-                        "flow".into(),
-                        Value::Str(format!("{}@tool_loop", flow_path.display())),
-                    ),
-                    ("async".into(), Value::Bool(false)),
-                    (
-                        "arguments".into(),
-                        Value::Struct(vec![("goal".into(), Value::Str("run probe".into()))]),
-                    ),
-                ],
-            },
+            admitted_args(
+                &flow_registry,
+                &ctx,
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        (
+                            "flow".into(),
+                            Value::Str(format!("{}@tool_loop", flow_path.display())),
+                        ),
+                        ("async".into(), Value::Bool(false)),
+                        (
+                            "arguments".into(),
+                            Value::Struct(vec![("goal".into(), Value::Str("run probe".into()))]),
+                        ),
+                    ],
+                },
+            ),
             &ctx,
         )
         .await

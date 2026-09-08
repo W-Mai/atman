@@ -86,7 +86,7 @@ pub struct WatchHub {
 
 pub struct CompactionState {
     pub manual_pending: std::sync::atomic::AtomicBool,
-    pub model_window_tokens: std::sync::atomic::AtomicU64,
+    model_window: Mutex<ModelWindowMeasurement>,
     pub review_mode: Mutex<CompactReviewMode>,
     pub lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_context_usage: Mutex<LastContextUsageStore>,
@@ -94,17 +94,40 @@ pub struct CompactionState {
     context_epoch: Mutex<Option<String>>,
 }
 
+#[derive(Default)]
+struct ModelWindowMeasurement {
+    model: String,
+    tokens: u64,
+}
+
 impl CompactionState {
     fn new() -> Self {
         Self {
             manual_pending: std::sync::atomic::AtomicBool::new(false),
-            model_window_tokens: std::sync::atomic::AtomicU64::new(0),
+            model_window: Mutex::new(ModelWindowMeasurement::default()),
             review_mode: Mutex::new(CompactReviewMode::default()),
             lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_context_usage: Mutex::new(LastContextUsageStore::default()),
             last_context_prefix: Mutex::new(crate::context_plan::ContextPrefixTracker::default()),
             context_epoch: Mutex::new(None),
         }
+    }
+
+    fn store_model_window(&self, model: &str, tokens: u64) {
+        let mut measurement = self
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned");
+        measurement.model = model.to_owned();
+        measurement.tokens = tokens;
+    }
+
+    fn model_window_for(&self, model: &str) -> Option<u64> {
+        let measurement = self
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned");
+        (measurement.model == model).then_some(measurement.tokens)
     }
 
     fn restore_context_epoch(&self, epoch: Option<String>) {
@@ -1106,7 +1129,7 @@ impl Session {
         let mut initial_context = replay.context;
         let persisted = PersistedContextState::load(&dir);
         if !persisted.model.is_empty() {
-            initial_context.model = persisted.model;
+            initial_context.model = persisted.model.clone();
         }
         initial_context.window_tokens = persisted.window_tokens;
         initial_context.window_budget = persisted.window_budget;
@@ -1155,10 +1178,7 @@ impl Session {
                 let c = CompactionState::new();
                 c.restore_context_epoch(checkpoint_epoch);
                 if persisted.window_tokens > 0 {
-                    c.model_window_tokens.store(
-                        persisted.window_tokens,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                    c.store_model_window(&persisted.model, persisted.window_tokens);
                 }
                 c
             },
@@ -1582,9 +1602,7 @@ impl Session {
         updates_model_window: bool,
     ) {
         if updates_model_window && tokens_in > 0 {
-            self.compaction
-                .model_window_tokens
-                .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
+            self.compaction.store_model_window(model, tokens_in);
         }
         self.watch.context.send_modify(|snap| {
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
@@ -1607,8 +1625,10 @@ impl Session {
 
     pub fn last_input_tokens(&self) -> u64 {
         self.compaction
-            .model_window_tokens
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned")
+            .tokens
     }
 
     pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -1624,14 +1644,14 @@ impl Session {
     }
 
     pub fn refresh_window_snapshot(&self) {
-        let provider_tokens = self.last_input_tokens();
+        let model = self.last_model();
+        let provider_tokens = self.compaction.model_window_for(&model).unwrap_or_default();
         let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
         let window = if provider_tokens > 0 {
             provider_tokens
         } else {
             estimated
         };
-        let model = self.last_model();
         let budget = crate::model_registry::model_info(&model).context_budget;
         self.watch.context.send_modify(|snap| {
             snap.window_tokens = window;
@@ -1665,9 +1685,15 @@ impl Session {
     pub fn set_current_model(&self, model: impl Into<String>) {
         let model = model.into();
         let budget = crate::model_registry::model_info(&model).context_budget;
+        let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
+        let changed = self.last_model() != model;
+        if changed {
+            self.compaction.store_model_window(&model, estimated);
+        }
         self.watch.context.send_modify(|snap| {
-            if snap.model != model {
+            if changed {
                 snap.provider.clear();
+                snap.window_tokens = estimated;
             }
             snap.model = model.clone();
             if budget > 0 {
@@ -2084,8 +2110,7 @@ impl Session {
                 compacted_count: rewritten_count,
             });
         self.compaction
-            .model_window_tokens
-            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+            .store_model_window(&self.last_model(), after_tokens);
         if let Ok(mut messages) = self.messages.lock() {
             *messages = replacement.clone();
         }
@@ -2155,8 +2180,7 @@ impl Session {
                 compacted_count: range.end - range.start,
             });
         self.compaction
-            .model_window_tokens
-            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+            .store_model_window(&self.last_model(), after_tokens);
         if let Ok(mut messages) = self.messages.lock() {
             *messages = replacement.clone();
         }
@@ -2248,8 +2272,7 @@ impl Session {
         let checkpoint_messages = self.messages();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
         self.compaction
-            .model_window_tokens
-            .store(window_tokens, std::sync::atomic::Ordering::Relaxed);
+            .store_model_window(&self.last_model(), window_tokens);
         self.compaction
             .update_context_epoch(checkpoint_messages.as_ref());
         // Sync the messages Vec (root's messages_handle) with the compacted
@@ -2605,6 +2628,15 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use tempfile::TempDir;
+
+    #[test]
+    fn context_window_measurement_is_paired_with_its_model() {
+        let state = CompactionState::new();
+        state.store_model_window("model-a", 42);
+
+        assert_eq!(state.model_window_for("model-a"), Some(42));
+        assert_eq!(state.model_window_for("model-b"), None);
+    }
 
     #[test]
     fn last_context_usage_store_evicts_the_oldest_identity() {

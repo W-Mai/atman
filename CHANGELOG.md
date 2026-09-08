@@ -6,8 +6,13 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking Changes
+
+- **Spawn admission** — `flow.instances` returns the current session's spawned-flow inventory and a caller-bound, single-use token required by `flow.spawn`; inventory changes invalidate unused tokens.
+
 ### ✨ Features
 
+- **Streaming single-line summaries** — compact thinking and tool rows join processed content into a syntax-colored ticker with a fixed left-faded to right-bright gradient; new content advances the viewport and completed rows remain still.
 - **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.
 - **Streaming edit and compaction output** — provider tool-argument deltas surface allowlisted file content while it is generated, and compaction summaries update incrementally without entering assistant history.
 - **Configurable diff layout** — file changes retain file and hunk structure, use two-column rendering by default, fall back safely in narrow views, and support `[diff] layout = "unified"`.
@@ -15,6 +20,9 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Responsive execution surfaces** — Bash output is read in bounded frames with queue backpressure and retained-output limits, nested Bash, Terminal, and subflow details resolve through one task-detail path, and stalled child provider calls respond immediately to task cancellation.
+- **Stable transcript state** — LLM completion closes thinking and assistant blocks by stable output identity even when tool drafts intervene, policy-resolved approvals bypass the pending prompt, focused floating panels hide the hardware input cursor, and working headers and tool rows use three-row hover and click regions.
+- **Model-paired context gauge** — context-window measurements stay paired with the model budget that produced them, model switches replace stale numerators with a current estimate, and overflow renders as `100%+` instead of an unbounded percentage.
 - **Provider-safe message projection** — OpenAI-compatible history replays reasoning-only assistant responses through `reasoning_content`, while OpenAI, Anthropic, and Codex omit history entries that become empty after provider-specific projection instead of sending invalid wire messages.
 - **Spawned message stream roles** — assistant messages appended to isolated child context emit assistant frames instead of tool-result frames, keeping root and child document-flow projection equivalent.
 - **Concurrent tool output routing** — Bash, Terminal, diff, and sub-agent frames carry their originating tool-use identity so parallel output cannot attach by arrival order or display title.

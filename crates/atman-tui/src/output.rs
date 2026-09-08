@@ -68,6 +68,7 @@ fn update_perf_counters(update: impl FnOnce(&mut PerfCounters)) {
     });
 }
 
+#[derive(Clone, Copy)]
 pub struct RenderCtx<'a> {
     pub expanded_tools: &'a std::collections::HashSet<String>,
     pub messages: &'a [Message],
@@ -530,7 +531,17 @@ pub fn render_item_with_regions(
         };
         (lines, regions)
     };
-    ensure_external_document_gap(&mut lines);
+    if matches!(item, OutputItem::ToolDispatch { .. }) {
+        if lines.last().is_none_or(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.chars().all(char::is_whitespace))
+        }) {
+            lines.push(Line::from(Span::styled(String::new(), RESET)));
+        }
+    } else {
+        ensure_external_document_gap(&mut lines);
+    }
     (lines, regions)
 }
 
@@ -1004,7 +1015,7 @@ impl LayoutCache {
         };
         let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
         let rows = lines.len().min(u32::MAX as usize) as u32;
-        let dynamic = dynamic_paint_for_item(item, &lines, &regions);
+        let dynamic = dynamic_paint_for_item(item, &lines, &regions, ctx);
         self.access_clock = self.access_clock.wrapping_add(1);
         self.entries[idx] = ItemCacheEntry {
             revision,
@@ -1669,24 +1680,29 @@ fn render_thinking(
 
     if disclosure == Disclosure::Summary {
         let body_width = target.saturating_sub(header_used + DOCUMENT_PAD_X * 2);
-        let latest = (body_width > 0)
-            .then(|| crate::markdown::render_markdown_with_width(text, body_width as u16))
-            .and_then(|lines| {
-                lines.into_iter().rev().find(|line| {
-                    line.spans
-                        .iter()
-                        .any(|span| !span.content.trim().is_empty())
-                })
-            });
         let mut spans = vec![Span::styled(header_prefix, header_style)];
-        if let Some(latest) = latest {
+        if body_width > 0 {
+            let rendered = crate::markdown::render_markdown_with_width(
+                text,
+                panel_width.saturating_sub(4).max(1),
+            );
+            let mut body = Vec::new();
+            for line in rendered.into_iter().filter(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| !span.content.trim().is_empty())
+            }) {
+                if !body.is_empty() {
+                    body.push(Span::styled(" · ", hint_style));
+                }
+                body.extend(
+                    line.spans
+                        .into_iter()
+                        .map(|span| Span::styled(span.content, span.style.patch(body_style))),
+                );
+            }
             spans.push(Span::styled(DOCUMENT_PAD, body_style));
-            let body = latest
-                .spans
-                .into_iter()
-                .map(|span| Span::styled(span.content, span.style.patch(body_style)))
-                .collect();
-            spans.extend(crate::width::truncate_spans(body, body_width, Some(bg)));
+            spans.extend(crate::width::streaming_ticker_spans(body, body_width, bg));
         }
         let used = crate::width::spans_width(spans.iter());
         if used < target {
@@ -2408,6 +2424,54 @@ fn aligned_document_row_with_control(
     Line::from(spans)
 }
 
+fn aligned_ticker_document_row_with_control(
+    left: Vec<Span<'static>>,
+    mut right: Vec<Span<'static>>,
+    control: Vec<Span<'static>>,
+    target: usize,
+    background: Color,
+) -> Line<'static> {
+    let horizontal_pad = DOCUMENT_PAD_X.min(target / 2);
+    let inner = target.saturating_sub(horizontal_pad * 2);
+    let min_left = 3.min(inner);
+    let control_width = crate::width::spans_width(control.iter()).min(inner);
+    let right_width = crate::width::spans_width(right.iter());
+    let right_budget = right_width.min(
+        inner
+            .saturating_sub(control_width)
+            .saturating_sub(min_left.saturating_add(1)),
+    );
+    right = crate::width::truncate_spans(right, right_budget, Some(background));
+    let right_width = crate::width::spans_width(right.iter());
+    let left_budget = inner
+        .saturating_sub(control_width)
+        .saturating_sub(right_width)
+        .saturating_sub(usize::from(!right.is_empty()));
+    let left = crate::width::streaming_ticker_spans(left, left_budget, background);
+    let left_width = crate::width::spans_width(left.iter());
+    let gap = inner.saturating_sub(left_width + right_width + control_width);
+
+    let mut spans = Vec::with_capacity(left.len() + right.len() + control.len() + 3);
+    spans.push(Span::styled(
+        " ".repeat(horizontal_pad),
+        Style::default().bg(background),
+    ));
+    spans.extend(left);
+    if gap > 0 {
+        spans.push(Span::styled(
+            " ".repeat(gap),
+            Style::default().bg(background),
+        ));
+    }
+    spans.extend(right);
+    spans.extend(control);
+    spans.push(Span::styled(
+        " ".repeat(horizontal_pad),
+        Style::default().bg(background),
+    ));
+    Line::from(spans)
+}
+
 fn edit_metric_spans(
     insertions: usize,
     deletions: usize,
@@ -2541,10 +2605,10 @@ fn render_tool_dispatch(
         width,
         panel_bg,
     ));
+    lines.push(document_blank(width, header_style));
     let mut regions = Vec::new();
 
     for call in calls {
-        let call_region_index = regions.len();
         let (glyph, color) = match call.status {
             ToolCallStatus::Running => (spinner_char(ctx.animation_frame), t.accent),
             ToolCallStatus::Ok => ("✓", t.success),
@@ -2563,7 +2627,7 @@ fn render_tool_dispatch(
         };
         let input_tail = if call.applied_edit.is_none() {
             tool_input_summary(call)
-                .map(|value| format!(" · {}", crate::width::middle_truncate(&value, 32)))
+                .map(|value| format!(" · {value}"))
                 .unwrap_or_default()
         } else {
             String::new()
@@ -2572,7 +2636,7 @@ fn render_tool_dispatch(
             .draft_preview
             .last_line()
             .filter(|line| !input_tail.contains(*line))
-            .map(|line| format!(" · {}", crate::width::truncate(line, 28)))
+            .map(|line| format!(" · {line}"))
             .unwrap_or_default();
         let edit_path = call
             .applied_edit
@@ -2648,13 +2712,12 @@ fn render_tool_dispatch(
             )]
         };
         let mut summary_line =
-            aligned_document_row_with_control(left, right, control, width, row_bg);
+            aligned_ticker_document_row_with_control(left, right, control, width, row_bg);
         if call.status == ToolCallStatus::Running && ctx.animation_frame != LAYOUT_ANIMATION_FRAME {
             paint_running_foreground(&mut summary_line, ctx.animation_frame, t.accent.into());
         }
         let row = lines.len() as u32;
         lines.push(document_blank(width, Style::default().bg(row_bg)));
-        let content_row = lines.len() as u32;
         lines.push(summary_line);
         lines.push(document_blank(width, Style::default().bg(row_bg)));
         regions.push(NodeRegion {
@@ -2669,8 +2732,8 @@ fn render_tool_dispatch(
             regions.push(NodeRegion {
                 panel_item_index: item_index,
                 path_key: fullscreen_key,
-                start_row: content_row,
-                end_row: content_row + 1,
+                start_row: row,
+                end_row: row + 3,
                 col_start: ctx
                     .panel_width
                     .saturating_sub((DOCUMENT_PAD_X + TOOL_CONTROL_WIDTH) as u16),
@@ -2694,7 +2757,7 @@ fn render_tool_dispatch(
                 width,
                 detail_style,
             ));
-            regions[call_region_index].end_row = lines.len() as u32;
+            lines.push(document_blank(width, detail_style));
             continue;
         };
 
@@ -2720,17 +2783,17 @@ fn render_tool_dispatch(
             hovered_output_node: child_hovered_output_node,
         };
         let mut detail_lines = render_item(&detail, &child_ctx);
-        if detail_lines
-            .last()
-            .is_some_and(|line| crate::width::spans_width(line.spans.iter()) == 0)
-        {
+        while detail_lines.last().is_some_and(|line| {
+            line.spans
+                .iter()
+                .all(|span| span.content.chars().all(char::is_whitespace))
+        }) {
             detail_lines.pop();
         }
         let detail_style = Style::default().bg(t.work_detail_bg.into());
         let nested_bg: Color = t.work_output_bg.into();
         let code_bg: Color = t.code_bg.into();
-        let detail_start = lines.len().saturating_add(1) as u32;
-        lines.push(document_blank(width, detail_style));
+        let detail_start = lines.len() as u32;
         if detail_has_inline_fullscreen && detail_lines.len() > 1 {
             regions.push(NodeRegion {
                 panel_item_index: item_index,
@@ -2762,9 +2825,7 @@ fn render_tool_dispatch(
             lines.push(line);
         }
         lines.push(document_blank(width, detail_style));
-        regions[call_region_index].end_row = lines.len() as u32;
     }
-    lines.push(document_blank(width, header_style));
     (lines, regions)
 }
 
@@ -4589,6 +4650,7 @@ fn dynamic_paint_for_item(
     item: &OutputItem,
     lines: &[Line<'static>],
     regions: &[NodeRegion],
+    _ctx: &RenderCtx<'_>,
 ) -> DynamicPaint {
     if !item.has_dynamic_paint() {
         return DynamicPaint::default();
@@ -8781,10 +8843,23 @@ mod tests {
     }
 
     #[test]
-    fn thinking_summary_shows_only_the_latest_visual_line() {
+    fn thinking_summary_ticker_advances_only_when_content_changes() {
         let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
         let lines = render_thinking(text, true, Disclosure::Summary, false, 0, 60, false);
         let middle = plain_line(&lines[1]);
+        let later =
+            plain_line(&render_thinking(text, true, Disclosure::Summary, false, 40, 60, false)[1]);
+        let appended = plain_line(
+            &render_thinking(
+                &format!("{text}\nline11"),
+                true,
+                Disclosure::Summary,
+                false,
+                40,
+                60,
+                false,
+            )[1],
+        );
         let t = crate::theme::theme();
 
         assert_eq!(lines.len(), 3);
@@ -8792,7 +8867,10 @@ mod tests {
         assert!(line_is_visually_blank(&lines[2]));
         assert!(middle.starts_with("  ⣿  thinking  "));
         assert!(middle.contains("line10"));
-        assert!(!middle.contains("line9"));
+        assert!(!middle.contains("line1 ·"));
+        assert_eq!(middle, later);
+        assert!(appended.contains("line11"));
+        assert_ne!(middle, appended);
         assert!(
             lines
                 .iter()
@@ -9667,10 +9745,11 @@ mod tests {
         assert!(line_is_visually_blank(&summary_lines[0]));
         assert!(line_is_visually_blank(summary_lines.last().unwrap()));
         assert!(line_is_visually_blank(&summary_lines[2]));
+        assert!(line_is_visually_blank(&summary_lines[3]));
         assert!(line_text(&summary_lines[1]).starts_with("  ⣿  working · 1"));
         assert!(line_text(&summary_lines[1]).ends_with("1/1 · 1 file · +4 −1  "));
-        assert!(line_text(&summary_lines[3]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
-        let tool_row = line_text(&summary_lines[3]);
+        assert!(line_text(&summary_lines[4]).ends_with("+4 −1 · 1h · 42ms  ⤢  "));
+        let tool_row = line_text(&summary_lines[4]);
         assert!(
             !['›', '⌄', '⌃']
                 .into_iter()
@@ -9685,28 +9764,33 @@ mod tests {
             .iter()
             .find(|region| region.path_key == format!("{TOOL_FULLSCREEN_REGION_PREFIX}edit-1"))
             .unwrap();
-        assert_eq!(call_region.start_row, 2);
-        assert!(call_region.end_row > call_region.start_row + 3);
-        assert_eq!(fullscreen_region.start_row, call_region.start_row + 1);
+        assert_eq!(call_region.start_row, 3);
+        assert_eq!(call_region.end_row, call_region.start_row + 3);
+        assert_eq!(fullscreen_region.start_row, call_region.start_row);
+        assert_eq!(fullscreen_region.end_row, call_region.end_row);
         assert!(fullscreen_region.col_start > call_region.col_start);
         assert!(line_is_visually_blank(lines.last().unwrap()));
+        assert!(
+            lines[3..6]
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| { span.style.bg == Some(crate::theme::theme().work_bg.into()) })
+        );
+        assert!(
+            lines[6..]
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| { span.style.bg == Some(crate::theme::theme().work_detail_bg.into()) })
+        );
         assert!(
             lines
                 .iter()
                 .rev()
-                .nth(1)
+                .find(|line| !line_is_visually_blank(line))
                 .unwrap()
                 .spans
                 .iter()
-                .all(|span| { span.style.bg == Some(crate::theme::theme().work_detail_bg.into()) })
-        );
-        assert!(
-            lines
-                .last()
-                .unwrap()
-                .spans
-                .iter()
-                .all(|span| { span.style.bg == Some(crate::theme::theme().work_bg.into()) })
+                .any(|span| { span.style.bg == Some(crate::theme::theme().work_output_bg.into()) })
         );
         assert_eq!(
             tool_headers
@@ -9935,11 +10019,9 @@ mod tests {
 
         assert_eq!(ranges[1].start_row, ranges[0].end_row);
         let separator = &lines[ranges[0].end_row.saturating_sub(1) as usize];
-        assert_eq!(crate::width::spans_width(separator.spans.iter()), 0);
-        let internal_padding = &lines[ranges[0].end_row.saturating_sub(2) as usize];
-        assert_eq!(crate::width::spans_width(internal_padding.spans.iter()), 80);
+        assert_eq!(crate::width::spans_width(separator.spans.iter()), 80);
         assert!(
-            internal_padding
+            separator
                 .spans
                 .iter()
                 .all(|span| span.style.bg == Some(crate::theme::theme().work_bg.into()))
@@ -9977,7 +10059,7 @@ mod tests {
                     .spans
                     .iter()
             ),
-            0
+            80
         );
     }
 

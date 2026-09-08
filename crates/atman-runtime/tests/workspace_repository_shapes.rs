@@ -157,7 +157,7 @@ async fn automatic_ownership_rejects_user_supplied_owner_fields_before_allocatio
     let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(ProviderRegistry::new()))
-        .with_flow_registry(registry)
+        .with_flow_registry(Arc::clone(&registry))
         .with_permission_broker(broker)
         .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
         .with_trust(atman_runtime::trust::TrustConfig::default())
@@ -176,6 +176,12 @@ async fn automatic_ownership_rejects_user_supplied_owner_fields_before_allocatio
                     ),
                     ("async".into(), Value::Bool(false)),
                     ("workspace".into(), Value::Str("retain".into())),
+                    (
+                        "spawn_token".into(),
+                        Value::Str(
+                            registry.issue_spawn_permit(ctx.flow_identity.as_ref().unwrap()),
+                        ),
+                    ),
                     ("owner_session".into(), Value::Str("spoof-session".into())),
                     ("owner_flow".into(), Value::Str("spoof-flow".into())),
                 ],

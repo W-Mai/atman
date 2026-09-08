@@ -445,6 +445,10 @@ flow test_flow(goal: string) -> string {
                 "arguments".into(),
                 Value::Struct(vec![("goal".into(), Value::Str("test goal".into()))]),
             ),
+            (
+                "spawn_token".into(),
+                Value::Str(registry.issue_spawn_permit(ctx.flow_identity.as_ref().unwrap())),
+            ),
         ],
     };
     let result = AgentSpawn.call(spawn_args, &ctx).await.unwrap();
@@ -550,6 +554,10 @@ flow test_flow(goal: string) -> string {
             (
                 "arguments".into(),
                 Value::Struct(vec![("goal".into(), Value::Str("hello".into()))]),
+            ),
+            (
+                "spawn_token".into(),
+                Value::Str(registry.issue_spawn_permit(ctx.flow_identity.as_ref().unwrap())),
             ),
         ],
     };

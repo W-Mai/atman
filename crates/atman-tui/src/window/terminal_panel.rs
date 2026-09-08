@@ -27,10 +27,7 @@ impl WindowComponent for TerminalPanelContent {
             .task_handle_index
             .get(&self.handle)
             .and_then(|&index| ctx.snapshots.get(index));
-        let item = ctx
-            .handle_index
-            .get(&self.handle)
-            .and_then(|&index| ctx.items.get(index));
+        let item = ctx.task_detail(&self.handle).map(|(_, item, _)| item);
         use crate::app::OutputItem;
         if let Some(OutputItem::Terminal {
             title,

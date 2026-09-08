@@ -44,7 +44,7 @@ Before calling tools, identify every independent read, search, or status check a
 Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
 
 - Independent source reads, audits, or research branches → use `multi_tool_use.parallel` when available; inside a flow use static `fanout [...] collect: all` for same-file expressions.
-- Independent coding investigations → use `flow.search` to discover managed flows, `flow.describe` to load the selected parameter contract, then `flow.spawn(async: true, arguments: {...})` with a focused goal. Register a watcher immediately when waiting on output, and observe every handle to terminal status.
+- Independent coding investigations → call `flow.instances` first, reuse suitable running work and kill obsolete flows, then use its single-use `spawn_token` with `flow.spawn`. Use `flow.search` to discover managed flows and `flow.describe` to load the selected parameter contract. Register a watcher immediately when waiting on output, and observe every handle to terminal status.
 - Long-running shell commands or servers → use `bash.spawn` with the default background mode, then `bash.status`/`bash.output` and a watcher. Kill jobs that are no longer needed.
 - Interactive TUI, REPL, editor, SSH, or dimension-sensitive process → use the PTY `term.*` lifecycle: spawn, capture/find, input, resize when needed, and kill on cleanup.
 - Use `dispatch_all` for assistant tool batches; do not confuse it with DSL fanout. Dynamic fanout is currently sequential, and static `collect: first` is not a race.
@@ -88,7 +88,8 @@ Prefer sub-agents for execution work — you manage, they build. Spawn parallel 
 
 flow.search(query) — discover available flows with ranked keywords and bounded results.
 flow.describe(ref) — load one selected flow's exact ref and parameter contract.
-flow.spawn(flow, async, arguments) — start a flow as a sub-agent. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow`; `async` defaults to true. Put declared flow parameters in `arguments`.
+flow.instances() — inspect current spawned flows and obtain the single-use token required by flow.spawn.
+flow.spawn(flow, spawn_token, async, arguments) — start a flow as a sub-agent. Default flow is `subagent.at` (research/verify/implement/review roles). Required: `flow` and `spawn_token`; `async` defaults to true. Put declared flow parameters in `arguments`.
 flow.check(flow) — validate a .at file before spawning.
 flow.status/flow.output/flow.kill — manage async sub-agents by handle.
 
@@ -258,7 +259,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
-                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check",
+                "flow.instances", "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.search", "flow.describe", "flow.check",
                 "form.ask",
                 "help.show",
                 "preview.push",
@@ -751,7 +752,8 @@ mod tests {
     fn system_prompt_uses_bounded_flow_discovery_contract() {
         assert!(SYSTEM_MD.contains("`flow.search` to discover managed flows"));
         assert!(SYSTEM_MD.contains("flow.describe(ref)"));
-        assert!(SYSTEM_MD.contains("flow.spawn(flow, async, arguments)"));
+        assert!(SYSTEM_MD.contains("flow.instances()"));
+        assert!(SYSTEM_MD.contains("flow.spawn(flow, spawn_token, async, arguments)"));
         assert!(!SYSTEM_MD.contains("flow.list"));
     }
 
@@ -981,6 +983,7 @@ mod tests {
                 "flow.output",
                 "flow.kill",
                 "flow.interject",
+                "flow.instances",
                 "flow.list",
                 "flow.check",
                 "watch",

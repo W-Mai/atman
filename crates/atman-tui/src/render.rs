@@ -599,7 +599,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
     let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
-    if !intro_active && !ui.wm.modals.onboarding_open && !ui.wm.modals.provider_manager.open {
+    if !intro_active
+        && !ui.wm.modals.onboarding_open
+        && !ui.wm.modals.provider_manager.open
+        && ui.wm.focused_id().is_none()
+    {
         let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
         let inner_y = input_rect.y.saturating_add(1);
         let mut placed = false;

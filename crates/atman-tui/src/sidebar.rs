@@ -1040,11 +1040,17 @@ fn render_lower_content(
         } else if ctx.window_budget == 0 {
             format_count(ctx.window_tokens)
         } else {
+            let raw_percent = ctx.window_tokens as f64 / ctx.window_budget as f64 * 100.0;
+            let percent = if raw_percent > 100.0 {
+                "100%+".to_owned()
+            } else {
+                format!("{}%", raw_percent as u64)
+            };
             format!(
-                "{} / {} ({}%)",
+                "{} / {} ({})",
                 format_count(ctx.window_tokens),
                 format_count(ctx.window_budget),
-                (ctx.window_tokens as f64 / ctx.window_budget as f64 * 100.0) as u64
+                percent
             )
         };
         let kv_w = content_w.saturating_sub(2);

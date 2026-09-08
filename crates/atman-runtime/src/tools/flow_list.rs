@@ -9,6 +9,7 @@ const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
 
 pub struct FlowList;
+pub struct FlowInstances;
 pub struct FlowSearch;
 pub struct FlowDescribe;
 
@@ -151,6 +152,70 @@ impl Tool for FlowList {
 
     fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move { Ok(FlowCatalog::load()?.legacy_value()) })
+    }
+}
+
+impl Tool for FlowInstances {
+    fn name(&self) -> &str {
+        "flow.instances"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "List spawned flow instances visible to the current session and return a single-use spawn_token. \
+             Inspect running work, reuse suitable instances, and kill obsolete flows before passing the token to flow.spawn.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false})
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let registry = ctx.flow_registry.as_ref().ok_or_else(|| {
+                RuntimeError::ToolFailed("flow.instances: no flow registry available".into())
+            })?;
+            let identity = ctx.flow_identity.as_ref().ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "flow.instances: trusted caller flow identity is unavailable".into(),
+                )
+            })?;
+            let (mut instances, token) = registry.inspect_for_spawn(identity);
+            const MAX_INSTANCES: usize = 50;
+            let truncated = instances.len().saturating_sub(MAX_INSTANCES);
+            if truncated > 0 {
+                instances.drain(..truncated);
+            }
+            let items = instances
+                .into_iter()
+                .map(|instance| {
+                    Value::Struct(vec![
+                        ("handle".into(), Value::Str(instance.handle)),
+                        ("goal".into(), Value::Str(instance.goal)),
+                        ("model".into(), Value::Str(instance.model)),
+                        ("status".into(), Value::Str(instance.status)),
+                        (
+                            "run_id".into(),
+                            Value::Str(instance.child_run_id.0.to_string()),
+                        ),
+                        (
+                            "started_at".into(),
+                            Value::Str(instance.started_at.to_rfc3339()),
+                        ),
+                    ])
+                })
+                .collect();
+            Ok(Value::Struct(vec![
+                ("instances".into(), Value::List(items)),
+                ("spawn_token".into(), Value::Str(token)),
+                ("truncated".into(), Value::Int(truncated as i64)),
+            ]))
+        })
     }
 }
 

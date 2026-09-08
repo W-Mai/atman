@@ -40,7 +40,8 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
         &root_path,
         format!(
             r#"flow root() -> string {{
-    return flow.spawn(flow: {child_ref:?}, async: false, workspace: "auto")
+    inventory = flow.instances()
+    return flow.spawn(flow: {child_ref:?}, spawn_token: inventory.spawn_token, async: false, workspace: "auto")
 }}
 "#
         ),

@@ -198,6 +198,18 @@ pub struct SubAgentRoute {
 }
 
 #[derive(Debug, Clone, Default)]
+struct LlmDisclosureState {
+    thinking_id: Option<u64>,
+    assistant_id: Option<u64>,
+}
+
+const ROOT_LLM_DISCLOSURE: &str = "root";
+
+fn llm_disclosure_key(run_id: Option<&str>) -> String {
+    run_id.unwrap_or(ROOT_LLM_DISCLOSURE).to_owned()
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ActivityTotals {
     pub attempted_calls: usize,
     pub completed_calls: usize,
@@ -425,8 +437,8 @@ impl OutputItem {
     pub(crate) fn has_dynamic_paint(&self) -> bool {
         match self {
             Self::AssistantMd { streaming, .. } => *streaming,
-            Self::Thinking { done, .. }
-            | Self::Terminal { done, .. }
+            Self::Thinking { done, .. } => !done,
+            Self::Terminal { done, .. }
             | Self::Bash { done, .. }
             | Self::SubAgentActivity { done, .. } => !done,
             Self::WorkflowPanel { ended_at, .. } => ended_at.is_none(),
@@ -453,6 +465,41 @@ pub struct OutputRevision {
     pub layout: u64,
     pub paint: u64,
     pub source_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedTaskDetail {
+    pub item: OutputItem,
+    pub revision: u64,
+}
+
+const TASK_TEXT_BYTES: usize = 256 * 1024;
+const TASK_BYTE_HISTORY: usize = 64 * 1024;
+const TASK_TRUNCATION_MARKER: &str = "… earlier task output truncated …\n";
+
+fn append_bounded_text(output: &mut String, text: &str) {
+    output.push_str(text);
+    if output.len() <= TASK_TEXT_BYTES {
+        return;
+    }
+    let marker_len = TASK_TRUNCATION_MARKER.len();
+    let mut keep_from = output
+        .len()
+        .saturating_sub(TASK_TEXT_BYTES.saturating_sub(marker_len));
+    while keep_from < output.len() && !output.is_char_boundary(keep_from) {
+        keep_from += 1;
+    }
+    output.drain(..keep_from);
+    if !output.starts_with(TASK_TRUNCATION_MARKER) {
+        output.insert_str(0, TASK_TRUNCATION_MARKER);
+    }
+}
+
+fn append_bounded_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(bytes);
+    if output.len() > TASK_BYTE_HISTORY {
+        output.drain(..output.len() - TASK_BYTE_HISTORY);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +653,10 @@ impl OutputStore {
 
     fn has_active_animation(&self) -> bool {
         !self.animated_ids.is_empty()
+    }
+
+    fn index_by_id(&self, id: u64) -> Option<usize> {
+        self.revisions.iter().position(|revision| revision.id == id)
     }
 
     #[cfg(test)]
@@ -771,12 +822,14 @@ pub struct AppState {
     pub last_items_len: usize,
     pub mouse_captured: bool,
     pub handle_index: std::collections::HashMap<String, usize>,
+    pub detached_task_details: std::collections::HashMap<String, DetachedTaskDetail>,
     pub task_handle_index: std::collections::HashMap<String, usize>,
     pub task_id_index: std::collections::HashMap<atman_runtime::TaskId, usize>,
     pub last_workflow_panel_idx: Option<usize>,
     pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
     pub top_level_run_ids: std::collections::HashSet<String>,
     pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
+    llm_disclosures: std::collections::HashMap<String, LlmDisclosureState>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -1055,6 +1108,7 @@ impl AppState {
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
+        self.llm_disclosures.clear();
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
@@ -1930,6 +1984,130 @@ impl AppState {
         }
     }
 
+    fn mutate_detached_task_detail(
+        &mut self,
+        handle: String,
+        create: impl FnOnce() -> OutputItem,
+        update: impl FnOnce(&mut OutputItem),
+    ) {
+        let entry =
+            self.detached_task_details
+                .entry(handle)
+                .or_insert_with(|| DetachedTaskDetail {
+                    item: create(),
+                    revision: 0,
+                });
+        update(&mut entry.item);
+        entry.revision = entry.revision.wrapping_add(1);
+    }
+
+    fn apply_detached_terminal_chunk(
+        &mut self,
+        handle: String,
+        bytes: Vec<u8>,
+        screen: Option<TerminalScreen>,
+        title: Option<String>,
+        command: Option<String>,
+    ) {
+        let create_handle = handle.clone();
+        let create_title = title.clone();
+        let create_command = command.clone();
+        self.mutate_detached_task_detail(
+            handle,
+            move || OutputItem::Terminal {
+                handle: create_handle,
+                title: create_title,
+                command: create_command,
+                screen: TerminalScreen {
+                    rows: 0,
+                    cols: 0,
+                    cells: Vec::new(),
+                    cursor: None,
+                    alt_screen: false,
+                },
+                accumulated_bytes: Vec::new(),
+                mode: TerminalViewMode::Capture,
+                done: false,
+                expanded: false,
+                scroll_offset: None,
+            },
+            move |item| {
+                let OutputItem::Terminal {
+                    title: current_title,
+                    command: current_command,
+                    screen: current_screen,
+                    accumulated_bytes,
+                    ..
+                } = item
+                else {
+                    return;
+                };
+                if current_title.is_none() {
+                    *current_title = title;
+                }
+                if current_command.is_none() {
+                    *current_command = command;
+                }
+                if let Some(screen) = screen {
+                    *current_screen = screen;
+                }
+                append_bounded_bytes(accumulated_bytes, &bytes);
+            },
+        );
+    }
+
+    fn apply_detached_bash_chunk(
+        &mut self,
+        handle: String,
+        text: String,
+        title: Option<String>,
+        command: Option<String>,
+    ) {
+        let create_handle = handle.clone();
+        let create_title = title.clone();
+        let create_command = command.clone();
+        self.mutate_detached_task_detail(
+            handle,
+            move || OutputItem::Bash {
+                handle: create_handle,
+                title: create_title,
+                command: create_command,
+                output: String::new(),
+                done: false,
+                expanded: false,
+            },
+            move |item| {
+                let OutputItem::Bash {
+                    title: current_title,
+                    command: current_command,
+                    output,
+                    ..
+                } = item
+                else {
+                    return;
+                };
+                if current_title.is_none() {
+                    *current_title = title;
+                }
+                if current_command.is_none() {
+                    *current_command = command;
+                }
+                append_bounded_text(output, &text);
+            },
+        );
+    }
+
+    fn finish_detached_task_detail(&mut self, handle: &str) {
+        let Some(entry) = self.detached_task_details.get_mut(handle) else {
+            return;
+        };
+        match &mut entry.item {
+            OutputItem::Terminal { done, .. } | OutputItem::Bash { done, .. } => *done = true,
+            _ => return,
+        }
+        entry.revision = entry.revision.wrapping_add(1);
+    }
+
     pub fn push_item(&mut self, item: OutputItem) {
         let idx = self.items.len();
         match &item {
@@ -2056,6 +2234,72 @@ impl AppState {
         changed
     }
 
+    fn item_id(&self, index: usize) -> Option<u64> {
+        self.items
+            .revisions()
+            .get(index)
+            .map(|revision| revision.id)
+    }
+
+    fn finish_tracked_thinking(&mut self, key: &str, retried: bool) {
+        let thinking_id = self
+            .llm_disclosures
+            .get(key)
+            .and_then(|state| state.thinking_id);
+        let Some(index) = thinking_id.and_then(|id| self.items.index_by_id(id)) else {
+            return;
+        };
+        self.mutate_item(index, OutputMutation::Semantic, |item| {
+            let OutputItem::Thinking {
+                done,
+                retried: item_retried,
+                ..
+            } = item
+            else {
+                return false;
+            };
+            let changed = !*done || (retried && !*item_retried);
+            *done = true;
+            *item_retried |= retried;
+            changed
+        });
+    }
+
+    fn finish_llm_disclosure(&mut self, key: &str, retried: bool) {
+        let state = self.llm_disclosures.remove(key).unwrap_or_default();
+        for id in [state.thinking_id, state.assistant_id]
+            .into_iter()
+            .flatten()
+        {
+            let Some(index) = self.items.index_by_id(id) else {
+                continue;
+            };
+            self.mutate_item(index, OutputMutation::Semantic, |item| match item {
+                OutputItem::Thinking {
+                    done,
+                    retried: item_retried,
+                    ..
+                } => {
+                    let changed = !*done || (retried && !*item_retried);
+                    *done = true;
+                    *item_retried |= retried;
+                    changed
+                }
+                OutputItem::AssistantMd {
+                    streaming,
+                    retried: item_retried,
+                    ..
+                } => {
+                    let changed = *streaming || (retried && !*item_retried);
+                    *streaming = false;
+                    *item_retried |= retried;
+                    changed
+                }
+                _ => false,
+            });
+        }
+    }
+
     pub fn mark_visual_dirty(&mut self) {
         self.wm_visual_version = self.wm_visual_version.wrapping_add(1);
     }
@@ -2175,6 +2419,9 @@ impl AppState {
             StreamFrame::PermissionRequestCreated { payload, .. }
             | StreamFrame::PermissionRequestTargeted { payload, .. }
             | StreamFrame::PermissionRequestDeferred { payload, .. } => {
+                if payload.decision_id.is_some() {
+                    return;
+                }
                 if !matches!(
                     payload.target,
                     atman_runtime::permission_audit::PermissionAuditTarget::User
@@ -2577,7 +2824,7 @@ impl AppState {
                     if let Some(screen) = screen {
                         *current_screen = screen;
                     }
-                    accumulated_bytes.extend_from_slice(&bytes);
+                    append_bounded_bytes(accumulated_bytes, &bytes);
                 } else {
                     call.detail = Some(Box::new(OutputItem::Terminal {
                         handle,
@@ -2627,7 +2874,7 @@ impl AppState {
                     if current_command.is_none() {
                         *current_command = command;
                     }
-                    output.push_str(&text);
+                    append_bounded_text(output, &text);
                 } else {
                     call.detail = Some(Box::new(OutputItem::Bash {
                         handle,
@@ -2748,6 +2995,7 @@ impl AppState {
                 }
             }
             StreamFrame::ThinkingChunk { text, run_id, .. } => {
+                let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
@@ -2770,6 +3018,12 @@ impl AppState {
                     });
                     self.streaming = true;
                     self.reset_lag_state();
+                    if let Some(id) = self.item_id(index) {
+                        self.llm_disclosures
+                            .entry(disclosure_key)
+                            .or_default()
+                            .thinking_id = Some(id);
+                    }
                 } else {
                     self.push_item(OutputItem::Thinking {
                         text,
@@ -2778,6 +3032,14 @@ impl AppState {
                         retried: false,
                     });
                     self.streaming = true;
+                    if let Some(index) = self.items.len().checked_sub(1)
+                        && let Some(id) = self.item_id(index)
+                    {
+                        self.llm_disclosures
+                            .entry(disclosure_key)
+                            .or_default()
+                            .thinking_id = Some(id);
+                    }
                 }
             }
             StreamFrame::LlmChunk {
@@ -2785,6 +3047,7 @@ impl AppState {
                 model: chunk_model,
                 run_id,
             } => {
+                let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
@@ -2798,7 +3061,7 @@ impl AppState {
                             changed = true;
                         }
                         if !text.is_empty() {
-                            output.push_str(&text);
+                            append_bounded_text(output, &text);
                             changed = true;
                         }
                         changed
@@ -2808,18 +3071,7 @@ impl AppState {
                     return;
                 }
                 self.waiting_for_llm = false;
-                if let Some(index) = self.items.len().checked_sub(1) {
-                    self.mutate_item(index, OutputMutation::Semantic, |item| {
-                        let OutputItem::Thinking { done, .. } = item else {
-                            return false;
-                        };
-                        if *done {
-                            return false;
-                        }
-                        *done = true;
-                        true
-                    });
-                }
+                self.finish_tracked_thinking(&disclosure_key, false);
                 let last_index = self.items.len().checked_sub(1);
                 let continues_assistant = last_index.is_some_and(|index| {
                     matches!(
@@ -2843,6 +3095,12 @@ impl AppState {
                     });
                     self.streaming = true;
                     self.reset_lag_state();
+                    if let Some(id) = self.item_id(index) {
+                        self.llm_disclosures
+                            .entry(disclosure_key)
+                            .or_default()
+                            .assistant_id = Some(id);
+                    }
                 } else {
                     self.push_item(OutputItem::AssistantMd {
                         md: text,
@@ -2851,6 +3109,14 @@ impl AppState {
                     });
                     self.streaming = true;
                     self.terminal_throttle = Some(Instant::now());
+                    if let Some(index) = self.items.len().checked_sub(1)
+                        && let Some(id) = self.item_id(index)
+                    {
+                        self.llm_disclosures
+                            .entry(disclosure_key)
+                            .or_default()
+                            .assistant_id = Some(id);
+                    }
                 }
             }
             StreamFrame::LlmRetry => {
@@ -2860,20 +3126,16 @@ impl AppState {
                     let index = self.items.len() - 1;
                     self.remove_item(index);
                 }
-                let indices = self
+                let disclosure_keys = self.llm_disclosures.keys().cloned().collect::<Vec<_>>();
+                for key in disclosure_keys {
+                    self.finish_llm_disclosure(&key, true);
+                }
+                let attempt_start = self
                     .items
                     .iter()
-                    .enumerate()
-                    .rev()
-                    .take_while(|(_, item)| {
-                        matches!(
-                            item,
-                            OutputItem::Thinking { .. } | OutputItem::AssistantMd { .. }
-                        )
-                    })
-                    .map(|(index, _)| index)
-                    .collect::<Vec<_>>();
-                for index in indices {
+                    .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
+                    .map_or(0, |index| index + 1);
+                for index in attempt_start..self.items.len() {
                     self.mutate_item(index, OutputMutation::Semantic, |item| match item {
                         OutputItem::Thinking { done, retried, .. } => {
                             let changed = !*done || !*retried;
@@ -2900,36 +3162,8 @@ impl AppState {
                 {
                     return;
                 }
-                let indices = self
-                    .items
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .take_while(|(_, item)| {
-                        matches!(
-                            item,
-                            OutputItem::Thinking { done: false, .. }
-                                | OutputItem::AssistantMd {
-                                    streaming: true,
-                                    ..
-                                }
-                        )
-                    })
-                    .map(|(index, _)| index)
-                    .collect::<Vec<_>>();
-                for index in indices {
-                    self.mutate_item(index, OutputMutation::Semantic, |item| match item {
-                        OutputItem::Thinking { done, .. } if !*done => {
-                            *done = true;
-                            true
-                        }
-                        OutputItem::AssistantMd { streaming, .. } if *streaming => {
-                            *streaming = false;
-                            true
-                        }
-                        _ => false,
-                    });
-                }
+                let disclosure_key = llm_disclosure_key(run_id.as_deref());
+                self.finish_llm_disclosure(&disclosure_key, false);
                 self.streaming = false;
                 self.reset_lag_state();
             }
@@ -3232,6 +3466,14 @@ impl AppState {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
+                    let task_command = self.task_command(&handle);
+                    self.apply_detached_terminal_chunk(
+                        handle,
+                        bytes,
+                        screen,
+                        call_intent.map(|intent| intent.as_str().to_owned()),
+                        task_command,
+                    );
                     return;
                 }
                 let task_command = self.task_command(&handle);
@@ -3290,7 +3532,7 @@ impl AppState {
                             changed = true;
                         }
                         if !bytes.is_empty() {
-                            accumulated_bytes.extend_from_slice(&bytes);
+                            append_bounded_bytes(accumulated_bytes, &bytes);
                             changed = true;
                         }
                         changed
@@ -3329,6 +3571,17 @@ impl AppState {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
+                    if !self.detached_task_details.contains_key(&handle) {
+                        let task_command = self.task_command(&handle);
+                        self.apply_detached_terminal_chunk(
+                            handle.clone(),
+                            Vec::new(),
+                            None,
+                            call_intent.map(|intent| intent.as_str().to_owned()),
+                            task_command,
+                        );
+                    }
+                    self.finish_detached_task_detail(&handle);
                     return;
                 }
                 let task_command = self.task_command(&handle);
@@ -3402,6 +3655,14 @@ impl AppState {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
+                    let task_command = self.task_command(&handle);
+                    let prefix = if kind == "stderr" { "[err] " } else { "" };
+                    self.apply_detached_bash_chunk(
+                        handle,
+                        format!("{prefix}{line}"),
+                        call_intent.map(|intent| intent.as_str().to_owned()),
+                        task_command,
+                    );
                     return;
                 }
                 let task_command = self.task_command(&handle);
@@ -3453,8 +3714,8 @@ impl AppState {
                             changed = true;
                         }
                         if !prefix.is_empty() || !line.is_empty() {
-                            output.push_str(prefix);
-                            output.push_str(&line);
+                            append_bounded_text(output, prefix);
+                            append_bounded_text(output, &line);
                             changed = true;
                         }
                         changed
@@ -3462,8 +3723,8 @@ impl AppState {
                     self.reset_lag_state();
                 } else {
                     let mut output = String::new();
-                    output.push_str(prefix);
-                    output.push_str(&line);
+                    append_bounded_text(&mut output, prefix);
+                    append_bounded_text(&mut output, &line);
                     self.push_item(OutputItem::Bash {
                         handle,
                         title: call_intent.map(|intent| intent.as_str().to_owned()),
@@ -3486,6 +3747,16 @@ impl AppState {
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
                 {
+                    if !self.detached_task_details.contains_key(&handle) {
+                        let task_command = self.task_command(&handle);
+                        self.apply_detached_bash_chunk(
+                            handle.clone(),
+                            String::new(),
+                            call_intent.map(|intent| intent.as_str().to_owned()),
+                            task_command,
+                        );
+                    }
+                    self.finish_detached_task_detail(&handle);
                     return;
                 }
                 let task_command = self.task_command(&handle);
@@ -4316,6 +4587,13 @@ mod tests {
         });
         let root_payload = payload(&root, "root-tool");
         let child_payload = payload(&descendant, "child-tool");
+        let mut automatic = payload(&root, "automatic-tool");
+        automatic.decision_id = Some("policy-decision".into());
+        app.apply_stream_frame(StreamFrame::PermissionRequestCreated {
+            run_id: root.clone(),
+            payload: automatic,
+        });
+        assert!(app.pending_permissions.is_empty());
         app.apply_stream_frame(StreamFrame::PermissionRequestCreated {
             run_id: root,
             payload: root_payload.clone(),
@@ -4341,7 +4619,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(root_graph.permission_requests.len(), 1);
+        assert_eq!(root_graph.permission_requests.len(), 2);
         assert_eq!(child_graph.permission_requests.len(), 1);
         assert!(root_graph.permission_requests.values().any(|request| {
             request.payload == root_payload && request.payload.policy.rule_id == "rule"
@@ -4848,10 +5126,12 @@ mod tests {
             text: "thinking...".into(),
             run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::ToolUseStart {
-            tool: "fs.read".into(),
-            args_preview: "\"x\"".into(),
-            id: "tc1".into(),
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "tc1".into(),
+            name: "fs.read".into(),
+            arguments_delta: "{\"path\":\"x\"}".into(),
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::LlmDone {
             total_tokens: 5,
@@ -6395,6 +6675,26 @@ mod terminal_stream_tests {
             }
             _ => panic!("expected Bash item"),
         }
+        assert!(matches!(
+            app.detached_task_details
+                .get("term_s_0")
+                .map(|detail| &detail.item),
+            Some(OutputItem::Terminal {
+                accumulated_bytes,
+                done: true,
+                ..
+            }) if accumulated_bytes == b"sub"
+        ));
+        assert!(matches!(
+            app.detached_task_details
+                .get("bg_s_0")
+                .map(|detail| &detail.item),
+            Some(OutputItem::Bash {
+                output,
+                done: true,
+                ..
+            }) if output == "sub\n"
+        ));
     }
 
     #[test]
@@ -6660,6 +6960,7 @@ mod terminal_e2e_tests {
         let items = &app.app.items;
         let item_revisions = app.app.items.revisions();
         let handle_index = &app.app.handle_index;
+        let detached_task_details = &app.app.detached_task_details;
         let task_handle_index = &app.app.task_handle_index;
         let workflow_run_to_panel = &app.app.workflow_run_to_panel;
         let task_snapshots_revision = app.app.task_snapshots_revision;
@@ -6685,6 +6986,7 @@ mod terminal_e2e_tests {
                     items,
                     item_revisions,
                     handle_index,
+                    detached_task_details,
                     task_handle_index,
                     workflow_run_to_panel,
                     task_snapshots_revision,

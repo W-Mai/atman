@@ -93,6 +93,8 @@ pub struct RenderCtx<'a> {
     pub items: &'a [crate::app::OutputItem],
     pub item_revisions: &'a [crate::app::OutputRevision],
     pub handle_index: &'a std::collections::HashMap<String, usize>,
+    pub detached_task_details:
+        &'a std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
     pub task_handle_index: &'a std::collections::HashMap<String, usize>,
     pub workflow_run_to_panel: &'a std::collections::HashMap<String, usize>,
     pub task_snapshots_revision: u64,
@@ -106,6 +108,60 @@ pub struct RenderCtx<'a> {
     pub hovered_mcp_row: &'a Option<String>,
     pub mcp_browser: &'a crate::mcp_manager::McpBrowserState<'a>,
     pub hovered_history_row: &'a Option<String>,
+}
+
+impl<'a> RenderCtx<'a> {
+    pub fn task_detail(
+        &self,
+        handle: &str,
+    ) -> Option<(
+        usize,
+        &'a crate::app::OutputItem,
+        crate::app::OutputRevision,
+    )> {
+        if let Some(detail) = self.detached_task_details.get(handle) {
+            return Some((
+                usize::MAX,
+                &detail.item,
+                crate::app::OutputRevision {
+                    id: detail.revision,
+                    semantic: detail.revision,
+                    layout: detail.revision,
+                    source_generation: detail.revision,
+                    ..Default::default()
+                },
+            ));
+        }
+        if let Some(&index) = self.handle_index.get(handle)
+            && let Some(item) = self.items.get(index)
+            && item.handle() == Some(handle)
+        {
+            return Some((
+                index,
+                item,
+                self.item_revisions.get(index).copied().unwrap_or_default(),
+            ));
+        }
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                let crate::app::OutputItem::ToolDispatch { calls } = item else {
+                    return None;
+                };
+                calls.iter().find_map(|call| {
+                    let detail = call.detail.as_deref()?;
+                    (detail.handle() == Some(handle)).then(|| {
+                        (
+                            index,
+                            detail,
+                            self.item_revisions.get(index).copied().unwrap_or_default(),
+                        )
+                    })
+                })
+            })
+    }
 }
 
 /// Mutable event context — allows components to send commands and mutate

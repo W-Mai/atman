@@ -2443,9 +2443,11 @@ mod tests {
             .unwrap();
         let flow_path = root.path().join("acceptance.at");
         std::fs::write(&flow_path, "flow child() { return \"ok\" }\n").unwrap();
+        let spawn_token = session.flow_registry.issue_spawn_permit(&identity);
         let source = format!(
-            "flow t() {{ return flow.spawn(flow: \"{}\", async: true) }}",
-            flow_path.display()
+            "flow t() {{ return flow.spawn(flow: \"{}\", spawn_token: \"{}\", async: true) }}",
+            flow_path.display(),
+            spawn_token,
         );
         let file = parse_file(&source).unwrap();
         let tools = ToolRegistry::new();

@@ -103,6 +103,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(sleep::Sleep));
     reg.register(Arc::new(help::HelpShow));
     reg.register(Arc::new(flow_list::FlowList));
+    reg.register(Arc::new(flow_list::FlowInstances));
     reg.register(Arc::new(flow_list::FlowSearch));
     reg.register(Arc::new(flow_list::FlowDescribe));
     reg.register(Arc::new(flow_check::FlowCheck));

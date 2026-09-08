@@ -144,7 +144,7 @@ the parent flow.
 | Run one expression per item | `fanout source { |item| expr } collect: all` | Current evaluator is sequential despite the name. |
 | Race fixed fanout branches | Not available | Static `collect: first` parses but is not implemented. |
 | Batch assistant tool calls | `dispatch_all(tool_uses)` | Auto-approved calls can run in parallel; approval-gated calls are serialized after approval. |
-| Run independent external coding workers | `flow.spawn(async: true)` | Returns a handle immediately; poll or watch, then collect output and clean up. |
+| Run independent external coding workers | `flow.instances()` then `flow.spawn(spawn_token: inventory.spawn_token, async: true)` | Inspect and clean up the session inventory before spending the single-use token; the spawn returns a handle immediately. |
 
 Use static `fanout ... collect: all` for real DSL-level concurrency. Do not call
 dynamic fanout parallel, and do not use static `collect: first` in production flows.

@@ -525,16 +525,16 @@ impl WindowManager {
     pub fn dispatch_key(
         &mut self,
         action: &crate::keys::KeyAction,
-        _app: &mut crate::app::AppState,
-        _control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+        app: &mut crate::app::AppState,
+        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
         if let Some(kind) = self.layers.dispatch_key() {
-            let (consumed, carried) = self.modals.handle_key_top(kind, action, _app, _control_tx);
+            let (consumed, carried) = self.modals.handle_key_top(kind, action, app, control_tx);
             let commands = carried
                 .and_then(|a| match a {
                     crate::wm::ModalAction::Dispatched(id) => {
-                        Some(self.apply_palette_action(id, _app, _control_tx))
+                        Some(self.apply_palette_action(id, app, control_tx))
                     }
                     crate::wm::ModalAction::Consumed
                     | crate::wm::ModalAction::OpenModelManager(_)
@@ -543,7 +543,7 @@ impl WindowManager {
                 .unwrap_or_default();
             return (consumed, commands);
         }
-        if _app.mcp_add_form.is_some() || _app.modal_notification.is_some() {
+        if app.mcp_add_form.is_some() || app.modal_notification.is_some() {
             return (false, Vec::new());
         }
         match action {
@@ -587,6 +587,17 @@ impl WindowManager {
                 return (true, Vec::new());
             }
             crate::keys::KeyAction::Escape => {
+                if let WindowContent::Task {
+                    handle,
+                    kind: atman_runtime::TaskKind::Flow,
+                } = &panel.content_kind
+                    && let Some(registry) = &app.task_registry
+                    && registry
+                        .lookup_by_handle_in_session(handle, &app.session_id)
+                        .is_some_and(|task| task.is_running())
+                {
+                    let _ = registry.kill_by_handle_from_operator(handle, &app.session_id);
+                }
                 return (true, vec![WmCommand::CloseWindow(id)]);
             }
             _ => {}
@@ -872,6 +883,7 @@ impl WindowManager {
                 &app.items,
                 app.items.revisions(),
                 &app.handle_index,
+                &app.detached_task_details,
                 &app.task_handle_index,
                 &app.workflow_run_to_panel,
                 app.task_snapshots_revision,
@@ -967,6 +979,7 @@ pub fn render(
     items: &[OutputItem],
     item_revisions: &[crate::app::OutputRevision],
     handle_index: &std::collections::HashMap<String, usize>,
+    detached_task_details: &std::collections::HashMap<String, crate::app::DetachedTaskDetail>,
     task_handle_index: &std::collections::HashMap<String, usize>,
     workflow_run_to_panel: &std::collections::HashMap<String, usize>,
     task_snapshots_revision: u64,
@@ -1048,6 +1061,7 @@ pub fn render(
                 items,
                 item_revisions,
                 handle_index,
+                detached_task_details,
                 task_handle_index,
                 workflow_run_to_panel,
                 task_snapshots_revision,
@@ -1771,6 +1785,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
         let empty_set = std::collections::HashSet::new();
         let empty_map = std::collections::HashMap::new();
+        let empty_details = std::collections::HashMap::new();
         let resources = std::collections::HashMap::new();
         let prompts = std::collections::HashMap::new();
         let browser = crate::mcp_manager::McpBrowserState {
@@ -1789,6 +1804,7 @@ mod tests {
                     &[],
                     &[],
                     &empty_map,
+                    &empty_details,
                     &empty_map,
                     &empty_map,
                     0,
@@ -1880,6 +1896,7 @@ mod tests {
                     &std::collections::HashMap::new(),
                     &std::collections::HashMap::new(),
                     &std::collections::HashMap::new(),
+                    &std::collections::HashMap::new(),
                     0,
                     activity_nodes,
                     &hovered_btn,
@@ -1952,6 +1969,7 @@ mod tests {
                     snapshots,
                     items,
                     &[],
+                    &std::collections::HashMap::new(),
                     &std::collections::HashMap::new(),
                     &std::collections::HashMap::new(),
                     &std::collections::HashMap::new(),

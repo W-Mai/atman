@@ -1,3 +1,4 @@
+use ratatui::style::Color;
 use ratatui::text::Span;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -142,6 +143,65 @@ pub fn truncate_spans(
     out
 }
 
+/// Render the newest part of a styled single-line stream while preserving each
+/// source span's hue. Appended content advances the viewport; time does not.
+pub fn streaming_ticker_spans(
+    spans: Vec<Span<'static>>,
+    max_w: usize,
+    background: Color,
+) -> Vec<Span<'static>> {
+    if max_w == 0 {
+        return Vec::new();
+    }
+
+    let units = spans
+        .into_iter()
+        .flat_map(|span| {
+            let style = span.style.bg(background);
+            span.content
+                .graphemes(true)
+                .map(move |grapheme| (grapheme.to_owned(), width(grapheme), style))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    if units.is_empty() {
+        return Vec::new();
+    }
+    let mut viewport = Vec::new();
+    let mut used = 0usize;
+    for (text, unit_width, style) in units.into_iter().rev() {
+        if used + unit_width > max_w {
+            break;
+        }
+        used += unit_width;
+        viewport.push((text, unit_width, style));
+    }
+    viewport.reverse();
+
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut column = 0usize;
+    for (text, unit_width, mut style) in viewport {
+        if let Some(foreground) = style.fg {
+            let progress = if max_w <= 1 {
+                1.0
+            } else {
+                (column as f64 / (max_w - 1) as f64).clamp(0.0, 1.0)
+            };
+            let brightness = 0.22 + progress * 0.78;
+            style.fg = Some(crate::theme::ThemeColor::new(background).lerp(foreground, brightness));
+        }
+        if let Some(last) = out.last_mut()
+            && last.style == style
+        {
+            last.content.to_mut().push_str(&text);
+        } else {
+            out.push(Span::styled(text, style));
+        }
+        column += unit_width;
+    }
+    out
+}
+
 fn grapheme_prefix(s: &str, max_w: usize) -> String {
     let mut out = String::new();
     let mut used = 0usize;
@@ -251,6 +311,7 @@ pub fn word_wrap(text: &str, max_w: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Style;
 
     #[test]
     fn width_cjk() {
@@ -405,5 +466,31 @@ mod tests {
         assert_eq!(word_wrap(emoji, 1), vec![emoji.to_string()]);
         // text after overflow continues on new line
         assert_eq!(word_wrap("🙂x", 1), vec!["🙂".to_string(), "x".to_string()]);
+    }
+
+    #[test]
+    fn streaming_ticker_keeps_the_latest_styled_graphemes_without_splitting_wide_text() {
+        let spans = vec![Span::styled("ab你好cd", Style::default().fg(Color::Cyan))];
+        let rendered = streaming_ticker_spans(spans, 5, Color::Black);
+        let text = rendered
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "好cd");
+        assert_eq!(width(&text), 4);
+    }
+
+    #[test]
+    fn streaming_ticker_preserves_distinct_source_hues() {
+        let spans = vec![
+            Span::styled("left", Style::default().fg(Color::Red)),
+            Span::styled("right", Style::default().fg(Color::Blue)),
+        ];
+        let rendered = streaming_ticker_spans(spans, 12, Color::Black);
+        let colors = rendered
+            .iter()
+            .filter_map(|span| span.style.fg)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(colors.len() > 1);
     }
 }

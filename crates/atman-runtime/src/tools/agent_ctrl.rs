@@ -8,6 +8,9 @@ use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResu
 use crate::value::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const SPAWN_PERMIT_TTL: Duration = Duration::from_secs(300);
 
 pub struct AgentSpawn;
 
@@ -165,6 +168,30 @@ pub struct FlowRegistry {
     /// decision commit in another subsystem. Lock order: lifecycle -> runs -> identity.
     lifecycle: Mutex<()>,
     terminal_observers: Mutex<Vec<std::sync::Weak<dyn FlowTerminalObserver>>>,
+    spawn_admission: Mutex<SpawnAdmission>,
+}
+
+#[derive(Default)]
+struct SpawnAdmission {
+    revisions: std::collections::HashMap<String, u64>,
+    permits: std::collections::HashMap<String, SpawnPermit>,
+}
+
+struct SpawnPermit {
+    session_id: String,
+    parent_run_id: FlowRunId,
+    revision: u64,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct FlowInstanceInfo {
+    pub handle: String,
+    pub goal: String,
+    pub model: String,
+    pub status: String,
+    pub child_run_id: FlowRunId,
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub struct DescendantBlockGuard {
@@ -194,6 +221,124 @@ impl Drop for FlowLifecycleGuard {
 impl FlowRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn bump_spawn_inventory(&self, session_id: &str) {
+        let mut admission = self.spawn_admission.lock().unwrap();
+        let revision = admission
+            .revisions
+            .entry(session_id.to_owned())
+            .or_default();
+        *revision = revision.wrapping_add(1);
+        admission
+            .permits
+            .retain(|_, permit| permit.session_id != session_id);
+    }
+
+    pub fn issue_spawn_permit(&self, identity: &crate::flow_authority::FlowIdentity) -> String {
+        let mut admission = self.spawn_admission.lock().unwrap();
+        Self::issue_spawn_permit_locked(&mut admission, identity)
+    }
+
+    fn issue_spawn_permit_locked(
+        admission: &mut SpawnAdmission,
+        identity: &crate::flow_authority::FlowIdentity,
+    ) -> String {
+        let now = Instant::now();
+        admission
+            .permits
+            .retain(|_, permit| permit.expires_at > now);
+        let revision = admission
+            .revisions
+            .get(&identity.session_id)
+            .copied()
+            .unwrap_or_default();
+        let token = format!("spawn_{}", uuid::Uuid::now_v7().simple());
+        admission.permits.insert(
+            token.clone(),
+            SpawnPermit {
+                session_id: identity.session_id.clone(),
+                parent_run_id: identity.run_id.clone(),
+                revision,
+                expires_at: now + SPAWN_PERMIT_TTL,
+            },
+        );
+        token
+    }
+
+    pub fn inspect_for_spawn(
+        &self,
+        identity: &crate::flow_authority::FlowIdentity,
+    ) -> (Vec<FlowInstanceInfo>, String) {
+        let mut admission = self.spawn_admission.lock().unwrap();
+        let instances = self.instances_for_session(&identity.session_id);
+        let token = Self::issue_spawn_permit_locked(&mut admission, identity);
+        (instances, token)
+    }
+
+    pub fn consume_spawn_permit(
+        &self,
+        token: &str,
+        identity: &crate::flow_authority::FlowIdentity,
+    ) -> Result<(), RuntimeError> {
+        let mut admission = self.spawn_admission.lock().unwrap();
+        let Some(permit) = admission.permits.remove(token) else {
+            return Err(RuntimeError::ToolFailed(
+                "flow.spawn: missing, expired, or already used spawn_token; call flow.instances, inspect existing flows, reuse suitable work, and kill obsolete flows before spawning"
+                    .into(),
+            ));
+        };
+        let current_revision = admission
+            .revisions
+            .get(&identity.session_id)
+            .copied()
+            .unwrap_or_default();
+        if permit.expires_at <= Instant::now()
+            || permit.session_id != identity.session_id
+            || permit.parent_run_id != identity.run_id
+        {
+            return Err(RuntimeError::ToolFailed(
+                "flow.spawn: spawn_token does not belong to this caller or has expired; call flow.instances again"
+                    .into(),
+            ));
+        }
+        if permit.revision != current_revision {
+            return Err(RuntimeError::ToolFailed(
+                "flow.spawn: flow inventory changed after inspection; call flow.instances again before spawning"
+                    .into(),
+            ));
+        }
+        let revision = admission
+            .revisions
+            .entry(identity.session_id.clone())
+            .or_default();
+        *revision = revision.wrapping_add(1);
+        admission
+            .permits
+            .retain(|_, permit| permit.session_id != identity.session_id);
+        Ok(())
+    }
+
+    pub fn instances_for_session(&self, session_id: &str) -> Vec<FlowInstanceInfo> {
+        let runs = self.runs.lock().unwrap();
+        let entries = self.entries.lock().unwrap();
+        let mut instances = entries
+            .values()
+            .filter(|entry| {
+                runs.get(&entry.child_run_id)
+                    .is_some_and(|identity| identity.session_id == session_id)
+            })
+            .map(|entry| FlowInstanceInfo {
+                handle: entry.handle.clone(),
+                goal: entry.display_label.clone(),
+                model: entry.model.clone(),
+                status: entry.status.lock().unwrap().kind_str().to_owned(),
+                child_run_id: entry.child_run_id.clone(),
+                started_at: entry.started_at,
+            })
+            .collect::<Vec<_>>();
+        instances.sort_by_key(|entry| entry.started_at);
+        instances
     }
 
     /// Runs `f` under the lifecycle arbitration. Callers must not already hold it,
@@ -402,6 +547,7 @@ impl FlowRegistry {
         };
         *identity.execution_state.lock().unwrap() =
             crate::flow_authority::FlowExecutionState::Terminal;
+        self.bump_spawn_inventory(&identity.session_id);
         let observers: Vec<_> = {
             let mut observers = self.terminal_observers.lock().unwrap();
             observers.retain(|existing| existing.strong_count() > 0);
@@ -557,7 +703,7 @@ impl FlowRegistry {
             interjection_tx: tokio::sync::broadcast::channel(32).0,
             pending_injections: Arc::new(std::sync::Mutex::new(Vec::new())),
             injection_notify: Arc::new(tokio::sync::Notify::new()),
-            frame_tx: tokio::sync::broadcast::channel(256).0,
+            frame_tx: tokio::sync::broadcast::channel(2048).0,
             workspace_state: Arc::new(Mutex::new(
                 workspace.as_ref().map(|_| WorkspaceState::Active),
             )),
@@ -568,6 +714,9 @@ impl FlowRegistry {
             .lock()
             .unwrap()
             .insert(handle, Arc::clone(&entry));
+        if let Some(identity) = self.lookup_run(&entry.child_run_id) {
+            self.bump_spawn_inventory(&identity.session_id);
+        }
         entry
     }
 
@@ -581,7 +730,12 @@ impl FlowRegistry {
     }
 
     pub fn remove(&self, handle: &str) {
-        self.entries.lock().unwrap().remove(handle);
+        let removed = self.entries.lock().unwrap().remove(handle);
+        if let Some(entry) = removed
+            && let Some(identity) = self.lookup_run(&entry.child_run_id)
+        {
+            self.bump_spawn_inventory(&identity.session_id);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -605,17 +759,16 @@ impl Tool for AgentSpawn {
     fn description(&self) -> Option<&str> {
         Some(
             "Spawn a DSL flow as an independent sub-agent with its own message history and \
-             iteration counter. All named args except `flow` and `async` pass through to the \
-             flow as parameters. Use flow.search for bounded discovery and flow.describe for \
-             the selected parameter contract.\n\n\
+             iteration counter. Put target flow parameters in `arguments`. Use flow.search for \
+             bounded discovery and flow.describe for the selected parameter contract.\n\n\
              Flow reference syntax: `file@flow_name`\n\
              - \"subagent.at@subagent\" — run the `subagent` flow in subagent.at\n\
              - \"subagent@research_loop\" — .at suffix optional\n\
              - \"subagent.at\" — no @, takes first non-describe flow\n\
              - \"/abs/path/my.at@main\" — absolute path\n\n\
              Default flow is `subagent.at` (research/verify/implement/review roles). \
-             Required: `flow`. `version` rejects source changes after discovery. `async` is optional (default true). \
-             Other named args pass through to the flow. \
+             Required: `flow` and a single-use `spawn_token` from flow.instances. `version` rejects source changes after discovery. `async` is optional (default true). \
+             Target flow parameters must be passed through `arguments`. \
              A flow may declare `contract { invocation { user_message: param } }` to seed its child message context. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
              Pass only parameters declared by flow.describe. Missing params use flow-defined defaults.",
@@ -627,6 +780,7 @@ impl Tool for AgentSpawn {
             "type": "object",
             "properties": {
                 "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
+                "spawn_token": {"type": "string", "minLength": 1, "description": "Single-use admission token returned by the latest flow.instances call. Inspect and clean up existing flow instances before spawning."},
                 "version": {"type": "string", "minLength": 1, "description": "Staleness guard. Pass the non-empty source fingerprint returned by the current flow.search or flow.describe result verbatim. Omit this field when no fingerprint is available; never send an empty or invented value."},
                 "arguments": {
                     "type": "object",
@@ -637,12 +791,23 @@ impl Tool for AgentSpawn {
                 "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with the parent snapshot through its last complete tool transaction. Every child also receives an explicit handoff.parent context record."},
                 "workspace": {"type": "string", "enum": ["none", "auto", "retain"], "default": "none", "description": "Workspace policy for the child flow."}
             },
-            "required": ["flow"]
+            "required": ["flow", "spawn_token"],
+            "additionalProperties": false
         })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            let token = extract_spawn_token(&args)?;
+            let flow_registry = ctx.flow_registry.as_ref().ok_or_else(|| {
+                RuntimeError::ToolFailed("flow.spawn: trusted flow registry is unavailable".into())
+            })?;
+            let identity = ctx.flow_identity.as_ref().ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "flow.spawn: trusted caller flow identity is unavailable".into(),
+                )
+            })?;
+            flow_registry.consume_spawn_permit(&token, identity)?;
             let is_async = args
                 .named("async")
                 .and_then(|v| {
@@ -1509,6 +1674,7 @@ fn resolve_flow_arguments(
     for (key, value) in &args.named {
         if key == "flow"
             || key == "version"
+            || key == "spawn_token"
             || key == "async"
             || key == "inherit_context"
             || key == "arguments"
@@ -1731,6 +1897,16 @@ fn extract_flow_version(args: &ToolArgs) -> Result<Option<String>, RuntimeError>
     }
 }
 
+fn extract_spawn_token(args: &ToolArgs) -> Result<String, RuntimeError> {
+    match args.named("spawn_token") {
+        Some(Value::Str(token)) if !token.trim().is_empty() => Ok(token.clone()),
+        _ => Err(RuntimeError::ToolFailed(
+            "flow.spawn: spawn_token is required; call flow.instances, inspect existing flows, reuse suitable work, and kill obsolete flows before spawning"
+                .into(),
+        )),
+    }
+}
+
 async fn read_flow_source(flow_ref: &str) -> Result<(PathBuf, String), RuntimeError> {
     for path in super::flow_source::candidates(flow_ref) {
         match tokio::fs::read_to_string(&path).await {
@@ -1837,6 +2013,59 @@ mod tests {
     struct SandboxProbe;
 
     struct SessionTextProbe;
+
+    fn root_identity(
+        registry: &FlowRegistry,
+        session_id: &str,
+    ) -> Arc<crate::flow_authority::FlowIdentity> {
+        let run_id = crate::event::FlowRunId::now();
+        registry
+            .register_root(
+                session_id.to_owned(),
+                run_id,
+                crate::flow_authority::EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap()
+    }
+
+    fn admitted_args(registry: &FlowRegistry, ctx: &ToolCtx, mut args: ToolArgs) -> ToolArgs {
+        args.named.push((
+            "spawn_token".into(),
+            Value::Str(
+                registry.issue_spawn_permit(ctx.flow_identity.as_ref().expect("flow identity")),
+            ),
+        ));
+        args
+    }
+
+    #[test]
+    fn spawn_permits_are_single_use_and_bound_to_the_caller() {
+        let registry = FlowRegistry::new();
+        let owner = root_identity(&registry, "session");
+        let sibling = root_identity(&registry, "session");
+        let foreign = root_identity(&registry, "other-session");
+
+        let token = registry.issue_spawn_permit(&owner);
+        assert!(registry.consume_spawn_permit(&token, &foreign).is_err());
+
+        let token = registry.issue_spawn_permit(&owner);
+        assert!(registry.consume_spawn_permit(&token, &sibling).is_err());
+
+        let token = registry.issue_spawn_permit(&owner);
+        registry.consume_spawn_permit(&token, &owner).unwrap();
+        assert!(registry.consume_spawn_permit(&token, &owner).is_err());
+    }
+
+    #[test]
+    fn spawn_inventory_changes_invalidate_issued_permits() {
+        let registry = FlowRegistry::new();
+        let owner = root_identity(&registry, "session");
+        let token = registry.issue_spawn_permit(&owner);
+
+        registry.bump_spawn_inventory("session");
+
+        assert!(registry.consume_spawn_permit(&token, &owner).is_err());
+    }
 
     #[test]
     fn empty_spawn_version_is_treated_as_omitted() {
@@ -2083,16 +2312,20 @@ mod tests {
 
             let result = AgentSpawn
                 .call(
-                    ToolArgs {
-                        positional: Vec::new(),
-                        named: vec![
-                            (
-                                "flow".into(),
-                                Value::Str(format!("{}@child", path.display())),
-                            ),
-                            ("async".into(), Value::Bool(is_async)),
-                        ],
-                    },
+                    admitted_args(
+                        &registry,
+                        &ctx,
+                        ToolArgs {
+                            positional: Vec::new(),
+                            named: vec![
+                                (
+                                    "flow".into(),
+                                    Value::Str(format!("{}@child", path.display())),
+                                ),
+                                ("async".into(), Value::Bool(is_async)),
+                            ],
+                        },
+                    ),
                     &ctx,
                 )
                 .await
@@ -2175,24 +2408,28 @@ mod tests {
             let mut ctx = ToolCtx::new()
                 .with_registry(Arc::new(ToolRegistry::new()))
                 .with_providers(Arc::new(ProviderRegistry::new()))
-                .with_flow_registry(registry)
+                .with_flow_registry(Arc::clone(&registry))
                 .with_stream_tx(stream_tx);
             ctx.flow_run_id = Some(root_run_id);
             ctx.flow_identity = Some(root_identity);
 
             AgentSpawn
                 .call(
-                    ToolArgs {
-                        positional: Vec::new(),
-                        named: vec![
-                            (
-                                "flow".into(),
-                                Value::Str(format!("{}@child", path.display())),
-                            ),
-                            ("async".into(), Value::Bool(true)),
-                            ("arguments".into(), Value::Struct(arguments)),
-                        ],
-                    },
+                    admitted_args(
+                        &registry,
+                        &ctx,
+                        ToolArgs {
+                            positional: Vec::new(),
+                            named: vec![
+                                (
+                                    "flow".into(),
+                                    Value::Str(format!("{}@child", path.display())),
+                                ),
+                                ("async".into(), Value::Bool(true)),
+                                ("arguments".into(), Value::Struct(arguments)),
+                            ],
+                        },
+                    ),
                     &ctx,
                 )
                 .await
@@ -2248,16 +2485,20 @@ mod tests {
 
         let result = AgentSpawn
             .call(
-                ToolArgs {
-                    positional: Vec::new(),
-                    named: vec![
-                        (
-                            "flow".into(),
-                            Value::Str(format!("{}@child", path.display())),
-                        ),
-                        ("async".into(), Value::Bool(false)),
-                    ],
-                },
+                admitted_args(
+                    &flows,
+                    &ctx,
+                    ToolArgs {
+                        positional: Vec::new(),
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@child", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(false)),
+                        ],
+                    },
+                ),
                 &ctx,
             )
             .await
@@ -2321,23 +2562,27 @@ flow plain(user_prompt: string) -> string {
 
         let result = AgentSpawn
             .call(
-                ToolArgs {
-                    positional: Vec::new(),
-                    named: vec![
-                        (
-                            "flow".into(),
-                            Value::Str(format!("{}@child", path.display())),
-                        ),
-                        ("async".into(), Value::Bool(false)),
-                        (
-                            "arguments".into(),
-                            Value::Struct(vec![(
-                                "user_prompt".into(),
-                                Value::Str("child prompt".into()),
-                            )]),
-                        ),
-                    ],
-                },
+                admitted_args(
+                    &flows,
+                    &ctx,
+                    ToolArgs {
+                        positional: Vec::new(),
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@child", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(false)),
+                            (
+                                "arguments".into(),
+                                Value::Struct(vec![(
+                                    "user_prompt".into(),
+                                    Value::Str("child prompt".into()),
+                                )]),
+                            ),
+                        ],
+                    },
+                ),
                 &ctx,
             )
             .await
@@ -2352,23 +2597,27 @@ flow plain(user_prompt: string) -> string {
 
         let plain_result = AgentSpawn
             .call(
-                ToolArgs {
-                    positional: Vec::new(),
-                    named: vec![
-                        (
-                            "flow".into(),
-                            Value::Str(format!("{}@plain", path.display())),
-                        ),
-                        ("async".into(), Value::Bool(false)),
-                        (
-                            "arguments".into(),
-                            Value::Struct(vec![(
-                                "user_prompt".into(),
-                                Value::Str("not implicit".into()),
-                            )]),
-                        ),
-                    ],
-                },
+                admitted_args(
+                    &flows,
+                    &ctx,
+                    ToolArgs {
+                        positional: Vec::new(),
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@plain", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(false)),
+                            (
+                                "arguments".into(),
+                                Value::Struct(vec![(
+                                    "user_prompt".into(),
+                                    Value::Str("not implicit".into()),
+                                )]),
+                            ),
+                        ],
+                    },
+                ),
                 &ctx,
             )
             .await
@@ -2378,23 +2627,27 @@ flow plain(user_prompt: string) -> string {
 
         let async_result = AgentSpawn
             .call(
-                ToolArgs {
-                    positional: Vec::new(),
-                    named: vec![
-                        (
-                            "flow".into(),
-                            Value::Str(format!("{}@child", path.display())),
-                        ),
-                        ("async".into(), Value::Bool(true)),
-                        (
-                            "arguments".into(),
-                            Value::Struct(vec![(
-                                "user_prompt".into(),
-                                Value::Str("async child prompt".into()),
-                            )]),
-                        ),
-                    ],
-                },
+                admitted_args(
+                    &flows,
+                    &ctx,
+                    ToolArgs {
+                        positional: Vec::new(),
+                        named: vec![
+                            (
+                                "flow".into(),
+                                Value::Str(format!("{}@child", path.display())),
+                            ),
+                            ("async".into(), Value::Bool(true)),
+                            (
+                                "arguments".into(),
+                                Value::Struct(vec![(
+                                    "user_prompt".into(),
+                                    Value::Str("async child prompt".into()),
+                                )]),
+                            ),
+                        ],
+                    },
+                ),
                 &ctx,
             )
             .await

@@ -150,6 +150,7 @@ impl<'a> StreamingLlmStream<'a> {
     }
 
     pub(crate) fn with_entry(mut self, entry: &'a Arc<FlowEntry>) -> Self {
+        self.flow_cancel = Some(entry.cancel.clone());
         self.frame_tx = Some(entry.frame_tx.clone());
         self.entry = Some(entry);
         self
@@ -1138,6 +1139,29 @@ mod tests {
             session.cancel_flow();
         };
         tokio::join!(stream.run(), fut).0.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn spawned_flow_cancel_interrupts_in_flight_provider_stream() {
+        let provider = ScriptProvider::new(vec![vec![Step::WaitCancel]]);
+        let entry = entry();
+        let cancel = entry.cancel.clone();
+        let (stream_tx, _) = broadcast::channel(16);
+        let mut stream = LlmStream::new(&provider, req(60))
+            .with_stream_tx(stream_tx)
+            .with_entry(&entry);
+        let cancel_task = async move {
+            tokio::task::yield_now().await;
+            cancel.cancel();
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            tokio::join!(stream.run(), cancel_task).0
+        })
+        .await
+        .expect("entry cancellation must wake the provider stream");
+        assert!(
+            matches!(result, Err(RuntimeError::Cancelled(message)) if message.contains("flow cancelled"))
+        );
     }
 
     #[tokio::test]

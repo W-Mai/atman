@@ -34,10 +34,8 @@ impl WindowComponent for FlowPanelContent {
         let mut hitmap_out: Vec<HitRegion> = Vec::new();
 
         let found = ctx
-            .handle_index
-            .get(&self.handle)
-            .copied()
-            .and_then(|index| ctx.items.get(index).map(|item| (index, item)))
+            .task_detail(&self.handle)
+            .map(|(index, item, _)| (index, item))
             .filter(|(_, item)| matches!(item, OutputItem::SubAgentActivity { .. }));
 
         if let Some((
@@ -739,6 +737,7 @@ mod tests {
                             items: &items,
                             item_revisions: &revisions,
                             handle_index: &empty_index,
+                            detached_task_details: &std::collections::HashMap::new(),
                             task_handle_index: &empty_index,
                             workflow_run_to_panel: &workflow_index,
                             task_snapshots_revision: 0,

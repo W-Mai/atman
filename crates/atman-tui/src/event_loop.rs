@@ -117,20 +117,30 @@ pub(crate) async fn run_frames(
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
 
-    // Fan-in merge: session broadcast (session-level frames) + each FlowRun's
-    // frame_tx (per-FlowRun frames). Forwarders are spawned on SubAgentStarted
-    // / root FlowStart so the TUI receives every frame through one channel.
-    let (merge_tx, mut merge_rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
+    // Keep bulk process output off the semantic lane so a noisy command cannot
+    // delay lifecycle, completion, approval, or cancellation frames.
+    let (semantic_tx, mut semantic_rx) = tokio::sync::mpsc::channel::<StreamFrame>(512);
+    let (bulk_tx, mut bulk_rx) = tokio::sync::mpsc::channel::<StreamFrame>(256);
     {
-        let fwd_tx = merge_tx.clone();
+        let semantic_tx = semantic_tx.clone();
+        let bulk_tx = bulk_tx.clone();
         let mut srx = handle.stream_rx;
         tokio::spawn(async move {
-            while let Ok(f) = srx.recv().await {
-                let _ = fwd_tx.send(f);
+            loop {
+                match srx.recv().await {
+                    Ok(frame) => {
+                        if !forward_ui_frame(frame, &semantic_tx, &bulk_tx).await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
     }
-    let frame_merge_tx = merge_tx.clone();
+    let frame_semantic_tx = semantic_tx.clone();
+    let frame_bulk_tx = bulk_tx.clone();
     let session_for_sub = handle.session.clone();
 
     loop {
@@ -142,8 +152,10 @@ pub(crate) async fn run_frames(
             } else {
                 terminal.hide_cursor()?;
             }
-        } else {
+        } else if app.wm.focused_id().is_none() {
             terminal.show_cursor()?;
+        } else {
+            terminal.hide_cursor()?;
         }
         app.app.tick = app.app.tick.wrapping_add(1);
 
@@ -403,37 +415,51 @@ pub(crate) async fn run_frames(
                                             _ => None,
                                         }
                                     });
-                                    if let (Some(registry), Some(handle)) =
-                                        (&app.app.task_registry, close_handle)
-                                        && let Some(task) = registry.lookup_by_handle_in_session(
-                                            &handle,
+                                    let task = close_handle.as_deref().and_then(|handle| {
+                                        app.app.task_registry.as_ref()?.lookup_by_handle_in_session(
+                                            handle,
                                             &app.app.session_id,
                                         )
-                                        && task.is_running()
-                                    {
-                                        let armed = app
-                                            .wm
-                                            .interaction
-                                            .panel_close_armed_id
-                                            .as_deref()
-                                            == Some(handle.as_str())
-                                            && !app.wm.panel_close_arm_expired();
-                                        if armed {
-                                            let _ = registry.kill_by_handle_from_operator(
-                                                &handle,
-                                                &app.app.session_id,
-                                            );
+                                    });
+                                    match (close_handle, task) {
+                                        (Some(handle), Some(task))
+                                            if task.is_running()
+                                                && task.kind == atman_runtime::TaskKind::Flow =>
+                                        {
+                                            if let Some(registry) = &app.app.task_registry {
+                                                let _ = registry.kill_by_handle_from_operator(
+                                                    &handle,
+                                                    &app.app.session_id,
+                                                );
+                                            }
                                             app.wm.clear_panel_close_arm();
-                                        } else {
-                                            app.wm.arm_panel_close(handle);
-                                            app.app.push_note(
-                                                format!(
-                                                    "press ✕ again to kill {}",
-                                                    task.label
-                                                ),
-                                                app::NoteLevel::Warn,
-                                            );
+                                            app.wm.close(close_id);
                                         }
+                                        (Some(handle), Some(task)) if task.is_running() => {
+                                            let armed = app
+                                                .wm
+                                                .interaction
+                                                .panel_close_armed_id
+                                                .as_deref()
+                                                == Some(handle.as_str())
+                                                && !app.wm.panel_close_arm_expired();
+                                            if armed {
+                                                if let Some(registry) = &app.app.task_registry {
+                                                    let _ = registry.kill_by_handle_from_operator(
+                                                        &handle,
+                                                        &app.app.session_id,
+                                                    );
+                                                }
+                                                app.wm.clear_panel_close_arm();
+                                            } else {
+                                                app.wm.arm_panel_close(handle);
+                                                app.app.push_note(
+                                                    format!("press ✕ again to kill {}", task.label),
+                                                    app::NoteLevel::Warn,
+                                                );
+                                            }
+                                        }
+                                        _ => app.wm.close(close_id),
                                     }
                                 } else if let Some(resize_id) =
                                     app.wm.hit_test_resize(me.column, me.row)
@@ -1241,7 +1267,7 @@ pub(crate) async fn run_frames(
                     app.app.scroll_down(scroll_delta as u32);
                 }
             }
-            frame = merge_rx.recv() => {
+            frame = semantic_rx.recv() => {
                 if let Some(frame) = frame {
                     // Spawn per-FlowRun frame_tx forwarders when new FlowRuns appear.
                     let new_handle: Option<String> = match &frame {
@@ -1255,27 +1281,39 @@ pub(crate) async fn run_frames(
                         && let Some(sess) = &session_for_sub
                         && let Ok(entry) = sess.flow_registry.lookup(&h)
                     {
-                        let tx = frame_merge_tx.clone();
+                        let semantic_tx = frame_semantic_tx.clone();
+                        let bulk_tx = frame_bulk_tx.clone();
                         let mut rx = entry.frame_tx.subscribe();
                         tokio::spawn(async move {
-                            while let Ok(f) = rx.recv().await {
-                                let _ = tx.send(f);
+                            loop {
+                                match rx.recv().await {
+                                    Ok(frame) => {
+                                        if !forward_ui_frame(frame, &semantic_tx, &bulk_tx).await {
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue;
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                }
                             }
                         });
                     }
                     app.app.apply_stream_frame(frame);
-                    let mut drained = 0u32;
-                    while drained < 256 {
-                        match merge_rx.try_recv() {
-                            Ok(extra) => {
-                                app.app.apply_stream_frame(extra);
-                                drained += 1;
-                            }
-                            Err(_) => break,
-                        }
-                    }
                 } else {
                     break;
+                }
+            }
+            frame = bulk_rx.recv() => {
+                if let Some(frame) = frame {
+                    app.app.apply_stream_frame(frame);
+                    for _ in 0..255 {
+                        let Ok(frame) = bulk_rx.try_recv() else {
+                            break;
+                        };
+                        app.app.apply_stream_frame(frame);
+                    }
                 }
             }
             ev = recv_task_event(handle.task_event_rx.as_mut()) => {
@@ -1782,6 +1820,28 @@ pub(crate) async fn wait_shutdown(rx: Option<&mut tokio::sync::oneshot::Receiver
     }
 }
 
+fn is_bulk_ui_frame(frame: &StreamFrame) -> bool {
+    matches!(
+        frame,
+        StreamFrame::BashChunk { .. } | StreamFrame::TerminalChunk { .. }
+    )
+}
+
+async fn forward_ui_frame(
+    frame: StreamFrame,
+    semantic_tx: &tokio::sync::mpsc::Sender<StreamFrame>,
+    bulk_tx: &tokio::sync::mpsc::Sender<StreamFrame>,
+) -> bool {
+    if is_bulk_ui_frame(&frame) {
+        match bulk_tx.try_send(frame) {
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    } else {
+        semantic_tx.send(frame).await.is_ok()
+    }
+}
+
 pub(crate) async fn poll_update_check(
     handle: &mut tokio::task::JoinHandle<Option<String>>,
 ) -> Option<String> {
@@ -1791,6 +1851,28 @@ pub(crate) async fn poll_update_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn saturated_bulk_lane_does_not_block_semantic_frames() {
+        let (semantic_tx, mut semantic_rx) = tokio::sync::mpsc::channel(1);
+        let (bulk_tx, _bulk_rx) = tokio::sync::mpsc::channel(1);
+        let bulk = StreamFrame::BashChunk {
+            handle: "bg".into(),
+            kind: "stdout".into(),
+            line: "data".into(),
+            call_intent: None,
+            tool_use_id: None,
+            run_id: None,
+        };
+        assert!(forward_ui_frame(bulk.clone(), &semantic_tx, &bulk_tx).await);
+        assert!(forward_ui_frame(bulk, &semantic_tx, &bulk_tx).await);
+
+        assert!(forward_ui_frame(StreamFrame::LlmRetry, &semantic_tx, &bulk_tx).await);
+        assert!(matches!(
+            semantic_rx.recv().await,
+            Some(StreamFrame::LlmRetry)
+        ));
+    }
 
     #[test]
     fn pending_model_switch_defers_context_model_and_reasoning_changes() {
