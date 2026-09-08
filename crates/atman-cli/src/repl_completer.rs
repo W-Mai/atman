@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rustyline::Context;
 use rustyline::completion::{Completer, Pair};
@@ -13,13 +13,23 @@ const BUILTINS: &[&str] = &[
 const INTERJECTIONS: &[&str] = &["nudge", "course-correct", "redirect", "stop"];
 
 pub struct AtmanCompleter {
-    commands_dir: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    project_root: Option<PathBuf>,
 }
 
 impl AtmanCompleter {
     pub fn new(config_dir: Option<PathBuf>) -> Self {
         Self {
-            commands_dir: config_dir.map(|d| d.join("commands")),
+            config_dir,
+            project_root: atman_runtime::tools::flow_source::current_project_root(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_project_root(config_dir: Option<PathBuf>, project_root: Option<PathBuf>) -> Self {
+        Self {
+            config_dir,
+            project_root,
         }
     }
 
@@ -45,30 +55,20 @@ impl AtmanCompleter {
     }
 
     fn slash_command_names(&self) -> Vec<String> {
-        let Some(dir) = self.commands_dir.as_deref() else {
-            return Vec::new();
-        };
-        collect_command_names(dir)
+        atman_runtime::tools::flow_source::installed_sources(
+            self.config_dir.as_deref(),
+            self.project_root.as_deref(),
+        )
+        .into_iter()
+        .filter_map(|source| {
+            source
+                .path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })
+        .collect()
     }
-}
-
-fn collect_command_names(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for e in entries.flatten() {
-        let path = e.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("at") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            out.push(stem.to_string());
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
 }
 
 fn last_word(rest: &str, offset: usize) -> (&str, usize) {
@@ -175,6 +175,26 @@ mod tests {
         let (_, cand) = c.complete_line("/", 1);
         let names: Vec<&str> = cand.iter().map(|p| p.display.as_str()).collect();
         assert_eq!(names, vec!["ok"]);
+    }
+
+    #[test]
+    fn slash_prefix_merges_project_and_user_commands_with_project_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = seed(&tmp, &["review", "global"]);
+        let project = tmp.path().join("project");
+        let commands = project.join(".atman/commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("review.at"), "project\n").unwrap();
+        std::fs::write(commands.join("local.at"), "project\n").unwrap();
+        let c = AtmanCompleter::with_project_root(Some(cfg), Some(project));
+
+        let (_, cand) = c.complete_line("/", 1);
+        let mut names = cand
+            .iter()
+            .map(|pair| pair.display.as_str())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, vec!["global", "local", "review"]);
     }
 
     #[test]

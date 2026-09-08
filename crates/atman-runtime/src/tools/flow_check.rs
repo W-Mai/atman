@@ -52,7 +52,7 @@ impl Tool for FlowCheck {
                 }
             };
 
-            let (path, src) = read_flow_source(&flow_ref).await?;
+            let (path, src) = read_flow_source(&flow_ref, ctx).await?;
             let file = atman_dsl::parse::parse_file(&src).map_err(|e| {
                 RuntimeError::ToolFailed(format!("flow.check: parse {}: {e}", path.display()))
             })?;
@@ -95,8 +95,11 @@ impl Tool for FlowCheck {
     }
 }
 
-async fn read_flow_source(flow_ref: &str) -> Result<(std::path::PathBuf, String), RuntimeError> {
-    for path in super::flow_source::candidates(flow_ref) {
+async fn read_flow_source(
+    flow_ref: &str,
+    ctx: &ToolCtx,
+) -> Result<(std::path::PathBuf, String), RuntimeError> {
+    for path in super::flow_source::candidates(flow_ref, ctx) {
         match tokio::fs::read_to_string(&path).await {
             Ok(src) => return Ok((path, src)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -999,12 +999,13 @@ struct PreparedFlowAgent {
 async fn prepare_flow_agent(
     flow_ref: &str,
     expected_version: Option<&str>,
+    ctx: &ToolCtx,
 ) -> Result<PreparedFlowAgent, RuntimeError> {
     let (file_part, flow_name) = match flow_ref.split_once('@') {
         Some((file, name)) => (file, Some(name)),
         None => (flow_ref, None),
     };
-    let (path, source) = read_flow_source(file_part).await?;
+    let (path, source) = read_flow_source(file_part, ctx).await?;
     let actual_version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
     if expected_version.is_some_and(|version| version != actual_version) {
         return Err(RuntimeError::ToolFailed(format!(
@@ -1069,7 +1070,7 @@ fn spawned_workspace_authority(
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
     let version = extract_flow_version(&args)?;
-    let prepared = prepare_flow_agent(&flow, version.as_deref()).await?;
+    let prepared = prepare_flow_agent(&flow, version.as_deref(), ctx).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
     let inherit_context = should_inherit_context(&args);
     let run_id = FlowRunId::now();
@@ -1142,7 +1143,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
     let flow_ref = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
     let version = extract_flow_version(&args)?;
-    let prepared = prepare_flow_agent(&flow_ref, version.as_deref()).await?;
+    let prepared = prepare_flow_agent(&flow_ref, version.as_deref(), ctx).await?;
     let flow_args = resolve_flow_arguments(&prepared.flow, &args)?;
     let model = flow_args
         .iter()
@@ -1907,8 +1908,11 @@ fn extract_spawn_token(args: &ToolArgs) -> Result<String, RuntimeError> {
     }
 }
 
-async fn read_flow_source(flow_ref: &str) -> Result<(PathBuf, String), RuntimeError> {
-    for path in super::flow_source::candidates(flow_ref) {
+async fn read_flow_source(
+    flow_ref: &str,
+    ctx: &ToolCtx,
+) -> Result<(PathBuf, String), RuntimeError> {
+    for path in super::flow_source::candidates(flow_ref, ctx) {
         match tokio::fs::read_to_string(&path).await {
             Ok(src) => return Ok((path, src)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2086,9 +2090,12 @@ mod tests {
         std::fs::write(&path, source).unwrap();
         let flow_ref = format!("{}@child", path.display());
         let version = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+        let ctx = ToolCtx::new();
 
-        prepare_flow_agent(&flow_ref, Some(&version)).await.unwrap();
-        let error = match prepare_flow_agent(&flow_ref, Some("blake3:stale")).await {
+        prepare_flow_agent(&flow_ref, Some(&version), &ctx)
+            .await
+            .unwrap();
+        let error = match prepare_flow_agent(&flow_ref, Some("blake3:stale"), &ctx).await {
             Ok(_) => panic!("stale version should fail"),
             Err(error) => error,
         };

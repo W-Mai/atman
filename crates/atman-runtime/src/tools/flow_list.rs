@@ -3,7 +3,7 @@ use crate::storage;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 use atman_dsl::ast::{Expr, FlowDecl, Literal, Stmt, TypeExpr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
@@ -26,12 +26,16 @@ struct FlowEntry {
     reference: String,
     version: String,
     summary: String,
+    scope: &'static str,
+    source_path: PathBuf,
     params: Vec<FlowParameter>,
 }
 
 struct FlowFile {
     name: String,
     description: String,
+    scope: &'static str,
+    source_path: PathBuf,
     flows: Vec<FlowEntry>,
 }
 
@@ -41,14 +45,18 @@ struct FlowCatalog {
 }
 
 impl FlowCatalog {
-    fn load() -> Result<Self, RuntimeError> {
+    fn load(ctx: &ToolCtx) -> Result<Self, RuntimeError> {
         let config_dir = storage::config_dir()
             .map_err(|error| RuntimeError::ToolFailed(format!("flow catalog: {error}")))?;
-        Self::load_from(&config_dir.join("commands"))
+        let project_root = super::flow_source::project_root_for_ctx(ctx);
+        let sources =
+            super::flow_source::installed_sources(Some(&config_dir), project_root.as_deref());
+        Self::load_sources(sources)
     }
 
+    #[cfg(test)]
     fn load_from(commands_dir: &Path) -> Result<Self, RuntimeError> {
-        let mut files = Vec::new();
+        let mut sources = Vec::new();
         if commands_dir.is_dir() {
             let read = std::fs::read_dir(commands_dir).map_err(|error| {
                 RuntimeError::ToolFailed(format!(
@@ -61,9 +69,22 @@ impl FlowCatalog {
                 if path.extension().and_then(|extension| extension.to_str()) != Some("at") {
                     continue;
                 }
-                if let Ok(file) = scan_flow_file(&path) {
-                    files.push(file);
-                }
+                sources.push(super::flow_source::InstalledFlowSource {
+                    path,
+                    scope: super::flow_source::FlowSourceScope::User,
+                });
+            }
+        }
+        Self::load_sources(sources)
+    }
+
+    fn load_sources(
+        sources: Vec<super::flow_source::InstalledFlowSource>,
+    ) -> Result<Self, RuntimeError> {
+        let mut files = Vec::new();
+        for source in sources {
+            if let Ok(file) = scan_flow_file(&source.path, source.scope) {
+                files.push(file);
             }
         }
         files.sort_by(|left, right| left.name.cmp(&right.name));
@@ -119,6 +140,11 @@ impl FlowCatalog {
                     Value::Struct(vec![
                         ("file".into(), Value::Str(file.name.clone())),
                         ("description".into(), Value::Str(file.description.clone())),
+                        ("scope".into(), Value::Str(file.scope.into())),
+                        (
+                            "source_path".into(),
+                            Value::Str(file.source_path.display().to_string()),
+                        ),
                         (
                             "flows".into(),
                             Value::List(file.flows.iter().map(legacy_flow_value).collect()),
@@ -150,8 +176,8 @@ impl Tool for FlowList {
         serde_json::json!({"type": "object", "properties": {}})
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
-        Box::pin(async move { Ok(FlowCatalog::load()?.legacy_value()) })
+    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move { Ok(FlowCatalog::load(ctx)?.legacy_value()) })
     }
 }
 
@@ -249,12 +275,12 @@ impl Tool for FlowSearch {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let query = string_arg(&args, "query", "flow.search")?;
             let limit = limit_arg(&args, "flow.search")?;
             let cursor = optional_string_arg(&args, "cursor", "flow.search")?;
-            search_catalog(&FlowCatalog::load()?, query, limit, cursor.as_deref())
+            search_catalog(&FlowCatalog::load(ctx)?, query, limit, cursor.as_deref())
         })
     }
 }
@@ -288,11 +314,15 @@ impl Tool for FlowDescribe {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let flow_ref = string_arg(&args, "ref", "flow.describe")?;
             let expected_version = optional_string_arg(&args, "version", "flow.describe")?;
-            describe_catalog_entry(&FlowCatalog::load()?, flow_ref, expected_version.as_deref())
+            describe_catalog_entry(
+                &FlowCatalog::load(ctx)?,
+                flow_ref,
+                expected_version.as_deref(),
+            )
         })
     }
 }
@@ -332,6 +362,11 @@ fn search_catalog(
                 ("ref".into(), Value::Str(flow.reference.clone())),
                 ("version".into(), Value::Str(flow.version.clone())),
                 ("summary".into(), Value::Str(flow.summary.clone())),
+                ("scope".into(), Value::Str(flow.scope.into())),
+                (
+                    "source_path".into(),
+                    Value::Str(flow.source_path.display().to_string()),
+                ),
             ])
         })
         .collect();
@@ -400,7 +435,10 @@ fn describe_catalog_entry(
     Ok(flow_detail_value(flow))
 }
 
-fn scan_flow_file(path: &Path) -> Result<FlowFile, RuntimeError> {
+fn scan_flow_file(
+    path: &Path,
+    scope: super::flow_source::FlowSourceScope,
+) -> Result<FlowFile, RuntimeError> {
     let source = std::fs::read_to_string(path).map_err(|error| {
         RuntimeError::ToolFailed(format!("flow catalog: read {}: {error}", path.display()))
     })?;
@@ -422,21 +460,32 @@ fn scan_flow_file(path: &Path) -> Result<FlowFile, RuntimeError> {
     let flows = parsed
         .flows
         .iter()
-        .map(|flow| flow_entry(&file_name, &description, &version, flow))
+        .map(|flow| flow_entry(&file_name, &description, &version, scope, path, flow))
         .collect();
     Ok(FlowFile {
         name: file_name,
         description,
+        scope: scope.as_str(),
+        source_path: path.to_path_buf(),
         flows,
     })
 }
 
-fn flow_entry(file_name: &str, description: &str, version: &str, flow: &FlowDecl) -> FlowEntry {
+fn flow_entry(
+    file_name: &str,
+    description: &str,
+    version: &str,
+    scope: super::flow_source::FlowSourceScope,
+    source_path: &Path,
+    flow: &FlowDecl,
+) -> FlowEntry {
     FlowEntry {
         name: flow.name.name.clone(),
         reference: format!("{file_name}@{}", flow.name.name),
         version: version.to_string(),
         summary: description.to_string(),
+        scope: scope.as_str(),
+        source_path: source_path.to_path_buf(),
         params: flow
             .params
             .iter()
@@ -455,6 +504,11 @@ fn flow_detail_value(flow: &FlowEntry) -> Value {
         ("ref".into(), Value::Str(flow.reference.clone())),
         ("version".into(), Value::Str(flow.version.clone())),
         ("summary".into(), Value::Str(flow.summary.clone())),
+        ("scope".into(), Value::Str(flow.scope.into())),
+        (
+            "source_path".into(),
+            Value::Str(flow.source_path.display().to_string()),
+        ),
         (
             "params".into(),
             Value::List(

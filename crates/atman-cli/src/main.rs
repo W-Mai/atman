@@ -1322,6 +1322,16 @@ type SlashCommandParsed = (
 );
 
 fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
+    let cfg = config_dir()?;
+    let project_root = atman_runtime::tools::flow_source::current_project_root();
+    resolve_slash_command_from(line, &cfg, project_root.as_deref())
+}
+
+fn resolve_slash_command_from(
+    line: &str,
+    cfg: &Path,
+    project_root: Option<&Path>,
+) -> Result<SlashCommandParsed> {
     let trimmed_line = line.trim();
     let (name_full, rest_raw) = match trimmed_line.split_once(char::is_whitespace) {
         Some((n, r)) => (n, r.trim_start()),
@@ -1331,14 +1341,21 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
         bail!("empty slash command");
     }
     let name = name_full.strip_prefix('/').unwrap_or(name_full);
-    let cfg = config_dir()?;
     if name == "agent" {
-        atman_runtime::templates::ensure_managed_agent_at(&cfg)?;
+        atman_runtime::templates::ensure_managed_agent_at(cfg)?;
     }
-    let path = cfg.join("commands").join(format!("{name}.at"));
-    if !path.exists() {
-        bail!("no such command: {} (looked for {})", name, path.display());
-    }
+    let path =
+        atman_runtime::tools::flow_source::resolve_installed_command(name, Some(cfg), project_root)
+            .map(|source| source.path)
+            .ok_or_else(|| {
+                let project_location = project_root
+                    .map(|root| root.join(".atman/commands").display().to_string())
+                    .unwrap_or_else(|| "<no project root>".into());
+                anyhow::anyhow!(
+                    "no such command: {name} (looked in {project_location} and {})",
+                    cfg.join("commands").display()
+                )
+            })?;
     let source =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
@@ -3709,21 +3726,18 @@ fn discover_flow_names() -> Vec<(String, String)> {
     let Ok(cfg) = config_dir() else {
         return Vec::new();
     };
-    let dir = cfg.join("commands");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, String)> = Vec::new();
-    for e in entries.flatten() {
-        let path = e.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("at") {
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        out.push((name.to_string(), format!("commands/{name}.at")));
-    }
+    let project_root = atman_runtime::tools::flow_source::current_project_root();
+    let mut out =
+        atman_runtime::tools::flow_source::installed_sources(Some(&cfg), project_root.as_deref())
+            .into_iter()
+            .filter_map(|source| {
+                let name = source.path.file_stem()?.to_str()?.to_owned();
+                Some((
+                    name,
+                    format!("{} · {}", source.scope.as_str(), source.path.display()),
+                ))
+            })
+            .collect::<Vec<_>>();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
@@ -7605,6 +7619,36 @@ mod tests {
         assert_eq!(select_suggest_model(Some("smart".into())), "smart");
         assert_eq!(select_suggest_model(Some(String::new())), "");
         assert_eq!(select_suggest_model(None), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn slash_command_prefers_project_source_over_user_source() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let project = root.path().join("project");
+        let user_commands = config.join("commands");
+        let project_commands = project.join(".atman/commands");
+        std::fs::create_dir_all(&user_commands).unwrap();
+        std::fs::create_dir_all(&project_commands).unwrap();
+        std::fs::write(
+            user_commands.join("review.at"),
+            "flow user_entry() { return \"user\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_commands.join("review.at"),
+            "flow review(input: string) { return input }\n",
+        )
+        .unwrap();
+
+        let (_, flow_name, args, source_dir) =
+            resolve_slash_command_from("/review inspect this", &config, Some(&project)).unwrap();
+
+        assert_eq!(flow_name, "review");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].0, "input");
+        assert!(matches!(&args[0].1, Value::Str(value) if value == "inspect this"));
+        assert_eq!(source_dir, Some(project_commands));
     }
 
     #[test]
