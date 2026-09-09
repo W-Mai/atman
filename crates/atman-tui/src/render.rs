@@ -309,6 +309,15 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         let empty_messages: Vec<atman_runtime::message::Message> = Vec::new();
         let messages: &[atman_runtime::message::Message] =
             messages_guard.as_deref().unwrap_or(&empty_messages);
+        let work_folds = app.work_fold_projections();
+        let animating_fold = work_folds
+            .iter()
+            .rev()
+            .find(|fold| fold.animating)
+            .map(|fold| (fold.key, fold.start_index));
+        if animating_fold.is_none() {
+            app.clear_work_fold_scroll_anchor();
+        }
         let ctx = output::RenderCtx {
             expanded_tools: &app.expanded_tools,
             messages,
@@ -321,7 +330,6 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             width: transcript_area.width,
             theme: crate::theme::current_mode(),
         };
-        let work_folds = app.work_fold_projections();
         let mut cache = std::mem::take(&mut app.layout_cache);
         let old_total_rows = cache.total_rows();
         let folding_above_viewport = !app.follow_tail
@@ -331,7 +339,9 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                     .is_some_and(|end| end <= app.scroll_offset)
             });
         cache.set_work_folds(work_folds);
-        let follow_tail_rows = app.follow_tail.then(|| {
+        let has_work_anchor =
+            animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
+        let follow_tail_rows = (app.follow_tail && !has_work_anchor).then(|| {
             document_visible_rows
                 .saturating_sub(input_overlay_rows)
                 .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
@@ -361,6 +371,29 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 },
             );
         }
+        if let Some((key, start_index)) = animating_fold
+            && let Some(header_row) = cache.item_row_start(start_index)
+        {
+            if let Some(screen_row) = app.work_fold_scroll_anchor(key) {
+                let anchored_offset = header_row.saturating_sub(screen_row);
+                if anchored_offset != metrics.scroll_offset {
+                    metrics = cache.update_dirty(
+                        cache_key,
+                        &app.items,
+                        &ctx,
+                        output::LayoutRequest {
+                            scroll_offset: anchored_offset,
+                            follow_tail_rows: None,
+                            ..request
+                        },
+                    );
+                }
+            } else if header_row >= metrics.scroll_offset
+                && header_row < metrics.scroll_offset.saturating_add(effective_viewport)
+            {
+                app.set_work_fold_scroll_anchor(key, header_row - metrics.scroll_offset);
+            }
+        }
         let (lines, ranges, node_regions) = cache.visible_slice(
             metrics.scroll_offset,
             effective_viewport,
@@ -370,12 +403,27 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.last_item_ranges = ranges;
         app.last_node_regions = node_regions;
         app.layout_cache = cache;
-        app.resolve_scroll(
-            total_rows,
-            document_visible_rows,
-            input_overlay_rows,
-            app.items.len(),
-        );
+        let preserve_work_anchor =
+            animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
+        if preserve_work_anchor {
+            let follow_tail = app.follow_tail;
+            app.follow_tail = false;
+            app.scroll_offset = metrics.scroll_offset;
+            app.resolve_scroll(
+                total_rows,
+                document_visible_rows,
+                input_overlay_rows,
+                app.items.len(),
+            );
+            app.follow_tail = follow_tail;
+        } else {
+            app.resolve_scroll(
+                total_rows,
+                document_visible_rows,
+                input_overlay_rows,
+                app.items.len(),
+            );
+        }
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }

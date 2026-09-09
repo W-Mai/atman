@@ -167,6 +167,7 @@ fn flatten_transcript_impl(
     let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
     let mut sub_agent_entries: HashMap<String, Vec<&TranscriptEntry>> = HashMap::new();
     let mut terminal_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut work_start_by_turn: HashMap<atman_runtime::event::TurnId, usize> = HashMap::new();
     let mut workflow_permission_batches: HashMap<
         usize,
         Vec<(
@@ -344,8 +345,31 @@ fn flatten_transcript_impl(
                         .or_default()
                         .push(msg.clone());
                 } else {
+                    let starts_root_turn = msg.role == MessageRole::User
+                        && msg.origin == atman_runtime::message::MessageOrigin::User
+                        && flow_run_id.is_none();
+                    let finishes_root_turn = msg.role == MessageRole::Assistant
+                        && msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer;
                     let first_new_item = out.len();
                     flatten_message_with_output_store(msg, &mut out, &tool_map, output_store);
+                    if starts_root_turn {
+                        work_start_by_turn
+                            .entry(msg.turn_id.clone())
+                            .or_insert(out.len());
+                    }
+                    if finishes_root_turn {
+                        let start_index = work_start_by_turn.get(&msg.turn_id).copied();
+                        for item in &mut out[first_new_item..] {
+                            if let OutputItem::WorkFoldMarker {
+                                start_index: marker_start,
+                                ..
+                            } = item
+                            {
+                                *marker_start = start_index;
+                                break;
+                            }
+                        }
+                    }
                     for (item_index, item) in out.iter().enumerate().skip(first_new_item) {
                         if let OutputItem::Terminal { handle, .. } = item {
                             terminal_indices
@@ -1030,6 +1054,7 @@ pub(crate) fn flatten_message_with_output_store(
             if msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer {
                 out.push(OutputItem::WorkFoldMarker {
                     summary: atman_runtime::tools::final_answer::summary(msg),
+                    start_index: None,
                 });
             }
             let calls = msg
@@ -1591,13 +1616,70 @@ mod tests {
         flatten_message(&message, &mut items, &HashMap::new());
         assert!(matches!(
             items.first(),
-            Some(OutputItem::WorkFoldMarker { summary: Some(summary) })
+            Some(OutputItem::WorkFoldMarker {
+                summary: Some(summary),
+                ..
+            })
                 if summary == "Checked the renderer and tests."
         ));
         assert!(matches!(
             items.get(1),
             Some(OutputItem::AssistantMd { md, .. }) if md == "Done."
         ));
+    }
+
+    #[test]
+    fn replay_fold_starts_after_the_external_user_message() {
+        let turn_id = TurnId::now();
+        let external = Message::user_text(turn_id.clone(), "build it");
+        let internal = Message::user_text(turn_id.clone(), "provide the final answer");
+        let final_answer = Message {
+            role: MessageRole::Assistant,
+            parts: vec![
+                MessagePart::FinalAnswerSummary {
+                    text: "Completed the requested work.".into(),
+                },
+                MessagePart::Text {
+                    text: "Done.".into(),
+                },
+            ],
+            turn_id,
+            origin: atman_runtime::message::MessageOrigin::FinalAnswer,
+        };
+        let entries = vec![
+            TranscriptEntry::Message {
+                message: external,
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: assistant(vec![MessagePart::Thinking {
+                    thinking: "working".into(),
+                    signature: None,
+                }]),
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: internal,
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: final_answer,
+                flow_run_id: None,
+            },
+        ];
+
+        let items = flatten_transcript(&entries);
+        let (marker_index, start_index) = items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| match item {
+                OutputItem::WorkFoldMarker { start_index, .. } => Some((index, *start_index)),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(start_index, Some(1));
+        assert!(marker_index > 2);
     }
 
     fn approved_permission(run_id: FlowRunId, tool_use_id: &str) -> TranscriptEntry {

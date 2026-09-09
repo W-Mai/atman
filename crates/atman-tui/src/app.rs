@@ -460,6 +460,7 @@ pub enum OutputItem {
     },
     WorkFoldMarker {
         summary: Option<String>,
+        start_index: Option<usize>,
     },
     Divider,
     WorkflowPanel {
@@ -1045,6 +1046,7 @@ pub struct AppState {
     pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
     llm_disclosures: std::collections::HashMap<String, LlmDisclosureState>,
     work_folds: Vec<WorkFoldState>,
+    work_fold_scroll_anchor: Option<(u64, u32)>,
     final_answer_drafts: std::collections::HashMap<String, FinalAnswerDraftState>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
@@ -1326,6 +1328,7 @@ impl AppState {
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.llm_disclosures.clear();
         self.work_folds.clear();
+        self.work_fold_scroll_anchor = None;
         self.final_answer_drafts.clear();
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
@@ -1334,18 +1337,25 @@ impl AppState {
             .iter()
             .enumerate()
             .filter_map(|(index, item)| match item {
-                OutputItem::WorkFoldMarker { summary } => Some((index, summary.clone())),
+                OutputItem::WorkFoldMarker {
+                    summary,
+                    start_index,
+                } => Some((index, summary.clone(), *start_index)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for (marker_index, summary) in marker_indices {
-            let Some(user_index) = self.items[..marker_index]
-                .iter()
-                .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
-            else {
+        for (marker_index, summary, persisted_start_index) in marker_indices {
+            let start_index = persisted_start_index
+                .filter(|start_index| *start_index < marker_index)
+                .or_else(|| {
+                    self.items[..marker_index]
+                        .iter()
+                        .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
+                        .map(|index| index + 1)
+                });
+            let Some(start_index) = start_index else {
                 continue;
             };
-            let start_index = user_index + 1;
             let Some(end_index) = marker_index.checked_sub(1) else {
                 continue;
             };
@@ -3363,6 +3373,7 @@ impl AppState {
                     completed_steps: fold.completed_steps,
                     total_steps: fold.total_steps,
                     expanded: fold.is_expanded(),
+                    animating: fold.is_animating(now),
                     hovered: self.hovered_output_node.as_ref().is_some_and(|(_, key)| {
                         key == &format!(
                             "{}{}",
@@ -3375,6 +3386,20 @@ impl AppState {
                 })
             })
             .collect()
+    }
+
+    pub(crate) fn work_fold_scroll_anchor(&self, key: u64) -> Option<u32> {
+        self.work_fold_scroll_anchor
+            .filter(|(anchor_key, _)| *anchor_key == key)
+            .map(|(_, row)| row)
+    }
+
+    pub(crate) fn set_work_fold_scroll_anchor(&mut self, key: u64, row: u32) {
+        self.work_fold_scroll_anchor = Some((key, row));
+    }
+
+    pub(crate) fn clear_work_fold_scroll_anchor(&mut self) {
+        self.work_fold_scroll_anchor = None;
     }
 
     fn apply_terminal_chunk_to_dispatch(
@@ -5033,6 +5058,7 @@ mod tests {
             },
             OutputItem::WorkFoldMarker {
                 summary: Some("Checked the restored work.".into()),
+                start_index: None,
             },
             OutputItem::AssistantMd {
                 md: "Done.".into(),
@@ -5082,6 +5108,7 @@ mod tests {
         });
         restored_items.push(OutputItem::WorkFoldMarker {
             summary: Some("Completed the requested changes.".into()),
+            start_index: None,
         });
         restored_items.push(OutputItem::AssistantMd {
             md: "Done.".into(),
@@ -5110,7 +5137,10 @@ mod tests {
                 disclosure: Disclosure::Summary,
                 retried: false,
             },
-            OutputItem::WorkFoldMarker { summary: None },
+            OutputItem::WorkFoldMarker {
+                summary: None,
+                start_index: None,
+            },
             OutputItem::AssistantMd {
                 md: "Older answer".into(),
                 streaming: false,

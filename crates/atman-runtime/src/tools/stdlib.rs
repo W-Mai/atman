@@ -662,9 +662,9 @@ impl Tool for MessageUser {
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            Ok(Value::Message(crate::message::Message::user_text(
-                turn_id, text,
-            )))
+            let mut message = crate::message::Message::user_text(turn_id, text);
+            message.origin = crate::message::MessageOrigin::Internal;
+            Ok(Value::Message(message))
         })
     }
 }
@@ -1577,6 +1577,28 @@ fn extract_string_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn message_user_marks_injected_prompts_as_internal() {
+        let turn_id = crate::event::TurnId::now();
+        let ctx = ToolCtx::new().with_anchors(Some(turn_id.clone()), None, None);
+        let value = MessageUser
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Str("provide the final answer".into())],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Message(message) = value else {
+            panic!("message.user must return a message");
+        };
+
+        assert_eq!(message.turn_id, turn_id);
+        assert_eq!(message.origin, crate::message::MessageOrigin::Internal);
+    }
 
     fn authorized_ctx(registry: std::sync::Arc<crate::tool::ToolRegistry>) -> ToolCtx {
         let trust = crate::trust::TrustConfig {

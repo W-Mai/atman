@@ -96,6 +96,7 @@ impl<'a> RenderCtx<'a> {
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DYNAMIC_SPINNER_MARKER: &str = "\u{e000}";
 pub(crate) const LAYOUT_ANIMATION_FRAME: u32 = u32::MAX;
+const WORK_FOLD_CONTENT_INSET: u16 = 2;
 
 fn spinner_char(frame: u32) -> &'static str {
     if frame == LAYOUT_ANIMATION_FRAME {
@@ -583,6 +584,8 @@ struct ItemCacheEntry {
     last_used: u64,
     prefix_lines: Arc<[Line<'static>]>,
     content_hidden: bool,
+    content_inset: u16,
+    outer_width: u16,
 }
 
 impl ItemCacheEntry {
@@ -668,6 +671,10 @@ impl LayoutCache {
 
     pub(crate) fn item_row_end(&self, index: usize) -> Option<u32> {
         self.row_ends.get(index).copied()
+    }
+
+    pub(crate) fn item_row_start(&self, index: usize) -> Option<u32> {
+        (index < self.entries.len()).then(|| self.row_start(index))
     }
 
     pub fn update_dirty(
@@ -906,6 +913,9 @@ impl LayoutCache {
                     &entry.dynamic,
                     animation_frame,
                 );
+                if lo.saturating_add(line_index) >= entry.prefix_lines.len() {
+                    inset_work_fold_content_line(line, entry.content_inset, entry.outer_width);
+                }
             }
             ranges.push(ItemRange {
                 item_index: idx,
@@ -934,6 +944,17 @@ impl LayoutCache {
         force_streaming: bool,
     ) -> bool {
         let retained_before = self.entries[idx].has_retained_lines();
+        let work_fold = self
+            .work_folds
+            .iter()
+            .find(|fold| idx >= fold.start_index && idx <= fold.end_index);
+        let content_width = if work_fold.is_some() {
+            ctx.panel_width
+                .saturating_sub(WORK_FOLD_CONTENT_INSET.saturating_mul(2))
+                .max(1)
+        } else {
+            ctx.panel_width
+        };
         if let OutputItem::AssistantMd {
             md,
             streaming: true,
@@ -950,7 +971,7 @@ impl LayoutCache {
                 projection.update(
                     md,
                     revision.source_generation,
-                    ctx.panel_width,
+                    content_width,
                     std::time::Instant::now(),
                     force_streaming,
                 ),
@@ -975,15 +996,10 @@ impl LayoutCache {
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
                 content_hidden: false,
+                content_inset: 0,
+                outer_width: ctx.panel_width,
             };
-            apply_work_fold_to_entry(
-                &mut self.entries[idx],
-                self.work_folds
-                    .iter()
-                    .find(|fold| idx >= fold.start_index && idx <= fold.end_index),
-                idx,
-                ctx.panel_width,
-            );
+            apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= !retained_before;
             return true;
         }
@@ -1005,7 +1021,7 @@ impl LayoutCache {
                 generation: revision.source_generation,
                 done: *done,
                 expanded: *expanded,
-                panel_width: ctx.panel_width,
+                panel_width: content_width,
                 fullscreen_hovered: ctx.hovered_output_node.is_some_and(|(_, key)| {
                     key == BASH_FULLSCREEN_KEY
                         || key.starts_with(TOOL_DETAIL_FULLSCREEN_REGION_PREFIX)
@@ -1032,8 +1048,8 @@ impl LayoutCache {
                         path_key: BASH_FULLSCREEN_KEY.to_string(),
                         start_row: 1,
                         end_row: 2,
-                        col_start: ctx.panel_width.saturating_sub(6),
-                        col_end: ctx.panel_width,
+                        col_start: content_width.saturating_sub(6),
+                        col_end: content_width,
                     }])
                 } else {
                     Arc::from([])
@@ -1046,15 +1062,10 @@ impl LayoutCache {
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
                 content_hidden: false,
+                content_inset: 0,
+                outer_width: ctx.panel_width,
             };
-            apply_work_fold_to_entry(
-                &mut self.entries[idx],
-                self.work_folds
-                    .iter()
-                    .find(|fold| idx >= fold.start_index && idx <= fold.end_index),
-                idx,
-                ctx.panel_width,
-            );
+            apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= retained_before != retain_lines;
             return true;
         }
@@ -1067,7 +1078,7 @@ impl LayoutCache {
             } else {
                 ctx.animation_frame
             },
-            panel_width: ctx.panel_width,
+            panel_width: content_width,
             hovered_thinking_idx: (hovered && matches!(item, OutputItem::Thinking { .. }))
                 .then_some(idx),
             hovered_output_node: ctx
@@ -1076,7 +1087,7 @@ impl LayoutCache {
         };
         let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
         let rows = lines.len().min(u32::MAX as usize) as u32;
-        let dynamic = dynamic_paint_for_item(item, &lines, ctx);
+        let dynamic = dynamic_paint_for_item(item, &lines, &item_ctx);
         self.access_clock = self.access_clock.wrapping_add(1);
         self.entries[idx] = ItemCacheEntry {
             revision,
@@ -1093,15 +1104,10 @@ impl LayoutCache {
             last_used: self.access_clock,
             prefix_lines: Arc::from([]),
             content_hidden: false,
+            content_inset: 0,
+            outer_width: ctx.panel_width,
         };
-        apply_work_fold_to_entry(
-            &mut self.entries[idx],
-            self.work_folds
-                .iter()
-                .find(|fold| idx >= fold.start_index && idx <= fold.end_index),
-            idx,
-            ctx.panel_width,
-        );
+        apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
         self.retention_dirty |= retained_before != retain_lines;
         true
     }
@@ -1229,24 +1235,35 @@ fn apply_work_fold_to_entry(
     let prefix_rows = prefix.len().min(u32::MAX as usize) as u32;
     entry.prefix_lines = Arc::from(prefix);
     entry.content_hidden = !visible;
+    entry.content_inset = WORK_FOLD_CONTENT_INSET;
+    entry.outer_width = panel_width;
     if visible {
         if fold.boundary_member == Some(member) {
             fade_work_fold_boundary(entry, fold.boundary_level);
         }
         entry.rows = entry.rows.saturating_add(prefix_rows);
+        entry.regions = Arc::from(
+            entry
+                .regions
+                .iter()
+                .cloned()
+                .map(|mut region| {
+                    region.start_row = region.start_row.saturating_add(prefix_rows);
+                    region.end_row = region.end_row.saturating_add(prefix_rows);
+                    region.col_start = region
+                        .col_start
+                        .saturating_add(WORK_FOLD_CONTENT_INSET)
+                        .min(panel_width);
+                    region.col_end = region
+                        .col_end
+                        .saturating_add(WORK_FOLD_CONTENT_INSET)
+                        .min(panel_width.saturating_sub(WORK_FOLD_CONTENT_INSET))
+                        .max(region.col_start);
+                    region
+                })
+                .collect::<Vec<_>>(),
+        );
         if prefix_rows > 0 {
-            entry.regions = Arc::from(
-                entry
-                    .regions
-                    .iter()
-                    .cloned()
-                    .map(|mut region| {
-                        region.start_row = region.start_row.saturating_add(prefix_rows);
-                        region.end_row = region.end_row.saturating_add(prefix_rows);
-                        region
-                    })
-                    .collect::<Vec<_>>(),
-            );
             for row in &mut entry.dynamic.running_rows {
                 *row = row.saturating_add(prefix_rows as usize);
             }
@@ -1271,6 +1288,24 @@ fn apply_work_fold_to_entry(
         });
         entry.regions = Arc::from(regions);
     }
+}
+
+fn inset_work_fold_content_line(line: &mut Line<'static>, inset: u16, outer_width: u16) {
+    if inset == 0 || outer_width == 0 {
+        return;
+    }
+    let inset = inset.min(outer_width / 2) as usize;
+    let outer_width = outer_width as usize;
+    let inner_width = outer_width.saturating_sub(inset.saturating_mul(2));
+    let content = crate::width::truncate_spans(std::mem::take(&mut line.spans), inner_width, None);
+    let used = crate::width::spans_width(content.iter());
+    let mut spans = Vec::with_capacity(content.len() + 2);
+    spans.push(Span::raw(" ".repeat(inset)));
+    spans.extend(content);
+    spans.push(Span::raw(
+        " ".repeat(outer_width.saturating_sub(inset).saturating_sub(used)),
+    ));
+    line.spans = spans;
 }
 
 fn fade_work_fold_boundary(entry: &mut ItemCacheEntry, level: u8) {
@@ -1302,7 +1337,7 @@ fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<L
     let panel_width = panel_width as usize;
     let title = format!("  work · {}/{}", fold.completed_steps, fold.total_steps);
     let mut title_spans = vec![
-        Span::styled("✓", Style::default().fg(t.success.into()).bg(background)),
+        Span::styled("∴", Style::default().fg(t.accent.into()).bg(background)),
         Span::styled(
             title,
             Style::default().fg(t.work_title_fg.into()).bg(background),
@@ -2288,6 +2323,7 @@ pub struct WorkFoldProjection {
     pub completed_steps: usize,
     pub total_steps: usize,
     pub expanded: bool,
+    pub animating: bool,
     pub hovered: bool,
     pub title: String,
     pub stats: String,
@@ -7694,6 +7730,7 @@ mod tests {
             completed_steps: 4,
             total_steps: 4,
             expanded: false,
+            animating: false,
             hovered: false,
             title: "inspect · edit · verify".into(),
             stats: "2 files · +8 −2".into(),
@@ -7715,6 +7752,8 @@ mod tests {
         let rendered = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
 
         assert!(rendered.contains("work · 4/4"));
+        assert!(rendered.contains('∴'));
+        assert!(!rendered.contains('✓'));
         assert!(rendered.contains("inspect · edit · verify"));
         assert!(!rendered.contains('▶'));
         assert!(!rendered.contains('▼'));
@@ -7724,6 +7763,58 @@ mod tests {
             .find(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
             .unwrap();
         assert_eq!(header.end_row - header.start_row, 5);
+    }
+
+    #[test]
+    fn expanded_work_fold_insets_member_content_on_both_sides() {
+        let items = OutputStore::from(vec![OutputItem::Thinking {
+            text: "nested work".into(),
+            done: true,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        }]);
+        let mut cache = LayoutCache::default();
+        cache.set_work_folds(vec![WorkFoldProjection {
+            key: items.revisions()[0].id,
+            start_index: 0,
+            end_index: 0,
+            visible_members: 1,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: true,
+            animating: false,
+            hovered: false,
+            title: "inspect".into(),
+            stats: String::new(),
+        }]);
+        let mut ctx = RenderCtx::empty();
+        ctx.panel_width = 40;
+        let metrics = cache.update_dirty(
+            LayoutKey {
+                width: 40,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &ctx,
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 100,
+                follow_tail_rows: None,
+            },
+        );
+        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        let content = lines
+            .iter()
+            .map(plain_line)
+            .find(|line| line.contains("nested work"))
+            .unwrap();
+
+        assert!(content.starts_with("  "));
+        assert!(content.ends_with("  "));
+        assert_eq!(crate::width::width(&content), 40);
     }
 
     fn permission_request(
