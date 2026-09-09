@@ -1336,33 +1336,25 @@ fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<L
     };
     let panel_width = panel_width as usize;
     let title = format!("  work · {}/{}", fold.completed_steps, fold.total_steps);
-    let mut title_spans = vec![
+    let title_spans = vec![
         Span::styled("∴", Style::default().fg(t.accent.into()).bg(background)),
         Span::styled(
             title,
             Style::default().fg(t.work_title_fg.into()).bg(background),
         ),
     ];
-    if !fold.stats.is_empty() {
-        let title_width = crate::width::spans_width(title_spans.iter());
-        let stats_width = crate::width::width(&fold.stats);
-        let gap = panel_width
-            .saturating_sub(title_width.saturating_add(stats_width))
-            .max(2);
-        title_spans.push(Span::styled(
-            " ".repeat(gap),
-            Style::default().bg(background),
-        ));
-        title_spans.push(Span::styled(
+    let stats_spans = if fold.stats.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::styled(
             fold.stats.clone(),
             Style::default()
                 .fg(t.work_meta_fg.into())
                 .bg(background)
                 .add_modifier(Modifier::DIM),
-        ));
-    }
-    let mut title_line = crate::width::truncate_spans(title_spans, panel_width, Some(background));
-    pad_work_fold_line(&mut title_line, panel_width, background);
+        )]
+    };
+    let title_line = aligned_document_row(title_spans, stats_spans, panel_width, background);
 
     let summary_spans = vec![
         Span::styled("   ", Style::default().bg(background)),
@@ -1374,14 +1366,30 @@ fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<L
                 .add_modifier(Modifier::DIM),
         ),
     ];
-    let mut summary_line = crate::width::truncate_spans_with_right_fade(
+    let horizontal_pad = DOCUMENT_PAD_X.min(panel_width / 2);
+    let inner_width = panel_width.saturating_sub(horizontal_pad.saturating_mul(2));
+    let summary = crate::width::truncate_spans_with_right_fade(
         summary_spans,
-        panel_width,
+        inner_width,
         background,
         4,
         0.82,
     );
-    pad_work_fold_line(&mut summary_line, panel_width, background);
+    let mut summary_line = Vec::with_capacity(summary.len() + 2);
+    summary_line.push(Span::styled(
+        " ".repeat(horizontal_pad),
+        Style::default().bg(background),
+    ));
+    summary_line.extend(summary);
+    pad_work_fold_line(
+        &mut summary_line,
+        panel_width.saturating_sub(horizontal_pad),
+        background,
+    );
+    summary_line.push(Span::styled(
+        " ".repeat(horizontal_pad),
+        Style::default().bg(background),
+    ));
 
     let blank = Line::from(Span::styled(
         " ".repeat(panel_width),
@@ -1389,7 +1397,7 @@ fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<L
     ));
     vec![
         blank.clone(),
-        Line::from(title_line),
+        title_line,
         blank.clone(),
         Line::from(summary_line),
         blank,
@@ -7750,6 +7758,14 @@ mod tests {
         );
         let (lines, _, regions) = cache.visible_slice(0, metrics.total_rows, 0);
         let rendered = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
+        let work_header = lines
+            .iter()
+            .map(plain_line)
+            .find(|line| line.contains("work · 4/4"))
+            .unwrap();
+        let thinking_header = plain_line(
+            &render_thinking("reasoning", true, Disclosure::Summary, false, 0, 100, false)[1],
+        );
 
         assert!(rendered.contains("work · 4/4"));
         assert!(rendered.contains('∴'));
@@ -7758,6 +7774,13 @@ mod tests {
         assert!(!rendered.contains('▶'));
         assert!(!rendered.contains('▼'));
         assert!(!rendered.contains("hidden reasoning"));
+        assert!(work_header.starts_with("  ∴  work · 4/4"));
+        assert!(work_header.ends_with(DOCUMENT_PAD));
+        assert!(thinking_header.starts_with("  ⣿  thinking"));
+        assert_eq!(
+            crate::width::width(work_header.split_once('∴').unwrap().0),
+            crate::width::width(thinking_header.split_once('⣿').unwrap().0),
+        );
         let header = regions
             .iter()
             .find(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
