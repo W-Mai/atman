@@ -1204,8 +1204,13 @@ pub(crate) async fn run_frames(
                                 }
 
                                 if let Some(idx) = app.app.hit_test(me.column, me.row)
-                                    && let Some(crate::app::OutputItem::Thinking { .. }) =
-                                        app.app.items.get(idx)
+                                    && matches!(
+                                        app.app.items.get(idx),
+                                        Some(
+                                            crate::app::OutputItem::Thinking { .. }
+                                                | crate::app::OutputItem::CompactionSummary { .. }
+                                        )
+                                    )
                                 {
                                     app.app.set_hovered_thinking(Some(idx));
                                 } else {

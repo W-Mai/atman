@@ -296,6 +296,7 @@ struct CompactionSummaryRender<'a> {
     disclosure: Disclosure,
     animation_frame: u32,
     panel_width: u16,
+    hovered: bool,
 }
 
 pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
@@ -401,7 +402,11 @@ pub fn build_lines_with_ranges(
             messages: ctx.messages,
             animation_frame: ctx.animation_frame,
             panel_width: ctx.panel_width,
-            hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
+            hovered_thinking_idx: if is_hovered
+                && matches!(
+                    item,
+                    OutputItem::Thinking { .. } | OutputItem::CompactionSummary { .. }
+                ) {
                 Some(idx)
             } else {
                 None
@@ -1166,8 +1171,12 @@ impl LayoutCache {
                 ctx.animation_frame
             },
             panel_width: content_width,
-            hovered_thinking_idx: (hovered && matches!(item, OutputItem::Thinking { .. }))
-                .then_some(idx),
+            hovered_thinking_idx: (hovered
+                && matches!(
+                    item,
+                    OutputItem::Thinking { .. } | OutputItem::CompactionSummary { .. }
+                ))
+            .then_some(idx),
             hovered_output_node: ctx
                 .hovered_output_node
                 .filter(|(item_index, _)| *item_index == idx),
@@ -2068,91 +2077,20 @@ fn render_thinking(
     } else {
         "thinking…"
     };
-    let target = panel_width.max(20) as usize;
-    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(blank.clone());
     let header_prefix = vec![
         Span::styled(format!("{glyph}{DOCUMENT_PAD}"), glyph_style),
         Span::styled(label.to_owned(), header_style),
     ];
-
-    if disclosure == Disclosure::Summary {
-        let rendered =
-            crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4).max(1));
-        let mut body = Vec::new();
-        for line in rendered.into_iter().filter(|line| {
-            line.spans
-                .iter()
-                .any(|span| !span.content.trim().is_empty())
-        }) {
-            if !body.is_empty() {
-                body.push(Span::styled(" · ", hint_style));
-            }
-            body.extend(
-                line.spans
-                    .into_iter()
-                    .map(|span| Span::styled(span.content, body_style.patch(span.style))),
-            );
-        }
-        lines.push(aligned_ticker_document_row_with_control(
-            header_prefix,
-            body,
-            DOCUMENT_PAD,
-            Vec::new(),
-            Vec::new(),
-            target,
-            bg,
-            TickerFade::Always,
-        ));
-        lines.push(blank);
-        return lines;
-    }
-
-    lines.push(aligned_document_row(header_prefix, Vec::new(), target, bg));
-    lines.push(blank.clone());
-
-    let all_lines =
-        crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4));
-    let max_lines = match disclosure {
-        Disclosure::Preview => all_lines.len().min(6),
-        Disclosure::Full => all_lines.len(),
-        Disclosure::Summary => unreachable!("summary returns above"),
-    };
-    for md_line in &all_lines[crate::width::tail_row_range(all_lines.len(), max_lines)] {
-        let content_w: usize = md_line
-            .spans
-            .iter()
-            .map(|s| crate::width::width(s.content.as_ref()))
-            .sum();
-        let used = content_w + 2;
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 2);
-        spans.push(Span::styled(DOCUMENT_PAD, body_style));
-        for src in &md_line.spans {
-            let style = body_style.patch(src.style);
-            spans.push(Span::styled(src.content.clone(), style));
-        }
-        if target > used {
-            spans.push(Span::styled(" ".repeat(target - used), body_style));
-        }
-        lines.push(Line::from(spans));
-    }
-    if disclosure != Disclosure::Full && all_lines.len() > max_lines {
-        let hint = format!(
-            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
-            all_lines.len() - max_lines
-        );
-        lines.push(line_with_right_pad(
-            "", &hint, target, hint_style, hint_style,
-        ));
-    } else if disclosure == Disclosure::Full && all_lines.len() > 6 {
-        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
-        lines.push(line_with_right_pad(
-            "", &hint, target, hint_style, hint_style,
-        ));
-    }
-    lines.push(blank);
-    lines
+    render_markdown_disclosure(MarkdownDisclosureRender {
+        text,
+        disclosure,
+        header_prefix,
+        header_right: Vec::new(),
+        bg,
+        body_style,
+        hint_style,
+        panel_width,
+    })
 }
 
 pub(crate) fn next_thinking_disclosure(
@@ -2160,6 +2098,18 @@ pub(crate) fn next_thinking_disclosure(
     disclosure: Disclosure,
     panel_width: u16,
 ) -> Disclosure {
+    next_markdown_disclosure(text, disclosure, panel_width)
+}
+
+pub(crate) fn next_compaction_disclosure(
+    text: &str,
+    disclosure: Disclosure,
+    panel_width: u16,
+) -> Disclosure {
+    next_markdown_disclosure(text, disclosure, panel_width)
+}
+
+fn next_markdown_disclosure(text: &str, disclosure: Disclosure, panel_width: u16) -> Disclosure {
     let preview_has_less_content = crate::markdown::render_markdown_with_width(
         text,
         panel_width.saturating_sub((DOCUMENT_PAD_X + RIGHT_PAD) as u16),
@@ -2172,6 +2122,110 @@ pub(crate) fn next_thinking_disclosure(
         Disclosure::Preview => Disclosure::Full,
         Disclosure::Full => Disclosure::Summary,
     }
+}
+
+struct MarkdownDisclosureRender<'a> {
+    text: &'a str,
+    disclosure: Disclosure,
+    header_prefix: Vec<Span<'static>>,
+    header_right: Vec<Span<'static>>,
+    bg: Color,
+    body_style: Style,
+    hint_style: Style,
+    panel_width: u16,
+}
+
+fn render_markdown_disclosure(render: MarkdownDisclosureRender<'_>) -> Vec<Line<'static>> {
+    let MarkdownDisclosureRender {
+        text,
+        disclosure,
+        header_prefix,
+        header_right,
+        bg,
+        body_style,
+        hint_style,
+        panel_width,
+    } = render;
+    let target = panel_width.max(20) as usize;
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
+    let mut lines = vec![blank.clone()];
+    let all_lines =
+        crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4).max(1));
+
+    if disclosure == Disclosure::Summary {
+        let mut body = Vec::new();
+        for line in all_lines.iter().filter(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
+        }) {
+            if !body.is_empty() {
+                body.push(Span::styled(" · ", hint_style));
+            }
+            body.extend(
+                line.spans
+                    .iter()
+                    .map(|span| Span::styled(span.content.clone(), body_style.patch(span.style))),
+            );
+        }
+        lines.push(aligned_ticker_document_row_with_control(
+            header_prefix,
+            body,
+            DOCUMENT_PAD,
+            header_right,
+            Vec::new(),
+            target,
+            bg,
+            TickerFade::Always,
+        ));
+        lines.push(blank);
+        return lines;
+    }
+
+    lines.push(aligned_document_row(
+        header_prefix,
+        header_right,
+        target,
+        bg,
+    ));
+    lines.push(blank.clone());
+    let visible = match disclosure {
+        Disclosure::Preview => all_lines.len().min(6),
+        Disclosure::Full => all_lines.len(),
+        Disclosure::Summary => unreachable!("summary returns above"),
+    };
+    for md_line in &all_lines[crate::width::tail_row_range(all_lines.len(), visible)] {
+        let content_w = crate::width::spans_width(md_line.spans.iter());
+        let used = content_w + DOCUMENT_PAD_X;
+        let mut spans = Vec::with_capacity(md_line.spans.len() + 2);
+        spans.push(Span::styled(DOCUMENT_PAD, body_style));
+        spans.extend(
+            md_line
+                .spans
+                .iter()
+                .map(|span| Span::styled(span.content.clone(), body_style.patch(span.style))),
+        );
+        if target > used {
+            spans.push(Span::styled(" ".repeat(target - used), body_style));
+        }
+        lines.push(Line::from(spans));
+    }
+    if disclosure != Disclosure::Full && all_lines.len() > visible {
+        let hint = format!(
+            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
+            all_lines.len() - visible
+        );
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
+    } else if disclosure == Disclosure::Full && all_lines.len() > 6 {
+        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
+        lines.push(line_with_right_pad(
+            "", &hint, target, hint_style, hint_style,
+        ));
+    }
+    lines.push(blank);
+    lines
 }
 
 fn render_assistant(
@@ -2382,6 +2436,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             disclosure: *disclosure,
             animation_frame: ctx.animation_frame,
             panel_width: ctx.panel_width,
+            hovered: ctx.hovered_thinking_idx.is_some(),
         }),
         OutputItem::DiffPreview {
             title,
@@ -7780,25 +7835,46 @@ line2
     #[test]
     fn collapsed_compaction_summary_limits_wrapped_visual_rows() {
         let summary = "S".repeat(36 * 15);
-        let lines = render_compaction_summary(CompactionSummaryRender {
-            phase: CompactionPhase::Finished,
-            range_start: 0,
-            range_end: 10,
-            summary: &summary,
-            before_tokens: 100,
-            after_tokens: 50,
-            compacted_count: 10,
-            disclosure: Disclosure::Summary,
-            animation_frame: 0,
-            panel_width: 40,
-        });
-        let rendered = rendered_text(&lines);
+        let render = |disclosure| {
+            render_compaction_summary(CompactionSummaryRender {
+                phase: CompactionPhase::Finished,
+                range_start: 0,
+                range_end: 10,
+                summary: &summary,
+                before_tokens: 100,
+                after_tokens: 50,
+                compacted_count: 10,
+                disclosure,
+                animation_frame: 0,
+                panel_width: 40,
+                hovered: false,
+            })
+        };
 
-        assert_eq!(lines.len(), 6, "header + latest row + hint + padding");
-        assert!(rendered.contains("14 more lines — click to expand"));
+        let summary_lines = render(Disclosure::Summary);
+        let preview_lines = render(Disclosure::Preview);
+        let full_lines = render(Disclosure::Full);
+        let preview_text = rendered_text(&preview_lines);
+        let full_text = rendered_text(&full_lines);
+
+        assert_eq!(
+            summary_lines.len(),
+            3,
+            "padding + single-line summary + padding"
+        );
+        assert_eq!(
+            preview_lines.len(),
+            11,
+            "header + six rows + hint + padding"
+        );
+        assert!(preview_text.contains("9 more lines — click to expand"));
+        assert!(full_lines.len() > preview_lines.len());
+        assert!(full_text.contains("click to collapse"));
         assert!(
-            lines
+            summary_lines
                 .iter()
+                .chain(preview_lines.iter())
+                .chain(full_lines.iter())
                 .all(|line| crate::width::spans_width(&line.spans) <= 40)
         );
     }
@@ -9946,6 +10022,35 @@ mod tests {
     }
 
     #[test]
+    fn compaction_disclosure_uses_the_same_three_state_cycle() {
+        assert_eq!(
+            next_compaction_disclosure("short summary", Disclosure::Summary, 60),
+            Disclosure::Full
+        );
+        assert_eq!(
+            next_compaction_disclosure("short summary", Disclosure::Full, 60),
+            Disclosure::Summary
+        );
+
+        let long = (1..=7)
+            .map(|line| format!("summary {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            next_compaction_disclosure(&long, Disclosure::Summary, 60),
+            Disclosure::Preview
+        );
+        assert_eq!(
+            next_compaction_disclosure(&long, Disclosure::Preview, 60),
+            Disclosure::Full
+        );
+        assert_eq!(
+            next_compaction_disclosure(&long, Disclosure::Full, 60),
+            Disclosure::Summary
+        );
+    }
+
+    #[test]
     fn system_note_wraps_long_line() {
         let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk lllll mmmmm";
         let lines = render_system_note(text, NoteLevel::Info, 30);
@@ -10012,9 +10117,10 @@ mod tests {
                         disclosure: Disclosure::Summary,
                         animation_frame: 0,
                         panel_width: target,
+                        hovered: false,
                     })[1],
                 ),
-                "  ✓  compacted",
+                "  ⣿  compacted",
             ),
         ];
 
@@ -11878,128 +11984,63 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         disclosure,
         animation_frame,
         panel_width,
+        hovered,
     } = render;
     let t = crate::theme::theme();
-    let bg: Color = t.code_bg.into();
-    let header_style = Style::default()
-        .fg(t.warn.into())
+    let bg: Color = if hovered {
+        t.work_hover_bg.into()
+    } else {
+        t.work_bg.into()
+    };
+    let header_style = Style::default().fg(t.work_title_fg.into()).bg(bg);
+    let glyph_style = Style::default()
+        .fg(match phase {
+            CompactionPhase::Running => t.accent.into(),
+            CompactionPhase::Finished => t.success.into(),
+            CompactionPhase::Failed => t.error.into(),
+        })
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+    let body_style = Style::default().fg(t.work_title_fg.into()).bg(bg);
     let hint_style = Style::default()
-        .fg(t.meta_fg.into())
+        .fg(t.work_meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
-
-    let target = panel_width.max(20) as usize;
-    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(blank.clone());
-
-    let stats = match phase {
-        CompactionPhase::Running => format!(
-            "{DOCUMENT_PAD}{}{DOCUMENT_PAD}compacting {range_start}..{range_end}...",
-            spinner_char(animation_frame)
+    let (glyph, label, stats) = match phase {
+        CompactionPhase::Running => (
+            spinner_char(animation_frame),
+            "compacting…",
+            format!("{range_start}..{range_end}"),
         ),
-        CompactionPhase::Finished => format!(
-            "{DOCUMENT_PAD}✓{DOCUMENT_PAD}compacted {compacted_count} msgs · {before_tokens} → {after_tokens} tokens"
+        CompactionPhase::Finished => (
+            "⣿",
+            "compacted",
+            format!("{before_tokens} → {after_tokens} · {compacted_count} msgs"),
         ),
-        CompactionPhase::Failed => {
-            format!("{DOCUMENT_PAD}✗{DOCUMENT_PAD}compaction failed · {summary}")
-        }
+        CompactionPhase::Failed => (
+            "✗",
+            "compaction failed",
+            format!("{range_start}..{range_end}"),
+        ),
     };
-    lines.push(line_with_right_pad(
-        "",
-        &stats,
-        target,
-        header_style,
-        header_style,
-    ));
-    lines.push(blank.clone());
-
-    if matches!(phase, CompactionPhase::Running) {
-        let rendered =
-            crate::markdown::render_markdown_with_width(summary, panel_width.saturating_sub(4));
-        let visible = match disclosure {
-            Disclosure::Summary => rendered.len().min(1),
-            Disclosure::Preview => rendered.len().min(6),
-            Disclosure::Full => rendered.len(),
-        };
-        if visible == 0 {
-            lines.push(line_with_right_pad(
-                DOCUMENT_PAD,
-                "summary generation in progress",
-                target,
-                body_style,
-                body_style,
-            ));
-        } else {
-            let range = crate::width::tail_row_range(rendered.len(), visible);
-            for line in rendered[range].iter() {
-                let body = line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>();
-                lines.push(line_with_right_pad(
-                    DOCUMENT_PAD,
-                    &crate::width::truncate(
-                        &body,
-                        target.saturating_sub(DOCUMENT_PAD_X + RIGHT_PAD),
-                    ),
-                    target,
-                    body_style,
-                    body_style,
-                ));
-            }
-        }
-        lines.push(blank);
-        return lines;
-    }
-
-    let rendered =
-        crate::markdown::render_markdown_with_width(summary, panel_width.saturating_sub(4));
-    let total = rendered.len();
-    let visible = match disclosure {
-        Disclosure::Summary => total.min(1),
-        Disclosure::Preview => total.min(12),
-        Disclosure::Full => total,
+    let text = if summary.is_empty() && matches!(phase, CompactionPhase::Running) {
+        "summary generation in progress"
+    } else {
+        summary
     };
-    let range = crate::width::tail_row_range(rendered.len(), visible);
-    for line in rendered[range].iter() {
-        let body = line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<Vec<_>>()
-            .join("");
-        let rows = wrap_with_prefix(&body, target, DOCUMENT_PAD, DOCUMENT_PAD);
-        for row in rows {
-            lines.push(line_with_right_pad(
-                &row.prefix,
-                &row.body,
-                target,
-                body_style,
-                body_style,
-            ));
-        }
-    }
-    if disclosure != Disclosure::Full && total > visible {
-        let hint = format!(
-            "{DOCUMENT_PAD}▼{DOCUMENT_PAD}{} more lines — click to expand",
-            total - visible
-        );
-        lines.push(line_with_right_pad(
-            "", &hint, target, hint_style, hint_style,
-        ));
-    } else if disclosure == Disclosure::Full && total > 12 {
-        let hint = format!("{DOCUMENT_PAD}▲{DOCUMENT_PAD}click to collapse");
-        lines.push(line_with_right_pad(
-            "", &hint, target, hint_style, hint_style,
-        ));
-    }
-    lines.push(blank);
-    lines
+    render_markdown_disclosure(MarkdownDisclosureRender {
+        text,
+        disclosure,
+        header_prefix: vec![
+            Span::styled(format!("{glyph}{DOCUMENT_PAD}"), glyph_style),
+            Span::styled(label, header_style),
+        ],
+        header_right: vec![Span::styled(stats, hint_style)],
+        bg,
+        body_style,
+        hint_style,
+        panel_width,
+    })
 }
 
 pub fn render_injection_queue(

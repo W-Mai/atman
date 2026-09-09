@@ -23,16 +23,6 @@ pub enum Disclosure {
     Full,
 }
 
-impl Disclosure {
-    fn next(self) -> Self {
-        match self {
-            Self::Summary => Self::Preview,
-            Self::Preview => Self::Full,
-            Self::Full => Self::Summary,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallStatus {
     Running,
@@ -2125,11 +2115,21 @@ impl AppState {
     }
 
     pub fn cycle_compaction_summary_disclosure(&mut self, item_index: usize) {
+        let panel_width = self
+            .last_transcript_rect
+            .map(|area| area.width)
+            .unwrap_or(80);
         self.mutate_item(item_index, OutputMutation::Interaction, |item| {
-            let OutputItem::CompactionSummary { disclosure, .. } = item else {
+            let OutputItem::CompactionSummary {
+                summary,
+                disclosure,
+                ..
+            } = item
+            else {
                 return false;
             };
-            *disclosure = disclosure.next();
+            *disclosure =
+                crate::output::next_compaction_disclosure(summary, *disclosure, panel_width);
             true
         });
     }
