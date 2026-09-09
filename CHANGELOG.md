@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-09-09
+
 ### ⚠️ Breaking Changes
 
 - **Spawn admission** — `flow.instances` returns the current session's spawned-flow inventory and a caller-bound, single-use token required by `flow.spawn`; inventory changes invalidate unused tokens.
@@ -23,15 +25,15 @@ All notable changes to atman are documented in this file.
 - **Collapsible working summaries** — Working groups default to a three-row intent ticker with fixed progress and edit metrics; the collapsed ticker only applies a subtle fade when content is clipped, tool titles toggle content visibility, and clicks inside content independently toggle full detail.
 - **Streaming single-line summaries** — compact thinking and tool rows join processed content into a syntax-colored ticker with a fixed left-faded to right-bright gradient; new content advances the viewport and completed rows remain still.
 - **Intent-grouped tool document flow** — each assistant dispatch renders as one ordered `working · N` block with live status, one-line summaries, bounded tail or hunk previews, complete output, and fullscreen audit detail for supported tools.
-- **Streaming edit and compaction output** — provider tool-argument deltas surface allowlisted file content while it is generated, and compaction summaries update incrementally without entering assistant history.
+- **Streaming edit and compaction output** — provider tool-argument deltas surface allowlisted file content while it is generated, and compaction summaries update incrementally without entering assistant history while supporting the same single-line, preview, and full disclosure modes as other document surfaces.
 - **Configurable diff layout** — file changes retain file and hunk structure, use two-column rendering by default, fall back safely in narrow views, and support `[diff] layout = "unified"`.
 - **Applied edit activity** — successful file mutations record normalized paths, hunks, insertions, and deletions for live tool rows, turn summaries, session status, replay, and the terminal exit summary.
 
 ### 🐛 Fixes
 
 - **Terminal restoration** — TUI shutdown restores mouse capture, bracketed paste, keyboard enhancement, synchronized updates, cursor visibility, text attributes, alternate-screen state, and raw mode before returning control to the shell, then reasserts shell-safe input modes after rendering the exit summary.
-- **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, frame expanded content with subtle side rails and a closed lower boundary, restore the complete pre-answer activity range after session replay, and report the same visible tool-call progress during live rendering and replay.
-- **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals, while successful root calls calibrate fresh compaction estimates for provider tokenizer differences.
+- **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, frame expanded content with subtle side rails and a closed lower boundary, preserve an external gap before final prose, restore the complete pre-answer activity range including final thinking after session replay, rehydrate evicted member content before expansion, and report the same visible tool-call progress during live rendering and replay.
+- **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals, successful root calls calibrate fresh compaction estimates for provider tokenizer differences, and persisted same-model measurements remain a conservative preflight floor for legacy sessions.
 - **Tool intent failures** — Tool calls missing a required intent remain in assistant history but are not authorized or executed; each receives a paired error result that explains the missing field to the model without retrying the provider response.
 - **Final response convergence** — Managed root agents accept classifier-approved direct replies immediately, require one `final.answer` delivery attempt after internal tool work, accept the next approved response instead of repeating the reminder indefinitely, and preserve a valid final response when a provider omits its required display intent.
 - **Tool activity hierarchy** — Thinking and working surfaces use explicit action, title, and metadata contrast levels; running tools animate only their status glyph, provider-facing tool schemas require call purposes, streamed purposes appear before final tool-use messages, and missing legacy purposes receive readable action labels.
