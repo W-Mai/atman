@@ -3,6 +3,8 @@ use std::io::Stdout;
 
 use anyhow::Result;
 use crossterm::event::{Event as CtEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+use crossterm::{ExecutableCommand, QueueableCommand};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
@@ -148,20 +150,27 @@ pub(crate) async fn run_frames(
 
     loop {
         app.app.tick_toasts();
-        terminal.draw(|f| render_frame(f, &mut app, &editor))?;
-        if let Some(kind) = app.wm.top_kind() {
+        terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
+        let draw_result = terminal
+            .draw(|f| render_frame(f, &mut app, &editor))
+            .map(|_| ());
+        let cursor_result = if let Some(kind) = app.wm.top_kind() {
             if app.wm.modals.cursor_visible(kind) {
-                terminal.show_cursor()?;
+                terminal.show_cursor()
             } else {
-                terminal.hide_cursor()?;
+                terminal.hide_cursor()
             }
         } else if app.wm.focused_id().is_none()
             && (!app.app.submission_focus || app.app.queued_submission_edit.is_some())
         {
-            terminal.show_cursor()?;
+            terminal.show_cursor()
         } else {
-            terminal.hide_cursor()?;
-        }
+            terminal.hide_cursor()
+        };
+        let sync_result = terminal.backend_mut().execute(EndSynchronizedUpdate);
+        draw_result?;
+        cursor_result?;
+        sync_result?;
         app.app.tick = app.app.tick.wrapping_add(1);
 
         if app.app.should_quit {

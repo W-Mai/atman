@@ -649,14 +649,50 @@ impl LayoutCache {
         if self.work_folds == folds {
             return;
         }
-        let mut dirty_from = usize::MAX;
-        for fold in self.work_folds.iter().chain(&folds) {
-            dirty_from = dirty_from.min(fold.start_index);
-            for index in fold.start_index..=fold.end_index {
-                self.pending_layout.insert(index);
+        let mut dirty = std::collections::BTreeSet::new();
+        for old in &self.work_folds {
+            let Some(new) = folds.iter().find(|fold| fold.key == old.key) else {
+                dirty.extend(old.start_index..=old.end_index);
+                continue;
+            };
+            if old.start_index != new.start_index || old.end_index != new.end_index {
+                dirty.extend(old.start_index..=old.end_index);
+                dirty.extend(new.start_index..=new.end_index);
+                continue;
+            }
+            if old.completed_steps != new.completed_steps
+                || old.total_steps != new.total_steps
+                || old.title != new.title
+                || old.stats != new.stats
+                || old.hovered != new.hovered
+            {
+                dirty.insert(old.start_index);
+            }
+            let changed_start = old.visible_members.min(new.visible_members);
+            let changed_end = old.visible_members.max(new.visible_members);
+            for member in changed_start..changed_end {
+                let index = old.start_index.saturating_add(member);
+                if index <= old.end_index {
+                    dirty.insert(index);
+                }
+            }
+            for member in [old.boundary_member, new.boundary_member]
+                .into_iter()
+                .flatten()
+            {
+                let index = old.start_index.saturating_add(member);
+                if index <= old.end_index {
+                    dirty.insert(index);
+                }
             }
         }
-        if dirty_from != usize::MAX {
+        for new in &folds {
+            if !self.work_folds.iter().any(|fold| fold.key == new.key) {
+                dirty.extend(new.start_index..=new.end_index);
+            }
+        }
+        if let Some(dirty_from) = dirty.first().copied() {
+            self.pending_layout.extend(dirty);
             self.pending_structure_from = Some(
                 self.pending_structure_from
                     .map_or(dirty_from, |current| current.min(dirty_from)),
@@ -1356,62 +1392,32 @@ fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<L
     };
     let title_line = aligned_document_row(title_spans, stats_spans, panel_width, background);
 
-    let summary_spans = vec![
-        Span::styled("   ", Style::default().bg(background)),
-        Span::styled(
-            fold.title.clone(),
-            Style::default()
-                .fg(t.work_meta_fg.into())
-                .bg(background)
-                .add_modifier(Modifier::DIM),
-        ),
-    ];
-    let horizontal_pad = DOCUMENT_PAD_X.min(panel_width / 2);
-    let inner_width = panel_width.saturating_sub(horizontal_pad.saturating_mul(2));
-    let summary = crate::width::truncate_spans_with_right_fade(
-        summary_spans,
-        inner_width,
-        background,
-        4,
-        0.82,
-    );
-    let mut summary_line = Vec::with_capacity(summary.len() + 2);
-    summary_line.push(Span::styled(
-        " ".repeat(horizontal_pad),
-        Style::default().bg(background),
-    ));
-    summary_line.extend(summary);
-    pad_work_fold_line(
-        &mut summary_line,
-        panel_width.saturating_sub(horizontal_pad),
-        background,
-    );
-    summary_line.push(Span::styled(
-        " ".repeat(horizontal_pad),
-        Style::default().bg(background),
-    ));
+    let summary_style = Style::default()
+        .fg(t.work_meta_fg.into())
+        .bg(background)
+        .add_modifier(Modifier::DIM);
+    let summary_prefix = format!("{DOCUMENT_PAD}   ");
+    let summary_lines =
+        wrap_with_prefix(&fold.title, panel_width, &summary_prefix, &summary_prefix)
+            .into_iter()
+            .map(|row| {
+                line_with_right_pad(
+                    &row.prefix,
+                    &row.body,
+                    panel_width,
+                    Style::default().bg(background),
+                    summary_style,
+                )
+            });
 
     let blank = Line::from(Span::styled(
         " ".repeat(panel_width),
         Style::default().bg(background),
     ));
-    vec![
-        blank.clone(),
-        title_line,
-        blank.clone(),
-        Line::from(summary_line),
-        blank,
-    ]
-}
-
-fn pad_work_fold_line(spans: &mut Vec<Span<'static>>, width: usize, background: Color) {
-    let used = crate::width::spans_width(spans.iter());
-    if used < width {
-        spans.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(background),
-        ));
-    }
+    let mut lines = vec![blank.clone(), title_line, blank.clone()];
+    lines.extend(summary_lines);
+    lines.push(blank);
+    lines
 }
 
 // Subtle stripe behind user messages so they visually separate from
@@ -7789,20 +7795,111 @@ mod tests {
     }
 
     #[test]
+    fn work_fold_header_wraps_the_complete_summary() {
+        let summary = "检查布局缓存并修复折叠范围同时验证代码块和终端输出的层级关系";
+        let fold = WorkFoldProjection {
+            key: 1,
+            start_index: 0,
+            end_index: 0,
+            visible_members: 0,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: false,
+            animating: false,
+            hovered: false,
+            title: summary.into(),
+            stats: String::new(),
+        };
+        let lines = render_work_fold_header(&fold, 24);
+        let compact = lines
+            .iter()
+            .flat_map(|line| plain_line(line).chars().collect::<Vec<_>>())
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+
+        assert!(lines.len() > 5);
+        assert!(compact.contains(summary));
+        assert!(
+            lines
+                .iter()
+                .all(|line| crate::width::width(&plain_line(line)) == 24)
+        );
+    }
+
+    #[test]
+    fn work_fold_animation_state_does_not_invalidate_all_members() {
+        let fold = WorkFoldProjection {
+            key: 1,
+            start_index: 2,
+            end_index: 40,
+            visible_members: 0,
+            total_members: 39,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: false,
+            animating: false,
+            hovered: false,
+            title: "complete".into(),
+            stats: String::new(),
+        };
+        let mut cache = LayoutCache::default();
+        cache.set_work_folds(vec![fold.clone()]);
+        cache.pending_layout.clear();
+        cache.pending_structure_from = None;
+        let mut animating = fold;
+        animating.expanded = true;
+        animating.animating = true;
+
+        cache.set_work_folds(vec![animating]);
+
+        assert!(cache.pending_layout.is_empty());
+        assert!(cache.pending_structure_from.is_none());
+    }
+
+    #[test]
     fn expanded_work_fold_insets_member_content_on_both_sides() {
-        let items = OutputStore::from(vec![OutputItem::Thinking {
-            text: "nested work".into(),
-            done: true,
-            disclosure: Disclosure::Summary,
-            retried: false,
-        }]);
+        let now = Instant::now();
+        let items = OutputStore::from(vec![
+            OutputItem::Thinking {
+                text: "nested work".into(),
+                done: true,
+                disclosure: Disclosure::Summary,
+                retried: false,
+            },
+            OutputItem::ToolDispatch {
+                calls: vec![ToolCallView {
+                    id: "read-1".into(),
+                    tool: "fs.read".into(),
+                    intent: "inspect source".into(),
+                    input: serde_json::json!({"path": "src/lib.rs"}),
+                    status: ToolCallStatus::Ok,
+                    disclosure: Disclosure::Summary,
+                    detail: None,
+                    draft_index: None,
+                    draft_preview: Default::default(),
+                    applied_edit: None,
+                    started_at: now,
+                    ended_at: Some(now),
+                }],
+            },
+            OutputItem::AssistantMd {
+                md: "normal output\n\n```rust\nlet nested = true;\n```".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
         let mut cache = LayoutCache::default();
         cache.set_work_folds(vec![WorkFoldProjection {
             key: items.revisions()[0].id,
             start_index: 0,
-            end_index: 0,
-            visible_members: 1,
-            total_members: 1,
+            end_index: 2,
+            visible_members: 3,
+            total_members: 3,
             boundary_member: None,
             boundary_level: 3,
             completed_steps: 1,
@@ -7829,15 +7926,27 @@ mod tests {
             },
         );
         let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
-        let content = lines
+        let content_lines = lines
             .iter()
             .map(plain_line)
-            .find(|line| line.contains("nested work"))
-            .unwrap();
+            .filter(|line| {
+                [
+                    "nested work",
+                    "working",
+                    "normal output",
+                    "let nested = true",
+                ]
+                .iter()
+                .any(|needle| line.contains(needle))
+            })
+            .collect::<Vec<_>>();
 
-        assert!(content.starts_with("  "));
-        assert!(content.ends_with("  "));
-        assert_eq!(crate::width::width(&content), 40);
+        assert_eq!(content_lines.len(), 4);
+        for content in content_lines {
+            assert!(content.starts_with("  "), "{content:?}");
+            assert!(content.ends_with("  "), "{content:?}");
+            assert_eq!(crate::width::width(&content), 40);
+        }
     }
 
     fn permission_request(

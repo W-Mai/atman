@@ -12,7 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
-- **Animated work folding** — Managed agents stream final responses through a reserved control that folds preceding thinking, tools, and workflow activity into a five-row `work` summary over 400–700 ms; the summary preserves completed progress, edit metrics, and a replay-stable activity description while supporting reversible mouse and `Alt+O` expansion without changing nested disclosure state.
+- **Animated work folding** — Managed agents stream final responses through a reserved control that folds preceding thinking, tools, and workflow activity into a wrapped `work` summary over 400–700 ms; the summary preserves completed progress, edit metrics, and a replay-stable activity description while supporting reversible mouse and `Alt+O` expansion without changing nested disclosure state.
 - **Final response validation** — Managed agent final responses are checked against the current request and recent transcript edges before the loop exits; recent-turn excerpts accept independent head and tail budgets.
 - **Queued next turns** — Normal input submitted during an active flow enters an ordered full-turn queue with keyboard and mouse controls for selection, reordering, editing, removal, and immediate intervention; the queue disappears when empty.
 - **Persistent authorization dock** — Pending permission requests remain visible as an intent-first action surface with targets, execution boundaries, risks, group controls, mouse actions, and a status-bar warning, while decisions report through transient toasts without mutating the transcript.
@@ -28,7 +28,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
-- **Stable work folding** — Work summaries use an aligned neutral marker, keep their header anchored during transitions, inset nested activity on both sides, and restore the complete pre-answer activity range after session replay.
+- **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, inset every nested output surface on both sides, and restore the complete pre-answer activity range after session replay.
 - **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals.
 - **Tool intent recovery** — Provider responses that omit a required tool-call intent receive one schema-correction retry; repeated omissions keep the flow usable with the existing generated display summary while retaining an empty asserted intent for approval and audit logic.
 - **Tool activity hierarchy** — Thinking and working surfaces use explicit action, title, and metadata contrast levels; running tools animate only their status glyph, provider-facing tool schemas require call purposes, streamed purposes appear before final tool-use messages, and missing legacy purposes receive readable action labels.
