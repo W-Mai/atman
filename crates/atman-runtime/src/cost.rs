@@ -21,6 +21,10 @@ impl CostSummary {
         self.usage.cached_input = self.usage.cached_input.saturating_add(usage.cached_input);
         self.usage.output = self.usage.output.saturating_add(usage.output);
         self.usage.cache_write = self.usage.cache_write.saturating_add(usage.cache_write);
+        self.usage.reasoning_tokens = self
+            .usage
+            .reasoning_tokens
+            .saturating_add(usage.reasoning_tokens);
         self.wallclock_ms = self.wallclock_ms.saturating_add(wallclock_ms);
     }
 }
@@ -174,6 +178,25 @@ mod tests {
         let t = total(&events);
         assert_eq!(t.calls, 2);
         assert_eq!(t.wallclock_ms, 200);
+    }
+
+    #[test]
+    fn total_preserves_every_usage_lane() {
+        let mut event = ok_call("m", "p", 11, 13);
+        let Event::LlmCall { usage, .. } = &mut event else {
+            unreachable!();
+        };
+        usage.cached_input = 17;
+        usage.cache_write = 19;
+        usage.reasoning_tokens = 23;
+
+        let total = total(&[event]);
+
+        assert_eq!(total.usage.input, 11);
+        assert_eq!(total.usage.cached_input, 17);
+        assert_eq!(total.usage.cache_write, 19);
+        assert_eq!(total.usage.output, 13);
+        assert_eq!(total.usage.reasoning_tokens, 23);
     }
 
     #[test]

@@ -198,6 +198,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "crossterm",
  "futures",
  "libc",
  "open",

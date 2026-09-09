@@ -1666,6 +1666,7 @@ async fn cmd_repl_once(
 ) -> Result<()> {
     use tokio::sync::mpsc;
 
+    let invocation_started = std::time::Instant::now();
     let use_tui = tui_mode_requested();
     let (note_tx, note_rx) = mpsc::unbounded_channel::<atman_tui::TuiNote>();
     let reporter = Reporter::new(use_tui, note_tx);
@@ -2687,6 +2688,8 @@ async fn cmd_repl_once(
     let session_id = session.id().to_string();
     let session_dir = session.dir().to_path_buf();
     let activity = session.activity_summary();
+    let cost = atman_runtime::cost::total(&session.sink().snapshot());
+    let elapsed = invocation_started.elapsed();
     session.shutdown().await;
     if is_fresh_session
         && user_msg_count == 0
@@ -2705,6 +2708,8 @@ async fn cmd_repl_once(
             todos,
             plans,
             activity,
+            cost,
+            elapsed,
         });
     });
     Ok(())
@@ -2724,6 +2729,8 @@ struct SessionSummary {
     todos: Vec<atman_runtime::memory::todo::Todo>,
     plans: Vec<atman_runtime::memory::plan::Plan>,
     activity: atman_runtime::activity::ActivitySummary,
+    cost: atman_runtime::cost::CostSummary,
+    elapsed: std::time::Duration,
 }
 
 pub fn flush_pending_summary() {
@@ -2735,86 +2742,585 @@ pub fn flush_pending_summary() {
 }
 
 fn print_session_summary(summary: &SessionSummary) {
-    let sid_short = &summary.sid;
-    let goal_line = summary.goal.as_deref().unwrap_or("(none)");
-    let pending = summary
-        .todos
-        .iter()
-        .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Pending))
-        .count();
+    use std::io::{IsTerminal, Write};
+
+    let is_tty = std::io::stdout().is_terminal();
+    let color = is_tty
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+    let terminal_width = if is_tty {
+        crossterm::terminal::size()
+            .map(|(columns, _)| usize::from(columns))
+            .unwrap_or(92)
+    } else {
+        92
+    };
+    let layout = session_summary_layout(summary, terminal_width);
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+
+    let _ = writeln!(stdout);
+    for row in &layout.rows {
+        let _ = write!(stdout, "{}", " ".repeat(layout.indent));
+        if color {
+            write_summary_row(&mut stdout, row, layout.width);
+        } else {
+            let _ = writeln!(stdout, "{}", row.plain(layout.width));
+        }
+    }
+    let _ = writeln!(stdout);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SummaryColor(u8, u8, u8);
+
+impl From<atman_tui::theme::ThemeColor> for SummaryColor {
+    fn from(color: atman_tui::theme::ThemeColor) -> Self {
+        let (r, g, b) = color.rgb();
+        Self(r, g, b)
+    }
+}
+
+#[derive(Clone)]
+struct SummarySpan {
+    text: String,
+    fg: SummaryColor,
+    bg: Option<SummaryColor>,
+    bold: bool,
+}
+
+impl SummarySpan {
+    fn new(text: impl Into<String>, fg: SummaryColor) -> Self {
+        Self {
+            text: text.into(),
+            fg,
+            bg: None,
+            bold: false,
+        }
+    }
+
+    fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+
+    fn on(mut self, bg: SummaryColor) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+}
+
+struct SummaryRow {
+    bg: SummaryColor,
+    spans: Vec<SummarySpan>,
+}
+
+impl SummaryRow {
+    fn blank(bg: SummaryColor) -> Self {
+        Self {
+            bg,
+            spans: Vec::new(),
+        }
+    }
+
+    fn plain(&self, width: usize) -> String {
+        let mut text = self
+            .spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        let used = atman_tui::width::width(&text);
+        text.push_str(&" ".repeat(width.saturating_sub(used)));
+        text
+    }
+}
+
+struct SessionSummaryLayout {
+    width: usize,
+    indent: usize,
+    rows: Vec<SummaryRow>,
+}
+
+#[derive(Clone, Copy)]
+struct SummaryPalette {
+    outer_bg: SummaryColor,
+    focus_bg: SummaryColor,
+    primary: SummaryColor,
+    title: SummaryColor,
+    meta: SummaryColor,
+    accent: SummaryColor,
+    heading: SummaryColor,
+    success: SummaryColor,
+    add: SummaryColor,
+    remove: SummaryColor,
+}
+
+impl SummaryPalette {
+    fn current() -> Self {
+        let theme = atman_tui::theme::theme();
+        Self {
+            outer_bg: theme.panel_bg.into(),
+            focus_bg: theme.user_msg_bg.into(),
+            primary: theme.work_action_fg.into(),
+            title: theme.work_title_fg.into(),
+            meta: theme.work_meta_fg.into(),
+            accent: theme.accent.into(),
+            heading: theme.heading.into(),
+            success: theme.success.into(),
+            add: theme.diff_add_fg.into(),
+            remove: theme.diff_remove_fg.into(),
+        }
+    }
+}
+
+fn session_summary_layout(summary: &SessionSummary, terminal_width: usize) -> SessionSummaryLayout {
+    let palette = SummaryPalette::current();
+    let width = terminal_width.clamp(20, 84);
+    let indent = 0;
+    let content_width = width.saturating_sub(4).max(1);
+    let mut rows = vec![SummaryRow::blank(palette.outer_bg)];
+
+    let header_gap = content_width.saturating_sub(atman_tui::width::width("∴ ATMANcompleted"));
+    rows.push(outer_row(
+        palette,
+        vec![
+            SummarySpan::new("∴ ATMAN", palette.accent).bold(),
+            SummarySpan::new(" ".repeat(header_gap), palette.primary),
+            SummarySpan::new("completed", palette.success),
+        ],
+    ));
+    rows.push(SummaryRow::blank(palette.outer_bg));
+
+    append_focus_block(
+        &mut rows,
+        width,
+        palette,
+        &[
+            (
+                summary.name.as_deref().unwrap_or("Untitled session"),
+                palette.primary,
+                true,
+            ),
+            (
+                summary.project_root.as_deref().unwrap_or("-"),
+                palette.meta,
+                false,
+            ),
+        ],
+    );
+    rows.push(SummaryRow::blank(palette.outer_bg));
+
     let done = summary
         .todos
         .iter()
-        .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done))
+        .filter(|todo| matches!(todo.status, atman_runtime::memory::todo::TodoStatus::Done))
         .count();
-    let plan_line = summary
+    let pending = summary
+        .todos
+        .iter()
+        .filter(|todo| {
+            matches!(
+                todo.status,
+                atman_runtime::memory::todo::TodoStatus::Pending
+            )
+        })
+        .count();
+    let usage = [
+        (
+            format!(
+                "{} tokens",
+                atman_runtime::humanize::format_count(summary.cost.usage.total())
+            ),
+            format!(
+                "{} cached",
+                atman_runtime::humanize::format_count(summary.cost.usage.cached_input)
+            ),
+        ),
+        (
+            format!("{} turns", summary.msg_count),
+            format_elapsed(summary.elapsed),
+        ),
+    ];
+    let work = [
+        (
+            format!("{} tools", summary.activity.attempted_calls),
+            format!("{} files", summary.activity.files),
+            format!("+{} lines", summary.activity.insertions),
+        ),
+        (
+            format!("{done} done"),
+            format!("{pending} pending"),
+            format!("−{} lines", summary.activity.deletions),
+        ),
+    ];
+    append_stats(&mut rows, content_width, palette, &usage, &work);
+    rows.push(SummaryRow::blank(palette.outer_bg));
+
+    append_labeled_text(
+        &mut rows,
+        width,
+        palette,
+        "goal",
+        summary.goal.as_deref().unwrap_or("(none)"),
+    );
+    let plan = summary
         .plans
         .iter()
-        .max_by_key(|p| p.updated_at)
-        .map(|p| {
-            let (step_done, step_total) = p.progress();
-            format!("{} ({step_done}/{step_total})", truncate_str(&p.title, 40))
+        .max_by_key(|plan| plan.updated_at)
+        .map(|plan| {
+            let (done, total) = plan.progress();
+            format!("{} {done}/{total}", plan.title)
         })
         .unwrap_or_else(|| "(none)".to_string());
+    append_labeled_text(&mut rows, width, palette, "plan", &plan);
+    rows.push(SummaryRow::blank(palette.outer_bg));
 
-    let lines = vec![
-        " ∴ ATMAN".to_string(),
-        format!(
-            " name      {}",
-            truncate_str(summary.name.as_deref().unwrap_or("Untitled session"), 60)
-        ),
-        format!(
-            " project   {}",
-            truncate_str(summary.project_root.as_deref().unwrap_or("-"), 80)
-        ),
-        format!(" session   {sid_short}"),
-        format!(" messages  {}", summary.msg_count),
-        format!(" goal      {}", truncate_str(goal_line, 50)),
-        format!(" plan      {plan_line}"),
-        format!(" todos     {done} done · {pending} pending"),
-        format!(
-            " activity  {} tools · {} files · +{} −{}",
-            summary.activity.attempted_calls,
-            summary.activity.files,
-            summary.activity.insertions,
-            summary.activity.deletions
-        ),
-        String::new(),
-        format!(" resume    atman --continue {sid_short}"),
-    ];
+    append_focus_labeled_text(
+        &mut rows,
+        width,
+        palette,
+        "resume",
+        &format!("atman --continue {}", summary.sid),
+    );
+    rows.push(SummaryRow::blank(palette.outer_bg));
 
-    let max_w = lines
-        .iter()
-        .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
-        .max()
-        .unwrap_or(0)
-        .max(40);
-    let inner_w = max_w + 4;
-    let top = format!("╭{}╮", "─".repeat(inner_w));
-    let bot = format!("╰{}╯", "─".repeat(inner_w));
-    let pad = |l: &str| {
-        let visible = unicode_width::UnicodeWidthStr::width(l);
-        let trail = max_w.saturating_sub(visible);
-        format!("│  {}{}  │", l, " ".repeat(trail))
-    };
-
-    println!();
-    println!("{}", top);
-    for l in &lines {
-        println!("{}", pad(l));
+    SessionSummaryLayout {
+        width,
+        indent,
+        rows,
     }
-    println!("{}", bot);
-    println!();
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
+fn outer_row(palette: SummaryPalette, spans: Vec<SummarySpan>) -> SummaryRow {
+    let mut padded = vec![SummarySpan::new("  ", palette.primary)];
+    padded.extend(spans);
+    SummaryRow {
+        bg: palette.outer_bg,
+        spans: padded,
     }
+}
+
+fn append_focus_block(
+    rows: &mut Vec<SummaryRow>,
+    width: usize,
+    palette: SummaryPalette,
+    entries: &[(&str, SummaryColor, bool)],
+) {
+    let block_width = width.saturating_sub(4);
+    rows.push(focus_row(width, palette, Vec::new()));
+    let text_width = block_width.saturating_sub(4).max(1);
+    for (text, color, bold) in entries {
+        for line in atman_tui::width::word_wrap(text, text_width) {
+            let mut span = SummarySpan::new(line, *color).on(palette.focus_bg);
+            span.bold = *bold;
+            rows.push(focus_row(width, palette, vec![span]));
+        }
+    }
+    rows.push(focus_row(width, palette, Vec::new()));
+}
+
+fn focus_row(width: usize, palette: SummaryPalette, content: Vec<SummarySpan>) -> SummaryRow {
+    let block_width = width.saturating_sub(4);
+    let used = content
+        .iter()
+        .map(|span| atman_tui::width::width(&span.text))
+        .sum::<usize>();
+    let mut spans = vec![SummarySpan::new("  ", palette.primary)];
+    spans.push(SummarySpan::new("  ", palette.primary).on(palette.focus_bg));
+    spans.extend(content);
+    spans.push(
+        SummarySpan::new(
+            " ".repeat(block_width.saturating_sub(2 + used)),
+            palette.primary,
+        )
+        .on(palette.focus_bg),
+    );
+    SummaryRow {
+        bg: palette.outer_bg,
+        spans,
+    }
+}
+
+fn append_stats(
+    rows: &mut Vec<SummaryRow>,
+    content_width: usize,
+    palette: SummaryPalette,
+    usage: &[(String, String); 2],
+    work: &[(String, String, String); 2],
+) {
+    if content_width >= 68 {
+        let gap = 6;
+        let left_width = (content_width - gap) / 2;
+        let right_width = content_width - gap - left_width;
+        rows.push(outer_row(
+            palette,
+            join_columns(
+                vec![SummarySpan::new("USAGE", palette.title).bold()],
+                left_width,
+                vec![SummarySpan::new("WORK", palette.title).bold()],
+                gap,
+                palette,
+            ),
+        ));
+        for row in 0..2 {
+            rows.push(outer_row(
+                palette,
+                join_columns(
+                    usage_grid_row(usage, row, left_width, palette),
+                    left_width,
+                    work_grid_row(work, row, right_width, palette),
+                    gap,
+                    palette,
+                ),
+            ));
+        }
+    } else {
+        rows.push(outer_row(
+            palette,
+            vec![SummarySpan::new("USAGE", palette.title).bold()],
+        ));
+        for row in 0..2 {
+            rows.push(outer_row(
+                palette,
+                usage_grid_row(usage, row, content_width, palette),
+            ));
+        }
+        rows.push(SummaryRow::blank(palette.outer_bg));
+        rows.push(outer_row(
+            palette,
+            vec![SummarySpan::new("WORK", palette.title).bold()],
+        ));
+        for row in 0..2 {
+            rows.push(outer_row(
+                palette,
+                work_grid_row(work, row, content_width, palette),
+            ));
+        }
+    }
+}
+
+fn usage_grid_row(
+    usage: &[(String, String); 2],
+    row: usize,
+    width: usize,
+    palette: SummaryPalette,
+) -> Vec<SummarySpan> {
+    let first_width = usage
+        .iter()
+        .map(|(first, _)| atman_tui::width::width(first))
+        .max()
+        .unwrap_or(0);
+    let first = &usage[row].0;
+    let second = &usage[row].1;
+    if first_width + 3 + atman_tui::width::width(second) > width {
+        return vec![SummarySpan::new(
+            atman_tui::width::truncate(&format!("{first} · {second}"), width),
+            palette.primary,
+        )];
+    }
+    let mut spans = if row == 0 {
+        let (count, unit) = first.split_once(' ').unwrap_or((first, ""));
+        vec![
+            SummarySpan::new(count, palette.heading).bold(),
+            SummarySpan::new(format!(" {unit}"), palette.primary),
+        ]
+    } else {
+        vec![SummarySpan::new(first, palette.meta)]
+    };
+    spans.extend([
+        SummarySpan::new(
+            " ".repeat(first_width.saturating_sub(atman_tui::width::width(first))),
+            palette.primary,
+        ),
+        SummarySpan::new(" · ", palette.meta),
+        SummarySpan::new(second, palette.meta),
+    ]);
+    pad_spans(&mut spans, width, palette.primary);
+    spans
+}
+
+fn work_grid_row(
+    work: &[(String, String, String); 2],
+    row: usize,
+    width: usize,
+    palette: SummaryPalette,
+) -> Vec<SummarySpan> {
+    let first_width = work
+        .iter()
+        .map(|(first, _, _)| atman_tui::width::width(first))
+        .max()
+        .unwrap_or(0);
+    let second_width = work
+        .iter()
+        .map(|(_, second, _)| atman_tui::width::width(second))
+        .max()
+        .unwrap_or(0);
+    let (first, second, third) = &work[row];
+    let fixed = first_width + 3 + second_width + 3;
+    if fixed >= width || atman_tui::width::width(third) > width.saturating_sub(fixed) {
+        return vec![SummarySpan::new(
+            atman_tui::width::truncate(&format!("{first} · {second} · {third}"), width),
+            palette.primary,
+        )];
+    }
+    let third_width = width.saturating_sub(fixed);
+    let base_color = if row == 0 {
+        palette.primary
+    } else {
+        palette.meta
+    };
+    let (delta, unit) = third.split_once(' ').unwrap_or((third, ""));
+    let mut spans = vec![
+        SummarySpan::new(first, base_color),
+        SummarySpan::new(
+            " ".repeat(first_width.saturating_sub(atman_tui::width::width(first))),
+            base_color,
+        ),
+        SummarySpan::new(" · ", palette.meta),
+        SummarySpan::new(second, base_color),
+        SummarySpan::new(
+            " ".repeat(second_width.saturating_sub(atman_tui::width::width(second))),
+            base_color,
+        ),
+        SummarySpan::new(" · ", palette.meta),
+        SummarySpan::new(
+            " ".repeat(third_width.saturating_sub(atman_tui::width::width(third))),
+            palette.primary,
+        ),
+        SummarySpan::new(
+            atman_tui::width::truncate(delta, third_width),
+            if row == 0 {
+                palette.add
+            } else {
+                palette.remove
+            },
+        ),
+        SummarySpan::new(format!(" {unit}"), palette.meta),
+    ];
+    pad_spans(&mut spans, width, palette.primary);
+    spans
+}
+
+fn join_columns(
+    mut left: Vec<SummarySpan>,
+    left_width: usize,
+    right: Vec<SummarySpan>,
+    gap: usize,
+    palette: SummaryPalette,
+) -> Vec<SummarySpan> {
+    pad_spans(&mut left, left_width, palette.primary);
+    left.push(SummarySpan::new(" ".repeat(gap), palette.primary));
+    left.extend(right);
+    left
+}
+
+fn pad_spans(spans: &mut Vec<SummarySpan>, width: usize, color: SummaryColor) {
+    let used = spans
+        .iter()
+        .map(|span| atman_tui::width::width(&span.text))
+        .sum::<usize>();
+    spans.push(SummarySpan::new(
+        " ".repeat(width.saturating_sub(used)),
+        color,
+    ));
+}
+
+fn append_labeled_text(
+    rows: &mut Vec<SummaryRow>,
+    width: usize,
+    palette: SummaryPalette,
+    label: &str,
+    text: &str,
+) {
+    let content_width = width.saturating_sub(4).max(1);
+    let label = format!("{label:<8}");
+    let label_width = atman_tui::width::width(&label);
+    let lines = atman_tui::width::word_wrap(text, content_width.saturating_sub(label_width).max(1));
+    for (index, line) in lines.into_iter().enumerate() {
+        rows.push(outer_row(
+            palette,
+            vec![
+                SummarySpan::new(
+                    if index == 0 {
+                        label.clone()
+                    } else {
+                        " ".repeat(label_width)
+                    },
+                    palette.title,
+                ),
+                SummarySpan::new(line, palette.primary),
+            ],
+        ));
+    }
+}
+
+fn append_focus_labeled_text(
+    rows: &mut Vec<SummaryRow>,
+    width: usize,
+    palette: SummaryPalette,
+    label: &str,
+    text: &str,
+) {
+    let block_width = width.saturating_sub(4);
+    let content_width = block_width.saturating_sub(4).max(1);
+    let label = format!("{label:<10}");
+    let label_width = atman_tui::width::width(&label);
+    rows.push(focus_row(width, palette, Vec::new()));
+    for (index, line) in
+        atman_tui::width::word_wrap(text, content_width.saturating_sub(label_width).max(1))
+            .into_iter()
+            .enumerate()
+    {
+        rows.push(focus_row(
+            width,
+            palette,
+            vec![
+                SummarySpan::new(
+                    if index == 0 {
+                        label.clone()
+                    } else {
+                        " ".repeat(label_width)
+                    },
+                    palette.accent,
+                )
+                .on(palette.focus_bg),
+                SummarySpan::new(line, palette.primary).on(palette.focus_bg),
+            ],
+        ));
+    }
+    rows.push(focus_row(width, palette, Vec::new()));
+}
+
+fn format_elapsed(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m {}s", seconds / 60, seconds % 60),
+        3_600..=86_399 => format!("{}h {}m", seconds / 3_600, (seconds % 3_600) / 60),
+        _ => format!("{}d {}h", seconds / 86_400, (seconds % 86_400) / 3_600),
+    }
+}
+
+fn write_summary_row(writer: &mut impl std::io::Write, row: &SummaryRow, width: usize) {
+    let SummaryColor(br, bg, bb) = row.bg;
+    let _ = write!(writer, "\x1b[48;2;{br};{bg};{bb}m");
+    let mut used = 0usize;
+    for span in &row.spans {
+        let SummaryColor(fr, fg, fb) = span.fg;
+        let SummaryColor(sr, sg, sb) = span.bg.unwrap_or(row.bg);
+        let weight = if span.bold { "1" } else { "22" };
+        let _ = write!(
+            writer,
+            "\x1b[{weight};38;2;{fr};{fg};{fb};48;2;{sr};{sg};{sb}m{}",
+            span.text
+        );
+        used += atman_tui::width::width(&span.text);
+    }
+    let _ = writeln!(
+        writer,
+        "\x1b[22;48;2;{br};{bg};{bb}m{}\x1b[0m",
+        " ".repeat(width.saturating_sub(used))
+    );
 }
 
 fn spawn_provider_mutation_task<F>(
@@ -4446,10 +4952,12 @@ async fn cmd_cost_all(root: &Path) -> Result<()> {
     println!();
     print_cost_summary("all sessions", &combined);
     println!();
-    println!("per-session totals (calls | in | cached | out | wall_ms):");
+    println!("per-session totals (calls | in | cached | cache_wr | out | reasoning | wall_ms):");
     for (sid, summary) in &per_session {
-        let (calls, input, cached, output, wall) = summary.grand_totals();
-        println!("  {sid:<40} {calls:>6} {input:>10} {cached:>10} {output:>10} {wall:>10}");
+        let (calls, input, cached, cache_write, output, reasoning, wall) = summary.grand_totals();
+        println!(
+            "  {sid:<40} {calls:>6} {input:>10} {cached:>10} {cache_write:>10} {output:>10} {reasoning:>10} {wall:>10}"
+        );
     }
     Ok(())
 }
@@ -4465,17 +4973,21 @@ struct ModelTotals {
     calls: u64,
     input: u64,
     cached: u64,
+    cache_write: u64,
     output: u64,
+    reasoning: u64,
     wall_ms: u64,
 }
 
 impl CostSummary {
-    fn record(&mut self, model: String, input: u64, cached: u64, output: u64, wall_ms: u64) {
+    fn record(&mut self, model: String, usage: atman_runtime::provider::TokenUsage, wall_ms: u64) {
         let entry = self.by_model.entry(model).or_default();
         entry.calls += 1;
-        entry.input += input;
-        entry.cached += cached;
-        entry.output += output;
+        entry.input += usage.input;
+        entry.cached += usage.cached_input;
+        entry.cache_write += usage.cache_write;
+        entry.output += usage.output;
+        entry.reasoning += usage.reasoning_tokens;
         entry.wall_ms += wall_ms;
         self.total_calls += 1;
     }
@@ -4486,20 +4998,24 @@ impl CostSummary {
             entry.calls += m.calls;
             entry.input += m.input;
             entry.cached += m.cached;
+            entry.cache_write += m.cache_write;
             entry.output += m.output;
+            entry.reasoning += m.reasoning;
             entry.wall_ms += m.wall_ms;
         }
         self.total_calls += other.total_calls;
     }
 
-    fn grand_totals(&self) -> (u64, u64, u64, u64, u64) {
-        let mut acc = (0u64, 0u64, 0u64, 0u64, 0u64);
+    fn grand_totals(&self) -> (u64, u64, u64, u64, u64, u64, u64) {
+        let mut acc = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
         for m in self.by_model.values() {
             acc.0 += m.calls;
             acc.1 += m.input;
             acc.2 += m.cached;
-            acc.3 += m.output;
-            acc.4 += m.wall_ms;
+            acc.3 += m.cache_write;
+            acc.4 += m.output;
+            acc.5 += m.reasoning;
+            acc.6 += m.wall_ms;
         }
         acc
     }
@@ -4516,11 +5032,15 @@ fn aggregate_cost(events_jsonl: &str) -> CostSummary {
             continue;
         }
         let model = v["model"].as_str().unwrap_or("<unknown>").to_string();
-        let input = v["usage"]["input"].as_u64().unwrap_or(0);
-        let cached = v["usage"]["cached_input"].as_u64().unwrap_or(0);
-        let output = v["usage"]["output"].as_u64().unwrap_or(0);
+        let usage = atman_runtime::provider::TokenUsage {
+            input: v["usage"]["input"].as_u64().unwrap_or(0),
+            cached_input: v["usage"]["cached_input"].as_u64().unwrap_or(0),
+            cache_write: v["usage"]["cache_write"].as_u64().unwrap_or(0),
+            output: v["usage"]["output"].as_u64().unwrap_or(0),
+            reasoning_tokens: v["usage"]["reasoning_tokens"].as_u64().unwrap_or(0),
+        };
         let wall = v["wallclock_ms"].as_u64().unwrap_or(0);
-        summary.record(model, input, cached, output, wall);
+        summary.record(model, usage, wall);
     }
     summary
 }
@@ -4530,13 +5050,13 @@ fn print_cost_summary(header: &str, summary: &CostSummary) {
     println!("total llm_calls: {}", summary.total_calls);
     println!();
     println!(
-        "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10}",
-        "model", "calls", "in", "cached", "out", "wall_ms"
+        "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "model", "calls", "in", "cached", "cache_wr", "out", "reasoning", "wall_ms"
     );
     for (model, m) in &summary.by_model {
         println!(
-            "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10}",
-            model, m.calls, m.input, m.cached, m.output, m.wall_ms
+            "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            model, m.calls, m.input, m.cached, m.cache_write, m.output, m.reasoning, m.wall_ms
         );
     }
 }
@@ -7253,6 +7773,137 @@ async fn test_provider_endpoint(
 mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
+
+    fn summary_fixture() -> SessionSummary {
+        let mut plan = atman_runtime::memory::plan::Plan::new(
+            "plan",
+            "完成退出摘要布局并验证很长的计划内容可以完整换行",
+            vec!["layout".into(), "verify".into()],
+        );
+        plan.steps[0].done = true;
+        let todo = |status| atman_runtime::memory::todo::Todo {
+            id: atman_runtime::memory::MemoryId::now(),
+            where_: "summary".into(),
+            why: "fixture".into(),
+            how: "fixture".into(),
+            expected_result: "fixture".into(),
+            status,
+        };
+        SessionSummary {
+            sid: "b3bacc33-f077-492a-96ad-1c3c9657f8e4".into(),
+            name: Some("DSL闭包实现与意图字段复盘".into()),
+            project_root: Some("/Users/w-mai/Projects/atman".into()),
+            msg_count: 107,
+            goal: Some("实现一个完整显示并且在较窄终端中自然换行的退出摘要".into()),
+            todos: vec![
+                todo(atman_runtime::memory::todo::TodoStatus::Done),
+                todo(atman_runtime::memory::todo::TodoStatus::Pending),
+            ],
+            plans: vec![plan],
+            activity: atman_runtime::activity::ActivitySummary {
+                attempted_calls: 69,
+                files: 8,
+                insertions: 214,
+                deletions: 37,
+                ..Default::default()
+            },
+            cost: atman_runtime::cost::CostSummary {
+                usage: atman_runtime::provider::TokenUsage {
+                    input: 410_000,
+                    cached_input: 920_000,
+                    output: 20_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            elapsed: std::time::Duration::from_secs(18 * 60 + 42),
+        }
+    }
+
+    #[test]
+    fn session_summary_aligns_stat_separators_and_line_deltas() {
+        let layout = session_summary_layout(&summary_fixture(), 104);
+        assert_eq!((layout.width, layout.indent), (84, 0));
+        let stat_rows = [
+            layout.rows[9].plain(layout.width),
+            layout.rows[10].plain(layout.width),
+        ];
+        let separator_columns = |line: &str| {
+            line.char_indices()
+                .filter_map(|(index, ch)| {
+                    (ch == '·').then_some(atman_tui::width::width(&line[..index]))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            separator_columns(&stat_rows[0]),
+            separator_columns(&stat_rows[1])
+        );
+        for line in &stat_rows {
+            assert!(line.contains(" · "));
+        }
+        let add_start = stat_rows[0].find("+214 lines").unwrap();
+        let add_end = atman_tui::width::width(&stat_rows[0][..add_start])
+            + atman_tui::width::width("+214 lines");
+        let remove_start = stat_rows[1].find("−37 lines").unwrap();
+        let remove_end = atman_tui::width::width(&stat_rows[1][..remove_start])
+            + atman_tui::width::width("−37 lines");
+        assert_eq!(add_end, remove_end);
+    }
+
+    #[test]
+    fn session_summary_wraps_content_without_exceeding_terminal_width() {
+        let layout = session_summary_layout(&summary_fixture(), 46);
+
+        assert_eq!(layout.width, 46);
+        assert!(layout.rows.len() > 19);
+        assert!(
+            layout
+                .rows
+                .iter()
+                .all(|row| atman_tui::width::width(&row.plain(layout.width)) == layout.width)
+        );
+        let text = layout
+            .rows
+            .iter()
+            .map(|row| row.plain(layout.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("DSL闭包实现"));
+        assert!(
+            text.split_whitespace()
+                .collect::<String>()
+                .contains("b3bacc33-f077-492a-96ad-1c3c9657f8e4")
+        );
+    }
+
+    #[test]
+    fn focus_blocks_fill_the_inner_width_with_two_column_outer_padding() {
+        let layout = session_summary_layout(&summary_fixture(), 104);
+        let focus_bg = SummaryPalette::current().focus_bg;
+        for row_index in [3, 4, 5, 6, 15, 16, 17] {
+            let focus_width = layout.rows[row_index]
+                .spans
+                .iter()
+                .filter(|span| span.bg == Some(focus_bg))
+                .map(|span| atman_tui::width::width(&span.text))
+                .sum::<usize>();
+            assert_eq!(focus_width, layout.width - 4);
+        }
+    }
+
+    #[test]
+    fn cost_aggregation_keeps_cache_write_and_reasoning_lanes() {
+        let summary = aggregate_cost(
+            r#"{"type":"llm_call","model":"m","usage":{"input":1,"cached_input":2,"cache_write":3,"output":4,"reasoning_tokens":5},"wallclock_ms":6}"#,
+        );
+        let model = summary.by_model.get("m").unwrap();
+
+        assert_eq!(model.cache_write, 3);
+        assert_eq!(model.reasoning, 5);
+        assert_eq!(summary.grand_totals(), (1, 1, 2, 3, 4, 5, 6));
+    }
 
     struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 

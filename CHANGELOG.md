@@ -12,6 +12,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Session exit summary** — TUI sessions end with a borderless, theme-aware summary that keeps identity and resume commands in full-width focus blocks, aligns usage and work metrics, wraps goal and plan text, and reports invocation tokens, cached input, elapsed time, turns, tool activity, files, and edit lines.
 - **Animated work folding** — Managed agents stream final responses through a reserved control that folds preceding thinking, tools, and workflow activity into a wrapped `work` summary over 400–700 ms; the summary preserves completed progress, edit metrics, and a replay-stable activity description while supporting reversible mouse and `Alt+O` expansion without changing nested disclosure state.
 - **Final response validation** — Managed agent final responses are checked against the current request and recent transcript edges before the loop exits; recent-turn excerpts accept independent head and tail budgets.
 - **Queued next turns** — Normal input submitted during an active flow enters an ordered full-turn queue with keyboard and mouse controls for selection, reordering, editing, removal, and immediate intervention; the queue disappears when empty.
