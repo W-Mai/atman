@@ -1651,8 +1651,12 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                 Err(e) => return Err(anyhow::anyhow!("prebuild task join failed: {e}")),
             },
             None => {
+                let used_tui = _terminal_guard.is_some();
                 drop(_terminal_guard);
                 flush_pending_summary();
+                if used_tui {
+                    atman_tui::terminal_guard::ensure_shell_mode()?;
+                }
                 return Ok(());
             }
         }

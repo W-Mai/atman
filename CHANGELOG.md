@@ -29,6 +29,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Terminal restoration** — TUI shutdown restores mouse capture, bracketed paste, keyboard enhancement, synchronized updates, cursor visibility, text attributes, alternate-screen state, and raw mode before returning control to the shell, then reasserts shell-safe input modes after rendering the exit summary.
 - **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, frame expanded content with subtle side rails and a closed lower boundary, and restore the complete pre-answer activity range after session replay.
 - **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals.
 - **Tool intent failures** — Tool calls missing a required intent remain in assistant history but are not authorized or executed; each receives a paired error result that explains the missing field to the model without retrying the provider response.

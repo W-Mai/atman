@@ -1,17 +1,19 @@
-use std::io::stdout;
+use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use crossterm::cursor::Show;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
+use crossterm::style::{Attribute, ResetColor, SetAttribute};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
+    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode, supports_keyboard_enhancement,
 };
+use crossterm::{execute, queue};
 
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
 
@@ -104,14 +106,40 @@ fn restore_terminal() -> Result<()> {
     if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
         return Ok(());
     }
-    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    let _ = execute!(
-        stdout(),
-        DisableBracketedPaste,
+    let mut output = stdout();
+    let output_result = queue!(
+        output,
+        EndSynchronizedUpdate,
         DisableMouseCapture,
-        LeaveAlternateScreen
-    );
-    let _ = disable_raw_mode();
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen,
+        Show,
+        SetAttribute(Attribute::Reset),
+        ResetColor,
+    )
+    .and_then(|()| output.flush());
+    let raw_result = disable_raw_mode();
+    output_result.context("restore terminal output modes")?;
+    raw_result.context("disable raw mode")?;
+    Ok(())
+}
+
+/// Reassert shell-facing input and display modes after post-TUI output.
+pub fn ensure_shell_mode() -> Result<()> {
+    let mut output = stdout();
+    let output_result = queue!(
+        output,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        Show,
+        SetAttribute(Attribute::Reset),
+        ResetColor,
+    )
+    .and_then(|()| output.flush());
+    let raw_result = disable_raw_mode();
+    output_result.context("restore shell output modes")?;
+    raw_result.context("restore shell input mode")?;
     Ok(())
 }
 
