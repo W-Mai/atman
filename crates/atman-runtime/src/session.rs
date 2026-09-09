@@ -156,11 +156,13 @@ impl CompactionState {
             .model_window
             .lock()
             .expect("context window measurement lock poisoned");
-        if measurement.provider != provider
-            || measurement.model != model
-            || measurement.tokens == 0
-            || measurement.estimated_tokens == 0
-        {
+        if measurement.model != model || measurement.tokens == 0 {
+            return estimate;
+        }
+        if measurement.estimated_tokens == 0 {
+            return estimate.max(measurement.tokens);
+        }
+        if measurement.provider != provider {
             return estimate;
         }
         let scaled = (estimate as u128)
@@ -2957,12 +2959,37 @@ mod tests {
             1_052_094
         );
         assert_eq!(
+            state.calibrated_estimate("provider-a", "model-a", 430_000),
+            520_000
+        );
+        assert_eq!(
             state.calibrated_estimate("provider-b", "model-a", 870_000),
             870_000
         );
         assert_eq!(
             state.calibrated_estimate("provider-a", "model-b", 870_000),
             870_000
+        );
+    }
+
+    #[test]
+    fn legacy_provider_measurement_remains_a_preflight_floor() {
+        let state = CompactionState::new();
+        state.store_model_window("model-a", 1_045_605);
+
+        assert_eq!(
+            state.calibrated_estimate("provider-a", "model-a", 864_732),
+            1_045_605
+        );
+        assert_eq!(
+            state.calibrated_estimate("provider-a", "model-b", 864_732),
+            864_732
+        );
+
+        state.store_model_window("model-a", 250_000);
+        assert_eq!(
+            state.calibrated_estimate("provider-a", "model-a", 300_000),
+            300_000
         );
     }
 
