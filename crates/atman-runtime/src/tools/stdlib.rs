@@ -1664,7 +1664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_answer_without_intent_becomes_a_tool_failure() {
+    async fn final_answer_without_intent_is_withheld_from_tool_dispatch() {
         let registry = std::sync::Arc::new(crate::tool::ToolRegistry::new());
         registry.register(std::sync::Arc::new(crate::tools::final_answer::FinalAnswer));
         let ctx = authorized_ctx(registry);
@@ -1692,35 +1692,7 @@ mod tests {
         let Value::List(uses) = uses else {
             panic!("tool use list");
         };
-        assert_eq!(uses.len(), 1);
-        let result = DispatchAll
-            .call(
-                ToolArgs {
-                    positional: vec![Value::List(uses)],
-                    named: Vec::new(),
-                },
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            result,
-            Value::List(results)
-                if matches!(
-                    results.as_slice(),
-                    [Value::Message(crate::message::Message { parts, .. })]
-                        if matches!(
-                            parts.as_slice(),
-                            [crate::message::MessagePart::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error: true,
-                            }] if tool_use_id == "answer-1"
-                                && content.contains("_atman_intent")
-                        )
-                )
-        ));
+        assert!(uses.is_empty());
     }
 
     #[tokio::test]

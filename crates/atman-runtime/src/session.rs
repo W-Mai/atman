@@ -96,8 +96,10 @@ pub struct CompactionState {
 
 #[derive(Default)]
 struct ModelWindowMeasurement {
+    provider: String,
     model: String,
     tokens: u64,
+    estimated_tokens: u64,
 }
 
 impl CompactionState {
@@ -118,8 +120,27 @@ impl CompactionState {
             .model_window
             .lock()
             .expect("context window measurement lock poisoned");
+        measurement.provider.clear();
         measurement.model = model.to_owned();
         measurement.tokens = tokens;
+        measurement.estimated_tokens = 0;
+    }
+
+    fn store_calibrated_model_window(
+        &self,
+        provider: &str,
+        model: &str,
+        tokens: u64,
+        estimated_tokens: u64,
+    ) {
+        let mut measurement = self
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned");
+        measurement.provider = provider.to_owned();
+        measurement.model = model.to_owned();
+        measurement.tokens = tokens;
+        measurement.estimated_tokens = estimated_tokens;
     }
 
     fn model_window_for(&self, model: &str) -> Option<u64> {
@@ -128,6 +149,38 @@ impl CompactionState {
             .lock()
             .expect("context window measurement lock poisoned");
         (measurement.model == model).then_some(measurement.tokens)
+    }
+
+    fn calibrated_estimate(&self, provider: &str, model: &str, estimate: u64) -> u64 {
+        let measurement = self
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned");
+        if measurement.provider != provider
+            || measurement.model != model
+            || measurement.tokens == 0
+            || measurement.estimated_tokens == 0
+        {
+            return estimate;
+        }
+        let scaled = (estimate as u128)
+            .saturating_mul(measurement.tokens as u128)
+            .div_ceil(measurement.estimated_tokens as u128)
+            .min(u64::MAX as u128) as u64;
+        estimate.max(scaled)
+    }
+
+    fn model_window_measurement(&self) -> ModelWindowMeasurement {
+        let measurement = self
+            .model_window
+            .lock()
+            .expect("context window measurement lock poisoned");
+        ModelWindowMeasurement {
+            provider: measurement.provider.clone(),
+            model: measurement.model.clone(),
+            tokens: measurement.tokens,
+            estimated_tokens: measurement.estimated_tokens,
+        }
     }
 
     fn restore_context_epoch(&self, epoch: Option<String>) {
@@ -791,9 +844,13 @@ fn load_goal(dir: &Path) -> Option<String> {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedContextState {
     #[serde(default)]
+    provider: String,
+    #[serde(default)]
     model: String,
     #[serde(default)]
     window_tokens: u64,
+    #[serde(default)]
+    estimated_window_tokens: u64,
     #[serde(default)]
     window_budget: u64,
 }
@@ -1135,6 +1192,9 @@ impl Session {
         if !persisted.model.is_empty() {
             initial_context.model = persisted.model.clone();
         }
+        if !persisted.provider.is_empty() {
+            initial_context.provider = persisted.provider.clone();
+        }
         initial_context.window_tokens = persisted.window_tokens;
         initial_context.window_budget = persisted.window_budget;
         let initial_goal = load_goal(&dir);
@@ -1182,7 +1242,16 @@ impl Session {
                 let c = CompactionState::new();
                 c.restore_context_epoch(checkpoint_epoch);
                 if persisted.window_tokens > 0 {
-                    c.store_model_window(&persisted.model, persisted.window_tokens);
+                    if persisted.provider.is_empty() || persisted.estimated_window_tokens == 0 {
+                        c.store_model_window(&persisted.model, persisted.window_tokens);
+                    } else {
+                        c.store_calibrated_model_window(
+                            &persisted.provider,
+                            &persisted.model,
+                            persisted.window_tokens,
+                            persisted.estimated_window_tokens,
+                        );
+                    }
                 }
                 c
             },
@@ -1486,6 +1555,7 @@ impl Session {
             ttft_ms,
             tokens_per_sec,
             true,
+            None,
         );
     }
 
@@ -1497,6 +1567,7 @@ impl Session {
         plan_id: crate::context_plan::ContextPlanId,
         call_purpose: crate::context_plan::ContextCallPurpose,
         call_identity: crate::context_plan::ContextCallIdentity,
+        measured_context_tokens: Option<&crate::context_plan::ContextTokenLanes>,
         usage: &crate::provider::TokenUsage,
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
@@ -1563,6 +1634,7 @@ impl Session {
             ttft_ms,
             tokens_per_sec,
             updates_model_window,
+            measured_context_tokens.map(crate::context_plan::ContextTokenLanes::total),
         );
     }
 
@@ -1608,9 +1680,22 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
         updates_model_window: bool,
+        estimated_input_tokens: Option<u64>,
     ) {
         if updates_model_window && tokens_in > 0 {
-            self.compaction.store_model_window(model, tokens_in);
+            if let (Some(provider), Some(estimated_input_tokens)) = (
+                provider,
+                estimated_input_tokens.filter(|tokens| *tokens > 0),
+            ) {
+                self.compaction.store_calibrated_model_window(
+                    provider,
+                    model,
+                    tokens_in,
+                    estimated_input_tokens,
+                );
+            } else {
+                self.compaction.store_model_window(model, tokens_in);
+            }
         }
         self.watch.context.send_modify(|snap| {
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
@@ -1637,6 +1722,16 @@ impl Session {
             .lock()
             .expect("context window measurement lock poisoned")
             .tokens
+    }
+
+    pub(crate) fn calibrated_context_input_estimate(
+        &self,
+        provider: &str,
+        model: &str,
+        estimate: u64,
+    ) -> u64 {
+        self.compaction
+            .calibrated_estimate(provider, model, estimate)
     }
 
     pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -1668,9 +1763,12 @@ impl Session {
             }
         });
         let snap = self.watch.context.borrow();
+        let measurement = self.compaction.model_window_measurement();
         PersistedContextState {
+            provider: measurement.provider,
             model,
             window_tokens: snap.window_tokens,
+            estimated_window_tokens: measurement.estimated_tokens,
             window_budget: snap.window_budget,
         }
         .save(&self.dir);
@@ -1709,9 +1807,12 @@ impl Session {
             }
         });
         let snap = self.watch.context.borrow();
+        let measurement = self.compaction.model_window_measurement();
         PersistedContextState {
+            provider: measurement.provider,
             model,
             window_tokens: snap.window_tokens,
+            estimated_window_tokens: measurement.estimated_tokens,
             window_budget: snap.window_budget,
         }
         .save(&self.dir);
@@ -2844,6 +2945,25 @@ mod tests {
 
         assert_eq!(state.model_window_for("model-a"), Some(42));
         assert_eq!(state.model_window_for("model-b"), None);
+    }
+
+    #[test]
+    fn provider_measurement_calibrates_a_fresh_estimate_without_becoming_a_stale_floor() {
+        let state = CompactionState::new();
+        state.store_calibrated_model_window("provider-a", "model-a", 1_040_000, 860_000);
+
+        assert_eq!(
+            state.calibrated_estimate("provider-a", "model-a", 870_000),
+            1_052_094
+        );
+        assert_eq!(
+            state.calibrated_estimate("provider-b", "model-a", 870_000),
+            870_000
+        );
+        assert_eq!(
+            state.calibrated_estimate("provider-a", "model-b", 870_000),
+            870_000
+        );
     }
 
     #[test]

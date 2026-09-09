@@ -729,7 +729,12 @@ fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
 }
 
 fn tool_call_intent_schema() -> serde_json::Value {
-    serde_json::json!({"type": "string"})
+    serde_json::json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": crate::message::TOOL_CALL_INTENT_MAX_CHARS,
+        "pattern": "\\S"
+    })
 }
 
 fn decorate_tool_input_schema(schema: &mut serde_json::Value) {

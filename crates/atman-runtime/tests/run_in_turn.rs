@@ -38,9 +38,7 @@ impl FinalAnswerProvider {
                     id: "final-1".into(),
                     name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
                     input: serde_json::json!({"message": "Done."}),
-                    intent: atman_runtime::message::ToolCallIntent::new(
-                        "Completed requested work.",
-                    ),
+                    intent: None,
                 }],
                 turn_id,
                 origin: MessageOrigin::User,
@@ -272,7 +270,7 @@ async fn run_in_turn_appends_assistant_message_to_session() {
 }
 
 #[tokio::test]
-async fn root_final_answer_is_persisted_only_after_explicit_acceptance() {
+async fn root_final_answer_without_provider_intent_is_persisted_after_explicit_acceptance() {
     let _registry = common::ModelRegistryGuard::mock("final-model").await;
     let src = r#"flow ask() -> string {
     reply = llm.call(
@@ -310,6 +308,10 @@ async fn root_final_answer_is_persisted_only_after_explicit_acceptance() {
     assert_eq!(assistants.len(), 1);
     assert_eq!(assistants[0].origin, MessageOrigin::FinalAnswer);
     assert_eq!(assistants[0].text_concat(), "Done.");
+    assert_eq!(
+        atman_runtime::tools::final_answer::summary(&assistants[0]).as_deref(),
+        Some("Done.")
+    );
 }
 
 #[tokio::test]

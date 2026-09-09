@@ -361,7 +361,10 @@ async fn maybe_auto_compact_locked(
         .unwrap_or_else(|| info.compaction_target_after());
     let msgs = session.messages();
     let window_tokens = estimate_tokens_for_messages(&msgs);
-    let current = budget_context.estimated_input_tokens(window_tokens);
+    let estimate = budget_context.estimated_input_tokens(window_tokens);
+    let current = providers.resolve(model).map_or(estimate, |provider| {
+        session.calibrated_context_input_estimate(provider.name(), model, estimate)
+    });
     if !forced && current <= trigger {
         return;
     }

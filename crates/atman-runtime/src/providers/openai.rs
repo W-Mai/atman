@@ -1149,6 +1149,41 @@ mod tests {
     }
 
     #[test]
+    fn final_answer_wire_schema_requires_non_empty_intent() {
+        let provider = OpenAiProvider::new("openai", "test-key");
+        let request = LlmRequest {
+            model: "gpt-test".into(),
+            messages: Vec::new(),
+            system: None,
+            input: crate::Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            prompt_cache_key: None,
+            tools: vec![crate::tool::tool_spec(
+                &crate::tools::final_answer::FinalAnswer,
+            )],
+            reasoning: ReasoningSelection::ProviderDefault,
+            stall_timeout_secs: 0,
+        };
+
+        let body = serde_json::to_value(provider.build_body(&request, false).unwrap()).unwrap();
+        let parameters = &body["tools"][0]["function"]["parameters"];
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["message", "_atman_intent"])
+        );
+        assert_eq!(
+            parameters["properties"]["_atman_intent"],
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "\\S"
+            })
+        );
+    }
+
+    #[test]
     fn non_streaming_response_preserves_reasoning_content() {
         let assistant = response_to_assistant(
             ChatCompletionsResponse {

@@ -52,6 +52,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         root_plan.clone(),
         ContextCallPurpose::General,
         root_identity,
+        None,
         &TokenUsage {
             input: 40,
             cached_input: 60,
@@ -67,6 +68,7 @@ async fn scoped_plan_usage_does_not_replace_the_root_model_window() {
         ContextPlanId::now(),
         ContextCallPurpose::Classification,
         child_identity,
+        None,
         &TokenUsage {
             input: 1_000,
             ..Default::default()

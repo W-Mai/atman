@@ -7,7 +7,7 @@ pub const FINAL_ANSWER_TOOL: &str = "final.answer";
 
 struct Candidate<'a> {
     answer: &'a str,
-    summary: &'a str,
+    summary: Option<&'a str>,
 }
 
 fn raw_candidate(message: &Message) -> Result<Option<Candidate<'_>>, &'static str> {
@@ -50,10 +50,25 @@ fn raw_candidate(message: &Message) -> Result<Option<Candidate<'_>>, &'static st
     else {
         return Err("final.answer requires a non-empty `message`");
     };
-    let Some(summary) = intent.as_ref().map(|intent| intent.as_str()) else {
-        return Err("final.answer requires a non-empty `_atman_intent`");
-    };
-    Ok(Some(Candidate { answer, summary }))
+    Ok(Some(Candidate {
+        answer,
+        summary: intent.as_ref().map(|intent| intent.as_str()),
+    }))
+}
+
+fn fallback_summary(answer: &str) -> String {
+    let first_line = answer
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Completed internal work")
+        .trim_start_matches(['#', '*', '-', '>', '`'])
+        .trim();
+    crate::message::ToolCallIntent::new(first_line)
+        .or_else(|| crate::message::ToolCallIntent::new("Completed internal work"))
+        .expect("fallback final-answer summary is non-empty")
+        .as_str()
+        .to_owned()
 }
 
 pub fn attempted(message: &Message) -> bool {
@@ -68,13 +83,36 @@ pub fn validation_error(message: &Message) -> Option<&'static str> {
 }
 
 pub fn summary(message: &Message) -> Option<String> {
-    message.parts.iter().find_map(|part| match part {
-        MessagePart::FinalAnswerSummary { text } => (!text.trim().is_empty()).then(|| text.clone()),
-        MessagePart::ToolUse { name, intent, .. } if name == FINAL_ANSWER_TOOL => {
-            intent.as_ref().map(|intent| intent.as_str().to_owned())
-        }
-        _ => None,
-    })
+    message
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            MessagePart::FinalAnswerSummary { text } => {
+                (!text.trim().is_empty()).then(|| text.clone())
+            }
+            MessagePart::ToolUse {
+                name,
+                input,
+                intent,
+                ..
+            } if name == FINAL_ANSWER_TOOL => intent
+                .as_ref()
+                .map(|intent| intent.as_str().to_owned())
+                .or_else(|| {
+                    input
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|answer| !answer.trim().is_empty())
+                        .map(fallback_summary)
+                }),
+            _ => None,
+        })
+        .or_else(|| {
+            (message.origin == crate::message::MessageOrigin::FinalAnswer)
+                .then(|| message.text_concat())
+                .filter(|answer| !answer.trim().is_empty())
+                .map(|answer| fallback_summary(&answer))
+        })
 }
 
 pub fn extract(message: &Message) -> Option<String> {
@@ -100,7 +138,10 @@ pub fn normalized_for_history(message: &Message) -> Option<Message> {
         .parts
         .retain(|part| matches!(part, MessagePart::Thinking { .. }));
     normalized.parts.push(MessagePart::FinalAnswerSummary {
-        text: candidate.summary.to_owned(),
+        text: candidate
+            .summary
+            .map(str::to_owned)
+            .unwrap_or_else(|| fallback_summary(candidate.answer)),
     });
     normalized.parts.push(MessagePart::Text {
         text: candidate.answer.to_owned(),
@@ -269,11 +310,26 @@ mod tests {
                 .get("_atman_intent")
                 .is_some()
         );
+        assert_eq!(
+            spec.input_schema["properties"]["_atman_intent"],
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "\\S"
+            })
+        );
     }
 
     #[test]
-    fn rejects_history_normalization_without_summary_intent() {
-        assert!(normalized_for_history(&control_message()).is_none());
+    fn normalizes_missing_summary_intent_with_answer_fallback() {
+        let normalized = normalized_for_history(&control_message()).unwrap();
+        assert_eq!(normalized.text_concat(), "Done.");
+        assert_eq!(summary(&normalized).as_deref(), Some("Done."));
+        assert_eq!(
+            normalized.origin,
+            crate::message::MessageOrigin::FinalAnswer
+        );
     }
 
     #[test]

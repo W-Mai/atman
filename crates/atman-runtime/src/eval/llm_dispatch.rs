@@ -469,7 +469,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     provider: provider.name().to_string(),
                     context_plan_id: Some(context_plan_id.clone()),
                     context_epoch: Some(context_epoch),
-                    context_tokens: Some(context_tokens),
+                    context_tokens: Some(context_tokens.clone()),
                     usage_source: Some(usage_source),
                     context_call_purpose: Some(context_call_purpose),
                     context_call_identity: Some(context_call_identity.clone()),
@@ -512,6 +512,12 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     context_plan_id,
                     context_call_purpose,
                     context_call_identity,
+                    matches!(
+                        usage_source,
+                        crate::context_plan::TokenUsageSource::Provider
+                            | crate::context_plan::TokenUsageSource::Mixed
+                    )
+                    .then_some(&context_tokens),
                     &usage,
                     ttft_ms,
                     tps,

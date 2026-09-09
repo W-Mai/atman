@@ -3148,11 +3148,7 @@ impl AppState {
                     intents.join(" · ")
                 }
             });
-        let attempted_calls = activity
-            .map(|activity| activity.attempted_calls)
-            .filter(|count| *count > 0)
-            .unwrap_or(call_ids.len());
-        let total_steps = attempted_calls.max(1);
+        let total_steps = call_ids.len().max(1);
         let (file_count, insertions, deletions) =
             activity.map_or((files.len(), insertions, deletions), |activity| {
                 (
@@ -5126,6 +5122,13 @@ mod tests {
             disclosure: Disclosure::Summary,
             retried: false,
         });
+        live.push_item(OutputItem::ToolDispatch {
+            calls: (0..4)
+                .map(|index| completed_tool_call(format!("call-{index}")))
+                .collect(),
+        });
+        // Internal agent-loop helpers also emit ToolNode frames, but they are
+        // not visible members of the folded work section.
         live.turn_activity.attempted_calls = 69;
         live.apply_stream_frame(StreamFrame::ToolCallDraft {
             index: 0,
@@ -5142,7 +5145,7 @@ mod tests {
             text: "build it".into(),
         }];
         restored_items.push(OutputItem::ToolDispatch {
-            calls: (0..69)
+            calls: (0..4)
                 .map(|index| completed_tool_call(format!("call-{index}")))
                 .collect(),
         });
@@ -5158,10 +5161,10 @@ mod tests {
         let replay = AppState::new("replay".into(), None).with_initial_items(restored_items);
         let replay_fold = replay.work_fold_projections().remove(0);
 
-        assert_eq!(live_fold.completed_steps, 69);
-        assert_eq!(live_fold.total_steps, 69);
-        assert_eq!(replay_fold.completed_steps, 69);
-        assert_eq!(replay_fold.total_steps, 69);
+        assert_eq!(live_fold.completed_steps, 4);
+        assert_eq!(live_fold.total_steps, 4);
+        assert_eq!(replay_fold.completed_steps, 4);
+        assert_eq!(replay_fold.total_steps, 4);
         assert_eq!(live_fold.title, replay_fold.title);
     }
 
