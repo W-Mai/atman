@@ -3,15 +3,15 @@ flow agent(user_prompt: string) -> string {
         capabilities { shell: true }
         invocation { user_message: user_prompt }
     }
-    return subflow(agent_loop, false)
+    return subflow(agent_loop, "direct")
 }
 
-flow agent_loop(final_answer_reminded: bool) -> string {
+flow agent_loop(completion_state: string) -> string {
     reply = llm.call(
         model: "smart",
         effort: env("effort"),
         context: "session",
-        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step. After all work is complete, deliver the complete user-facing response through final.answer.",
+        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step. After internal tool work is complete, deliver the complete user-facing response through final.answer. Direct conversational replies that require no tool work may use ordinary assistant text.",
         cache: true,
         retry: 12,
         tools: [
@@ -70,27 +70,30 @@ flow agent_loop(final_answer_reminded: bool) -> string {
             }
         }
         when disposition == "continue_action" {
+            when completion_state == "reminded" {
+                completion_state = "worked"
+            }
             session.push(message.user("Agent loop control: issue the required tool call instead of describing it."))
+            return subflow(agent_loop, completion_state)
         }
         when disposition == "continue_work" {
+            when completion_state == "reminded" {
+                completion_state = "worked"
+            }
             session.push(message.user("Agent loop control: continue the concrete work required by the current request."))
+            return subflow(agent_loop, completion_state)
         }
-        when disposition == "complete" {
-            when final_answer_reminded {
-                return candidate
-            }
+        when completion_state == "worked" {
             session.push(message.user("Agent loop control: your next response MUST be exactly one final.answer tool call. Put the complete user-facing Markdown in message, include a concise _atman_intent for the work header, and do not emit ordinary assistant text before or after the tool call."))
+            return subflow(agent_loop, "reminded")
         }
-        when disposition == "needs_user" {
-            when final_answer_reminded {
-                return candidate
-            }
-            session.push(message.user("Agent loop control: your next response MUST be exactly one final.answer tool call. Put the complete user-facing Markdown in message, include a concise _atman_intent for the work header, and do not emit ordinary assistant text before or after the tool call."))
-        }
-        retrying_final_answer = disposition == "complete" || disposition == "needs_user"
-        return subflow(agent_loop, retrying_final_answer)
+        return candidate
     }
     tool_results = dispatch_all(tool_uses)
     session.push(tool_results)
-    return subflow(agent_loop, final_answer_attempt)
+    completion_state = "worked"
+    when final_answer_attempt {
+        completion_state = "reminded"
+    }
+    return subflow(agent_loop, completion_state)
 }
