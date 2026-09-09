@@ -27,6 +27,70 @@ struct MissingIntentProvider {
     requests: std::sync::Mutex<Vec<Vec<Message>>>,
 }
 
+struct FinalAnswerProvider;
+
+impl FinalAnswerProvider {
+    fn response(&self, turn_id: TurnId) -> AssistantMessage {
+        AssistantMessage {
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "final-1".into(),
+                    name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+                    input: serde_json::json!({"message": "Done."}),
+                    intent: atman_runtime::message::ToolCallIntent::new(
+                        "Completed requested work.",
+                    ),
+                }],
+                turn_id,
+                origin: MessageOrigin::User,
+            },
+            stop_reason: StopReason::End,
+            token_usage: TokenUsage::default(),
+            timing: CallTiming::default(),
+            model: "final-model".into(),
+            response_id: None,
+        }
+    }
+}
+
+impl Provider for FinalAnswerProvider {
+    fn name(&self) -> &str {
+        "final-model"
+    }
+
+    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        Box::pin(async move {
+            let turn_id = req
+                .messages
+                .first()
+                .map(|message| message.turn_id.clone())
+                .unwrap_or_else(TurnId::now);
+            Ok(self.response(turn_id))
+        })
+    }
+
+    fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+        let turn_id = req
+            .messages
+            .first()
+            .map(|message| message.turn_id.clone())
+            .unwrap_or_else(TurnId::now);
+        let response = self.response(turn_id);
+        let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
+        let cancel = CancellationToken::new();
+        let output = Box::pin(async move {
+            let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+            Ok(response)
+        });
+        Observable {
+            output,
+            events,
+            cancel,
+        }
+    }
+}
+
 impl MissingIntentProvider {
     fn response(&self) -> AssistantMessage {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -205,6 +269,47 @@ async fn run_in_turn_appends_assistant_message_to_session() {
         )
     });
     assert!(has_correlated_assistant);
+}
+
+#[tokio::test]
+async fn root_final_answer_is_persisted_only_after_explicit_acceptance() {
+    let _registry = common::ModelRegistryGuard::mock("final-model").await;
+    let src = r#"flow ask() -> string {
+    reply = llm.call(
+        model: "final-model",
+        prompt: "finish",
+        context: "session",
+        tools: ["final.answer"],
+    )
+    answer = extract_final_answer(reply)
+    session.push(finalize_response(reply))
+    return answer
+}
+"#;
+    let file = parse_file(src).unwrap();
+    let executor = Executor::new();
+    atman_runtime::tools::register_tier_zero(&executor.tools);
+    executor.providers.register(Arc::new(FinalAnswerProvider));
+    let session = Arc::new(Session::open_ephemeral());
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "start"));
+
+    let output = executor
+        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
+        .await
+        .unwrap();
+    session.end_turn();
+
+    assert!(matches!(output, Value::Str(answer) if answer == "Done."));
+    let assistants = session
+        .messages()
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(assistants.len(), 1);
+    assert_eq!(assistants[0].origin, MessageOrigin::FinalAnswer);
+    assert_eq!(assistants[0].text_concat(), "Done.");
 }
 
 #[tokio::test]

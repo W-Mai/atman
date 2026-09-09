@@ -342,9 +342,13 @@ impl HistoryStore for HistoryStoreImpl {
 }
 
 pub(crate) fn recent_turn_messages(messages: &[Message], n: usize) -> (u64, Vec<Message>) {
+    let messages = messages
+        .iter()
+        .filter(|message| message.origin != crate::message::MessageOrigin::Internal)
+        .collect::<Vec<_>>();
     if messages.is_empty() || n == 0 {
         let mut turn_ids = Vec::new();
-        for message in messages {
+        for message in &messages {
             if !turn_ids.contains(&message.turn_id) {
                 turn_ids.push(message.turn_id.clone());
             }
@@ -460,6 +464,24 @@ mod tests {
         assert_eq!(recent[0].text_concat(), "next request");
         let (_, recent) = recent_turn_messages(&messages, 2);
         assert_eq!(recent.len(), 4);
+    }
+
+    #[test]
+    fn recent_turns_can_exclude_internal_loop_controls_before_grouping() {
+        let turn = crate::event::TurnId::now();
+        let mut control = user_msg("loop control");
+        control.turn_id = turn.clone();
+        control.origin = MessageOrigin::Internal;
+        let messages = vec![user_msg("request"), control, assistant_msg("answer")];
+
+        let (_, recent) = recent_turn_messages(&messages, 2);
+
+        assert_eq!(recent.len(), 2);
+        assert!(
+            recent
+                .iter()
+                .all(|message| message.text_concat() != "loop control")
+        );
     }
 
     #[test]

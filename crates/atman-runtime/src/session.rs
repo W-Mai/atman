@@ -1935,6 +1935,16 @@ impl Session {
         AppendMessageCommand { msg, flow_run_id }.execute(self);
     }
 
+    pub(crate) fn append_message_with_stream_scope(
+        &self,
+        msg: Message,
+        flow_run_id: Option<FlowRunId>,
+        stream_flow_run_id: Option<FlowRunId>,
+    ) {
+        AppendMessageCommand { msg, flow_run_id }
+            .execute_with_stream_scope(self, stream_flow_run_id.as_ref());
+    }
+
     pub fn append_context_records(
         &self,
         turn_id: TurnId,
@@ -2643,8 +2653,28 @@ impl AppendMessageCommand {
         self.execute_with_messages(session, &mut messages)
     }
 
+    fn execute_with_stream_scope(
+        &self,
+        session: &Session,
+        stream_flow_run_id: Option<&FlowRunId>,
+    ) -> u64 {
+        let mut messages = session.messages.lock().unwrap();
+        self.execute_with_messages_and_stream(session, &mut messages, stream_flow_run_id)
+    }
+
     fn execute_with_messages(&self, session: &Session, messages: &mut Vec<Message>) -> u64 {
-        let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
+        self.execute_with_messages_and_stream(session, messages, self.flow_run_id.as_ref())
+    }
+
+    fn execute_with_messages_and_stream(
+        &self,
+        session: &Session,
+        messages: &mut Vec<Message>,
+        stream_flow_run_id: Option<&FlowRunId>,
+    ) -> u64 {
+        let flow_run_id_str = stream_flow_run_id
+            .or(self.flow_run_id.as_ref())
+            .map(|run_id| run_id.0.to_string());
         let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
             &self.msg,
             Some(&session.output_store),

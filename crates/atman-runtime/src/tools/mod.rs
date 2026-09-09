@@ -79,6 +79,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(stdlib::TextConcat));
     reg.register(Arc::new(final_answer::FinalAnswer));
     reg.register(Arc::new(final_answer::ExtractFinalAnswer));
+    reg.register(Arc::new(final_answer::FinalizeResponse));
     reg.register(Arc::new(stdlib::ExtractToolUses));
     reg.register(Arc::new(stdlib::DispatchAll));
     reg.register(Arc::new(context::ContextRecordAppend));

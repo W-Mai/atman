@@ -37,7 +37,7 @@ pub fn build_llm_context(
     } else if !matches!(context_mode, ContextMode::None) {
         let mut history = session_snapshot
             .as_deref()
-            .map(|messages| project_session_messages(messages, context_mode))
+            .map(|messages| project_session_messages(messages, context_mode, turn_id))
             .unwrap_or_default();
         let budget_text = args.prompt.clone().unwrap_or_default();
         if let Some(p) = args.prompt.clone()
@@ -83,13 +83,20 @@ pub fn build_llm_context(
 pub(super) fn project_session_messages(
     messages: &[crate::message::Message],
     context_mode: ContextMode,
+    current_turn_id: &crate::event::TurnId,
 ) -> Vec<crate::message::Message> {
+    let visible = |message: &&crate::message::Message| {
+        message.origin != crate::message::MessageOrigin::Internal
+            || message.turn_id == *current_turn_id
+            || message.contains_context_record()
+    };
     match context_mode {
-        ContextMode::Session => messages.to_vec(),
+        ContextMode::Session => messages.iter().filter(visible).cloned().collect(),
         ContextMode::SessionRecent(n) => {
             let mut projected = crate::context_plan::latest_live_context_record_messages(messages);
             let ordinary: Vec<_> = messages
                 .iter()
+                .filter(visible)
                 .filter_map(|message| {
                     let mut message = message.clone();
                     message.parts.retain(|part| {
@@ -228,11 +235,35 @@ mod tests {
         };
         let messages = vec![record(1, "old"), record(2, "current"), message("tail")];
 
-        let projected = project_session_messages(&messages, ContextMode::SessionRecent(3));
+        let projected =
+            project_session_messages(&messages, ContextMode::SessionRecent(3), &turn_id);
 
         assert_eq!(projected.len(), 2);
         assert!(projected[0].text_concat().contains("current"));
         assert!(!projected[0].text_concat().contains("old"));
         assert_eq!(projected[1].text_concat(), "tail");
+    }
+
+    #[test]
+    fn session_context_keeps_only_current_turn_internal_controls() {
+        let previous_turn = TurnId::now();
+        let current_turn = TurnId::now();
+        let internal = |turn_id: TurnId, text: &str| Message {
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text { text: text.into() }],
+            turn_id,
+            origin: MessageOrigin::Internal,
+        };
+        let messages = vec![
+            internal(previous_turn, "stale loop control"),
+            message("visible user message"),
+            internal(current_turn.clone(), "current loop control"),
+        ];
+
+        let projected = project_session_messages(&messages, ContextMode::Session, &current_turn);
+
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].text_concat(), "visible user message");
+        assert_eq!(projected[1].text_concat(), "current loop control");
     }
 }

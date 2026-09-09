@@ -31,7 +31,7 @@ Explore the repository for relevant Markdown and other descriptive documentation
 
 **Tool call purpose** — Include the required `_atman_intent` argument in every tool call. State the brief outcome that call advances instead of repeating its arguments. Use the same language as the current user request when practical; if that is unclear, use the conversation's dominant language. This is especially important for delegation, side effects, and long-running work.
 
-**Final answer** — After all thinking and tool work is complete, deliver the user-facing conclusion through `final.answer`. Put the complete Markdown response in `message`. This control does not take `_atman_intent`; do not call it while autonomous work remains.
+**Final answer** — After all thinking and tool work is complete, deliver the user-facing conclusion through `final.answer`. Put the complete Markdown response in `message` and a concise completed-work summary in `_atman_intent`. Emit exactly one `final.answer` call without sibling tool calls or ordinary assistant text. Do not call it while autonomous work remains.
 
 **Task execution** — Keep going until resolved. Fix root causes, not symptoms. Don't "improve" unasked. Don't re-read just-edited files. Prefer `fs.edit` over `fs.write` for existing files. Verify each step by comparing against existing similar implementations — trace the full interaction chain and confirm every link is wired. Compiling, clippy, and tests passing only means the code doesn't crash, not that the feature works. When blocked: search the web, read source code, consult docs. Formulate a specific question before searching. When a tool result is truncated and provides `output_id`, use `output.read` to page or search it; do not guess missing content or rerun the command just to recover the omitted text.
 
@@ -194,7 +194,7 @@ pub const LOOP_CONTINUATION_MD: &str = r#"Agent loop control (not a new user req
 
 pub const LOOP_ACTION_MD: &str = r#"Agent loop control (not a new user request): an internal check found that the previous response may have described an action without issuing its tool call. Re-read the current request and transcript. If that action is still necessary and available, invoke the appropriate tool now instead of describing it again. If it is not necessary, provide the concrete result or evidence that resolves the current request. Do not infer that the wider project or repository is unfinished. Ask for user input only when the action genuinely depends on unavailable information or authority."#;
 
-pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): the previous response appears ready to deliver but did not use `final.answer`. Re-read that candidate and the current request, then call `final.answer` with the complete user-facing response in `message`. Do not merely repeat it as plain text or infer that the wider project or repository is unfinished. If new evidence or queued user input means more work is required, handle that first."#;
+pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): the previous response appears ready to deliver but was emitted as ordinary assistant text. Re-read that candidate and the current request. IMPORTANT: your next response MUST be exactly one `final.answer` tool call. Put the complete user-facing Markdown in `message`, include a concise `_atman_intent` summarizing the completed work for the work header, and do not emit ordinary assistant text before or after the tool call. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. Do not infer that the wider project or repository is unfinished."#;
 
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
@@ -236,6 +236,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         ),
     )
     system_prompt = @"../prompts/system.md"
+    final_answer_reminded = false
     loop {
         reply = llm.call(
             model: "smart",
@@ -276,8 +277,10 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         )
         final_answer = extract_final_answer(reply)
         tool_uses = extract_tool_uses(reply)
+        final_answer_attempt = list.any(tool_uses, |call| call.name == "final.answer")
         when is_empty(tool_uses) {
             when has_pending_injections() {
+                final_answer_reminded = false
                 continue
             }
             recent = memory.recent_turns(n: 5, excerpt: { head: 12000, tail: 12000 })
@@ -299,38 +302,47 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 categories: ["complete", "needs_user", "continue_action", "continue_work"],
                 retry: 2,
             )
-            when final_answer {
-                when disposition == "complete" {
-                    return final_answer
-                }
-                when disposition == "needs_user" {
-                    return final_answer
-                }
-            }
             when disposition == "continue_action" {
+                final_answer_reminded = false
                 session.push(message.user(@"../prompts/loop-action.md"))
                 continue
             }
             when disposition == "continue_work" {
+                final_answer_reminded = false
                 session.push(message.user(@"../prompts/loop-continuation.md"))
                 continue
             }
             when has_pending_injections() {
+                final_answer_reminded = false
                 continue
             }
             watcher_event = wait_for_watcher(timeout_ms: 30000)
             when watcher_event {
+                final_answer_reminded = false
                 session.push(watcher_event)
                 continue
             }
             when has_pending_injections() {
+                final_answer_reminded = false
                 continue
             }
+            when final_answer {
+                session.push(finalize_response(reply))
+                return final_answer
+            }
+            when final_answer_reminded {
+                return candidate_response
+            }
+            final_answer_reminded = true
             session.push(message.user(@"../prompts/loop-final-answer.md"))
             continue
         }
         tool_results = dispatch_all(tool_uses)
         session.push(tool_results)
+        final_answer_reminded = false
+        when final_answer_attempt {
+            final_answer_reminded = true
+        }
     }
     return text_concat(reply)
 }
@@ -730,6 +742,8 @@ mod tests {
             file.flows.iter().any(|f| f.name.name == "agent"),
             "agent flow must exist"
         );
+        parse_file(include_str!("../../../examples/agent.at"))
+            .expect("examples/agent.at must parse");
     }
 
     #[test]
@@ -797,7 +811,7 @@ mod tests {
         assert!(AGENT_AT.contains("agent.mistake."));
         assert!(!AGENT_AT.contains("## Relevant Rules"));
         assert!(!AGENT_AT.contains("## Relevant Past Mistakes"));
-        assert!(AGENT_AT.contains("system_prompt = @\"../prompts/system.md\"\n    loop"));
+        assert!(AGENT_AT.contains("system_prompt = @\"../prompts/system.md\""));
         assert!(AGENT_AT.contains("\"flow.search\""));
         assert!(AGENT_AT.contains("\"flow.describe\""));
         assert!(!AGENT_AT.contains("\"flow.list\""));
@@ -806,6 +820,11 @@ mod tests {
     #[test]
     fn managed_agents_use_the_reserved_final_answer_control() {
         assert!(SYSTEM_MD.contains("through `final.answer`"));
+        assert!(SYSTEM_MD.contains("summary in `_atman_intent`"));
+        assert!(!SYSTEM_MD.contains("does not take `_atman_intent`"));
+        assert!(LOOP_FINAL_ANSWER_MD.contains("MUST be exactly one `final.answer` tool call"));
+        assert!(LOOP_FINAL_ANSWER_MD.contains("`_atman_intent`"));
+        assert!(LOOP_FINAL_ANSWER_MD.contains("do not emit ordinary assistant text"));
         assert!(AGENT_AT.contains("\"final.answer\""));
         assert_eq!(AGENT_AT.matches("extract_final_answer(reply)").count(), 1);
         let extract = AGENT_AT
@@ -814,6 +833,16 @@ mod tests {
         let classify = AGENT_AT.find("disposition = llm.classify(").unwrap();
         let accepted = AGENT_AT.find("return final_answer").unwrap();
         assert!(extract < classify && classify < accepted);
+        assert!(AGENT_AT.contains("session.push(finalize_response(reply))"));
+        assert!(!AGENT_AT.contains("iteration >="));
+        assert!(!include_str!("../../../examples/agent.at").contains("iteration >="));
+        let fallback = AGENT_AT.find("when final_answer_reminded").unwrap();
+        let reminder = AGENT_AT
+            .find("session.push(message.user(@\"../prompts/loop-final-answer.md\"))")
+            .unwrap();
+        assert!(AGENT_AT[..fallback].contains("final_answer_reminded = false"));
+        assert!(AGENT_AT[fallback..reminder].contains("return candidate_response"));
+        assert!(fallback < reminder);
         assert_eq!(SUBAGENT_AT.matches("\"final.answer\"").count(), 4);
         assert_eq!(
             SUBAGENT_AT.matches("extract_final_answer(reply)").count(),

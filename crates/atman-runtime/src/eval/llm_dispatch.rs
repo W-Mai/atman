@@ -404,7 +404,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
-            if let Ok(message) = &mut outcome
+            let defer_final_candidate =
+                matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
+                    && outcome.as_ref().is_ok_and(|message| {
+                        crate::tools::final_answer::normalized_for_history(&message.message)
+                            .is_some()
+                    });
+            if !defer_final_candidate
+                && let Ok(message) = &mut outcome
                 && let Some(normalized) =
                     crate::tools::final_answer::normalized_for_history(&message.message)
             {
@@ -532,6 +539,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     }
                     if let Some(session) = ctx.session_runtime.as_ref()
                         && !matches!(context_mode, ContextMode::None)
+                        && !defer_final_candidate
                     {
                         if !has_messages_override {
                             drop(compact_guard.take());
@@ -546,7 +554,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             compaction_budget,
                         )
                         .await;
-                    } else if uses_spawned_context {
+                    } else if uses_spawned_context && !defer_final_candidate {
                         if let Err(error) = crate::tools::session::append_message_to_context(
                             ctx,
                             am.message.clone(),

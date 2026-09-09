@@ -98,7 +98,8 @@ pub(super) fn rebuild_session_llm_messages(
     extra_messages: &[crate::message::Message],
 ) -> Vec<crate::message::Message> {
     let session_messages = session.messages();
-    let mut messages = llm_context::project_session_messages(&session_messages, context_mode);
+    let mut messages =
+        llm_context::project_session_messages(&session_messages, context_mode, turn_id);
     if let Some(prompt) = prompt
         && !prompt.is_empty()
     {

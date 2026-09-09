@@ -1048,6 +1048,7 @@ pub struct AppState {
     work_folds: Vec<WorkFoldState>,
     work_fold_scroll_anchor: Option<(u64, u32)>,
     final_answer_drafts: std::collections::HashMap<String, FinalAnswerDraftState>,
+    final_answer_drafts_completed: bool,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -1330,6 +1331,7 @@ impl AppState {
         self.work_folds.clear();
         self.work_fold_scroll_anchor = None;
         self.final_answer_drafts.clear();
+        self.final_answer_drafts_completed = false;
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
         let marker_indices = self
@@ -3038,6 +3040,34 @@ impl AppState {
         true
     }
 
+    fn discard_completed_final_answer_draft(&mut self) {
+        if !self.final_answer_drafts_completed {
+            return;
+        }
+        let assistant_ids = self
+            .final_answer_drafts
+            .values()
+            .filter_map(|draft| draft.assistant_id)
+            .collect::<HashSet<_>>();
+        let fold_ids = self
+            .final_answer_drafts
+            .values()
+            .filter_map(|draft| draft.work_fold_id)
+            .collect::<HashSet<_>>();
+        self.final_answer_drafts.clear();
+        self.final_answer_drafts_completed = false;
+        self.work_folds
+            .retain(|fold| !fold_ids.contains(&fold.start_id));
+        let mut indices = assistant_ids
+            .into_iter()
+            .filter_map(|id| self.items.index_by_id(id))
+            .collect::<Vec<_>>();
+        indices.sort_unstable_by(|left, right| right.cmp(left));
+        for index in indices {
+            self.remove_item(index);
+        }
+    }
+
     fn begin_work_fold(&mut self, summary: Option<&str>) -> Option<u64> {
         let start_index = self
             .items
@@ -3172,6 +3202,8 @@ impl AppState {
                 retried: false,
             });
         }
+        self.final_answer_drafts.clear();
+        self.final_answer_drafts_completed = false;
     }
 
     fn mutate_tool_call(
@@ -3600,6 +3632,7 @@ impl AppState {
                 self.turn_activity = ActivityTotals::default();
             }
             StreamFrame::TurnEnded { .. } => {
+                self.discard_completed_final_answer_draft();
                 if self.turn_activity.attempted_calls > 0 || self.turn_activity.applied_edits > 0 {
                     self.push_item(OutputItem::ActivitySummary {
                         turn: self.turn_activity.clone(),
@@ -3608,6 +3641,7 @@ impl AppState {
                 }
             }
             StreamFrame::ThinkingChunk { text, run_id, .. } => {
+                self.discard_completed_final_answer_draft();
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -3660,6 +3694,7 @@ impl AppState {
                 model: chunk_model,
                 run_id,
             } => {
+                self.discard_completed_final_answer_draft();
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 if let Some(rid) = &run_id
                     && self.sub_agent_run_ids.contains_key(rid)
@@ -3740,6 +3775,7 @@ impl AppState {
                         .filter_map(|draft| draft.work_fold_id)
                         .collect::<HashSet<_>>();
                     self.final_answer_drafts.clear();
+                    self.final_answer_drafts_completed = false;
                     self.work_folds
                         .retain(|fold| !fold_ids.contains(&fold.start_id));
                 }
@@ -3787,7 +3823,7 @@ impl AppState {
                 }
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 self.finish_llm_disclosure(&disclosure_key, false);
-                self.final_answer_drafts.clear();
+                self.final_answer_drafts_completed = !self.final_answer_drafts.is_empty();
                 self.streaming = false;
                 self.reset_lag_state();
             }
@@ -3798,6 +3834,7 @@ impl AppState {
                 arguments_delta,
                 run_id,
             } => {
+                self.discard_completed_final_answer_draft();
                 self.apply_tool_call_draft(
                     run_id.as_deref(),
                     index,
@@ -3945,6 +3982,9 @@ impl AppState {
                     if message.origin == atman_runtime::message::MessageOrigin::FinalAnswer {
                         self.commit_final_answer_message(message);
                     } else {
+                        if atman_runtime::tools::final_answer::attempted(message) {
+                            self.discard_completed_final_answer_draft();
+                        }
                         self.append_tool_dispatch(message);
                     }
                 }
@@ -5176,6 +5216,102 @@ mod tests {
                 streaming: false,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn next_llm_output_discards_a_rejected_final_answer_candidate() {
+        let mut app = AppState::new("session".into(), None);
+        app.push_item(OutputItem::UserTurn {
+            text: "finish it".into(),
+        });
+        app.push_item(OutputItem::Thinking {
+            text: "work".into(),
+            done: false,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta: "{\"_atman_intent\":\"Finished the work.\",\"message\":\"premature\"}"
+                .into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 1,
+            run_id: None,
+        });
+        assert!(app.final_answer_drafts_completed);
+
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "more work".into(),
+            run_id: None,
+        });
+
+        assert!(app.final_answer_drafts.is_empty());
+        assert!(!app.final_answer_drafts_completed);
+        assert!(app.work_folds.is_empty());
+        assert!(
+            !app.items.iter().any(
+                |item| matches!(item, OutputItem::AssistantMd { md, .. } if md == "premature")
+            )
+        );
+        assert!(matches!(
+            app.items.last(),
+            Some(OutputItem::Thinking { text, .. }) if text.ends_with("more work")
+        ));
+    }
+
+    #[test]
+    fn accepted_final_answer_commits_the_streamed_candidate_fold() {
+        let mut app = AppState::new("session".into(), None);
+        app.push_item(OutputItem::UserTurn {
+            text: "finish it".into(),
+        });
+        app.push_item(OutputItem::Thinking {
+            text: "work".into(),
+            done: false,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta: "{\"_atman_intent\":\"Finished the work.\",\"message\":\"Done.\"}"
+                .into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 1,
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::AssistantMsg {
+            flow_run_id: None,
+            message: Message {
+                role: atman_runtime::message::MessageRole::Assistant,
+                parts: vec![
+                    atman_runtime::message::MessagePart::FinalAnswerSummary {
+                        text: "Finished the work.".into(),
+                    },
+                    atman_runtime::message::MessagePart::Text {
+                        text: "Done.".into(),
+                    },
+                ],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: atman_runtime::message::MessageOrigin::FinalAnswer,
+            },
+        });
+
+        assert!(app.final_answer_drafts.is_empty());
+        assert!(!app.final_answer_drafts_completed);
+        assert_eq!(app.work_folds.len(), 1);
+        assert_eq!(app.work_folds[0].title, "Finished the work.");
+        assert!(matches!(
+            app.items.last(),
+            Some(OutputItem::AssistantMd { md, streaming: false, .. }) if md == "Done."
         ));
     }
 

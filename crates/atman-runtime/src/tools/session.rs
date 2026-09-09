@@ -83,6 +83,20 @@ impl Tool for SessionPush {
 }
 
 pub(crate) fn append_message_to_context(ctx: &ToolCtx, msg: Message) -> Result<(), RuntimeError> {
+    if matches!(ctx.history_segment, crate::tool::HistorySegment::Root)
+        && let Some(session) = ctx.session_runtime.as_ref()
+    {
+        let stream_flow_run_id = match msg.role {
+            MessageRole::Assistant | MessageRole::Tool => ctx.flow_run_id.clone(),
+            MessageRole::User | MessageRole::System => None,
+        };
+        session.append_message_with_stream_scope(
+            msg,
+            ctx.message_flow_run_id(),
+            stream_flow_run_id,
+        );
+        return Ok(());
+    }
     let Some(handle) = &ctx.session_messages_handle else {
         return Err(RuntimeError::ToolFailed(
             "session message context is unavailable".into(),
@@ -194,13 +208,12 @@ mod tests {
 
         let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
         let run_id = FlowRunId::now();
-        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let mut stream_rx = session.stream_subscribe();
         let ctx = ToolCtx::new()
             .with_anchors(Some(TurnId::now()), Some(run_id.clone()), None)
             .with_events(session.sink().clone())
             .with_session_messages_handle(session.messages_handle())
-            .with_session_runtime(session.clone())
-            .with_stream_tx(stream_tx);
+            .with_session_runtime(session.clone());
         let message = Message {
             role: MessageRole::Tool,
             parts: vec![MessagePart::ToolResult {

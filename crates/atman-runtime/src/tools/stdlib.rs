@@ -816,6 +816,7 @@ impl Tool for ExtractToolUses {
                 }
             };
             let mut out = Vec::new();
+            let final_answer_error = crate::tools::final_answer::validation_error(m);
             for part in &m.parts {
                 if let crate::message::MessagePart::ToolUse {
                     id,
@@ -824,7 +825,9 @@ impl Tool for ExtractToolUses {
                     intent,
                 } = part
                 {
-                    if name == crate::tools::final_answer::FINAL_ANSWER_TOOL && intent.is_some() {
+                    if name == crate::tools::final_answer::FINAL_ANSWER_TOOL
+                        && final_answer_error.is_none()
+                    {
                         continue;
                     }
                     let mut fields = vec![
@@ -834,6 +837,11 @@ impl Tool for ExtractToolUses {
                     ];
                     if let Some(intent) = intent {
                         fields.push(("intent".into(), Value::Str(intent.as_str().into())));
+                    }
+                    if name == crate::tools::final_answer::FINAL_ANSWER_TOOL
+                        && let Some(error) = final_answer_error
+                    {
+                        fields.push(("validation_error".into(), Value::Str(error.into())));
                     }
                     out.push(Value::Struct(fields));
                 }
@@ -952,18 +960,35 @@ fn prepare_dispatch(
                 Some(Value::Str(value)) => crate::message::ToolCallIntent::new(value),
                 _ => None,
             };
+            let validation_error = match get("validation_error") {
+                Some(Value::Str(value)) => Some(value),
+                _ => None,
+            };
             Ok((
                 index,
                 id,
                 name,
                 get("input").unwrap_or(Value::Unit),
                 call_intent,
+                validation_error,
             ))
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
 
     let mut prepared = Vec::with_capacity(parsed.len());
-    for (index, id, name, input, mut call_intent) in parsed {
+    for (index, id, name, input, mut call_intent, validation_error) in parsed {
+        if let Some(error) = validation_error {
+            emit_tool_node(ctx, &id, &name, &input, call_intent.as_ref());
+            prepared.push(PreparedEntry::Failed {
+                index,
+                msg: build_error_result(
+                    ctx,
+                    &id,
+                    &format!("tool `{name}` was not executed: {error}"),
+                ),
+            });
+            continue;
+        }
         if ctx
             .model_tool_exposures
             .as_ref()
@@ -1696,6 +1721,52 @@ mod tests {
                         )
                 )
         ));
+    }
+
+    #[tokio::test]
+    async fn mixed_final_answer_stays_in_dispatch_as_an_explicit_failure() {
+        let message = Value::Message(crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![
+                crate::message::MessagePart::ToolUse {
+                    id: "answer-1".into(),
+                    name: crate::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+                    input: serde_json::json!({"message": "Done."}),
+                    intent: crate::message::ToolCallIntent::new("Completed requested work."),
+                },
+                crate::message::MessagePart::ToolUse {
+                    id: "read-1".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path": "README.md"}),
+                    intent: crate::message::ToolCallIntent::new("Read documentation."),
+                },
+            ],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        });
+
+        let Value::List(uses) = ExtractToolUses
+            .call(
+                ToolArgs {
+                    positional: vec![message],
+                    named: Vec::new(),
+                },
+                &ToolCtx::new(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("tool use list");
+        };
+
+        assert_eq!(uses.len(), 2);
+        let Value::Struct(final_fields) = &uses[0] else {
+            panic!("final tool use");
+        };
+        assert!(final_fields.iter().any(|(name, value)| {
+            name == "validation_error"
+                && matches!(value, Value::Str(error) if error.contains("without sibling tool calls"))
+        }));
     }
 
     #[test]
