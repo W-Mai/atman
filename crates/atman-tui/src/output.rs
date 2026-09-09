@@ -97,6 +97,7 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 const DYNAMIC_SPINNER_MARKER: &str = "\u{e000}";
 pub(crate) const LAYOUT_ANIMATION_FRAME: u32 = u32::MAX;
 const WORK_FOLD_CONTENT_INSET: u16 = 2;
+const WORK_FOLD_BOUNDARY_ROWS: usize = 2;
 
 fn spinner_char(frame: u32) -> &'static str {
     if frame == LAYOUT_ANIMATION_FRAME {
@@ -586,6 +587,7 @@ struct ItemCacheEntry {
     content_hidden: bool,
     content_inset: u16,
     outer_width: u16,
+    work_boundary_end: bool,
 }
 
 impl ItemCacheEntry {
@@ -604,25 +606,50 @@ impl ItemCacheEntry {
         if self.content_hidden || end <= prefix_len {
             return true;
         }
-        let start = start.saturating_sub(prefix_len);
-        let end = end.saturating_sub(prefix_len);
-        if let Some(projection) = &self.streaming_markdown {
+        let boundary_rows = self.boundary_rows();
+        let content_rows = (self.rows as usize)
+            .saturating_sub(prefix_len)
+            .saturating_sub(boundary_rows);
+        let content_start = start.saturating_sub(prefix_len).min(content_rows);
+        let content_end = end.saturating_sub(prefix_len).min(content_rows);
+        let prepared = if content_start >= content_end {
+            true
+        } else if let Some(projection) = &self.streaming_markdown {
             let projection_rows = projection.rows();
-            projection.append_range(start, end.min(projection_rows), out);
-            if start <= projection_rows && end > projection_rows {
+            projection.append_range(content_start, content_end.min(projection_rows), out);
+            if content_start <= projection_rows && content_end > projection_rows {
                 out.push(Line::from(Span::styled(String::new(), RESET)));
             }
             true
         } else if let Some(projection) = &self.bash_output {
-            projection.append_prepared_range(start, end, out)
+            projection.append_prepared_range(content_start, content_end, out)
         } else if let Some(lines) = &self.lines {
-            let start = start.min(lines.len());
-            let end = end.min(lines.len()).max(start);
-            out.extend(lines[start..end].iter().cloned());
+            let content_start = content_start.min(lines.len());
+            let content_end = content_end.min(lines.len()).max(content_start);
+            out.extend(lines[content_start..content_end].iter().cloned());
             true
         } else {
             false
+        };
+        if self.work_boundary_end {
+            let boundary_start = prefix_len.saturating_add(content_rows);
+            let suffix_start = start.saturating_sub(boundary_start).min(boundary_rows);
+            let suffix_end = end.saturating_sub(boundary_start).min(boundary_rows);
+            out.extend((suffix_start..suffix_end).map(|_| Line::default()));
         }
+        prepared
+    }
+
+    fn boundary_rows(&self) -> usize {
+        if self.work_boundary_end {
+            WORK_FOLD_BOUNDARY_ROWS
+        } else {
+            0
+        }
+    }
+
+    fn content_row_end(&self) -> usize {
+        (self.rows as usize).saturating_sub(self.boundary_rows())
     }
 }
 
@@ -674,6 +701,17 @@ impl LayoutCache {
                 let index = old.start_index.saturating_add(member);
                 if index <= old.end_index {
                     dirty.insert(index);
+                }
+            }
+            if old.visible_members != new.visible_members {
+                for visible_members in [old.visible_members, new.visible_members] {
+                    let Some(member) = visible_members.checked_sub(1) else {
+                        continue;
+                    };
+                    let index = old.start_index.saturating_add(member);
+                    if index <= old.end_index {
+                        dirty.insert(index);
+                    }
                 }
             }
             for member in [old.boundary_member, new.boundary_member]
@@ -879,6 +917,7 @@ impl LayoutCache {
                 .saturating_sub(start) as usize;
             if let OutputItem::Bash { output, .. } = &items[idx] {
                 let entry = &mut self.entries[idx];
+                let content_end = entry.content_row_end();
                 if !entry.content_hidden
                     && let Some(projection) = &mut entry.bash_output
                 {
@@ -886,7 +925,7 @@ impl LayoutCache {
                     let _materialized = projection.prepare_range(
                         output,
                         local_start.saturating_sub(prefix),
-                        local_end.saturating_sub(prefix),
+                        local_end.min(content_end).saturating_sub(prefix),
                     );
                     #[cfg(test)]
                     update_perf_counters(|counters| {
@@ -921,6 +960,11 @@ impl LayoutCache {
         let mut regions = Vec::new();
         for idx in start_idx..end_idx {
             let entry = &self.entries[idx];
+            let work_fold_hovered = self
+                .work_folds
+                .iter()
+                .find(|fold| idx >= fold.start_index && idx <= fold.end_index)
+                .is_some_and(|fold| fold.hovered);
             let start = self.row_start(idx);
             let end = self.row_ends[idx];
             if !entry.has_retained_lines() {
@@ -949,8 +993,20 @@ impl LayoutCache {
                     &entry.dynamic,
                     animation_frame,
                 );
-                if lo.saturating_add(line_index) >= entry.prefix_lines.len() {
-                    inset_work_fold_content_line(line, entry.content_inset, entry.outer_width);
+                let local_row = lo.saturating_add(line_index);
+                if local_row >= entry.prefix_lines.len() && local_row < entry.content_row_end() {
+                    frame_work_fold_content_line(
+                        line,
+                        entry.content_inset,
+                        entry.outer_width,
+                        work_fold_hovered,
+                    );
+                } else if entry.work_boundary_end && local_row == entry.content_row_end() {
+                    *line = render_work_fold_footer(
+                        entry.content_inset,
+                        entry.outer_width,
+                        work_fold_hovered,
+                    );
                 }
             }
             ranges.push(ItemRange {
@@ -985,9 +1041,7 @@ impl LayoutCache {
             .iter()
             .find(|fold| idx >= fold.start_index && idx <= fold.end_index);
         let content_width = if work_fold.is_some() {
-            ctx.panel_width
-                .saturating_sub(WORK_FOLD_CONTENT_INSET.saturating_mul(2))
-                .max(1)
+            work_fold_content_width(ctx.panel_width)
         } else {
             ctx.panel_width
         };
@@ -1034,6 +1088,7 @@ impl LayoutCache {
                 content_hidden: false,
                 content_inset: 0,
                 outer_width: ctx.panel_width,
+                work_boundary_end: false,
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= !retained_before;
@@ -1100,6 +1155,7 @@ impl LayoutCache {
                 content_hidden: false,
                 content_inset: 0,
                 outer_width: ctx.panel_width,
+                work_boundary_end: false,
             };
             apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
             self.retention_dirty |= retained_before != retain_lines;
@@ -1142,6 +1198,7 @@ impl LayoutCache {
             content_hidden: false,
             content_inset: 0,
             outer_width: ctx.panel_width,
+            work_boundary_end: false,
         };
         apply_work_fold_to_entry(&mut self.entries[idx], work_fold, idx, ctx.panel_width);
         self.retention_dirty |= retained_before != retain_lines;
@@ -1273,11 +1330,16 @@ fn apply_work_fold_to_entry(
     entry.content_hidden = !visible;
     entry.content_inset = WORK_FOLD_CONTENT_INSET;
     entry.outer_width = panel_width;
+    entry.work_boundary_end = false;
     if visible {
+        entry.work_boundary_end = member.saturating_add(1) == fold.visible_members;
         if fold.boundary_member == Some(member) {
             fade_work_fold_boundary(entry, fold.boundary_level);
         }
-        entry.rows = entry.rows.saturating_add(prefix_rows);
+        entry.rows = entry
+            .rows
+            .saturating_add(prefix_rows)
+            .saturating_add(entry.boundary_rows().min(u32::MAX as usize) as u32);
         entry.regions = Arc::from(
             entry
                 .regions
@@ -1326,22 +1388,72 @@ fn apply_work_fold_to_entry(
     }
 }
 
-fn inset_work_fold_content_line(line: &mut Line<'static>, inset: u16, outer_width: u16) {
-    if inset == 0 || outer_width == 0 {
-        return;
+fn work_fold_frame_widths(inset: u16, outer_width: u16) -> Option<(usize, usize)> {
+    if inset == 0 || outer_width < 3 {
+        return None;
     }
-    let inset = inset.min(outer_width / 2) as usize;
     let outer_width = outer_width as usize;
-    let inner_width = outer_width.saturating_sub(inset.saturating_mul(2));
+    let inset = usize::from(inset).min(outer_width.saturating_sub(3) / 2);
+    let inner_width = outer_width.saturating_sub(inset.saturating_mul(2).saturating_add(2));
+    Some((inset, inner_width))
+}
+
+fn work_fold_content_width(outer_width: u16) -> u16 {
+    work_fold_frame_widths(WORK_FOLD_CONTENT_INSET, outer_width)
+        .map_or(outer_width.max(1), |(_, inner_width)| {
+            inner_width.min(u16::MAX as usize) as u16
+        })
+}
+
+fn work_fold_boundary_style(hovered: bool) -> Style {
+    let t = crate::theme::theme();
+    let foreground = if hovered {
+        t.work_boundary_fg.lerp(t.accent, 0.28)
+    } else {
+        t.work_boundary_fg.into()
+    };
+    Style::default().fg(foreground)
+}
+
+fn frame_work_fold_content_line(
+    line: &mut Line<'static>,
+    inset: u16,
+    outer_width: u16,
+    hovered: bool,
+) {
+    let Some((inset, inner_width)) = work_fold_frame_widths(inset, outer_width) else {
+        return;
+    };
+    let outer_width = outer_width as usize;
     let content = crate::width::truncate_spans(std::mem::take(&mut line.spans), inner_width, None);
     let used = crate::width::spans_width(content.iter());
-    let mut spans = Vec::with_capacity(content.len() + 2);
+    let mut spans = Vec::with_capacity(content.len() + 5);
     spans.push(Span::raw(" ".repeat(inset)));
+    spans.push(Span::styled("│", work_fold_boundary_style(hovered)));
     spans.extend(content);
-    spans.push(Span::raw(
-        " ".repeat(outer_width.saturating_sub(inset).saturating_sub(used)),
-    ));
+    spans.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
+    spans.push(Span::styled("│", work_fold_boundary_style(hovered)));
+    spans.push(Span::raw(" ".repeat(inset)));
+    debug_assert_eq!(
+        crate::width::spans_width(spans.iter()),
+        outer_width,
+        "work fold frame must preserve the panel width"
+    );
     line.spans = spans;
+}
+
+fn render_work_fold_footer(inset: u16, outer_width: u16, hovered: bool) -> Line<'static> {
+    let Some((inset, inner_width)) = work_fold_frame_widths(inset, outer_width) else {
+        return Line::from(Span::raw(" ".repeat(outer_width as usize)));
+    };
+    Line::from(vec![
+        Span::raw(" ".repeat(inset)),
+        Span::styled(
+            format!("╰{}╯", "─".repeat(inner_width)),
+            work_fold_boundary_style(hovered),
+        ),
+        Span::raw(" ".repeat(inset)),
+    ])
 }
 
 fn fade_work_fold_boundary(entry: &mut ItemCacheEntry, level: u8) {
@@ -7862,7 +7974,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_work_fold_insets_member_content_on_both_sides() {
+    fn expanded_work_fold_frames_member_content_and_closes_the_boundary() {
         let now = Instant::now();
         let items = OutputStore::from(vec![
             OutputItem::Thinking {
@@ -7926,9 +8038,9 @@ mod tests {
             },
         );
         let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
-        let content_lines = lines
+        let rendered_lines = lines.iter().map(plain_line).collect::<Vec<_>>();
+        let content_lines = rendered_lines
             .iter()
-            .map(plain_line)
             .filter(|line| {
                 [
                     "nested work",
@@ -7943,10 +8055,72 @@ mod tests {
 
         assert_eq!(content_lines.len(), 4);
         for content in content_lines {
-            assert!(content.starts_with("  "), "{content:?}");
-            assert!(content.ends_with("  "), "{content:?}");
-            assert_eq!(crate::width::width(&content), 40);
+            assert!(content.starts_with("  │"), "{content:?}");
+            assert!(content.ends_with("│  "), "{content:?}");
+            assert_eq!(crate::width::width(content), 40);
         }
+        let footer = rendered_lines
+            .iter()
+            .position(|line| line.starts_with("  ╰") && line.ends_with("╯  "))
+            .expect("work boundary footer");
+        assert_eq!(
+            rendered_lines
+                .iter()
+                .filter(|line| line.starts_with("  ╰"))
+                .count(),
+            1
+        );
+        assert_eq!(crate::width::width(&rendered_lines[footer]), 40);
+        assert!(rendered_lines[footer + 1].trim().is_empty());
+    }
+
+    #[test]
+    fn work_fold_frame_preserves_narrow_panel_widths() {
+        for outer_width in 3..20 {
+            let mut line = Line::from(Span::raw("content"));
+            frame_work_fold_content_line(&mut line, WORK_FOLD_CONTENT_INSET, outer_width, false);
+            let footer = render_work_fold_footer(WORK_FOLD_CONTENT_INSET, outer_width, false);
+
+            assert_eq!(
+                crate::width::width(&plain_line(&line)),
+                outer_width as usize
+            );
+            assert_eq!(
+                crate::width::width(&plain_line(&footer)),
+                outer_width as usize
+            );
+        }
+    }
+
+    #[test]
+    fn work_fold_visibility_change_invalidates_old_and_new_footer_owners() {
+        let fold = WorkFoldProjection {
+            key: 1,
+            start_index: 4,
+            end_index: 8,
+            visible_members: 2,
+            total_members: 5,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: true,
+            animating: true,
+            hovered: false,
+            title: "inspect".into(),
+            stats: String::new(),
+        };
+        let mut cache = LayoutCache {
+            work_folds: vec![fold.clone()],
+            ..Default::default()
+        };
+        let mut advanced = fold;
+        advanced.visible_members = 3;
+
+        cache.set_work_folds(vec![advanced]);
+
+        assert!(cache.pending_layout.contains(&5));
+        assert!(cache.pending_layout.contains(&6));
     }
 
     fn permission_request(

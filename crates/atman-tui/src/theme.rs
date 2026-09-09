@@ -106,6 +106,7 @@ pub struct Theme {
     pub work_title_fg: ThemeColor,
     pub work_action_fg: ThemeColor,
     pub work_meta_fg: ThemeColor,
+    pub work_boundary_fg: ThemeColor,
     pub user_msg_bg: ThemeColor,
     pub note_info_bg: ThemeColor,
     pub note_warn_bg: ThemeColor,
@@ -143,6 +144,7 @@ impl Theme {
             work_title_fg: ThemeColor(Color::Rgb(138, 144, 154)),
             work_action_fg: ThemeColor(Color::Rgb(212, 216, 224)),
             work_meta_fg: ThemeColor(Color::Rgb(106, 112, 122)),
+            work_boundary_fg: ThemeColor(Color::Rgb(58, 64, 74)),
             user_msg_bg: ThemeColor(Color::Rgb(38, 42, 54)),
             note_info_bg: ThemeColor(Color::Rgb(20, 26, 34)),
             note_warn_bg: ThemeColor(Color::Rgb(38, 30, 16)),
@@ -180,6 +182,7 @@ impl Theme {
             work_title_fg: ThemeColor(Color::Rgb(78, 84, 94)),
             work_action_fg: ThemeColor(Color::Rgb(28, 30, 34)),
             work_meta_fg: ThemeColor(Color::Rgb(112, 118, 128)),
+            work_boundary_fg: ThemeColor(Color::Rgb(174, 180, 190)),
             user_msg_bg: ThemeColor(Color::Rgb(220, 225, 235)),
             note_info_bg: ThemeColor(Color::Rgb(220, 232, 244)),
             note_warn_bg: ThemeColor(Color::Rgb(248, 236, 210)),
@@ -358,6 +361,7 @@ mod tests {
             assert_ne!(theme.work_bg, theme.work_detail_bg);
             assert_ne!(theme.work_detail_bg, theme.work_output_bg);
             assert_ne!(theme.work_bg, theme.work_hover_bg);
+            assert_ne!(theme.work_boundary_fg, theme.work_bg);
         }
     }
 

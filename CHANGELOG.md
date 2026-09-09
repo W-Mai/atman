@@ -28,7 +28,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
-- **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, inset every nested output surface on both sides, and restore the complete pre-answer activity range after session replay.
+- **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, frame expanded content with subtle side rails and a closed lower boundary, and restore the complete pre-answer activity range after session replay.
 - **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals.
 - **Tool intent failures** — Tool calls missing a required intent remain in assistant history but are not authorized or executed; each receives a paired error result that explains the missing field to the model without retrying the provider response.
 - **Tool activity hierarchy** — Thinking and working surfaces use explicit action, title, and metadata contrast levels; running tools animate only their status glyph, provider-facing tool schemas require call purposes, streamed purposes appear before final tool-use messages, and missing legacy purposes receive readable action labels.
