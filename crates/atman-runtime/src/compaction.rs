@@ -41,6 +41,7 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut fixed_tokens = 0u64;
     for part in &msg.parts {
         chars += match part {
+            MessagePart::FinalAnswerSummary { .. } => 0,
             MessagePart::ContextRecord(record) => record.render_for_model().len(),
             MessagePart::CompactSummary { summary, .. } => summary.len(),
             MessagePart::Text { text } => text.len(),
@@ -912,6 +913,7 @@ fn serialize_message_for_summary(msg: &Message) -> String {
     let mut parts = Vec::new();
     for part in &msg.parts {
         match part {
+            MessagePart::FinalAnswerSummary { .. } => {}
             MessagePart::ContextRecord(record) => {
                 if record.retention() == crate::context_plan::ContextRecordRetention::Timeline {
                     parts.push(record.render_for_model());

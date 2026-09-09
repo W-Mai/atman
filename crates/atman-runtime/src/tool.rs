@@ -657,6 +657,9 @@ impl ToolCtx {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn tier(&self) -> Tier;
+    fn requires_call_intent(&self) -> bool {
+        true
+    }
     fn invocation_plane(&self) -> InvocationPlane {
         InvocationPlane::Ordinary
     }
@@ -695,7 +698,9 @@ pub trait Tool: Send + Sync {
 
 pub fn tool_spec(tool: &dyn Tool) -> ToolSpec {
     let mut input_schema = tool.input_schema();
-    decorate_tool_input_schema(&mut input_schema);
+    if tool.requires_call_intent() {
+        decorate_tool_input_schema(&mut input_schema);
+    }
     canonicalize_json_object_keys(&mut input_schema);
     ToolSpec {
         name: tool.name().to_string(),

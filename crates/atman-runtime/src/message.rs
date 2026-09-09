@@ -82,6 +82,7 @@ pub enum MessageOrigin {
     User,
     Watcher,
     Interjection,
+    FinalAnswer,
     Internal,
 }
 
@@ -154,6 +155,9 @@ pub enum MessagePart {
         thinking: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+    },
+    FinalAnswerSummary {
+        text: String,
     },
     Image {
         source: ImageSource,

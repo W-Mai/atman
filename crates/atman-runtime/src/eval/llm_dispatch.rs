@@ -391,7 +391,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             };
             let estimated_input = context_plan.estimated_input_tokens();
             let start = std::time::Instant::now();
-            let outcome = call_and_maybe_stream(
+            let mut outcome = call_and_maybe_stream(
                 provider.as_ref(),
                 context_plan.into_request(),
                 StreamCallCtx {
@@ -405,6 +405,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
+            let missing_tool_intent = outcome
+                .as_ref()
+                .ok()
+                .and_then(|message| missing_tool_call_intent_error(&message.message, &tool_specs));
+            if let Ok(message) = &mut outcome
+                && let Some(normalized) =
+                    crate::tools::final_answer::normalized_for_history(&message.message)
+            {
+                message.message = normalized;
+            }
             let elapsed_ms = start.elapsed().as_millis() as u64;
             let provider_usage = outcome
                 .as_ref()
@@ -422,10 +432,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     .filter(|part| matches!(part, crate::message::MessagePart::ToolUse { .. }))
                     .count() as u64
             });
-            let missing_tool_intent = outcome
-                .as_ref()
-                .ok()
-                .and_then(|message| missing_tool_call_intent_error(&message.message, &tool_specs));
             let response_error = outcome.as_ref().ok().and_then(|message| {
                 if message.message.parts.is_empty() {
                     return Some(RuntimeError::ToolFailed(
@@ -945,6 +951,29 @@ fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_answer_requires_intent_before_history_normalization() {
+        let message = crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![crate::message::MessagePart::ToolUse {
+                id: "answer".into(),
+                name: crate::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+                input: serde_json::json!({"message": "Done."}),
+                intent: None,
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        };
+        let tools = vec![crate::tool::tool_spec(
+            &crate::tools::final_answer::FinalAnswer,
+        )];
+
+        assert!(matches!(
+            missing_tool_call_intent_error(&message, &tools),
+            Some(crate::error::RuntimeError::ToolCallIntentMissing { .. })
+        ));
+    }
 
     #[test]
     fn fixed_wire_prefix_counts_only_system_and_tool_definitions() {

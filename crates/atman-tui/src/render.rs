@@ -321,23 +321,46 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             width: transcript_area.width,
             theme: crate::theme::current_mode(),
         };
+        let work_folds = app.work_fold_projections();
         let mut cache = std::mem::take(&mut app.layout_cache);
+        let old_total_rows = cache.total_rows();
+        let folding_above_viewport = !app.follow_tail
+            && work_folds.iter().any(|fold| {
+                cache
+                    .item_row_end(fold.end_index)
+                    .is_some_and(|end| end <= app.scroll_offset)
+            });
+        cache.set_work_folds(work_folds);
         let follow_tail_rows = app.follow_tail.then(|| {
             document_visible_rows
                 .saturating_sub(input_overlay_rows)
                 .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
                 .max(1)
         });
-        let metrics = cache.update_dirty(
-            cache_key,
-            &app.items,
-            &ctx,
-            output::LayoutRequest {
-                scroll_offset: app.scroll_offset,
-                viewport_rows: effective_viewport,
-                follow_tail_rows,
-            },
-        );
+        let request = output::LayoutRequest {
+            scroll_offset: app.scroll_offset,
+            viewport_rows: effective_viewport,
+            follow_tail_rows,
+        };
+        let mut metrics = cache.update_dirty(cache_key, &app.items, &ctx, request);
+        if folding_above_viewport && metrics.total_rows != old_total_rows {
+            let anchored_offset = if metrics.total_rows > old_total_rows {
+                app.scroll_offset
+                    .saturating_add(metrics.total_rows - old_total_rows)
+            } else {
+                app.scroll_offset
+                    .saturating_sub(old_total_rows - metrics.total_rows)
+            };
+            metrics = cache.update_dirty(
+                cache_key,
+                &app.items,
+                &ctx,
+                output::LayoutRequest {
+                    scroll_offset: anchored_offset,
+                    ..request
+                },
+            );
+        }
         let (lines, ranges, node_regions) = cache.visible_slice(
             metrics.scroll_offset,
             effective_viewport,

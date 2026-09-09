@@ -568,6 +568,7 @@ pub struct LayoutCache {
     retention_protected: std::ops::Range<usize>,
     retention_dirty: bool,
     access_clock: u64,
+    work_folds: Vec<WorkFoldProjection>,
 }
 
 #[derive(Clone, Default)]
@@ -580,14 +581,28 @@ struct ItemCacheEntry {
     regions: Arc<[NodeRegion]>,
     dynamic: DynamicPaint,
     last_used: u64,
+    prefix_lines: Arc<[Line<'static>]>,
+    content_hidden: bool,
 }
 
 impl ItemCacheEntry {
     fn has_retained_lines(&self) -> bool {
-        self.lines.is_some() || self.streaming_markdown.is_some() || self.bash_output.is_some()
+        !self.prefix_lines.is_empty()
+            || self.lines.is_some()
+            || self.streaming_markdown.is_some()
+            || self.bash_output.is_some()
     }
 
     fn append_line_range(&self, start: usize, end: usize, out: &mut Vec<Line<'static>>) -> bool {
+        let prefix_len = self.prefix_lines.len();
+        let prefix_start = start.min(prefix_len);
+        let prefix_end = end.min(prefix_len).max(prefix_start);
+        out.extend(self.prefix_lines[prefix_start..prefix_end].iter().cloned());
+        if self.content_hidden || end <= prefix_len {
+            return true;
+        }
+        let start = start.saturating_sub(prefix_len);
+        let end = end.saturating_sub(prefix_len);
         if let Some(projection) = &self.streaming_markdown {
             let projection_rows = projection.rows();
             projection.append_range(start, end.min(projection_rows), out);
@@ -625,6 +640,34 @@ impl LayoutCache {
             self.pending_structure_from
                 .map_or(index, |current| current.min(index)),
         );
+    }
+
+    pub fn set_work_folds(&mut self, folds: Vec<WorkFoldProjection>) {
+        if self.work_folds == folds {
+            return;
+        }
+        let mut dirty_from = usize::MAX;
+        for fold in self.work_folds.iter().chain(&folds) {
+            dirty_from = dirty_from.min(fold.start_index);
+            for index in fold.start_index..=fold.end_index {
+                self.pending_layout.insert(index);
+            }
+        }
+        if dirty_from != usize::MAX {
+            self.pending_structure_from = Some(
+                self.pending_structure_from
+                    .map_or(dirty_from, |current| current.min(dirty_from)),
+            );
+        }
+        self.work_folds = folds;
+    }
+
+    pub(crate) fn total_rows(&self) -> u32 {
+        self.total_rows
+    }
+
+    pub(crate) fn item_row_end(&self, index: usize) -> Option<u32> {
+        self.row_ends.get(index).copied()
     }
 
     pub fn update_dirty(
@@ -791,16 +834,24 @@ impl LayoutCache {
             let local_end = end
                 .min(scroll_offset.saturating_add(request.viewport_rows))
                 .saturating_sub(start) as usize;
-            if let (Some(projection), OutputItem::Bash { output, .. }) =
-                (&mut self.entries[idx].bash_output, &items[idx])
-            {
-                let _materialized = projection.prepare_range(output, local_start, local_end);
-                #[cfg(test)]
-                update_perf_counters(|counters| {
-                    counters.bash_materialized_rows = counters
-                        .bash_materialized_rows
-                        .saturating_add(_materialized as u64);
-                });
+            if let OutputItem::Bash { output, .. } = &items[idx] {
+                let entry = &mut self.entries[idx];
+                if !entry.content_hidden
+                    && let Some(projection) = &mut entry.bash_output
+                {
+                    let prefix = entry.prefix_lines.len();
+                    let _materialized = projection.prepare_range(
+                        output,
+                        local_start.saturating_sub(prefix),
+                        local_end.saturating_sub(prefix),
+                    );
+                    #[cfg(test)]
+                    update_perf_counters(|counters| {
+                        counters.bash_materialized_rows = counters
+                            .bash_materialized_rows
+                            .saturating_add(_materialized as u64);
+                    });
+                }
             }
         }
         self.prune_lines(retain_start..retain_end);
@@ -922,7 +973,17 @@ impl LayoutCache {
                 regions: Arc::from([]),
                 dynamic: DynamicPaint::default(),
                 last_used: self.access_clock,
+                prefix_lines: Arc::from([]),
+                content_hidden: false,
             };
+            apply_work_fold_to_entry(
+                &mut self.entries[idx],
+                self.work_folds
+                    .iter()
+                    .find(|fold| idx >= fold.start_index && idx <= fold.end_index),
+                idx,
+                ctx.panel_width,
+            );
             self.retention_dirty |= !retained_before;
             return true;
         }
@@ -983,7 +1044,17 @@ impl LayoutCache {
                     running_rows: Vec::new(),
                 },
                 last_used: self.access_clock,
+                prefix_lines: Arc::from([]),
+                content_hidden: false,
             };
+            apply_work_fold_to_entry(
+                &mut self.entries[idx],
+                self.work_folds
+                    .iter()
+                    .find(|fold| idx >= fold.start_index && idx <= fold.end_index),
+                idx,
+                ctx.panel_width,
+            );
             self.retention_dirty |= retained_before != retain_lines;
             return true;
         }
@@ -1020,7 +1091,17 @@ impl LayoutCache {
             },
             dynamic,
             last_used: self.access_clock,
+            prefix_lines: Arc::from([]),
+            content_hidden: false,
         };
+        apply_work_fold_to_entry(
+            &mut self.entries[idx],
+            self.work_folds
+                .iter()
+                .find(|fold| idx >= fold.start_index && idx <= fold.end_index),
+            idx,
+            ctx.panel_width,
+        );
         self.retention_dirty |= retained_before != retain_lines;
         true
     }
@@ -1126,6 +1207,167 @@ impl LayoutCache {
             .iter()
             .filter(|entry| entry.has_retained_lines())
             .count()
+    }
+}
+
+fn apply_work_fold_to_entry(
+    entry: &mut ItemCacheEntry,
+    fold: Option<&WorkFoldProjection>,
+    item_index: usize,
+    panel_width: u16,
+) {
+    let Some(fold) = fold else {
+        return;
+    };
+    let member = item_index.saturating_sub(fold.start_index);
+    let visible = member < fold.visible_members;
+    let prefix = if item_index == fold.start_index {
+        render_work_fold_header(fold, panel_width)
+    } else {
+        Vec::new()
+    };
+    let prefix_rows = prefix.len().min(u32::MAX as usize) as u32;
+    entry.prefix_lines = Arc::from(prefix);
+    entry.content_hidden = !visible;
+    if visible {
+        if fold.boundary_member == Some(member) {
+            fade_work_fold_boundary(entry, fold.boundary_level);
+        }
+        entry.rows = entry.rows.saturating_add(prefix_rows);
+        if prefix_rows > 0 {
+            entry.regions = Arc::from(
+                entry
+                    .regions
+                    .iter()
+                    .cloned()
+                    .map(|mut region| {
+                        region.start_row = region.start_row.saturating_add(prefix_rows);
+                        region.end_row = region.end_row.saturating_add(prefix_rows);
+                        region
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            for row in &mut entry.dynamic.running_rows {
+                *row = row.saturating_add(prefix_rows as usize);
+            }
+            if let Some(elapsed) = entry.dynamic.elapsed.as_mut() {
+                elapsed.line = elapsed.line.saturating_add(prefix_rows as usize);
+            }
+        }
+    } else {
+        entry.rows = prefix_rows;
+        entry.regions = Arc::from([]);
+        entry.dynamic = DynamicPaint::default();
+    }
+    if item_index == fold.start_index {
+        let mut regions = entry.regions.to_vec();
+        regions.push(NodeRegion {
+            panel_item_index: item_index,
+            path_key: format!("{WORK_FOLD_REGION_PREFIX}{}", fold.key),
+            start_row: 0,
+            end_row: prefix_rows,
+            col_start: 0,
+            col_end: panel_width,
+        });
+        entry.regions = Arc::from(regions);
+    }
+}
+
+fn fade_work_fold_boundary(entry: &mut ItemCacheEntry, level: u8) {
+    let Some(lines) = entry.lines.as_ref() else {
+        return;
+    };
+    let t = crate::theme::theme();
+    let brightness = f64::from(level.clamp(1, 3)) / 3.0;
+    let mut faded = lines.to_vec();
+    for line in &mut faded {
+        for span in &mut line.spans {
+            let foreground = span.style.fg.unwrap_or_else(|| t.tinted_fg.into());
+            span.style.fg = Some(t.code_bg.lerp(foreground, brightness));
+            if level == 1 {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            }
+        }
+    }
+    entry.lines = Some(Arc::from(faded));
+}
+
+fn render_work_fold_header(fold: &WorkFoldProjection, panel_width: u16) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let background = if fold.hovered {
+        t.work_hover_bg.into()
+    } else {
+        t.work_bg.into()
+    };
+    let panel_width = panel_width as usize;
+    let title = format!("  work · {}/{}", fold.completed_steps, fold.total_steps);
+    let mut title_spans = vec![
+        Span::styled("✓", Style::default().fg(t.success.into()).bg(background)),
+        Span::styled(
+            title,
+            Style::default().fg(t.work_title_fg.into()).bg(background),
+        ),
+    ];
+    if !fold.stats.is_empty() {
+        let title_width = crate::width::spans_width(title_spans.iter());
+        let stats_width = crate::width::width(&fold.stats);
+        let gap = panel_width
+            .saturating_sub(title_width.saturating_add(stats_width))
+            .max(2);
+        title_spans.push(Span::styled(
+            " ".repeat(gap),
+            Style::default().bg(background),
+        ));
+        title_spans.push(Span::styled(
+            fold.stats.clone(),
+            Style::default()
+                .fg(t.work_meta_fg.into())
+                .bg(background)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    let mut title_line = crate::width::truncate_spans(title_spans, panel_width, Some(background));
+    pad_work_fold_line(&mut title_line, panel_width, background);
+
+    let summary_spans = vec![
+        Span::styled("   ", Style::default().bg(background)),
+        Span::styled(
+            fold.title.clone(),
+            Style::default()
+                .fg(t.work_meta_fg.into())
+                .bg(background)
+                .add_modifier(Modifier::DIM),
+        ),
+    ];
+    let mut summary_line = crate::width::truncate_spans_with_right_fade(
+        summary_spans,
+        panel_width,
+        background,
+        4,
+        0.82,
+    );
+    pad_work_fold_line(&mut summary_line, panel_width, background);
+
+    let blank = Line::from(Span::styled(
+        " ".repeat(panel_width),
+        Style::default().bg(background),
+    ));
+    vec![
+        blank.clone(),
+        Line::from(title_line),
+        blank.clone(),
+        Line::from(summary_line),
+        blank,
+    ]
+}
+
+fn pad_work_fold_line(spans: &mut Vec<Span<'static>>, width: usize, background: Color) {
+    let used = crate::width::spans_width(spans.iter());
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(background),
+        ));
     }
 }
 
@@ -1896,6 +2138,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::ToolDispatch { calls } => render_tool_dispatch(calls, ctx, 0).0,
         OutputItem::ActivitySummary { turn, .. } => render_activity_summary(turn, ctx.panel_width),
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
+        OutputItem::WorkFoldMarker { .. } => Vec::new(),
         OutputItem::Divider => make_dashed_divider(ctx.panel_width),
         OutputItem::WorkflowPanel {
             graph,
@@ -2031,6 +2274,24 @@ pub const TOOL_DETAIL_REGION_PREFIX: &str = "__tool_detail__:";
 pub const TOOL_FULLSCREEN_REGION_PREFIX: &str = "__tool_fullscreen__:";
 pub const TOOL_DETAIL_FULLSCREEN_REGION_PREFIX: &str = "__tool_detail_fullscreen__:";
 pub const WORKING_GROUP_REGION_PREFIX: &str = "__working_group__:";
+pub const WORK_FOLD_REGION_PREFIX: &str = "__work_fold__:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkFoldProjection {
+    pub key: u64,
+    pub start_index: usize,
+    pub end_index: usize,
+    pub visible_members: usize,
+    pub total_members: usize,
+    pub boundary_member: Option<usize>,
+    pub boundary_level: u8,
+    pub completed_steps: usize,
+    pub total_steps: usize,
+    pub expanded: bool,
+    pub hovered: bool,
+    pub title: String,
+    pub stats: String,
+}
 const TOOL_CONTROL_WIDTH: usize = 3;
 const TOOL_INPUT_PREVIEW_ROWS: usize = 8;
 
@@ -7402,6 +7663,68 @@ line2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapsed_work_fold_keeps_five_row_header_and_hides_members() {
+        let items = OutputStore::from(vec![
+            OutputItem::UserTurn {
+                text: "build it".into(),
+            },
+            OutputItem::Thinking {
+                text: "hidden reasoning".into(),
+                done: true,
+                disclosure: Disclosure::Summary,
+                retried: false,
+            },
+            OutputItem::AssistantMd {
+                md: "Done.".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+        let mut cache = LayoutCache::default();
+        cache.set_work_folds(vec![WorkFoldProjection {
+            key: items.revisions()[1].id,
+            start_index: 1,
+            end_index: 1,
+            visible_members: 0,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 4,
+            total_steps: 4,
+            expanded: false,
+            hovered: false,
+            title: "inspect · edit · verify".into(),
+            stats: "2 files · +8 −2".into(),
+        }]);
+        let metrics = cache.update_dirty(
+            LayoutKey {
+                width: 100,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 100,
+                follow_tail_rows: None,
+            },
+        );
+        let (lines, _, regions) = cache.visible_slice(0, metrics.total_rows, 0);
+        let rendered = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("work · 4/4"));
+        assert!(rendered.contains("inspect · edit · verify"));
+        assert!(!rendered.contains('▶'));
+        assert!(!rendered.contains('▼'));
+        assert!(!rendered.contains("hidden reasoning"));
+        let header = regions
+            .iter()
+            .find(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
+            .unwrap();
+        assert_eq!(header.end_row - header.start_row, 5);
+    }
 
     fn permission_request(
         request_id: atman_runtime::permission::PermissionRequestId,

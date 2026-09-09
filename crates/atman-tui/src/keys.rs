@@ -33,6 +33,7 @@ pub enum KeyAction {
     ToggleSidebar,
     ToggleMouseCapture,
     ToggleLastTool,
+    ToggleLastWork,
     OpenCommandPalette,
     SearchHistory,
     NudgePrefill,
@@ -62,6 +63,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('x'), true, _, _) => KeyAction::HardStop,
         (Char('j'), true, _, _) => KeyAction::Newline,
         (Char('o'), true, _, _) => KeyAction::ToggleLastTool,
+        (Char('o'), false, _, true) => KeyAction::ToggleLastWork,
         (Char('p'), true, _, _) => KeyAction::OpenCommandPalette,
         (Char('k'), true, _, _) => KeyAction::SearchHistory,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
@@ -222,6 +224,14 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             KeyAction::CycleReasoning
+        );
+    }
+
+    #[test]
+    fn alt_o_toggles_the_latest_work_section() {
+        assert_eq!(
+            map(ke(KeyCode::Char('o'), KeyModifiers::ALT)),
+            KeyAction::ToggleLastWork
         );
     }
 }

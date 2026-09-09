@@ -313,6 +313,7 @@ pub fn cheatsheet_lines() -> Vec<Line<'static>> {
         Line::from(section("Flows & Tools")),
         kv("click a tool / flow panel", "toggle expansion"),
         kv("Ctrl+O", "toggle last tool expansion"),
+        kv("Alt+O", "toggle latest work section"),
         Line::from(""),
         Line::from(section("Windows")),
         kv("F1", "this cheatsheet"),

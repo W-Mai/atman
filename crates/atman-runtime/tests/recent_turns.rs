@@ -169,3 +169,57 @@ async fn recent_turns_excerpt_is_bounded_without_replacing_lossless_items() {
     assert!(excerpt.contains("latest-marker"));
     assert!(matches!(items, Value::List(items) if items.len() == 2));
 }
+
+#[tokio::test]
+async fn recent_turns_excerpt_keeps_independent_head_and_tail() {
+    let ex = Executor::new();
+    ex.tools
+        .register(Arc::new(atman_runtime::tools::memory::MemoryRecentTurns));
+    let messages = Arc::new(vec![
+        Message::user_text(
+            atman_runtime::event::TurnId::now(),
+            format!("HEAD-MARKER {}", "middle ".repeat(80)),
+        ),
+        Message::assistant_text(
+            atman_runtime::event::TurnId::now(),
+            format!("{} TAIL-MARKER", "result ".repeat(80)),
+        ),
+    ]);
+    let ctx = atman_runtime::ToolCtx::new().with_session_messages(messages);
+    let args = atman_runtime::ToolArgs {
+        positional: Vec::new(),
+        named: vec![
+            ("n".into(), Value::Int(5)),
+            (
+                "excerpt".into(),
+                Value::Struct(vec![
+                    ("head".into(), Value::Int(64)),
+                    ("tail".into(), Value::Int(64)),
+                ]),
+            ),
+        ],
+    };
+
+    let result = ex
+        .tools
+        .get("memory.recent_turns")
+        .unwrap()
+        .call(args, &ctx)
+        .await
+        .unwrap();
+    let excerpt = result
+        .field("excerpt")
+        .and_then(|value| match value {
+            Value::Str(text) => Some(text),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(excerpt.contains("HEAD-MARKER"));
+    assert!(excerpt.contains("TAIL-MARKER"));
+    assert!(excerpt.contains("[... omitted "));
+    assert!(matches!(
+        result.field("excerpt_truncated"),
+        Some(Value::Bool(true))
+    ));
+}

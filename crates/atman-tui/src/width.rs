@@ -143,6 +143,49 @@ pub fn truncate_spans(
     out
 }
 
+pub fn truncate_spans_with_right_fade(
+    spans: Vec<Span<'static>>,
+    max_w: usize,
+    background: Color,
+    fade_columns: usize,
+    fade_floor: f64,
+) -> Vec<Span<'static>> {
+    let total = spans_width(spans.iter());
+    if total <= max_w || fade_columns == 0 {
+        return truncate_spans(spans, max_w, Some(background));
+    }
+    let fade_start = max_w.saturating_sub(fade_columns);
+    let fade_floor = fade_floor.clamp(0.0, 1.0);
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut column = 0usize;
+    'spans: for span in spans {
+        for grapheme in span.content.graphemes(true) {
+            let unit_width = width(grapheme);
+            if column.saturating_add(unit_width) > max_w {
+                break 'spans;
+            }
+            let mut style = span.style.bg(background);
+            if column >= fade_start
+                && let Some(foreground) = style.fg
+            {
+                let progress = (column - fade_start) as f64 / fade_columns as f64;
+                let brightness = 1.0 - progress.clamp(0.0, 1.0) * (1.0 - fade_floor);
+                style.fg =
+                    Some(crate::theme::ThemeColor::new(background).lerp(foreground, brightness));
+            }
+            if let Some(last) = out.last_mut()
+                && last.style == style
+            {
+                last.content.to_mut().push_str(grapheme);
+            } else {
+                out.push(Span::styled(grapheme.to_owned(), style));
+            }
+            column = column.saturating_add(unit_width);
+        }
+    }
+    out
+}
+
 /// Render the newest part of a styled single-line stream while preserving each
 /// source span's hue. Appended content advances the viewport; time does not.
 pub fn streaming_ticker_spans(
@@ -501,6 +544,43 @@ mod tests {
             .iter()
             .filter_map(|span| span.style.fg)
             .collect::<std::collections::HashSet<_>>();
+        assert!(colors.len() > 1);
+    }
+
+    #[test]
+    fn right_fade_only_applies_when_prefix_content_is_clipped() {
+        let visible = truncate_spans_with_right_fade(
+            vec![Span::styled("visible", Style::default().fg(Color::Cyan))],
+            12,
+            Color::Black,
+            4,
+            0.68,
+        );
+        assert!(
+            visible
+                .iter()
+                .all(|span| span.style.fg == Some(Color::Cyan))
+        );
+
+        let clipped = truncate_spans_with_right_fade(
+            vec![Span::styled(
+                "abcdefghijklmnop",
+                Style::default().fg(Color::Cyan),
+            )],
+            10,
+            Color::Black,
+            4,
+            0.68,
+        );
+        let text = clipped
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let colors = clipped
+            .iter()
+            .filter_map(|span| span.style.fg)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(text, "abcdefghij");
         assert!(colors.len() > 1);
     }
 }

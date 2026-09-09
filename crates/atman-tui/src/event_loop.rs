@@ -859,6 +859,10 @@ pub(crate) async fn run_frames(
                                     app.app.hit_test_node(me.column, me.row)
                                 {
                                     if node_id.starts_with(
+                                        crate::output::WORK_FOLD_REGION_PREFIX,
+                                    ) {
+                                        app.app.toggle_work_fold(&node_id);
+                                    } else if node_id.starts_with(
                                         crate::output::WORKING_GROUP_REGION_PREFIX,
                                     ) {
                                         app.app.toggle_working_group_expansion(

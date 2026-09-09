@@ -92,13 +92,22 @@ pub struct MemoryRecentTurns;
 
 const RECENT_EXCERPT_MESSAGE_CHARS: usize = 2_000;
 
+#[derive(Clone, Copy)]
+enum RecentExcerpt {
+    LegacyRecent(usize),
+    HeadTail { head: usize, tail: usize },
+}
+
 fn recent_turns_value(
     message_count: u64,
     turn_count: u64,
     messages: Vec<crate::message::Message>,
-    excerpt_chars: Option<usize>,
+    excerpt: Option<RecentExcerpt>,
 ) -> Value {
-    let excerpt = excerpt_chars.map(|limit| bounded_recent_excerpt(&messages, limit));
+    let excerpt = excerpt.map(|mode| match mode {
+        RecentExcerpt::LegacyRecent(limit) => bounded_recent_excerpt(&messages, limit),
+        RecentExcerpt::HeadTail { head, tail } => bounded_head_tail_excerpt(&messages, head, tail),
+    });
     let items = messages.into_iter().map(Value::Message).collect();
     let mut fields = vec![
         (
@@ -113,6 +122,174 @@ fn recent_turns_value(
         fields.push(("excerpt_truncated".into(), Value::Bool(truncated)));
     }
     Value::Struct(fields)
+}
+
+#[derive(Default)]
+struct HeadTailExcerpt {
+    head: String,
+    tail: std::collections::VecDeque<char>,
+    head_chars: usize,
+    head_limit: usize,
+    tail_limit: usize,
+    total_chars: usize,
+}
+
+impl HeadTailExcerpt {
+    fn new(head_limit: usize, tail_limit: usize) -> Self {
+        Self {
+            head_limit,
+            tail_limit,
+            ..Self::default()
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        for ch in text.chars() {
+            if self.head_chars < self.head_limit {
+                self.head.push(ch);
+                self.head_chars += 1;
+            }
+            if self.tail_limit > 0 {
+                if self.tail.len() == self.tail_limit {
+                    self.tail.pop_front();
+                }
+                self.tail.push_back(ch);
+            }
+            self.total_chars += 1;
+        }
+    }
+
+    fn finish(self) -> (String, bool) {
+        let head_chars = self.head_chars;
+        let tail_chars = self.tail.len();
+        let overlap = head_chars
+            .saturating_add(tail_chars)
+            .saturating_sub(self.total_chars);
+        let tail = self.tail.into_iter().skip(overlap).collect::<String>();
+        let truncated = self.total_chars > head_chars.saturating_add(tail_chars);
+        if !truncated {
+            return (self.head + &tail, false);
+        }
+        if self.head.is_empty() {
+            return (tail, true);
+        }
+        if tail.is_empty() {
+            return (self.head, true);
+        }
+        let omitted = self
+            .total_chars
+            .saturating_sub(head_chars.saturating_add(tail_chars));
+        (
+            format!(
+                "{}\n\n[... omitted {omitted} chars ...]\n\n{tail}",
+                self.head
+            ),
+            true,
+        )
+    }
+}
+
+fn visit_message_excerpt_segments(
+    message: &crate::message::Message,
+    mut visit: impl FnMut(&str) -> bool,
+) {
+    use crate::message::MessagePart;
+
+    if visit(&format!("[{}]", message.role.as_str())) {
+        return;
+    }
+    for part in &message.parts {
+        let stop = match part {
+            MessagePart::FinalAnswerSummary { .. } => false,
+            MessagePart::ContextRecord(record) => {
+                let label = format!("\n[context {}@{}]\n", record.key(), record.revision());
+                visit(&label) || visit(&record.render_for_model())
+            }
+            MessagePart::CompactSummary { summary, .. } => visit("\nsummary: ") || visit(summary),
+            MessagePart::Text { text } => visit("\ntext: ") || visit(text),
+            MessagePart::Thinking { .. } => visit("\n[thinking omitted]"),
+            MessagePart::Image { .. } => visit("\n[image]"),
+            MessagePart::ToolUse { name, intent, .. } => {
+                visit("\ntool_call: ")
+                    || visit(name)
+                    || intent
+                        .as_ref()
+                        .is_some_and(|intent| visit(" — ") || visit(intent.as_str()))
+            }
+            MessagePart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let status = if *is_error { "error" } else { "ok" };
+                visit(&format!("\ntool_result {tool_use_id} ({status}): ")) || visit(content)
+            }
+        };
+        if stop {
+            return;
+        }
+    }
+}
+
+fn bounded_head_tail_excerpt(
+    messages: &[crate::message::Message],
+    head_chars: usize,
+    tail_chars: usize,
+) -> (String, bool) {
+    let mut excerpt = HeadTailExcerpt::new(head_chars, tail_chars);
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            excerpt.push("\n\n");
+        }
+        visit_message_excerpt_segments(message, |segment| {
+            excerpt.push(segment);
+            false
+        });
+    }
+    excerpt.finish()
+}
+
+fn non_negative_excerpt_field(value: &Value, name: &str) -> Result<usize, RuntimeError> {
+    match value.field(name) {
+        Some(Value::Int(value)) if *value >= 0 => Ok(*value as usize),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: format!("non-negative int for excerpt.{name}"),
+            actual: other.kind_name().into(),
+        }),
+        None => Ok(0),
+    }
+}
+
+fn recent_excerpt_arg(args: &ToolArgs) -> Result<Option<RecentExcerpt>, RuntimeError> {
+    let legacy = args.named("excerpt_chars");
+    let head_tail = args.named("excerpt");
+    if legacy.is_some() && head_tail.is_some() {
+        return Err(RuntimeError::ToolFailed(
+            "memory.recent_turns: choose `excerpt` or `excerpt_chars`, not both".into(),
+        ));
+    }
+    if let Some(value) = head_tail {
+        let Value::Struct(_) = value else {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "struct with non-negative `head` and/or `tail`".into(),
+                actual: value.kind_name().into(),
+            });
+        };
+        return Ok(Some(RecentExcerpt::HeadTail {
+            head: non_negative_excerpt_field(value, "head")?,
+            tail: non_negative_excerpt_field(value, "tail")?,
+        }));
+    }
+    match legacy {
+        Some(Value::Int(value)) if *value >= 0 => {
+            Ok(Some(RecentExcerpt::LegacyRecent(*value as usize)))
+        }
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: "non-negative int".into(),
+            actual: other.kind_name().into(),
+        }),
+        None => Ok(None),
+    }
 }
 
 fn bounded_recent_excerpt(
@@ -144,8 +321,6 @@ fn bounded_recent_excerpt(
 }
 
 fn bounded_message_excerpt(message: &crate::message::Message, max_chars: usize) -> (String, bool) {
-    use crate::message::MessagePart;
-
     fn push_bounded(out: &mut String, used: &mut usize, max: usize, text: &str) -> bool {
         for ch in text.chars() {
             if *used == max {
@@ -159,68 +334,12 @@ fn bounded_message_excerpt(message: &crate::message::Message, max_chars: usize) 
 
     let mut out = String::new();
     let mut used = 0;
-    let mut truncated = push_bounded(
-        &mut out,
-        &mut used,
-        max_chars,
-        &format!("[{}]", message.role.as_str()),
-    );
-    for part in &message.parts {
-        if used == max_chars {
-            truncated = true;
-            break;
-        }
-        truncated |= match part {
-            MessagePart::ContextRecord(record) => push_bounded(
-                &mut out,
-                &mut used,
-                max_chars,
-                &format!(
-                    "\n[context {}@{}]\n{}",
-                    record.key(),
-                    record.revision(),
-                    record.render_for_model()
-                ),
-            ),
-            MessagePart::CompactSummary { summary, .. } => {
-                push_bounded(&mut out, &mut used, max_chars, "\nsummary: ")
-                    | push_bounded(&mut out, &mut used, max_chars, summary)
-            }
-            MessagePart::Text { text } => {
-                push_bounded(&mut out, &mut used, max_chars, "\ntext: ")
-                    | push_bounded(&mut out, &mut used, max_chars, text)
-            }
-            MessagePart::Thinking { .. } => {
-                push_bounded(&mut out, &mut used, max_chars, "\n[thinking omitted]")
-            }
-            MessagePart::Image { .. } => push_bounded(&mut out, &mut used, max_chars, "\n[image]"),
-            MessagePart::ToolUse { name, intent, .. } => {
-                let purpose = intent
-                    .as_ref()
-                    .map(|intent| format!(" — {}", intent.as_str()))
-                    .unwrap_or_default();
-                push_bounded(
-                    &mut out,
-                    &mut used,
-                    max_chars,
-                    &format!("\ntool_call: {name}{purpose}"),
-                )
-            }
-            MessagePart::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                let status = if *is_error { "error" } else { "ok" };
-                push_bounded(
-                    &mut out,
-                    &mut used,
-                    max_chars,
-                    &format!("\ntool_result {tool_use_id} ({status}): "),
-                ) | push_bounded(&mut out, &mut used, max_chars, content)
-            }
-        };
-    }
+    let mut truncated = false;
+    visit_message_excerpt_segments(message, |segment| {
+        let segment_truncated = push_bounded(&mut out, &mut used, max_chars, segment);
+        truncated |= segment_truncated;
+        segment_truncated
+    });
     (out, truncated)
 }
 
@@ -237,8 +356,10 @@ impl Tool for MemoryRecentTurns {
         Some(
             "Return the last N Message values (user + assistant + tool_result) from the \
              current session's event log so a flow can hand the code agent a sliding \
-             history window. `items` remain lossless; `excerpt_chars` additionally returns \
-             a bounded recent-first text excerpt. Reads from disk; cost O(events file size).",
+             history window. `items` remain lossless; `excerpt: {head, tail}` returns a \
+             bounded text excerpt retaining independently selected transcript edges. \
+             `excerpt_chars` remains a legacy recent-first budget. Reads from disk; cost \
+             O(events file size).",
         )
     }
 
@@ -247,7 +368,16 @@ impl Tool for MemoryRecentTurns {
             "type": "object",
             "properties": {
                 "n": {"type": "integer", "description": "Max complete turns to return (default 10)"},
-                "excerpt_chars": {"type": "integer", "minimum": 0, "description": "Also return an `excerpt` capped at this many characters without changing lossless `items`"}
+                "excerpt": {
+                    "type": "object",
+                    "description": "Also return an `excerpt` retaining independently bounded transcript edges without changing lossless `items`.",
+                    "properties": {
+                        "head": {"type": "integer", "minimum": 0, "description": "Characters retained from the start of the selected transcript."},
+                        "tail": {"type": "integer", "minimum": 0, "description": "Characters retained from the end of the selected transcript."}
+                    },
+                    "additionalProperties": false
+                },
+                "excerpt_chars": {"type": "integer", "minimum": 0, "description": "Legacy recent-first excerpt budget; cannot be combined with `excerpt`."}
             }
         })
     }
@@ -264,21 +394,12 @@ impl Tool for MemoryRecentTurns {
                 }
                 None => 10,
             };
-            let excerpt_chars = match args.named("excerpt_chars") {
-                Some(Value::Int(k)) if *k >= 0 => Some(*k as usize),
-                Some(other) => {
-                    return Err(RuntimeError::TypeMismatch {
-                        expected: "non-negative int".into(),
-                        actual: other.kind_name().into(),
-                    });
-                }
-                None => None,
-            };
+            let excerpt = recent_excerpt_arg(&args)?;
             if n == 0 {
                 if let Some(cb) = &ctx.on_memory_recent {
                     cb(0);
                 }
-                return Ok(recent_turns_value(0, 0, Vec::new(), excerpt_chars));
+                return Ok(recent_turns_value(0, 0, Vec::new(), excerpt));
             }
             // Sub-agent path: session_messages has the child's local message list.
             if let Some(msgs) = ctx.session_messages.as_ref() {
@@ -290,7 +411,7 @@ impl Tool for MemoryRecentTurns {
                     msgs.len() as u64,
                     total,
                     recent,
-                    excerpt_chars,
+                    excerpt,
                 ));
             }
             // Main-agent path: delegate to HistoryStore.
@@ -306,12 +427,7 @@ impl Tool for MemoryRecentTurns {
             if let Some(cb) = &ctx.on_memory_recent {
                 cb(msgs.len() as u16);
             }
-            Ok(recent_turns_value(
-                message_count,
-                turn_count,
-                msgs,
-                excerpt_chars,
-            ))
+            Ok(recent_turns_value(message_count, turn_count, msgs, excerpt))
         })
     }
 }

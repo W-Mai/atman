@@ -103,7 +103,7 @@ A `.at` file declares types, providers, tools, routes, lifecycle hooks, and flow
 
 ### The managed agent loop
 
-`atman init` writes a managed `commands/agent.at` template. The current template first records the user turn, loads relevant rules and past confessions, samples recent history, asks a cheap model to select relevant context, and then runs a tool loop with `llm.call`, retries, compaction, and tool dispatch. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
+`atman init` writes a managed `commands/agent.at` template. The current template first records the user turn, loads relevant rules and past confessions, samples both edges of recent history, asks a cheap model to select relevant context, and then runs a tool loop with `llm.call`, retries, compaction, and tool dispatch. A candidate final response is checked against the current request and recent transcript before the loop exits; plain-text candidates that are ready to deliver are returned to the model with an internal request to use `final.answer`. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
 
 `loop` is unconditional. A flow must leave it with `break`, `return`, an error, or cancellation; use `continue` to start the next iteration:
 
@@ -350,7 +350,7 @@ mode = "auto"             # auto | dark | light | wuxia
 layout = "split"           # split | unified
 ```
 
-Tool calls from one assistant dispatch are grouped into an ordered `working · N` block. Each intent opens from a one-line summary to a bounded preview and then the complete auditable output. Diff output uses a two-column layout by default, falls back to unified rendering in narrow inline views, and keeps the configured layout in larger views.
+Tool calls from one assistant dispatch are grouped into an ordered `working · N` block. Each intent opens from a one-line summary to a bounded preview and then the complete auditable output. When a managed agent starts its final response, preceding thinking, tools, and workflow activity fold into a five-row `work` summary containing completed progress, edit metrics, and an activity description; click anywhere in the summary or press `Alt+O` to expand it with the same animation. Diff output uses a two-column layout by default, falls back to unified rendering in narrow inline views, and keeps the configured layout in larger views.
 
 Provider env vars: `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_BASE_URL`.
 

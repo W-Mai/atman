@@ -101,7 +101,7 @@ The flow chooses one message source:
 
 The managed `commands/agent.at` uses `context: "session"`. It does **not** feed `memory.recent_turns` to the main model as a fixed sliding window.
 
-At the start of the managed flow, `memory.recent_turns(n: 5, excerpt_chars: 12000)` provides a bounded excerpt to the cheap rule/confession selector. The same bounded view is used later by the loop-disposition classifier. Its lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context.
+At the start of the managed flow, `memory.recent_turns(n: 5, excerpt: { head: 12000, tail: 12000 })` provides a bounded excerpt to the cheap rule/confession selector. The same bounded view is used later to judge a candidate final answer against the current request and recent transcript. `head` and `tail` are independent character budgets; when the middle is omitted, `excerpt` keeps both edges in transcript order. The lossless `items` remain available to explicit callers, and these helper calls do not define the main model's session context. The older `excerpt_chars` input remains available for recent-first excerpts and cannot be combined with `excerpt`.
 
 ## Session history and active window
 

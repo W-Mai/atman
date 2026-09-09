@@ -58,15 +58,25 @@ fn tool_result_reports_running(tool: &str, content: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct ToolDraftPreview {
     target: Option<&'static str>,
+    max_tail: Option<usize>,
     probe: String,
     arguments: String,
     active: bool,
     escaped: bool,
     unicode: Option<(u32, u8)>,
+    unicode_high: Option<u16>,
     tail: String,
 }
 
 impl ToolDraftPreview {
+    fn for_field(target: &'static str, max_tail: Option<usize>) -> Self {
+        Self {
+            target: Some(target),
+            max_tail,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn push(&mut self, tool: &str, delta: &str) {
         if self.arguments.len() < 16_384 {
             let mut take = delta.len().min(16_384 - self.arguments.len());
@@ -76,11 +86,14 @@ impl ToolDraftPreview {
             self.arguments.push_str(&delta[..take]);
         }
         if self.target.is_none() {
-            self.target = match tool {
-                "fs.write" => Some("content"),
-                "fs.edit" => Some("new_string"),
-                _ => None,
+            let (target, max_tail) = match tool {
+                "fs.write" => (Some("content"), Some(8192)),
+                "fs.edit" => (Some("new_string"), Some(8192)),
+                atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL => (Some("message"), None),
+                _ => (None, None),
             };
+            self.target = target;
+            self.max_tail = max_tail;
         }
         let Some(target) = self.target else {
             return;
@@ -121,9 +134,7 @@ impl ToolDraftPreview {
                     value = value.saturating_mul(16).saturating_add(digit);
                     digits += 1;
                     if digits == 4 {
-                        if let Some(decoded) = char::from_u32(value) {
-                            self.tail.push(decoded);
-                        }
+                        self.push_utf16_unit(value as u16);
                     } else {
                         self.unicode = Some((value, digits));
                     }
@@ -144,18 +155,44 @@ impl ToolDraftPreview {
             } else if ch == '\\' {
                 self.escaped = true;
             } else if ch == '"' {
+                if self.unicode_high.take().is_some() {
+                    self.tail.push(char::REPLACEMENT_CHARACTER);
+                }
                 self.active = false;
                 break;
             } else {
                 self.tail.push(ch);
             }
         }
-        if self.tail.len() > 8192 {
-            let mut keep_from = self.tail.len() - 8192;
+        if let Some(max_tail) = self.max_tail
+            && self.tail.len() > max_tail
+        {
+            let mut keep_from = self.tail.len() - max_tail;
             while !self.tail.is_char_boundary(keep_from) {
                 keep_from += 1;
             }
             self.tail.drain(..keep_from);
+        }
+    }
+
+    fn push_utf16_unit(&mut self, unit: u16) {
+        if let Some(high) = self.unicode_high.take() {
+            if (0xDC00..=0xDFFF).contains(&unit) {
+                let codepoint =
+                    0x10000 + (((u32::from(high) - 0xD800) << 10) | (u32::from(unit) - 0xDC00));
+                if let Some(decoded) = char::from_u32(codepoint) {
+                    self.tail.push(decoded);
+                }
+                return;
+            }
+            self.tail.push(char::REPLACEMENT_CHARACTER);
+        }
+        if (0xD800..=0xDBFF).contains(&unit) {
+            self.unicode_high = Some(unit);
+        } else if (0xDC00..=0xDFFF).contains(&unit) {
+            self.tail.push(char::REPLACEMENT_CHARACTER);
+        } else if let Some(decoded) = char::from_u32(u32::from(unit)) {
+            self.tail.push(decoded);
         }
     }
 
@@ -207,6 +244,77 @@ const ROOT_LLM_DISCLOSURE: &str = "root";
 
 fn llm_disclosure_key(run_id: Option<&str>) -> String {
     run_id.unwrap_or(ROOT_LLM_DISCLOSURE).to_owned()
+}
+
+#[derive(Debug, Clone)]
+struct WorkFoldState {
+    start_id: u64,
+    end_id: u64,
+    member_count: usize,
+    completed_steps: usize,
+    total_steps: usize,
+    title: String,
+    stats: String,
+    from_visible: f32,
+    target_visible: f32,
+    started_at: Instant,
+    duration: Duration,
+}
+
+impl WorkFoldState {
+    fn visibility(&self, now: Instant) -> f32 {
+        if self.duration.is_zero() {
+            return self.target_visible;
+        }
+        let progress = (now.saturating_duration_since(self.started_at).as_secs_f32()
+            / self.duration.as_secs_f32())
+        .clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        (self.from_visible + (self.target_visible - self.from_visible) * eased)
+            .clamp(0.0, self.member_count as f32)
+    }
+
+    fn is_expanded(&self) -> bool {
+        self.target_visible > 0.0
+    }
+
+    fn is_animating(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started_at) < self.duration
+            && (self.from_visible - self.target_visible).abs() > f32::EPSILON
+    }
+
+    fn toggle(&mut self, now: Instant) {
+        let current = self.visibility(now);
+        self.from_visible = current;
+        self.target_visible = if self.is_expanded() {
+            0.0
+        } else {
+            self.member_count as f32
+        };
+        self.started_at = now;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FinalAnswerDraftState {
+    preview: ToolDraftPreview,
+    summary_preview: ToolDraftPreview,
+    assistant_id: Option<u64>,
+    work_fold_id: Option<u64>,
+}
+
+impl Default for FinalAnswerDraftState {
+    fn default() -> Self {
+        Self {
+            preview: ToolDraftPreview::default(),
+            summary_preview: ToolDraftPreview::for_field(
+                atman_runtime::message::TOOL_CALL_INTENT_FIELD,
+                Some(atman_runtime::message::TOOL_CALL_INTENT_MAX_CHARS),
+            ),
+            assistant_id: None,
+            work_fold_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -349,6 +457,9 @@ pub enum OutputItem {
     SystemNote {
         text: String,
         level: NoteLevel,
+    },
+    WorkFoldMarker {
+        summary: Option<String>,
     },
     Divider,
     WorkflowPanel {
@@ -933,6 +1044,8 @@ pub struct AppState {
     pub top_level_run_ids: std::collections::HashSet<String>,
     pub sub_agent_run_ids: std::collections::HashMap<String, SubAgentRoute>,
     llm_disclosures: std::collections::HashMap<String, LlmDisclosureState>,
+    work_folds: Vec<WorkFoldState>,
+    final_answer_drafts: std::collections::HashMap<String, FinalAnswerDraftState>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -1212,8 +1325,56 @@ impl AppState {
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.llm_disclosures.clear();
+        self.work_folds.clear();
+        self.final_answer_drafts.clear();
         let structure_revision = self.items.structure_revision();
         self.items.replace(items);
+        let marker_indices = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item {
+                OutputItem::WorkFoldMarker { summary } => Some((index, summary.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (marker_index, summary) in marker_indices {
+            let Some(user_index) = self.items[..marker_index]
+                .iter()
+                .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
+            else {
+                continue;
+            };
+            let start_index = user_index + 1;
+            let Some(end_index) = marker_index.checked_sub(1) else {
+                continue;
+            };
+            if start_index > end_index {
+                continue;
+            }
+            let Some(start_id) = self.item_id(start_index) else {
+                continue;
+            };
+            let Some(end_id) = self.item_id(end_index) else {
+                continue;
+            };
+            let member_count = end_index - start_index + 1;
+            let (completed_steps, total_steps, title, stats) =
+                self.work_fold_metadata(start_index, end_index, summary.as_deref(), None);
+            self.work_folds.push(WorkFoldState {
+                start_id,
+                end_id,
+                member_count,
+                completed_steps,
+                total_steps,
+                title,
+                stats,
+                from_visible: 0.0,
+                target_visible: 0.0,
+                started_at: Instant::now(),
+                duration: Duration::ZERO,
+            });
+        }
         debug_assert_ne!(self.items.structure_revision(), structure_revision);
         self.inline_note_indices.clear();
         self.handle_index.clear();
@@ -1847,7 +2008,9 @@ impl AppState {
     }
 
     pub fn has_active_animation(&self) -> bool {
+        let now = Instant::now();
         self.items.has_active_animation()
+            || self.work_folds.iter().any(|fold| fold.is_animating(now))
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -2700,6 +2863,9 @@ impl AppState {
         name: String,
         arguments_delta: String,
     ) {
+        if self.apply_final_answer_draft(run_id, index, &call_id, &name, &arguments_delta) {
+            return;
+        }
         if run_id.is_some_and(|run_id| self.sub_agent_run_ids.contains_key(run_id)) {
             return;
         }
@@ -2771,6 +2937,230 @@ impl AppState {
             });
         } else {
             self.push_item(OutputItem::ToolDispatch { calls: vec![call] });
+        }
+    }
+
+    fn apply_final_answer_draft(
+        &mut self,
+        run_id: Option<&str>,
+        index: usize,
+        _call_id: &str,
+        name: &str,
+        arguments_delta: &str,
+    ) -> bool {
+        if run_id.is_some_and(|run_id| self.sub_agent_run_ids.contains_key(run_id)) {
+            return false;
+        }
+        let key = format!("final-draft:{}:{index}", run_id.unwrap_or("root"));
+        let is_final = name == atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL
+            || self.final_answer_drafts.contains_key(&key);
+        if !is_final {
+            return false;
+        }
+        let disclosure_key = llm_disclosure_key(run_id);
+        self.finish_tracked_thinking(&disclosure_key, false);
+        if !self.final_answer_drafts.contains_key(&key) {
+            let work_fold_id = self.begin_work_fold(None);
+            self.push_item(OutputItem::AssistantMd {
+                md: String::new(),
+                streaming: true,
+                retried: false,
+            });
+            let assistant_id = self
+                .items
+                .len()
+                .checked_sub(1)
+                .and_then(|idx| self.item_id(idx));
+            self.final_answer_drafts.insert(
+                key.clone(),
+                FinalAnswerDraftState {
+                    preview: ToolDraftPreview::default(),
+                    summary_preview: ToolDraftPreview::for_field(
+                        atman_runtime::message::TOOL_CALL_INTENT_FIELD,
+                        Some(atman_runtime::message::TOOL_CALL_INTENT_MAX_CHARS),
+                    ),
+                    assistant_id,
+                    work_fold_id,
+                },
+            );
+            self.llm_disclosures
+                .entry(disclosure_key)
+                .or_default()
+                .assistant_id = assistant_id;
+        }
+        let (assistant_id, work_fold_id, suffix, summary) = {
+            let draft = self.final_answer_drafts.get_mut(&key).unwrap();
+            let before = draft.preview.text().len();
+            draft.preview.push(
+                atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL,
+                arguments_delta,
+            );
+            draft.summary_preview.push("", arguments_delta);
+            let text = draft.preview.text();
+            let suffix = text.get(before..).unwrap_or_default().to_owned();
+            (
+                draft.assistant_id,
+                draft.work_fold_id,
+                suffix,
+                draft.summary_preview.text().to_owned(),
+            )
+        };
+        if let Some(summary) = atman_runtime::message::ToolCallIntent::new(summary)
+            && let Some(fold) = work_fold_id
+                .and_then(|id| self.work_folds.iter_mut().find(|fold| fold.start_id == id))
+        {
+            fold.title = summary.as_str().to_owned();
+        }
+        if !suffix.is_empty()
+            && let Some(item_index) = assistant_id.and_then(|id| self.items.index_by_id(id))
+        {
+            self.mutate_item(item_index, OutputMutation::SemanticPreserveSource, |item| {
+                let OutputItem::AssistantMd { md, .. } = item else {
+                    return false;
+                };
+                md.push_str(&suffix);
+                true
+            });
+        }
+        self.waiting_for_llm = false;
+        self.streaming = true;
+        self.reset_lag_state();
+        true
+    }
+
+    fn begin_work_fold(&mut self, summary: Option<&str>) -> Option<u64> {
+        let start_index = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, OutputItem::UserTurn { .. }))
+            .map_or(0, |index| index.saturating_add(1));
+        let end_index = self.items.len().checked_sub(1)?;
+        if start_index > end_index {
+            return None;
+        }
+        let start_id = self.item_id(start_index)?;
+        let end_id = self.item_id(end_index)?;
+        if self
+            .work_folds
+            .iter()
+            .any(|fold| fold.start_id == start_id && fold.end_id == end_id)
+        {
+            return Some(start_id);
+        }
+        let member_count = end_index - start_index + 1;
+        let (completed_steps, total_steps, title, stats) =
+            self.work_fold_metadata(start_index, end_index, summary, Some(&self.turn_activity));
+        let duration_ms = (400 + member_count as u64 * 40).clamp(400, 700);
+        self.work_folds.push(WorkFoldState {
+            start_id,
+            end_id,
+            member_count,
+            completed_steps,
+            total_steps,
+            title,
+            stats,
+            from_visible: member_count as f32,
+            target_visible: 0.0,
+            started_at: Instant::now(),
+            duration: Duration::from_millis(duration_ms),
+        });
+        Some(start_id)
+    }
+
+    fn work_fold_metadata(
+        &self,
+        start_index: usize,
+        end_index: usize,
+        summary: Option<&str>,
+        activity: Option<&ActivityTotals>,
+    ) -> (usize, usize, String, String) {
+        let mut call_ids = HashSet::new();
+        let mut intents = Vec::new();
+        let mut files = HashSet::new();
+        let mut insertions = 0usize;
+        let mut deletions = 0usize;
+        for item in &self.items[start_index..=end_index] {
+            let OutputItem::ToolDispatch { calls } = item else {
+                continue;
+            };
+            for call in calls {
+                call_ids.insert(call.id.clone());
+                if !call.intent.trim().is_empty()
+                    && call.intent != call.tool
+                    && !intents.iter().any(|intent| intent == &call.intent)
+                    && intents.len() < 3
+                {
+                    intents.push(call.intent.clone());
+                }
+                if let Some((path, metrics)) = &call.applied_edit {
+                    files.insert(path.clone());
+                    insertions = insertions.saturating_add(metrics.insertions);
+                    deletions = deletions.saturating_add(metrics.deletions);
+                }
+            }
+        }
+        let title = atman_runtime::message::ToolCallIntent::new(summary.unwrap_or_default())
+            .map(|summary| summary.as_str().to_owned())
+            .unwrap_or_else(|| {
+                if intents.is_empty() {
+                    "Completed internal work.".to_owned()
+                } else {
+                    intents.join(" · ")
+                }
+            });
+        let attempted_calls = activity
+            .map(|activity| activity.attempted_calls)
+            .filter(|count| *count > 0)
+            .unwrap_or(call_ids.len());
+        let total_steps = attempted_calls.max(1);
+        let (file_count, insertions, deletions) =
+            activity.map_or((files.len(), insertions, deletions), |activity| {
+                (
+                    activity.file_count(),
+                    activity.insertions,
+                    activity.deletions,
+                )
+            });
+        let mut stats = Vec::new();
+        if file_count > 0 {
+            stats.push(format!("{file_count} files"));
+        }
+        if insertions > 0 || deletions > 0 {
+            stats.push(format!("+{insertions} −{deletions}"));
+        }
+        (total_steps, total_steps, title, stats.join(" · "))
+    }
+
+    fn commit_final_answer_message(&mut self, message: &Message) {
+        let text = message.text_concat();
+        let summary = atman_runtime::tools::final_answer::summary(message);
+        if let Some(summary) = summary.as_deref()
+            && let Some(fold) = self.work_folds.last_mut()
+        {
+            fold.title = summary.to_owned();
+        }
+        let existing = self
+            .items
+            .last()
+            .is_some_and(|item| matches!(item, OutputItem::AssistantMd { .. }))
+            .then(|| self.items.len() - 1);
+        if let Some(index) = existing {
+            self.mutate_item(index, OutputMutation::Semantic, |item| {
+                let OutputItem::AssistantMd { md, streaming, .. } = item else {
+                    return false;
+                };
+                let changed = *md != text || *streaming;
+                *md = text;
+                *streaming = false;
+                changed
+            });
+        } else {
+            let _ = self.begin_work_fold(summary.as_deref());
+            self.push_item(OutputItem::AssistantMd {
+                md: text,
+                streaming: false,
+                retried: false,
+            });
         }
     }
 
@@ -2927,6 +3317,64 @@ impl AppState {
             self.expanded_tools.insert(group_key.to_owned());
         }
         self.touch_item(item_index, OutputMutation::Interaction);
+    }
+
+    pub fn toggle_work_fold(&mut self, group_key: &str) -> bool {
+        let Some(id) = group_key
+            .strip_prefix(crate::output::WORK_FOLD_REGION_PREFIX)
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        let Some(fold) = self.work_folds.iter_mut().find(|fold| fold.start_id == id) else {
+            return false;
+        };
+        fold.toggle(Instant::now());
+        true
+    }
+
+    pub fn toggle_latest_work_fold(&mut self) -> bool {
+        let Some(fold) = self.work_folds.last_mut() else {
+            return false;
+        };
+        fold.toggle(Instant::now());
+        true
+    }
+
+    pub(crate) fn work_fold_projections(&self) -> Vec<crate::output::WorkFoldProjection> {
+        let now = Instant::now();
+        self.work_folds
+            .iter()
+            .filter_map(|fold| {
+                let start_index = self.items.index_by_id(fold.start_id)?;
+                let end_index = self.items.index_by_id(fold.end_id)?;
+                let visibility = fold.visibility(now);
+                let visible_members = visibility.ceil() as usize;
+                let fraction = visibility.fract();
+                Some(crate::output::WorkFoldProjection {
+                    key: fold.start_id,
+                    start_index,
+                    end_index,
+                    visible_members,
+                    total_members: fold.member_count,
+                    boundary_member: (fraction > f32::EPSILON)
+                        .then(|| visible_members.saturating_sub(1)),
+                    boundary_level: (fraction * 3.0).ceil().clamp(1.0, 3.0) as u8,
+                    completed_steps: fold.completed_steps,
+                    total_steps: fold.total_steps,
+                    expanded: fold.is_expanded(),
+                    hovered: self.hovered_output_node.as_ref().is_some_and(|(_, key)| {
+                        key == &format!(
+                            "{}{}",
+                            crate::output::WORK_FOLD_REGION_PREFIX,
+                            fold.start_id
+                        )
+                    }),
+                    title: fold.title.clone(),
+                    stats: fold.stats.clone(),
+                })
+            })
+            .collect()
     }
 
     fn apply_terminal_chunk_to_dispatch(
@@ -3119,6 +3567,11 @@ impl AppState {
         }
         match frame {
             StreamFrame::TurnStarted { .. } => {
+                let now = Instant::now();
+                for fold in &mut self.work_folds {
+                    fold.from_visible = fold.target_visible;
+                    fold.started_at = now.checked_sub(fold.duration).unwrap_or(now);
+                }
                 self.turn_activity = ActivityTotals::default();
             }
             StreamFrame::TurnEnded { .. } => {
@@ -3255,6 +3708,16 @@ impl AppState {
                 }
             }
             StreamFrame::LlmRetry => {
+                if !self.final_answer_drafts.is_empty() {
+                    let fold_ids = self
+                        .final_answer_drafts
+                        .values()
+                        .filter_map(|draft| draft.work_fold_id)
+                        .collect::<HashSet<_>>();
+                    self.final_answer_drafts.clear();
+                    self.work_folds
+                        .retain(|fold| !fold_ids.contains(&fold.start_id));
+                }
                 while self.items.last().is_some_and(|item| {
                     matches!(item, OutputItem::ToolDispatch { calls } if calls.iter().all(|call| call.draft_index.is_some()))
                 }) {
@@ -3299,6 +3762,7 @@ impl AppState {
                 }
                 let disclosure_key = llm_disclosure_key(run_id.as_deref());
                 self.finish_llm_disclosure(&disclosure_key, false);
+                self.final_answer_drafts.clear();
                 self.streaming = false;
                 self.reset_lag_state();
             }
@@ -3453,7 +3917,11 @@ impl AppState {
                         .as_ref()
                         .is_none_or(|run_id| !self.sub_agent_run_ids.contains_key(run_id))
                 {
-                    self.append_tool_dispatch(message);
+                    if message.origin == atman_runtime::message::MessageOrigin::FinalAnswer {
+                        self.commit_final_answer_message(message);
+                    } else {
+                        self.append_tool_dispatch(message);
+                    }
                 }
                 if let StreamFrame::ToolResultMsg { message, .. } = &frame {
                     self.apply_tool_result_to_dispatch(message);
@@ -4476,6 +4944,210 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn completed_tool_call(id: impl Into<String>) -> ToolCallView {
+        let now = Instant::now();
+        ToolCallView {
+            id: id.into(),
+            tool: "fs.read".into(),
+            intent: "Inspect project state".into(),
+            input: serde_json::json!({"path": "src/lib.rs"}),
+            status: ToolCallStatus::Ok,
+            disclosure: Disclosure::Summary,
+            detail: None,
+            draft_index: None,
+            draft_preview: Default::default(),
+            applied_edit: None,
+            started_at: now,
+            ended_at: Some(now),
+        }
+    }
+
+    #[test]
+    fn final_answer_draft_streams_markdown_and_folds_prior_work() {
+        let mut app = AppState::new("session".into(), None);
+        app.push_item(OutputItem::UserTurn {
+            text: "build it".into(),
+        });
+        app.push_item(OutputItem::Thinking {
+            text: "checking the renderer".into(),
+            done: false,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: String::new(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta:
+                "{\"_atman_intent\":\"Validated the renderer and tests.\",\"message\":\"Hel".into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer-1".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta: "lo \\uD83D".into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer-1".into(),
+            name: String::new(),
+            arguments_delta: "\\uDE00\"}".into(),
+            run_id: None,
+        });
+
+        assert_eq!(app.work_folds.len(), 1);
+        assert_eq!(app.work_folds[0].title, "Validated the renderer and tests.");
+        assert!(matches!(
+            app.items.last(),
+            Some(OutputItem::AssistantMd { md, streaming: true, .. }) if md == "Hello 😀"
+        ));
+        assert!(!app.items.iter().any(|item| matches!(
+            item,
+            OutputItem::ToolDispatch { calls }
+                if calls.iter().any(|call| call.tool == atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL)
+        )));
+
+        let duration = app.work_folds[0].duration;
+        app.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
+        assert_eq!(app.work_fold_projections()[0].visible_members, 0);
+        assert!(app.toggle_latest_work_fold());
+        app.work_folds[0].started_at = Instant::now().checked_sub(duration).unwrap();
+        assert_eq!(app.work_fold_projections()[0].visible_members, 1);
+    }
+
+    #[test]
+    fn restored_final_answer_defaults_its_work_section_to_collapsed() {
+        let app = AppState::new("session".into(), None).with_initial_items(vec![
+            OutputItem::UserTurn {
+                text: "build it".into(),
+            },
+            OutputItem::Thinking {
+                text: "restored reasoning".into(),
+                done: true,
+                disclosure: Disclosure::Summary,
+                retried: false,
+            },
+            OutputItem::WorkFoldMarker {
+                summary: Some("Checked the restored work.".into()),
+            },
+            OutputItem::AssistantMd {
+                md: "Done.".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+
+        let projections = app.work_fold_projections();
+        assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].visible_members, 0);
+        assert!(!projections[0].expanded);
+        assert_eq!(projections[0].title, "Checked the restored work.");
+    }
+
+    #[test]
+    fn live_and_replayed_work_folds_use_completed_tool_progress() {
+        let mut live = AppState::new("live".into(), None);
+        live.push_item(OutputItem::UserTurn {
+            text: "build it".into(),
+        });
+        live.push_item(OutputItem::Thinking {
+            text: "working".into(),
+            done: true,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+        live.turn_activity.attempted_calls = 69;
+        live.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta:
+                "{\"_atman_intent\":\"Completed the requested changes.\",\"message\":\"Done.\"}"
+                    .into(),
+            run_id: None,
+        });
+        let live_fold = live.work_fold_projections().remove(0);
+
+        let mut restored_items = vec![OutputItem::UserTurn {
+            text: "build it".into(),
+        }];
+        restored_items.push(OutputItem::ToolDispatch {
+            calls: (0..69)
+                .map(|index| completed_tool_call(format!("call-{index}")))
+                .collect(),
+        });
+        restored_items.push(OutputItem::WorkFoldMarker {
+            summary: Some("Completed the requested changes.".into()),
+        });
+        restored_items.push(OutputItem::AssistantMd {
+            md: "Done.".into(),
+            streaming: false,
+            retried: false,
+        });
+        let replay = AppState::new("replay".into(), None).with_initial_items(restored_items);
+        let replay_fold = replay.work_fold_projections().remove(0);
+
+        assert_eq!(live_fold.completed_steps, 69);
+        assert_eq!(live_fold.total_steps, 69);
+        assert_eq!(replay_fold.completed_steps, 69);
+        assert_eq!(replay_fold.total_steps, 69);
+        assert_eq!(live_fold.title, replay_fold.title);
+    }
+
+    #[test]
+    fn retry_discards_only_the_uncommitted_final_answer_fold() {
+        let mut app = AppState::new("session".into(), None).with_initial_items(vec![
+            OutputItem::UserTurn {
+                text: "older turn".into(),
+            },
+            OutputItem::Thinking {
+                text: "older work".into(),
+                done: true,
+                disclosure: Disclosure::Summary,
+                retried: false,
+            },
+            OutputItem::WorkFoldMarker { summary: None },
+            OutputItem::AssistantMd {
+                md: "Older answer".into(),
+                streaming: false,
+                retried: false,
+            },
+        ]);
+        app.push_item(OutputItem::UserTurn {
+            text: "new turn".into(),
+        });
+        app.push_item(OutputItem::Thinking {
+            text: "new work".into(),
+            done: false,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta: "{\"message\":\"partial\"}".into(),
+            run_id: None,
+        });
+        assert_eq!(app.work_folds.len(), 2);
+
+        app.apply_stream_frame(StreamFrame::LlmRetry);
+
+        assert_eq!(app.work_folds.len(), 1);
+        assert!(app.final_answer_drafts.is_empty());
+        assert!(matches!(
+            app.items.last(),
+            Some(OutputItem::AssistantMd {
+                retried: true,
+                streaming: false,
+                ..
+            })
+        ));
+    }
 
     struct ModelConfigReset;
 

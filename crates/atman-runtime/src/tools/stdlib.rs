@@ -824,6 +824,9 @@ impl Tool for ExtractToolUses {
                     intent,
                 } = part
                 {
+                    if name == crate::tools::final_answer::FINAL_ANSWER_TOOL {
+                        continue;
+                    }
                     let mut fields = vec![
                         ("id".into(), Value::Str(id.clone())),
                         ("name".into(), Value::Str(name.clone())),

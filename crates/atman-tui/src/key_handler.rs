@@ -1337,6 +1337,10 @@ pub(crate) fn handle_key(
             app.toggle_last_tool_expansion();
             *interrupt_prompt = None;
         }
+        KeyAction::ToggleLastWork => {
+            app.toggle_latest_work_fold();
+            *interrupt_prompt = None;
+        }
         KeyAction::HelpModal => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
             app.wm.open(

@@ -1027,6 +1027,11 @@ pub(crate) fn flatten_message_with_output_store(
             }
         }
         MessageRole::Assistant => {
+            if msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer {
+                out.push(OutputItem::WorkFoldMarker {
+                    summary: atman_runtime::tools::final_answer::summary(msg),
+                });
+            }
             let calls = msg
                 .parts
                 .iter()
@@ -1566,6 +1571,34 @@ pub fn history_note(item_count: usize, message_count: usize) -> Option<OutputIte
 mod tests {
     use super::*;
     use atman_runtime::event::{FlowNodeStatus, FlowRunId, TurnId};
+
+    #[test]
+    fn final_answer_history_inserts_a_fold_boundary_marker() {
+        let message = Message {
+            turn_id: TurnId::now(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                MessagePart::FinalAnswerSummary {
+                    text: "Checked the renderer and tests.".into(),
+                },
+                MessagePart::Text {
+                    text: "Done.".into(),
+                },
+            ],
+            origin: atman_runtime::message::MessageOrigin::FinalAnswer,
+        };
+        let mut items = Vec::new();
+        flatten_message(&message, &mut items, &HashMap::new());
+        assert!(matches!(
+            items.first(),
+            Some(OutputItem::WorkFoldMarker { summary: Some(summary) })
+                if summary == "Checked the renderer and tests."
+        ));
+        assert!(matches!(
+            items.get(1),
+            Some(OutputItem::AssistantMd { md, .. }) if md == "Done."
+        ));
+    }
 
     fn approved_permission(run_id: FlowRunId, tool_use_id: &str) -> TranscriptEntry {
         let request_id = atman_runtime::permission::PermissionRequestId::now();
