@@ -598,10 +598,13 @@ struct ItemCacheEntry {
 
 impl ItemCacheEntry {
     fn has_retained_lines(&self) -> bool {
-        !self.prefix_lines.is_empty()
-            || self.lines.is_some()
-            || self.streaming_markdown.is_some()
-            || self.bash_output.is_some()
+        let content_retained =
+            self.lines.is_some() || self.streaming_markdown.is_some() || self.bash_output.is_some();
+        if self.content_hidden || self.content_row_end() <= self.prefix_lines.len() {
+            !self.prefix_lines.is_empty() || content_retained
+        } else {
+            content_retained
+        }
     }
 
     fn append_line_range(&self, start: usize, end: usize, out: &mut Vec<Line<'static>>) -> bool {
@@ -1330,8 +1333,14 @@ fn apply_work_fold_to_entry(
         Vec::new()
     };
     let header_rows = prefix.len().min(u32::MAX as usize) as u32;
-    if visible && item_index == fold.start_index {
-        prefix.push(render_work_fold_top_padding(panel_width, fold.hovered));
+    if item_index == fold.start_index {
+        if visible {
+            prefix.push(render_work_fold_top_padding(panel_width, fold.hovered));
+        } else {
+            // The colored row belongs to the header's internal padding. This
+            // unstyled row is the block margin before whatever follows it.
+            prefix.push(Line::default());
+        }
     }
     let prefix_rows = prefix.len().min(u32::MAX as usize) as u32;
     entry.prefix_lines = Arc::from(prefix);
@@ -7982,6 +7991,16 @@ mod tests {
             .find(|region| region.path_key.starts_with(WORK_FOLD_REGION_PREFIX))
             .unwrap();
         assert_eq!(header.end_row - header.start_row, 5);
+        assert!(
+            lines[header.end_row.saturating_sub(1) as usize]
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(crate::theme::theme().work_bg.into()))
+        );
+        assert!(
+            lines[header.end_row as usize].spans.is_empty(),
+            "work needs an external blank row"
+        );
     }
 
     #[test]
@@ -8049,6 +8068,71 @@ mod tests {
 
         assert!(cache.pending_layout.is_empty());
         assert!(cache.pending_structure_from.is_none());
+    }
+
+    #[test]
+    fn expanding_an_old_fold_rehydrates_content_behind_its_retained_header() {
+        let items = OutputStore::from(
+            (0..70)
+                .map(|index| OutputItem::Thinking {
+                    text: format!("thought {index}"),
+                    done: true,
+                    disclosure: Disclosure::Summary,
+                    retried: false,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let collapsed = WorkFoldProjection {
+            key: items.revisions()[0].id,
+            start_index: 0,
+            end_index: 0,
+            visible_members: 0,
+            total_members: 1,
+            boundary_member: None,
+            boundary_level: 3,
+            completed_steps: 1,
+            total_steps: 1,
+            expanded: false,
+            animating: false,
+            hovered: false,
+            title: "complete".into(),
+            stats: String::new(),
+        };
+        let mut cache = LayoutCache::default();
+        cache.set_work_folds(vec![collapsed.clone()]);
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::ThemeMode::Dark,
+        };
+        cache.update_dirty(
+            key,
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: u32::MAX,
+                viewport_rows: 5,
+                follow_tail_rows: None,
+            },
+        );
+
+        let mut expanded = collapsed;
+        expanded.visible_members = 1;
+        expanded.expanded = true;
+        cache.set_work_folds(vec![expanded]);
+        let metrics = cache.update_dirty(
+            key,
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 20,
+                follow_tail_rows: None,
+            },
+        );
+        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows.min(20), 0);
+        let rendered = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("thought 0"));
     }
 
     #[test]

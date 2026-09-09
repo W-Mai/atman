@@ -1051,12 +1051,7 @@ pub(crate) fn flatten_message_with_output_store(
             }
         }
         MessageRole::Assistant => {
-            if msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer {
-                out.push(OutputItem::WorkFoldMarker {
-                    summary: atman_runtime::tools::final_answer::summary(msg),
-                    start_index: None,
-                });
-            }
+            let is_final_answer = msg.origin == atman_runtime::message::MessageOrigin::FinalAnswer;
             let calls = msg
                 .parts
                 .iter()
@@ -1102,17 +1097,30 @@ pub(crate) fn flatten_message_with_output_store(
                         }
                     }
                     MessagePart::Text { text } => {
-                        out.push(OutputItem::AssistantMd {
-                            md: text.clone(),
-                            streaming: false,
-                            retried: false,
-                        });
+                        if !is_final_answer {
+                            out.push(OutputItem::AssistantMd {
+                                md: text.clone(),
+                                streaming: false,
+                                retried: false,
+                            });
+                        }
                     }
                     _ => {}
                 }
             }
             if !calls.is_empty() {
                 out.push(OutputItem::ToolDispatch { calls });
+            }
+            if is_final_answer {
+                out.push(OutputItem::WorkFoldMarker {
+                    summary: atman_runtime::tools::final_answer::summary(msg),
+                    start_index: None,
+                });
+                out.push(OutputItem::AssistantMd {
+                    md: msg.text_concat(),
+                    streaming: false,
+                    retried: false,
+                });
             }
         }
         MessageRole::Tool => {
@@ -1603,12 +1611,15 @@ mod tests {
             turn_id: TurnId::now(),
             role: MessageRole::Assistant,
             parts: vec![
+                MessagePart::Thinking {
+                    thinking: "final verification".into(),
+                    signature: None,
+                },
                 MessagePart::FinalAnswerSummary {
                     text: "Checked the renderer and tests.".into(),
                 },
-                MessagePart::Text {
-                    text: "Done.".into(),
-                },
+                MessagePart::Text { text: "Do".into() },
+                MessagePart::Text { text: "ne.".into() },
             ],
             origin: atman_runtime::message::MessageOrigin::FinalAnswer,
         };
@@ -1616,6 +1627,10 @@ mod tests {
         flatten_message(&message, &mut items, &HashMap::new());
         assert!(matches!(
             items.first(),
+            Some(OutputItem::Thinking { text, .. }) if text == "final verification"
+        ));
+        assert!(matches!(
+            items.get(1),
             Some(OutputItem::WorkFoldMarker {
                 summary: Some(summary),
                 ..
@@ -1623,7 +1638,7 @@ mod tests {
                 if summary == "Checked the renderer and tests."
         ));
         assert!(matches!(
-            items.get(1),
+            items.get(2),
             Some(OutputItem::AssistantMd { md, .. }) if md == "Done."
         ));
     }
@@ -1636,6 +1651,10 @@ mod tests {
         let final_answer = Message {
             role: MessageRole::Assistant,
             parts: vec![
+                MessagePart::Thinking {
+                    thinking: "final check".into(),
+                    signature: None,
+                },
                 MessagePart::FinalAnswerSummary {
                     text: "Completed the requested work.".into(),
                 },
@@ -1680,6 +1699,14 @@ mod tests {
 
         assert_eq!(start_index, Some(1));
         assert!(marker_index > 2);
+        assert!(matches!(
+            items.get(marker_index.saturating_sub(1)),
+            Some(OutputItem::Thinking { text, .. }) if text == "final check"
+        ));
+
+        let app = crate::app::AppState::new("replay".into(), None).with_initial_items(items);
+        let fold = app.work_fold_projections().remove(0);
+        assert_eq!(fold.end_index, marker_index - 1);
     }
 
     fn approved_permission(run_id: FlowRunId, tool_use_id: &str) -> TranscriptEntry {
