@@ -824,7 +824,7 @@ impl Tool for ExtractToolUses {
                     intent,
                 } = part
                 {
-                    if name == crate::tools::final_answer::FINAL_ANSWER_TOOL {
+                    if name == crate::tools::final_answer::FINAL_ANSWER_TOOL && intent.is_some() {
                         continue;
                     }
                     let mut fields = vec![
@@ -1032,6 +1032,19 @@ fn prepare_dispatch(
             &Value::Struct(named.clone()),
             call_intent.as_ref(),
         );
+        if tool.requires_call_intent() && call_intent.is_none() {
+            prepared.push(PreparedEntry::Failed {
+                index,
+                msg: build_error_result(
+                    ctx,
+                    &id,
+                    &format!(
+                        "tool `{name}` was not executed because its required `_atman_intent` was missing or empty. Issue a new tool call with a concise `_atman_intent`; do not assume this call succeeded."
+                    ),
+                ),
+            });
+            continue;
+        }
         let missing = missing_required_fields(&raw_schema, &named);
         if !missing.is_empty() {
             let content = format!(
@@ -1625,6 +1638,66 @@ mod tests {
         ctx
     }
 
+    #[tokio::test]
+    async fn final_answer_without_intent_becomes_a_tool_failure() {
+        let registry = std::sync::Arc::new(crate::tool::ToolRegistry::new());
+        registry.register(std::sync::Arc::new(crate::tools::final_answer::FinalAnswer));
+        let ctx = authorized_ctx(registry);
+        let reply = Value::Message(crate::message::Message {
+            role: crate::message::MessageRole::Assistant,
+            parts: vec![crate::message::MessagePart::ToolUse {
+                id: "answer-1".into(),
+                name: crate::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+                input: serde_json::json!({"message": "Done."}),
+                intent: None,
+            }],
+            turn_id: crate::event::TurnId::now(),
+            origin: crate::message::MessageOrigin::User,
+        });
+        let uses = ExtractToolUses
+            .call(
+                ToolArgs {
+                    positional: vec![reply],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::List(uses) = uses else {
+            panic!("tool use list");
+        };
+        assert_eq!(uses.len(), 1);
+        let result = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![Value::List(uses)],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            Value::List(results)
+                if matches!(
+                    results.as_slice(),
+                    [Value::Message(crate::message::Message { parts, .. })]
+                        if matches!(
+                            parts.as_slice(),
+                            [crate::message::MessagePart::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error: true,
+                            }] if tool_use_id == "answer-1"
+                                && content.contains("_atman_intent")
+                        )
+                )
+        ));
+    }
+
     #[test]
     fn shell_quote_wraps_and_escapes() {
         assert_eq!(shell_quote("hello"), "'hello'");
@@ -1732,6 +1805,7 @@ mod tests {
                     Value::Struct(vec![
                         ("id".into(), Value::Str(format!("call-{index}"))),
                         ("name".into(), Value::Str(name.into())),
+                        ("intent".into(), Value::Str(format!("Run {name}"))),
                         ("input".into(), Value::Struct(Vec::new())),
                     ])
                 })
@@ -1827,11 +1901,19 @@ mod tests {
             Value::Struct(vec![
                 ("id".into(), Value::Str("control-1".into())),
                 ("name".into(), Value::Str("permission.probe".into())),
+                (
+                    "intent".into(),
+                    Value::Str("Inspect permission control".into()),
+                ),
                 ("input".into(), Value::Struct(Vec::new())),
             ]),
             Value::Struct(vec![
                 ("id".into(), Value::Str("control-2".into())),
                 ("name".into(), Value::Str("permission.probe".into())),
+                (
+                    "intent".into(),
+                    Value::Str("Inspect permission control".into()),
+                ),
                 ("input".into(), Value::Struct(Vec::new())),
             ]),
         ];
@@ -1851,6 +1933,7 @@ mod tests {
         let uses = Value::List(vec![Value::Struct(vec![
             ("id".into(), Value::Str("probe_id".into())),
             ("name".into(), Value::Str("permit.probe".into())),
+            ("intent".into(), Value::Str("Inspect authorization".into())),
             ("input".into(), Value::Struct(Vec::new())),
         ])]);
 
@@ -1979,11 +2062,13 @@ mod tests {
             Value::Struct(vec![
                 ("id".into(), Value::Str("slow_id".into())),
                 ("name".into(), Value::Str("slow".into())),
+                ("intent".into(), Value::Str("Run slow probe".into())),
                 ("input".into(), Value::Struct(Vec::new())),
             ]),
             Value::Struct(vec![
                 ("id".into(), Value::Str("fast_id".into())),
                 ("name".into(), Value::Str("fast".into())),
+                ("intent".into(), Value::Str("Run fast probe".into())),
                 ("input".into(), Value::Struct(Vec::new())),
             ]),
         ]);
@@ -2084,6 +2169,10 @@ mod tests {
         let uses = Value::List(vec![Value::Struct(vec![
             ("id".into(), Value::Str("read_id".into())),
             ("name".into(), Value::Str("fs.read".into())),
+            (
+                "intent".into(),
+                Value::Str("Read the complete fixture".into()),
+            ),
             (
                 "input".into(),
                 Value::Struct(vec![("path".into(), Value::Path(path))]),

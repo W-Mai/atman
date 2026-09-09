@@ -30,17 +30,15 @@ pub fn extract(message: &Message) -> Option<String> {
 
 pub fn normalized_for_history(message: &Message) -> Option<Message> {
     let answer = extract(message)?;
-    let summary = summary(message);
+    let summary = summary(message)?;
     let mut normalized = message.clone();
     normalized.origin = crate::message::MessageOrigin::FinalAnswer;
     normalized
         .parts
         .retain(|part| matches!(part, MessagePart::Thinking { .. }));
-    if let Some(text) = summary {
-        normalized
-            .parts
-            .push(MessagePart::FinalAnswerSummary { text });
-    }
+    normalized
+        .parts
+        .push(MessagePart::FinalAnswerSummary { text: summary });
     normalized.parts.push(MessagePart::Text { text: answer });
     Some(normalized)
 }
@@ -165,8 +163,18 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_control_to_plain_assistant_text() {
-        let normalized = normalized_for_history(&control_message()).unwrap();
+    fn rejects_history_normalization_without_summary_intent() {
+        assert!(normalized_for_history(&control_message()).is_none());
+    }
+
+    #[test]
+    fn normalizes_valid_control_to_plain_assistant_text() {
+        let mut message = control_message();
+        let MessagePart::ToolUse { intent, .. } = &mut message.parts[0] else {
+            unreachable!();
+        };
+        *intent = crate::message::ToolCallIntent::new("Completed requested work.");
+        let normalized = normalized_for_history(&message).unwrap();
         assert_eq!(normalized.text_concat(), "Done.");
         assert!(!normalized.parts.iter().any(
             |part| matches!(part, MessagePart::ToolUse { name, .. } if name == FINAL_ANSWER_TOOL)

@@ -315,7 +315,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
         };
     let mut signature_retries: u32 = 0;
-    let mut tool_intent_retry_used = false;
     'llm_attempts: loop {
         for attempt in 0..=retry_count {
             let mut sanitized_messages =
@@ -405,10 +404,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 ctx.watch_rules.clone(),
             )
             .await;
-            let missing_tool_intent = outcome
-                .as_ref()
-                .ok()
-                .and_then(|message| missing_tool_call_intent_error(&message.message, &tool_specs));
             if let Ok(message) = &mut outcome
                 && let Some(normalized) =
                     crate::tools::final_answer::normalized_for_history(&message.message)
@@ -438,17 +433,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         "LLM returned an empty assistant message".into(),
                     ));
                 }
-                (!tool_intent_retry_used)
-                    .then(|| missing_tool_intent.clone())
-                    .flatten()
+                None
             });
-            if tool_intent_retry_used && let Some(error) = missing_tool_intent.as_ref() {
-                send_llm_diagnostic(
-                    ctx,
-                    crate::notify::NotifyLevel::Warn,
-                    format!("{error}; continuing with a generated display summary"),
-                );
-            }
             let (usage, usage_source) = crate::context_plan::reconcile_token_usage(
                 &provider_usage,
                 estimated_input,
@@ -721,25 +707,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         last_err = Some(e);
                         continue 'llm_attempts;
                     }
-                    if matches!(e, RuntimeError::ToolCallIntentMissing { .. }) {
-                        tool_intent_retry_used = true;
-                        append_system_context(
-                            &mut system,
-                            vec![
-                                "Your previous response omitted the required `_atman_intent` field from one or more tool calls. Retry the response and include a concise `_atman_intent` string in every tool call.".into(),
-                            ],
-                        );
-                        if let Some(tx) = stream_tx.as_ref() {
-                            let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
-                        }
-                        send_llm_diagnostic(
-                            ctx,
-                            crate::notify::NotifyLevel::Warn,
-                            format!("{e} — retrying once with a schema correction"),
-                        );
-                        last_err = Some(e);
-                        continue 'llm_attempts;
-                    }
                     if attempt < retry_count {
                         let kind = e.kind();
                         let should_retry = match &retry_kinds_ref {
@@ -806,27 +773,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         format!("LLM call failed: {error}"),
     );
     Value::Err(error)
-}
-
-fn missing_tool_call_intent_error(
-    message: &crate::message::Message,
-    tool_specs: &[crate::tool::ToolSpec],
-) -> Option<RuntimeError> {
-    let missing = message
-        .parts
-        .iter()
-        .filter_map(|part| match part {
-            crate::message::MessagePart::ToolUse {
-                name, intent: None, ..
-            } if crate::tool::tool_spec_supports_call_intent(name, tool_specs) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    (!missing.is_empty()).then(|| RuntimeError::ToolCallIntentMissing {
-        tools: missing.into_iter().collect::<Vec<_>>().join(", "),
-    })
 }
 
 fn record_spawned_compaction(ctx: &ToolCtx, result: &crate::compaction::HandleAutoCompactResult) {
@@ -951,29 +897,6 @@ fn normalize_working_directory_context(system: &mut Option<String>, cwd: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn final_answer_requires_intent_before_history_normalization() {
-        let message = crate::message::Message {
-            role: crate::message::MessageRole::Assistant,
-            parts: vec![crate::message::MessagePart::ToolUse {
-                id: "answer".into(),
-                name: crate::tools::final_answer::FINAL_ANSWER_TOOL.into(),
-                input: serde_json::json!({"message": "Done."}),
-                intent: None,
-            }],
-            turn_id: crate::event::TurnId::now(),
-            origin: crate::message::MessageOrigin::User,
-        };
-        let tools = vec![crate::tool::tool_spec(
-            &crate::tools::final_answer::FinalAnswer,
-        )];
-
-        assert!(matches!(
-            missing_tool_call_intent_error(&message, &tools),
-            Some(crate::error::RuntimeError::ToolCallIntentMissing { .. })
-        ));
-    }
 
     #[test]
     fn fixed_wire_prefix_counts_only_system_and_tool_definitions() {

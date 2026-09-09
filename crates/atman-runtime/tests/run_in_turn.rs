@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{LlmCallStatus, NodeEvent, Observable, TurnId};
-use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole, ToolCallIntent};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
     TokenUsage,
@@ -22,26 +22,30 @@ struct EmptyThenGoodProvider {
     calls: AtomicU32,
 }
 
-struct MissingIntentThenGoodProvider {
+struct MissingIntentProvider {
     calls: AtomicU32,
-    systems: std::sync::Mutex<Vec<Option<String>>>,
-    supply_on_retry: bool,
+    requests: std::sync::Mutex<Vec<Vec<Message>>>,
 }
 
-impl MissingIntentThenGoodProvider {
-    fn response(&self, req: LlmRequest) -> AssistantMessage {
+impl MissingIntentProvider {
+    fn response(&self) -> AssistantMessage {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.systems.lock().unwrap().push(req.system);
+        let parts = if call == 0 {
+            vec![MessagePart::ToolUse {
+                id: format!("call_{call}"),
+                name: "fs.read".into(),
+                input: serde_json::json!({"path": "README.md"}),
+                intent: None,
+            }]
+        } else {
+            vec![MessagePart::Text {
+                text: "observed tool failure".into(),
+            }]
+        };
         AssistantMessage {
             message: Message {
                 role: MessageRole::Assistant,
-                parts: vec![MessagePart::ToolUse {
-                    id: format!("call_{call}"),
-                    name: "fs.read".into(),
-                    input: serde_json::json!({"path": "README.md"}),
-                    intent: (call > 0 && self.supply_on_retry)
-                        .then(|| ToolCallIntent::new("Read project documentation").unwrap()),
-                }],
+                parts,
                 turn_id: TurnId::now(),
                 origin: MessageOrigin::User,
             },
@@ -54,17 +58,21 @@ impl MissingIntentThenGoodProvider {
     }
 }
 
-impl Provider for MissingIntentThenGoodProvider {
+impl Provider for MissingIntentProvider {
     fn name(&self) -> &str {
         "intent-model"
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
-        Box::pin(async move { Ok(self.response(req)) })
+        Box::pin(async move {
+            self.requests.lock().unwrap().push(req.messages);
+            Ok(self.response())
+        })
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let response = self.response(req);
+        self.requests.lock().unwrap().push(req.messages);
+        let response = self.response();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let output = Box::pin(async move {
@@ -320,13 +328,22 @@ async fn empty_assistant_message_retries_without_entering_session_history() {
 }
 
 #[tokio::test]
-async fn missing_tool_intent_retries_with_schema_correction() {
+async fn missing_tool_intent_returns_a_visible_tool_failure_without_llm_retry() {
     let _registry = common::ModelRegistryGuard::mock("intent-model").await;
     let file = parse_file(
         r#"flow ask() -> any {
-    return llm.call(
+    reply = llm.call(
         model: "intent-model",
         prompt: "read the project documentation",
+        context: "session",
+        tools: ["fs.read"],
+    )
+    tool_uses = extract_tool_uses(reply)
+    tool_results = dispatch_all(tool_uses)
+    session.push(tool_results)
+    return llm.call(
+        model: "intent-model",
+        prompt: "continue after the tool result",
         context: "session",
         tools: ["fs.read"],
     )
@@ -334,15 +351,14 @@ async fn missing_tool_intent_retries_with_schema_correction() {
 "#,
     )
     .unwrap();
-    let executor = Executor::new();
+    let session = Arc::new(Session::open_ephemeral());
+    let executor = Executor::with_events(session.sink().clone());
     atman_runtime::tools::register_tier_zero(&executor.tools);
-    let provider = Arc::new(MissingIntentThenGoodProvider {
+    let provider = Arc::new(MissingIntentProvider {
         calls: AtomicU32::new(0),
-        systems: std::sync::Mutex::new(Vec::new()),
-        supply_on_retry: true,
+        requests: std::sync::Mutex::new(Vec::new()),
     });
     executor.providers.register(provider.clone());
-    let session = Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
@@ -353,19 +369,9 @@ async fn missing_tool_intent_retries_with_schema_correction() {
     session.end_turn();
 
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-    assert!(
-        provider.systems.lock().unwrap()[1]
-            .as_deref()
-            .is_some_and(|system| system.contains("previous response omitted"))
-    );
     assert!(matches!(
         output,
-        Value::Message(Message { parts, .. })
-            if parts.iter().any(|part| matches!(
-                part,
-                MessagePart::ToolUse { intent: Some(intent), .. }
-                    if intent.as_str() == "Read project documentation"
-            ))
+        Value::Message(message) if message.text_concat() == "observed tool failure"
     ));
     assert_eq!(
         session
@@ -373,7 +379,20 @@ async fn missing_tool_intent_retries_with_schema_correction() {
             .iter()
             .filter(|message| message.role == MessageRole::Assistant)
             .count(),
-        1
+        2
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].iter().any(|message| matches!(
+            message.parts.as_slice(),
+            [MessagePart::ToolResult { content, is_error: true, .. }]
+                if content.contains("was not executed")
+                    && content.contains("_atman_intent")
+                    && content.contains("do not assume this call succeeded")
+        )),
+        "second request: {:#?}",
+        requests[1]
     );
     let statuses = executor
         .events
@@ -386,59 +405,6 @@ async fn missing_tool_intent_retries_with_schema_correction() {
         .collect::<Vec<_>>();
     assert!(matches!(
         statuses.as_slice(),
-        [LlmCallStatus::Errored { message }, LlmCallStatus::Ok]
-            if message.contains("omitted required tool call intent")
+        [LlmCallStatus::Ok, LlmCallStatus::Ok]
     ));
-}
-
-#[tokio::test]
-async fn repeated_missing_tool_intent_keeps_the_flow_usable() {
-    let _registry = common::ModelRegistryGuard::mock("intent-model").await;
-    let file = parse_file(
-        r#"flow ask() -> any {
-    return llm.call(
-        model: "intent-model",
-        prompt: "read the project documentation",
-        context: "session",
-        tools: ["fs.read"],
-    )
-}
-"#,
-    )
-    .unwrap();
-    let executor = Executor::new();
-    atman_runtime::tools::register_tier_zero(&executor.tools);
-    let provider = Arc::new(MissingIntentThenGoodProvider {
-        calls: AtomicU32::new(0),
-        systems: std::sync::Mutex::new(Vec::new()),
-        supply_on_retry: false,
-    });
-    executor.providers.register(provider.clone());
-    let session = Arc::new(Session::open_ephemeral());
-    let turn_id = TurnId::now();
-    session.begin_turn(user_msg(turn_id.clone(), "start"));
-
-    let output = executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
-        .await
-        .unwrap();
-    session.end_turn();
-
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
-    assert!(matches!(
-        output,
-        Value::Message(Message { parts, .. })
-            if parts.iter().any(|part| matches!(
-                part,
-                MessagePart::ToolUse { intent: None, .. }
-            ))
-    ));
-    assert_eq!(
-        session
-            .messages()
-            .iter()
-            .filter(|message| message.role == MessageRole::Assistant)
-            .count(),
-        1
-    );
 }
