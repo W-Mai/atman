@@ -96,7 +96,7 @@ impl<'a> RenderCtx<'a> {
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DYNAMIC_SPINNER_MARKER: &str = "\u{e000}";
 pub(crate) const LAYOUT_ANIMATION_FRAME: u32 = u32::MAX;
-const WORK_FOLD_CONTENT_INSET: u16 = 2;
+const WORK_FOLD_RAIL_WIDTH: u16 = 1;
 const WORK_FOLD_BOUNDARY_ROWS: usize = 2;
 
 fn spinner_char(frame: u32) -> &'static str {
@@ -585,7 +585,7 @@ struct ItemCacheEntry {
     last_used: u64,
     prefix_lines: Arc<[Line<'static>]>,
     content_hidden: bool,
-    content_inset: u16,
+    work_framed: bool,
     outer_width: u16,
     work_boundary_end: bool,
 }
@@ -994,19 +994,13 @@ impl LayoutCache {
                     animation_frame,
                 );
                 let local_row = lo.saturating_add(line_index);
-                if local_row >= entry.prefix_lines.len() && local_row < entry.content_row_end() {
-                    frame_work_fold_content_line(
-                        line,
-                        entry.content_inset,
-                        entry.outer_width,
-                        work_fold_hovered,
-                    );
+                if entry.work_framed
+                    && local_row >= entry.prefix_lines.len()
+                    && local_row < entry.content_row_end()
+                {
+                    frame_work_fold_content_line(line, entry.outer_width, work_fold_hovered);
                 } else if entry.work_boundary_end && local_row == entry.content_row_end() {
-                    *line = render_work_fold_footer(
-                        entry.content_inset,
-                        entry.outer_width,
-                        work_fold_hovered,
-                    );
+                    *line = render_work_fold_footer(entry.outer_width, work_fold_hovered);
                 }
             }
             ranges.push(ItemRange {
@@ -1086,7 +1080,7 @@ impl LayoutCache {
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
                 content_hidden: false,
-                content_inset: 0,
+                work_framed: false,
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
             };
@@ -1153,7 +1147,7 @@ impl LayoutCache {
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
                 content_hidden: false,
-                content_inset: 0,
+                work_framed: false,
                 outer_width: ctx.panel_width,
                 work_boundary_end: false,
             };
@@ -1196,7 +1190,7 @@ impl LayoutCache {
             last_used: self.access_clock,
             prefix_lines: Arc::from([]),
             content_hidden: false,
-            content_inset: 0,
+            work_framed: false,
             outer_width: ctx.panel_width,
             work_boundary_end: false,
         };
@@ -1328,7 +1322,7 @@ fn apply_work_fold_to_entry(
     let prefix_rows = prefix.len().min(u32::MAX as usize) as u32;
     entry.prefix_lines = Arc::from(prefix);
     entry.content_hidden = !visible;
-    entry.content_inset = WORK_FOLD_CONTENT_INSET;
+    entry.work_framed = true;
     entry.outer_width = panel_width;
     entry.work_boundary_end = false;
     if visible {
@@ -1350,12 +1344,12 @@ fn apply_work_fold_to_entry(
                     region.end_row = region.end_row.saturating_add(prefix_rows);
                     region.col_start = region
                         .col_start
-                        .saturating_add(WORK_FOLD_CONTENT_INSET)
+                        .saturating_add(WORK_FOLD_RAIL_WIDTH)
                         .min(panel_width);
                     region.col_end = region
                         .col_end
-                        .saturating_add(WORK_FOLD_CONTENT_INSET)
-                        .min(panel_width.saturating_sub(WORK_FOLD_CONTENT_INSET))
+                        .saturating_add(WORK_FOLD_RAIL_WIDTH)
+                        .min(panel_width.saturating_sub(WORK_FOLD_RAIL_WIDTH))
                         .max(region.col_start);
                     region
                 })
@@ -1388,21 +1382,19 @@ fn apply_work_fold_to_entry(
     }
 }
 
-fn work_fold_frame_widths(inset: u16, outer_width: u16) -> Option<(usize, usize)> {
-    if inset == 0 || outer_width < 3 {
+fn work_fold_inner_width(outer_width: u16) -> Option<usize> {
+    if outer_width < 3 {
         return None;
     }
-    let outer_width = outer_width as usize;
-    let inset = usize::from(inset).min(outer_width.saturating_sub(3) / 2);
-    let inner_width = outer_width.saturating_sub(inset.saturating_mul(2).saturating_add(2));
-    Some((inset, inner_width))
+    Some(usize::from(
+        outer_width.saturating_sub(WORK_FOLD_RAIL_WIDTH * 2),
+    ))
 }
 
 fn work_fold_content_width(outer_width: u16) -> u16 {
-    work_fold_frame_widths(WORK_FOLD_CONTENT_INSET, outer_width)
-        .map_or(outer_width.max(1), |(_, inner_width)| {
-            inner_width.min(u16::MAX as usize) as u16
-        })
+    work_fold_inner_width(outer_width).map_or(outer_width.max(1), |inner_width| {
+        inner_width.min(u16::MAX as usize) as u16
+    })
 }
 
 fn work_fold_boundary_style(hovered: bool) -> Style {
@@ -1415,25 +1407,18 @@ fn work_fold_boundary_style(hovered: bool) -> Style {
     Style::default().fg(foreground)
 }
 
-fn frame_work_fold_content_line(
-    line: &mut Line<'static>,
-    inset: u16,
-    outer_width: u16,
-    hovered: bool,
-) {
-    let Some((inset, inner_width)) = work_fold_frame_widths(inset, outer_width) else {
+fn frame_work_fold_content_line(line: &mut Line<'static>, outer_width: u16, hovered: bool) {
+    let Some(inner_width) = work_fold_inner_width(outer_width) else {
         return;
     };
     let outer_width = outer_width as usize;
     let content = crate::width::truncate_spans(std::mem::take(&mut line.spans), inner_width, None);
     let used = crate::width::spans_width(content.iter());
-    let mut spans = Vec::with_capacity(content.len() + 5);
-    spans.push(Span::raw(" ".repeat(inset)));
-    spans.push(Span::styled("│", work_fold_boundary_style(hovered)));
+    let mut spans = Vec::with_capacity(content.len() + 3);
+    spans.push(Span::styled("⠇", work_fold_boundary_style(hovered)));
     spans.extend(content);
     spans.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
-    spans.push(Span::styled("│", work_fold_boundary_style(hovered)));
-    spans.push(Span::raw(" ".repeat(inset)));
+    spans.push(Span::styled("⠸", work_fold_boundary_style(hovered)));
     debug_assert_eq!(
         crate::width::spans_width(spans.iter()),
         outer_width,
@@ -1442,18 +1427,14 @@ fn frame_work_fold_content_line(
     line.spans = spans;
 }
 
-fn render_work_fold_footer(inset: u16, outer_width: u16, hovered: bool) -> Line<'static> {
-    let Some((inset, inner_width)) = work_fold_frame_widths(inset, outer_width) else {
+fn render_work_fold_footer(outer_width: u16, hovered: bool) -> Line<'static> {
+    let Some(inner_width) = work_fold_inner_width(outer_width) else {
         return Line::from(Span::raw(" ".repeat(outer_width as usize)));
     };
-    Line::from(vec![
-        Span::raw(" ".repeat(inset)),
-        Span::styled(
-            format!("╰{}╯", "─".repeat(inner_width)),
-            work_fold_boundary_style(hovered),
-        ),
-        Span::raw(" ".repeat(inset)),
-    ])
+    Line::from(Span::styled(
+        format!("⠧{}⠼", "⠤".repeat(inner_width)),
+        work_fold_boundary_style(hovered),
+    ))
 }
 
 fn fade_work_fold_boundary(entry: &mut ItemCacheEntry, level: u8) {
@@ -8055,18 +8036,18 @@ mod tests {
 
         assert_eq!(content_lines.len(), 4);
         for content in content_lines {
-            assert!(content.starts_with("  │"), "{content:?}");
-            assert!(content.ends_with("│  "), "{content:?}");
+            assert!(content.starts_with("⠇"), "{content:?}");
+            assert!(content.ends_with("⠸"), "{content:?}");
             assert_eq!(crate::width::width(content), 40);
         }
         let footer = rendered_lines
             .iter()
-            .position(|line| line.starts_with("  ╰") && line.ends_with("╯  "))
+            .position(|line| line.starts_with("⠧") && line.ends_with("⠼"))
             .expect("work boundary footer");
         assert_eq!(
             rendered_lines
                 .iter()
-                .filter(|line| line.starts_with("  ╰"))
+                .filter(|line| line.starts_with("⠧"))
                 .count(),
             1
         );
@@ -8078,8 +8059,8 @@ mod tests {
     fn work_fold_frame_preserves_narrow_panel_widths() {
         for outer_width in 3..20 {
             let mut line = Line::from(Span::raw("content"));
-            frame_work_fold_content_line(&mut line, WORK_FOLD_CONTENT_INSET, outer_width, false);
-            let footer = render_work_fold_footer(WORK_FOLD_CONTENT_INSET, outer_width, false);
+            frame_work_fold_content_line(&mut line, outer_width, false);
+            let footer = render_work_fold_footer(outer_width, false);
 
             assert_eq!(
                 crate::width::width(&plain_line(&line)),
