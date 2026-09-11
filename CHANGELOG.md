@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Startup recent sessions** — Recent sessions render in a responsive padded container with four-row records, width-aware text, distinct hover and selection states, and keyboard or pointer navigation that leaves numeric input untouched until the list is focused.
 - **Session switcher records** — Session entries use goal-aware spacing, full-height selection markers, distinct default, hover, and selected backgrounds, item-based wheel navigation, and whole-record pointer hit regions without passing modal input through to content underneath.
 
 ## [1.11.0] — 2026-09-09

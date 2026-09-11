@@ -1677,14 +1677,10 @@ pub fn line_with_right_pad(
 // transcript area. Content is laid out as:
 //   banner (8 rows)
 //   1 pad row
-//   [input slot: 5 rows]
-//   1 pad row
-//   sessions header + rows
-//   1 pad row
-//   hint line
 const STARTUP_INPUT_SLOT_ROWS: u16 = 8;
-const STARTUP_INPUT_SLOT_PAD: u16 = 1;
 const STARTUP_INPUT_MAX_WIDTH: u16 = 72;
+const STARTUP_INPUT_TOP_ROWS: u16 = STARTUP_BANNER.len() as u16 + 4;
+const STARTUP_INPUT_RECENT_GAP_ROWS: u16 = 3;
 pub const STARTUP_BANNER: &[&str] = &[
     "      ⢀⡤⣾⢿⡿⢿⡿⣷⢤⡀                                           ",
     "     ⢠⢯⢎⠞⡵⠚⠓⢮⠳⡱⡽⡄                                          ",
@@ -1701,59 +1697,97 @@ pub struct StartupOverlayLayout {
     pub input_slot: ratatui::layout::Rect,
     pub overlay_width: u16,
     pub banner_rect: ratatui::layout::Rect,
+    pub recent_container: Option<ratatui::layout::Rect>,
+    pub help_rect: ratatui::layout::Rect,
+    pub visible_session_count: usize,
+    pub session_rects: Vec<ratatui::layout::Rect>,
 }
 
-const SESSION_CARD_TITLE_MAX: usize = 48;
+const STARTUP_PREFIX_ROWS: u16 =
+    STARTUP_INPUT_TOP_ROWS + STARTUP_INPUT_SLOT_ROWS + STARTUP_INPUT_RECENT_GAP_ROWS;
+const STARTUP_FOOTER_ROWS: u16 = 2;
+const STARTUP_RECENT_FIXED_ROWS: u16 = 3;
+const STARTUP_SESSION_ROWS: u16 = 4;
+const STARTUP_OVERLAY_MAX_WIDTH: u16 = 84;
 
 pub fn compute_startup_overlay(
     area: ratatui::layout::Rect,
     recent: &[crate::app::StartupSessionEntry],
 ) -> StartupOverlayLayout {
-    let banner_h = STARTUP_BANNER.len() as u16 + 2;
-    let sessions_h: u16 = if recent.is_empty() {
-        3
+    let available_for_sessions = area
+        .height
+        .saturating_sub(STARTUP_PREFIX_ROWS + STARTUP_FOOTER_ROWS + STARTUP_RECENT_FIXED_ROWS);
+    let visible_session_count = if recent.is_empty() {
+        0
     } else {
-        let n = recent.len() as u16;
-        (2 + n * 2 + n.saturating_sub(1)).min(25)
+        usize::from(available_for_sessions / STARTUP_SESSION_ROWS).min(recent.len())
     };
-    let hint_h: u16 = 2;
-    let total_h = banner_h
-        + STARTUP_INPUT_SLOT_PAD
-        + STARTUP_INPUT_SLOT_ROWS
-        + STARTUP_INPUT_SLOT_PAD
-        + sessions_h
-        + hint_h;
-    // Splash lane is narrower than the docked input; sessions cards line
-    // up under this splash input, and the slide animates x/width/height
-    // from here to compute_input_rect on dismiss.
-    let input_docked = crate::layout::compute_input_rect(area, 1);
-    let width = STARTUP_INPUT_MAX_WIDTH.min(input_docked.width);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + area.height.saturating_sub(total_h) / 2;
-    let overlay = ratatui::layout::Rect {
-        x,
-        y,
-        width,
-        height: total_h.min(area.height),
+    let recent_height = if visible_session_count == 0 {
+        0
+    } else {
+        STARTUP_RECENT_FIXED_ROWS
+            + STARTUP_SESSION_ROWS * visible_session_count.min(u16::MAX as usize) as u16
     };
-    let slot_y = overlay.y + banner_h + STARTUP_INPUT_SLOT_PAD;
-    let input_slot = ratatui::layout::Rect {
-        x: overlay.x,
-        y: slot_y,
-        width: overlay.width,
-        height: STARTUP_INPUT_SLOT_ROWS,
-    };
-    let banner_rect = ratatui::layout::Rect {
-        x: overlay.x,
-        y: overlay.y + 1,
-        width: overlay.width,
-        height: STARTUP_BANNER.len() as u16 + 2,
-    };
+    let total_h = (STARTUP_PREFIX_ROWS + recent_height + STARTUP_FOOTER_ROWS).min(area.height);
+    let overlay_width = STARTUP_OVERLAY_MAX_WIDTH.min(area.width);
+    let overlay_x = area.x + area.width.saturating_sub(overlay_width) / 2;
+    let overlay_y = area.y + area.height.saturating_sub(total_h) / 2;
+    let overlay = ratatui::layout::Rect::new(overlay_x, overlay_y, overlay_width, total_h);
+    let input_width = STARTUP_INPUT_MAX_WIDTH.min(overlay.width);
+    let input_x = overlay.x + overlay.width.saturating_sub(input_width) / 2;
+    let input_y = overlay
+        .y
+        .saturating_add(STARTUP_INPUT_TOP_ROWS)
+        .min(overlay.bottom());
+    let input_slot = ratatui::layout::Rect::new(
+        input_x,
+        input_y,
+        input_width,
+        STARTUP_INPUT_SLOT_ROWS.min(overlay.bottom().saturating_sub(input_y)),
+    );
+    let banner_y = overlay.y.saturating_add(1).min(overlay.bottom());
+    let banner_rect = ratatui::layout::Rect::new(
+        overlay.x,
+        banner_y,
+        overlay.width,
+        (STARTUP_BANNER.len() as u16 + 2).min(overlay.bottom().saturating_sub(banner_y)),
+    );
+    let recent_container = (visible_session_count > 0).then(|| {
+        ratatui::layout::Rect::new(
+            input_slot.x,
+            input_slot
+                .bottom()
+                .saturating_add(STARTUP_INPUT_RECENT_GAP_ROWS),
+            input_slot.width,
+            recent_height,
+        )
+    });
+    let session_rects = recent_container
+        .into_iter()
+        .flat_map(|container| {
+            (0..visible_session_count).map(move |index| {
+                ratatui::layout::Rect::new(
+                    container.x.saturating_add(1),
+                    container
+                        .y
+                        .saturating_add(2 + STARTUP_SESSION_ROWS * index as u16),
+                    container.width.saturating_sub(2),
+                    STARTUP_SESSION_ROWS,
+                )
+            })
+        })
+        .collect();
+    let help_y = overlay.bottom().saturating_sub(1);
+    let help_rect = ratatui::layout::Rect::new(overlay.x, help_y, overlay.width, 1);
     StartupOverlayLayout {
         area: overlay,
         input_slot,
         overlay_width: overlay.width,
         banner_rect,
+        recent_container,
+        help_rect,
+        visible_session_count,
+        session_rects,
     }
 }
 
@@ -1767,209 +1801,124 @@ pub fn render_startup_intro_fade(
     recent: &[crate::app::StartupSessionEntry],
     progress: f32,
 ) -> StartupOverlayLayout {
-    let t = crate::theme::theme();
-    let layout = compute_startup_overlay(transcript_area, recent);
     if progress >= 0.9 {
-        return layout;
+        return compute_startup_overlay(transcript_area, recent);
     }
-    let (fg_banner, fg_subtle, fg_bold, extra_mod) = if progress < 0.33 {
-        (
-            t.accent.into(),
-            t.subtle_fg.into(),
-            t.tinted_fg.into(),
-            Modifier::empty(),
-        )
-    } else if progress < 0.66 {
-        (
-            t.accent.into(),
-            t.subtle_fg.into(),
-            t.tinted_fg.into(),
-            Modifier::DIM,
-        )
-    } else {
-        (
-            t.subtle_fg.into(),
-            t.subtle_fg.into(),
-            t.subtle_fg.into(),
-            Modifier::DIM,
-        )
-    };
-    let logo_style = Style::default()
-        .fg(fg_banner)
-        .add_modifier(Modifier::BOLD | extra_mod);
-    let subtle = Style::default().fg(fg_subtle).add_modifier(extra_mod);
-    let bold_plain = if fg_bold == t.tinted_fg.into() {
-        Style::default().add_modifier(Modifier::BOLD | extra_mod)
-    } else {
-        Style::default()
-            .fg(fg_bold)
-            .add_modifier(Modifier::BOLD | extra_mod)
-    };
+    render_startup_overlay(
+        f,
+        StartupOverlayRender {
+            area: transcript_area,
+            version,
+            recent,
+            dim: progress >= 0.33,
+            reveal_count: recent.len(),
+            focus: crate::app::StartupFocus::Input,
+            selected: 0,
+            hovered: None,
+        },
+    )
+}
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(""));
-    for row in STARTUP_BANNER {
-        lines.push(Line::from(Span::styled((*row).to_string(), logo_style)).centered());
-    }
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from(Span::styled(
-            format!("atman witnesses; code exists · v{version}"),
-            subtle,
-        ))
-        .centered(),
-    );
-    for _ in 0..STARTUP_INPUT_SLOT_PAD {
-        lines.push(Line::from(""));
-    }
-    for _ in 0..STARTUP_INPUT_SLOT_ROWS {
-        lines.push(Line::from(""));
-    }
-    for _ in 0..STARTUP_INPUT_SLOT_PAD {
-        lines.push(Line::from(""));
-    }
-    if recent.is_empty() {
-        lines.push(
-            Line::from(Span::styled(
-                "No previous sessions in this project yet.".to_string(),
-                subtle,
-            ))
-            .centered(),
-        );
-    } else {
-        lines.push(
-            Line::from(Span::styled(
-                "Recent sessions in this project".to_string(),
-                bold_plain,
-            ))
-            .centered(),
-        );
-        lines.push(Line::from(""));
-        let card_width = layout.area.width as usize;
-        for (i, entry) in recent.iter().enumerate() {
-            lines.extend(render_session_card(i + 1, entry, card_width, true));
-            if i + 1 < recent.len() {
-                lines.push(Line::from(""));
-            }
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from(Span::styled(
-            "Type 1-9 to resume · start typing to begin a new session".to_string(),
-            subtle,
-        ))
-        .centered(),
-    );
-    let para =
-        ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(para, layout.area);
-    layout
+pub struct StartupOverlayRender<'a> {
+    pub area: ratatui::layout::Rect,
+    pub version: &'a str,
+    pub recent: &'a [crate::app::StartupSessionEntry],
+    pub dim: bool,
+    pub reveal_count: usize,
+    pub focus: crate::app::StartupFocus,
+    pub selected: usize,
+    pub hovered: Option<usize>,
 }
 
 pub fn render_startup_overlay(
     f: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    version: &str,
-    recent: &[crate::app::StartupSessionEntry],
-    dim: bool,
-    reveal_count: usize,
+    render: StartupOverlayRender<'_>,
 ) -> StartupOverlayLayout {
+    let StartupOverlayRender {
+        area,
+        version,
+        recent,
+        dim,
+        reveal_count,
+        focus,
+        selected,
+        hovered,
+    } = render;
     let t = crate::theme::theme();
     let recent = &recent[..reveal_count.min(recent.len())];
     let layout = compute_startup_overlay(area, recent);
     f.render_widget(ratatui::widgets::Clear, area);
-    let inner_area = area;
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let logo_style = {
-        let mut s = Style::default()
-            .fg(t.accent.into())
-            .add_modifier(Modifier::BOLD);
-        if dim {
-            s = s.add_modifier(Modifier::DIM);
-        }
-        s
+    let extra = if dim {
+        Modifier::DIM
+    } else {
+        Modifier::empty()
     };
-    let subtle = {
-        let mut s = Style::default().fg(t.subtle_fg.into());
-        if dim {
-            s = s.add_modifier(Modifier::DIM);
-        }
-        s
-    };
-    let bold_plain = {
-        let mut s = Style::default().add_modifier(Modifier::BOLD);
-        if dim {
-            s = s.add_modifier(Modifier::DIM);
-        }
-        s
-    };
-    lines.push(Line::from(""));
+    let logo_style = Style::default()
+        .fg(t.accent.into())
+        .add_modifier(Modifier::BOLD | extra);
+    let subtle = Style::default().fg(t.subtle_fg.into()).add_modifier(extra);
+    let mut chrome = Vec::with_capacity(STARTUP_PREFIX_ROWS as usize);
+    chrome.push(Line::from(""));
     for row in STARTUP_BANNER {
-        lines.push(Line::from(Span::styled((*row).to_string(), logo_style)).centered());
+        chrome.push(Line::from(Span::styled((*row).to_string(), logo_style)).centered());
     }
-    lines.push(Line::from(""));
-    lines.push(
+    chrome.push(Line::from(""));
+    chrome.push(
         Line::from(Span::styled(
             format!("atman witnesses; code exists · v{version}"),
             subtle,
         ))
         .centered(),
     );
-
-    for _ in 0..STARTUP_INPUT_SLOT_PAD {
-        lines.push(Line::from(""));
-    }
-    for _ in 0..STARTUP_INPUT_SLOT_ROWS {
-        lines.push(Line::from(""));
-    }
-    for _ in 0..STARTUP_INPUT_SLOT_PAD {
-        lines.push(Line::from(""));
-    }
-
-    if recent.is_empty() {
-        lines.push(
-            Line::from(Span::styled(
-                "No previous sessions in this project yet.".to_string(),
-                subtle,
-            ))
-            .centered(),
-        );
-    } else {
-        lines.push(
-            Line::from(Span::styled(
-                "Recent sessions in this project".to_string(),
-                bold_plain,
-            ))
-            .centered(),
-        );
-        lines.push(Line::from(""));
-        let card_width = layout.area.width as usize;
-        for (i, entry) in recent.iter().enumerate() {
-            lines.extend(render_session_card(i + 1, entry, card_width, dim));
-            if i + 1 < recent.len() {
-                lines.push(Line::from(""));
-            }
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(
-        Line::from(Span::styled(
-            "Type 1-9 to resume · start typing to begin a new session".to_string(),
-            subtle,
-        ))
-        .centered(),
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(chrome).alignment(ratatui::layout::Alignment::Center),
+        layout.area,
     );
 
-    let para =
-        ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-    // Paint into inner_area (inside the border of the actual passed-in
-    // area), NOT into layout.area — the latter would re-center a fresh
-    // rect inside `area`, which for a lerped animation frame means the
-    // content stays anchored to the middle of the shrinking rect
-    // instead of shrinking with it.
-    f.render_widget(para, inner_area);
+    if let Some(container) = layout.recent_container {
+        f.render_widget(ratatui::widgets::Clear, container);
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                "Recent sessions",
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD | extra),
+            )))
+            .alignment(ratatui::layout::Alignment::Center),
+            ratatui::layout::Rect::new(
+                container.x.saturating_add(2),
+                container.y.saturating_add(1),
+                container.width.saturating_sub(4),
+                1,
+            ),
+        );
+        for (index, rect) in layout.session_rects.iter().copied().enumerate() {
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(render_session_card(
+                    index + 1,
+                    &recent[index],
+                    rect.width as usize,
+                    dim,
+                    focus == crate::app::StartupFocus::Recent && selected == index,
+                    hovered == Some(index),
+                )),
+                rect,
+            );
+        }
+    }
+
+    let help = if layout.visible_session_count == 0 {
+        "Start typing to begin a new session"
+    } else if focus == crate::app::StartupFocus::Recent {
+        "↑↓ / 1-9 select · Enter open · Tab input"
+    } else {
+        "Shift+Tab browse recent sessions · start typing for a new session"
+    };
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(Line::from(Span::styled(help, subtle)))
+            .alignment(ratatui::layout::Alignment::Center),
+        layout.help_rect,
+    );
     layout
 }
 
@@ -1978,50 +1927,82 @@ fn render_session_card(
     entry: &crate::app::StartupSessionEntry,
     width: usize,
     dim: bool,
+    selected: bool,
+    hovered: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
-    let bg = crate::markdown::block_bg();
-    let mut extra = Modifier::empty();
-    if dim {
-        extra |= Modifier::DIM;
-    }
+    let bg: Color = if selected {
+        t.highlight_bg.into()
+    } else if hovered {
+        t.modal_bg.lerp(t.work_hover_bg, 0.72)
+    } else {
+        Color::Reset
+    };
+    let extra = if dim {
+        Modifier::DIM
+    } else {
+        Modifier::empty()
+    };
     let bg_only = Style::default().bg(bg).add_modifier(extra);
+    let interactive = selected || hovered;
     let index_style = Style::default()
-        .fg(t.accent.into())
+        .fg(if interactive {
+            t.tinted_fg.into()
+        } else {
+            t.accent.into()
+        })
         .bg(bg)
         .add_modifier(Modifier::BOLD | extra);
-    let title_style = Style::default().bg(bg).add_modifier(Modifier::BOLD | extra);
+    let title_style = Style::default()
+        .fg(t.tinted_fg.into())
+        .bg(bg)
+        .add_modifier(Modifier::BOLD | extra);
     let meta_style = Style::default()
         .fg(t.subtle_fg.into())
         .bg(bg)
         .add_modifier(extra);
-
-    let title_source = entry.goal.as_deref().unwrap_or(&entry.short_id);
-    let title = crate::width::truncate(title_source, SESSION_CARD_TITLE_MAX);
-    let title_used = 4 + crate::width::width(title.as_str());
-    let title_pad = width.saturating_sub(title_used);
-    let title_line = Line::from(vec![
-        Span::styled(" ".to_string(), bg_only),
-        Span::styled(format!("{n} "), index_style),
-        Span::styled(" ".to_string(), bg_only),
-        Span::styled(title, title_style),
-        Span::styled(" ".repeat(title_pad), bg_only),
-    ]);
-
-    let project = entry.project.as_deref().unwrap_or("no-project");
-    let meta = format!(
-        "{}  ·  {}  ·  {} events",
-        entry.age_label, project, entry.event_count
+    let content_width = width.saturating_sub(8);
+    let title_source = entry
+        .goal
+        .as_deref()
+        .filter(|goal| !goal.is_empty())
+        .unwrap_or(&entry.short_id);
+    let title = crate::width::pad_right(
+        &crate::width::truncate(title_source, content_width),
+        content_width,
     );
-    let meta_used = 4 + crate::width::width(meta.as_str());
-    let meta_pad = width.saturating_sub(meta_used);
-    let meta_line = Line::from(vec![
-        Span::styled("    ".to_string(), bg_only),
-        Span::styled(meta, meta_style),
-        Span::styled(" ".repeat(meta_pad), bg_only),
-    ]);
-
-    vec![title_line, meta_line]
+    let meta_source = entry
+        .project
+        .as_deref()
+        .filter(|project| !project.is_empty())
+        .map(|project| {
+            format!(
+                "{}  ·  {} events  ·  {project}",
+                entry.age_label, entry.event_count
+            )
+        })
+        .unwrap_or_else(|| format!("{}  ·  {} events", entry.age_label, entry.event_count));
+    let meta = crate::width::pad_right(
+        &crate::width::truncate(&meta_source, content_width),
+        content_width,
+    );
+    let blank = Line::from(Span::styled(" ".repeat(width), bg_only));
+    vec![
+        blank.clone(),
+        Line::from(vec![
+            Span::styled("  ", bg_only),
+            Span::styled(format!("[{n}]"), index_style),
+            Span::styled(" ", bg_only),
+            Span::styled(title, title_style),
+            Span::styled("  ", bg_only),
+        ]),
+        Line::from(vec![
+            Span::styled("      ", bg_only),
+            Span::styled(meta, meta_style),
+            Span::styled("  ", bg_only),
+        ]),
+        blank,
+    ]
 }
 
 fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
@@ -7912,6 +7893,115 @@ line2
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn startup_entry(goal: Option<&str>) -> crate::app::StartupSessionEntry {
+        crate::app::StartupSessionEntry {
+            session_id: "session-1".into(),
+            short_id: "session1".into(),
+            goal: goal.map(str::to_owned),
+            project: Some("project".into()),
+            age_label: "2h ago".into(),
+            event_count: 42,
+        }
+    }
+
+    #[test]
+    fn startup_layout_preserves_input_and_limits_four_row_records() {
+        let recent = vec![startup_entry(Some("goal")); 5];
+        let empty = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 40), &[]);
+        let too_short = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 31), &recent);
+        let one = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 32), &recent);
+        let two = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 36), &recent);
+        let full = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 48), &recent);
+        let narrow = compute_startup_overlay(ratatui::layout::Rect::new(7, 4, 60, 48), &recent);
+        let tiny = compute_startup_overlay(ratatui::layout::Rect::new(7, 4, 10, 12), &recent);
+
+        assert_eq!(empty.visible_session_count, 0);
+        assert_eq!(too_short.visible_session_count, 0);
+        assert_eq!(one.visible_session_count, 1);
+        assert_eq!(two.visible_session_count, 2);
+        assert_eq!(full.visible_session_count, 5);
+        assert_eq!(full.overlay_width, 84);
+        assert_eq!(full.input_slot.width, 72);
+        assert_eq!(full.recent_container.unwrap().width, full.input_slot.width);
+        assert_eq!(narrow.overlay_width, 60);
+        assert_eq!(narrow.input_slot.width, 60);
+        assert_eq!(
+            narrow.recent_container.unwrap().width,
+            narrow.input_slot.width
+        );
+        assert_eq!(tiny.visible_session_count, 0);
+        assert!(tiny.recent_container.is_none());
+
+        let container = two.recent_container.unwrap();
+        assert_eq!(container.x, two.input_slot.x);
+        assert_eq!(
+            container.y - two.input_slot.bottom(),
+            STARTUP_INPUT_RECENT_GAP_ROWS
+        );
+        assert_eq!(two.session_rects.len(), 2);
+        assert_eq!(two.session_rects[0].height, STARTUP_SESSION_ROWS);
+        assert_eq!(two.session_rects[0].bottom(), two.session_rects[1].y);
+        assert_eq!(two.session_rects[0].x, container.x + 1);
+        assert_eq!(two.session_rects[0].width, container.width - 2);
+
+        for (bounds, layout) in [
+            (ratatui::layout::Rect::new(3, 2, 100, 40), &empty),
+            (ratatui::layout::Rect::new(3, 2, 100, 31), &too_short),
+            (ratatui::layout::Rect::new(3, 2, 100, 32), &one),
+            (ratatui::layout::Rect::new(3, 2, 100, 36), &two),
+            (ratatui::layout::Rect::new(3, 2, 100, 48), &full),
+            (ratatui::layout::Rect::new(7, 4, 60, 48), &narrow),
+            (ratatui::layout::Rect::new(7, 4, 10, 12), &tiny),
+        ] {
+            for rect in std::iter::once(layout.area)
+                .chain(std::iter::once(layout.input_slot))
+                .chain(std::iter::once(layout.banner_rect))
+                .chain(std::iter::once(layout.help_rect))
+                .chain(layout.recent_container)
+                .chain(layout.session_rects.iter().copied())
+            {
+                assert!(rect.x >= bounds.x);
+                assert!(rect.y >= bounds.y);
+                assert!(rect.right() <= bounds.right());
+                assert!(rect.bottom() <= bounds.bottom());
+            }
+        }
+    }
+
+    #[test]
+    fn startup_session_card_is_four_rows_and_width_safe_for_cjk() {
+        let width = 40;
+        let entry = startup_entry(Some("修复启动页体验 🚀 with a deliberately long suffix"));
+        let normal = render_session_card(1, &entry, width, false, false, false);
+        let hovered = render_session_card(1, &entry, width, false, false, true);
+        let selected = render_session_card(1, &entry, width, false, true, false);
+
+        for card in [&normal, &hovered, &selected] {
+            assert_eq!(card.len(), STARTUP_SESSION_ROWS as usize);
+            assert!(
+                card.iter()
+                    .all(|line| crate::width::spans_width(line.spans.iter()) == width)
+            );
+            let bg = card[0].spans[0].style.bg;
+            assert!(
+                card.iter()
+                    .flat_map(|line| line.spans.iter())
+                    .all(|span| span.style.bg == bg)
+            );
+            assert!(plain_line(&card[0]).trim().is_empty());
+            assert!(plain_line(&card[3]).trim().is_empty());
+        }
+        let t = crate::theme::theme();
+        assert_eq!(normal[0].spans[0].style.bg, Some(Color::Reset));
+        assert_eq!(hovered[1].spans[1].style.fg, Some(t.tinted_fg.into()));
+        assert_eq!(hovered[1].spans[3].style.fg, Some(t.tinted_fg.into()));
+        assert_eq!(selected[1].spans[1].style.fg, Some(t.tinted_fg.into()));
+        assert_eq!(selected[1].spans[3].style.fg, Some(t.tinted_fg.into()));
+        assert_ne!(normal[0].spans[0].style.bg, hovered[0].spans[0].style.bg);
+        assert_ne!(hovered[0].spans[0].style.bg, selected[0].spans[0].style.bg);
+        assert!(plain_line(&normal[2]).contains("project"));
+    }
 
     #[test]
     fn collapsed_work_fold_keeps_five_row_header_and_hides_members() {

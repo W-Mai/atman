@@ -920,55 +920,106 @@ pub(crate) fn handle_key(
         app.wm.modals.palette.open();
         return;
     }
+    let startup_recent_len = app.items.first().and_then(|item| match item {
+        crate::app::OutputItem::StartupCard { recent, .. } => {
+            Some(recent.len().min(app.startup_session_rects.len()))
+        }
+        _ => None,
+    });
+    let mut startup_released_to_input = false;
+    if app.startup_intro.is_none() {
+        match (app.startup_focus, startup_recent_len) {
+            (crate::app::StartupFocus::Recent, Some(len)) if len > 0 => match &action {
+                KeyAction::Tab | KeyAction::Escape => {
+                    app.startup_focus = crate::app::StartupFocus::Input;
+                    app.startup_last_click = None;
+                    return;
+                }
+                KeyAction::BackTab => return,
+                KeyAction::HistoryUp => {
+                    app.startup_selected_session = app.startup_selected_session.saturating_sub(1);
+                    return;
+                }
+                KeyAction::HistoryDown => {
+                    app.startup_selected_session =
+                        (app.startup_selected_session + 1).min(len.saturating_sub(1));
+                    return;
+                }
+                KeyAction::Char(c) if c.is_ascii_digit() && *c != '0' => {
+                    let index = (*c as usize) - ('1' as usize);
+                    if index < len {
+                        app.startup_selected_session = index;
+                    }
+                    return;
+                }
+                KeyAction::Submit => {
+                    let index = app.startup_selected_session.min(len.saturating_sub(1));
+                    let session_id = app.items.first().and_then(|item| match item {
+                        crate::app::OutputItem::StartupCard { recent, .. } => {
+                            recent.get(index).map(|entry| entry.session_id.clone())
+                        }
+                        _ => None,
+                    });
+                    if let Some(session_id) = session_id {
+                        request_session_switch(app, control_tx, session_id);
+                    }
+                    return;
+                }
+                KeyAction::Char(_) => {
+                    app.startup_focus = crate::app::StartupFocus::Input;
+                    app.startup_last_click = None;
+                    startup_released_to_input = true;
+                }
+                _ => return,
+            },
+            (crate::app::StartupFocus::Input, Some(len))
+                if len > 0 && matches!(action, KeyAction::BackTab) =>
+            {
+                app.startup_focus = crate::app::StartupFocus::Recent;
+                app.startup_selected_session = app.startup_selected_session.min(len - 1);
+                app.startup_last_click = None;
+                app.popup.close();
+                return;
+            }
+            (crate::app::StartupFocus::Recent, _) => {
+                app.startup_focus = crate::app::StartupFocus::Input;
+                app.startup_last_click = None;
+            }
+            _ => {}
+        }
+    }
     if matches!(action, KeyAction::Char('x'))
-        && matches!(
-            app.items.first(),
-            Some(crate::app::OutputItem::StartupCard { .. })
-        )
+        && !startup_released_to_input
+        && startup_recent_len.is_some()
         && !app.hints_dismissed
     {
         app.hints_dismissed = true;
         app.save_ui_state();
         return;
     }
-    if let Some(crate::app::OutputItem::StartupCard { recent, .. }) = app.items.first() {
-        // The overlay only animates away when the user actually starts
-        // a session:
-        //   * a digit 1-9 → resume that recent session
-        //   * Enter (Submit) with input in the editor → begin a new
-        //     session interaction
-        // Plain char keys just type into the editor and the overlay
-        // stays put with the growing text visible in its input slot.
-        if editor.buf().is_empty()
-            && let KeyAction::Char(c) = &action
-            && let Some(digit) = c.to_digit(10)
-            && (1..=9).contains(&digit)
-        {
-            let idx = (digit as usize) - 1;
-            if let Some(entry) = recent.get(idx) {
-                let session_id = entry.session_id.clone();
-                request_session_switch(app, control_tx, session_id);
-                return;
+    if startup_recent_len.is_some()
+        && matches!(action, KeyAction::Submit)
+        && !editor.buf().trim().is_empty()
+        && app.startup_intro.is_none()
+    {
+        let (version, recent) = match app.items.first() {
+            Some(crate::app::OutputItem::StartupCard { version, recent }) => {
+                (version.clone(), recent.clone())
             }
-        }
-        if matches!(action, KeyAction::Submit)
-            && !editor.buf().trim().is_empty()
-            && app.startup_intro.is_none()
-        {
-            let (version, recent) = match app.items.first() {
-                Some(crate::app::OutputItem::StartupCard { version, recent }) => {
-                    (version.clone(), recent.clone())
-                }
-                _ => (String::new(), Vec::new()),
-            };
-            let _ = app.remove_item(0);
-            app.inline_note_indices.clear();
-            app.startup_intro = Some(crate::app::StartupIntro {
-                started_at: std::time::Instant::now(),
-                version,
-                recent,
-            });
-        }
+            _ => (String::new(), Vec::new()),
+        };
+        let _ = app.remove_item(0);
+        app.inline_note_indices.clear();
+        app.startup_focus = crate::app::StartupFocus::Input;
+        app.startup_hovered_session = None;
+        app.startup_container_rect = None;
+        app.startup_session_rects.clear();
+        app.startup_last_click = None;
+        app.startup_intro = Some(crate::app::StartupIntro {
+            started_at: std::time::Instant::now(),
+            version,
+            recent,
+        });
     }
     if app.popup.is_open() {
         match &action {
@@ -1584,6 +1635,11 @@ pub(crate) fn request_session_switch(
             intro: intro.clone(),
         });
     }
+    app.startup_focus = crate::app::StartupFocus::Input;
+    app.startup_hovered_session = None;
+    app.startup_container_rect = None;
+    app.startup_session_rects.clear();
+    app.startup_last_click = None;
     app.should_quit = true;
 }
 
@@ -1603,6 +1659,118 @@ mod tests {
     const PNG_BYTES: &[u8] = &[
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
     ];
+
+    fn startup_state() -> crate::UiState {
+        let recent = (1..=3)
+            .map(|index| crate::app::StartupSessionEntry {
+                session_id: format!("session-{index}"),
+                short_id: format!("session{index}"),
+                goal: Some(format!("goal {index}")),
+                project: Some("project".into()),
+                age_label: "1m ago".into(),
+                event_count: index,
+            })
+            .collect();
+        let mut state = crate::UiState::new(
+            AppState::new("current".into(), None).with_initial_items(vec![
+                crate::app::OutputItem::StartupCard {
+                    version: "1.0.0".into(),
+                    recent,
+                },
+            ]),
+        );
+        state.app.startup_session_rects = (0..3)
+            .map(|index| ratatui::layout::Rect::new(10, 20 + index * 4, 40, 4))
+            .collect();
+        state
+    }
+
+    fn press_startup_key(
+        state: &mut crate::UiState,
+        editor: &mut InputEditor,
+        action: KeyAction,
+        control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    ) {
+        let mut interrupt_prompt = None;
+        handle_key(
+            action,
+            state,
+            editor,
+            &mut interrupt_prompt,
+            None,
+            control_tx,
+        );
+    }
+
+    #[test]
+    fn startup_input_keeps_digits_until_recent_is_focused() {
+        let mut state = startup_state();
+        let mut editor = InputEditor::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        press_startup_key(&mut state, &mut editor, KeyAction::Char('2'), Some(&tx));
+
+        assert_eq!(editor.buf(), "2");
+        assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Input);
+        assert!(!state.app.should_quit);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_recent_focus_selects_before_enter_switches() {
+        let mut state = startup_state();
+        let mut editor = InputEditor::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        press_startup_key(&mut state, &mut editor, KeyAction::BackTab, Some(&tx));
+        assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Recent);
+
+        press_startup_key(&mut state, &mut editor, KeyAction::Char('3'), Some(&tx));
+        assert_eq!(state.app.startup_selected_session, 2);
+        assert!(rx.try_recv().is_err());
+
+        press_startup_key(&mut state, &mut editor, KeyAction::HistoryUp, Some(&tx));
+        assert_eq!(state.app.startup_selected_session, 1);
+        press_startup_key(&mut state, &mut editor, KeyAction::HistoryDown, Some(&tx));
+        assert_eq!(state.app.startup_selected_session, 2);
+        assert!(rx.try_recv().is_err());
+
+        press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
+        assert!(state.app.should_quit);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiControl::SwitchSession { sid, .. }) if sid == "session-3"
+        ));
+    }
+
+    #[test]
+    fn startup_recent_focus_returns_to_input_without_losing_chars() {
+        for exit in [KeyAction::Tab, KeyAction::Escape] {
+            let mut state = startup_state();
+            let mut editor = InputEditor::default();
+            press_startup_key(&mut state, &mut editor, KeyAction::BackTab, None);
+            press_startup_key(&mut state, &mut editor, exit, None);
+            assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Input);
+        }
+
+        let mut state = startup_state();
+        let mut editor = InputEditor::default();
+        press_startup_key(&mut state, &mut editor, KeyAction::BackTab, None);
+        press_startup_key(&mut state, &mut editor, KeyAction::Char('q'), None);
+        assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Input);
+        assert_eq!(editor.buf(), "q");
+    }
+
+    #[test]
+    fn startup_recent_selection_is_limited_to_rendered_rows() {
+        let mut state = startup_state();
+        state.app.startup_session_rects.truncate(1);
+        let mut editor = InputEditor::default();
+        press_startup_key(&mut state, &mut editor, KeyAction::BackTab, None);
+        press_startup_key(&mut state, &mut editor, KeyAction::Char('3'), None);
+        press_startup_key(&mut state, &mut editor, KeyAction::HistoryDown, None);
+        assert_eq!(state.app.startup_selected_session, 0);
+    }
 
     #[test]
     fn empty_input_exits_on_second_interrupt() {

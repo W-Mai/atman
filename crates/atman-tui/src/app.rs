@@ -856,6 +856,13 @@ impl OutputStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartupFocus {
+    #[default]
+    Input,
+    Recent,
+}
+
 #[derive(Debug, Clone)]
 pub struct StartupIntro {
     pub started_at: Instant,
@@ -1008,6 +1015,12 @@ pub struct AppState {
     pub kill_armed_id: Option<atman_runtime::TaskId>,
     pub kill_armed_at: Option<Instant>,
     pub startup_intro: Option<StartupIntro>,
+    pub startup_focus: StartupFocus,
+    pub startup_selected_session: usize,
+    pub startup_hovered_session: Option<usize>,
+    pub startup_container_rect: Option<ratatui::layout::Rect>,
+    pub startup_session_rects: Vec<ratatui::layout::Rect>,
+    pub startup_last_click: Option<(usize, Instant)>,
     pub onboarding_skipped: bool,
     pub hints_dismissed: bool,
     pub animation_frame: u32,

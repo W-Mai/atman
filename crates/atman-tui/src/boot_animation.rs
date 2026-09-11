@@ -268,8 +268,19 @@ fn render(
         }),
         l.status,
     );
-    let splash = crate::output::compute_startup_overlay(l.transcript, recent);
-    crate::output::render_startup_overlay(f, splash.area, version, recent, false, reveal_count);
+    let splash = crate::output::render_startup_overlay(
+        f,
+        crate::output::StartupOverlayRender {
+            area: l.transcript,
+            version,
+            recent,
+            dim: false,
+            reveal_count,
+            focus: crate::app::StartupFocus::Input,
+            selected: 0,
+            hovered: None,
+        },
+    );
     f.render_widget(
         crate::input::input_paragraph(
             "",

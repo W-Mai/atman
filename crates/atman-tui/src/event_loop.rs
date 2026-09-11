@@ -263,6 +263,16 @@ pub(crate) async fn run_frames(
                                 commands,
                                 handle.control_tx.as_ref(),
                             );
+                            if !consumed
+                                && handle_startup_session_mouse(
+                                    &mut app.app,
+                                    &me,
+                                    handle.control_tx.as_ref(),
+                                )
+                            {
+                                interrupt_prompt = None;
+                                break;
+                            }
                             if !consumed {
                             let over_input = app
                                 .input_rect
@@ -357,6 +367,16 @@ pub(crate) async fn run_frames(
                                 commands,
                                 handle.control_tx.as_ref(),
                             );
+                            if !consumed
+                                && handle_startup_session_mouse(
+                                    &mut app.app,
+                                    &me,
+                                    handle.control_tx.as_ref(),
+                                )
+                            {
+                                interrupt_prompt = None;
+                                break;
+                            }
                             if !consumed {
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 if let Some(click) = app.app.approval_hitmap.at(me.column, me.row) {
@@ -1893,6 +1913,56 @@ pub(crate) async fn wait_trust_change(
     }
 }
 
+fn handle_startup_session_mouse(
+    app: &mut AppState,
+    event: &crossterm::event::MouseEvent,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    if app.startup_intro.is_some()
+        || !matches!(app.items.first(), Some(app::OutputItem::StartupCard { .. }))
+    {
+        app.startup_focus = app::StartupFocus::Input;
+        app.startup_hovered_session = None;
+        app.startup_last_click = None;
+        return false;
+    }
+    let hit = app
+        .startup_session_rects
+        .iter()
+        .position(|rect| rect_contains(*rect, event.column, event.row));
+    app.startup_hovered_session = hit;
+    let in_container = app
+        .startup_container_rect
+        .is_some_and(|rect| rect_contains(rect, event.column, event.row));
+    let Some(index) = hit else {
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            app.startup_last_click = None;
+        }
+        return in_container;
+    };
+    if event.kind == MouseEventKind::Down(MouseButton::Left) {
+        let now = std::time::Instant::now();
+        let double_click = app.startup_last_click.is_some_and(|(last_index, at)| {
+            last_index == index && now.duration_since(at) <= std::time::Duration::from_millis(400)
+        });
+        app.startup_focus = app::StartupFocus::Recent;
+        app.startup_selected_session = index;
+        app.startup_last_click = Some((index, now));
+        app.popup.close();
+        if double_click
+            && let Some(session_id) = app.items.first().and_then(|item| match item {
+                app::OutputItem::StartupCard { recent, .. } => {
+                    recent.get(index).map(|entry| entry.session_id.clone())
+                }
+                _ => None,
+            })
+        {
+            key_handler::request_session_switch(app, control_tx, session_id);
+        }
+    }
+    true
+}
+
 pub(crate) async fn wait_queued_submission_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::QueuedSubmissionView>>>,
 ) {
@@ -1993,6 +2063,94 @@ pub(crate) async fn poll_update_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn startup_app() -> AppState {
+        let mut app = AppState::new("current".into(), None).with_initial_items(vec![
+            app::OutputItem::StartupCard {
+                version: "1.0.0".into(),
+                recent: vec![app::StartupSessionEntry {
+                    session_id: "target".into(),
+                    short_id: "target00".into(),
+                    goal: Some("resume work".into()),
+                    project: Some("project".into()),
+                    age_label: "1m ago".into(),
+                    event_count: 7,
+                }],
+            },
+        ]);
+        app.startup_container_rect = Some(ratatui::layout::Rect::new(9, 18, 42, 9));
+        app.startup_session_rects = vec![ratatui::layout::Rect::new(10, 20, 40, 4)];
+        app
+    }
+
+    fn startup_mouse(kind: MouseEventKind, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column: 20,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn startup_session_four_rows_single_click_selects_and_double_click_switches() {
+        for row in 20..24 {
+            let mut app = startup_app();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), row);
+
+            assert!(handle_startup_session_mouse(&mut app, &click, Some(&tx)));
+            assert_eq!(app.startup_focus, app::StartupFocus::Recent);
+            assert_eq!(app.startup_selected_session, 0);
+            assert_eq!(app.startup_hovered_session, Some(0));
+            assert!(!app.should_quit);
+            assert!(rx.try_recv().is_err());
+
+            assert!(handle_startup_session_mouse(&mut app, &click, Some(&tx)));
+            assert!(app.should_quit);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(TuiControl::SwitchSession { sid, .. }) if sid == "target"
+            ));
+        }
+    }
+
+    #[test]
+    fn startup_session_container_consumes_click_and_hover_clears_outside() {
+        let mut app = startup_app();
+        assert!(handle_startup_session_mouse(
+            &mut app,
+            &startup_mouse(MouseEventKind::Moved, 20),
+            None,
+        ));
+        assert_eq!(app.startup_hovered_session, Some(0));
+        assert!(handle_startup_session_mouse(
+            &mut app,
+            &startup_mouse(MouseEventKind::Down(MouseButton::Left), 19),
+            None,
+        ));
+        assert_eq!(app.startup_hovered_session, None);
+        assert!(!handle_startup_session_mouse(
+            &mut app,
+            &startup_mouse(MouseEventKind::Moved, 30),
+            None,
+        ));
+        assert_eq!(app.startup_hovered_session, None);
+
+        app.startup_focus = app::StartupFocus::Recent;
+        app.startup_intro = Some(app::StartupIntro {
+            started_at: std::time::Instant::now(),
+            version: "1.0.0".into(),
+            recent: Vec::new(),
+        });
+        assert!(!handle_startup_session_mouse(
+            &mut app,
+            &startup_mouse(MouseEventKind::Down(MouseButton::Left), 20),
+            None,
+        ));
+        assert_eq!(app.startup_focus, app::StartupFocus::Input);
+        assert!(!app.should_quit);
+    }
 
     #[tokio::test]
     async fn saturated_bulk_lane_does_not_block_semantic_frames() {

@@ -287,145 +287,178 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     let effective_viewport = document_visible_rows.max(1);
     if startup_active {
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
-            let base = output::compute_startup_overlay(l.transcript, recent).area;
             f.render_widget(ratatui::widgets::Clear, l.transcript);
-            output::render_startup_overlay(f, base, version, recent, false, recent.len());
-        }
-        app.resolve_scroll(0, effective_viewport, 0, app.items.len());
-        app.last_item_ranges.clear();
-    } else if app.items.is_empty() {
-        app.resolve_scroll(0, effective_viewport, 0, app.items.len());
-        app.last_item_ranges.clear();
-        // Clear the full unpadded transcript rect first — otherwise the
-        // 2-col padding strip on each side of transcript_area keeps
-        // whatever the previous frame's overlay painted there, and the
-        // startup card's animated edges leak through for one frame
-        // after the slide completes.
-        f.render_widget(ratatui::widgets::Clear, l.transcript);
-        f.render_widget(output::empty_hint(), transcript_area);
-    } else {
-        let messages_lock = app.session.as_ref().map(|s| s.messages_handle());
-        let messages_guard = messages_lock.as_ref().and_then(|h| h.lock().ok());
-        let empty_messages: Vec<atman_runtime::message::Message> = Vec::new();
-        let messages: &[atman_runtime::message::Message] =
-            messages_guard.as_deref().unwrap_or(&empty_messages);
-        let work_folds = app.work_fold_projections();
-        let animating_fold = work_folds
-            .iter()
-            .rev()
-            .find(|fold| fold.animating)
-            .map(|fold| (fold.key, fold.start_index));
-        if animating_fold.is_none() {
-            app.clear_work_fold_scroll_anchor();
-        }
-        let ctx = output::RenderCtx {
-            expanded_tools: &app.expanded_tools,
-            messages,
-            animation_frame: app.animation_frame,
-            panel_width: transcript_area.width,
-            hovered_thinking_idx: app.hovered_thinking_idx,
-            hovered_output_node: app.hovered_output_node.as_ref(),
-        };
-        let cache_key = output::LayoutKey {
-            width: transcript_area.width,
-            theme: crate::theme::current_mode(),
-        };
-        let mut cache = std::mem::take(&mut app.layout_cache);
-        let old_total_rows = cache.total_rows();
-        let folding_above_viewport = !app.follow_tail
-            && work_folds.iter().any(|fold| {
-                cache
-                    .item_row_end(fold.end_index)
-                    .is_some_and(|end| end <= app.scroll_offset)
-            });
-        cache.set_work_folds(work_folds);
-        let has_work_anchor =
-            animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
-        let follow_tail_rows = (app.follow_tail && !has_work_anchor).then(|| {
-            document_visible_rows
-                .saturating_sub(input_overlay_rows)
-                .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
-                .max(1)
-        });
-        let request = output::LayoutRequest {
-            scroll_offset: app.scroll_offset,
-            viewport_rows: effective_viewport,
-            follow_tail_rows,
-        };
-        let mut metrics = cache.update_dirty(cache_key, &app.items, &ctx, request);
-        if folding_above_viewport && metrics.total_rows != old_total_rows {
-            let anchored_offset = if metrics.total_rows > old_total_rows {
-                app.scroll_offset
-                    .saturating_add(metrics.total_rows - old_total_rows)
-            } else {
-                app.scroll_offset
-                    .saturating_sub(old_total_rows - metrics.total_rows)
-            };
-            metrics = cache.update_dirty(
-                cache_key,
-                &app.items,
-                &ctx,
-                output::LayoutRequest {
-                    scroll_offset: anchored_offset,
-                    ..request
+            let startup_layout = output::render_startup_overlay(
+                f,
+                output::StartupOverlayRender {
+                    area: l.transcript,
+                    version,
+                    recent,
+                    dim: false,
+                    reveal_count: recent.len(),
+                    focus: app.startup_focus,
+                    selected: app.startup_selected_session,
+                    hovered: app.startup_hovered_session,
                 },
             );
-        }
-        if let Some((key, start_index)) = animating_fold
-            && let Some(header_row) = cache.item_row_start(start_index)
-        {
-            if let Some(screen_row) = app.work_fold_scroll_anchor(key) {
-                let anchored_offset = header_row.saturating_sub(screen_row);
-                if anchored_offset != metrics.scroll_offset {
-                    metrics = cache.update_dirty(
-                        cache_key,
-                        &app.items,
-                        &ctx,
-                        output::LayoutRequest {
-                            scroll_offset: anchored_offset,
-                            follow_tail_rows: None,
-                            ..request
-                        },
-                    );
+            app.startup_container_rect = startup_layout.recent_container;
+            app.startup_session_rects = startup_layout.session_rects;
+            if app.startup_session_rects.is_empty() {
+                app.startup_focus = crate::app::StartupFocus::Input;
+                app.startup_selected_session = 0;
+                app.startup_hovered_session = None;
+                app.startup_last_click = None;
+            } else {
+                app.startup_selected_session = app
+                    .startup_selected_session
+                    .min(app.startup_session_rects.len() - 1);
+                if app
+                    .startup_hovered_session
+                    .is_some_and(|index| index >= app.startup_session_rects.len())
+                {
+                    app.startup_hovered_session = None;
                 }
-            } else if header_row >= metrics.scroll_offset
-                && header_row < metrics.scroll_offset.saturating_add(effective_viewport)
-            {
-                app.set_work_fold_scroll_anchor(key, header_row - metrics.scroll_offset);
             }
         }
-        let (lines, ranges, node_regions) = cache.visible_slice(
-            metrics.scroll_offset,
-            effective_viewport,
-            app.animation_frame,
-        );
-        let total_rows = metrics.total_rows;
-        app.last_item_ranges = ranges;
-        app.last_node_regions = node_regions;
-        app.layout_cache = cache;
-        let preserve_work_anchor =
-            animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
-        if preserve_work_anchor {
-            let follow_tail = app.follow_tail;
-            app.follow_tail = false;
-            app.scroll_offset = metrics.scroll_offset;
-            app.resolve_scroll(
-                total_rows,
-                document_visible_rows,
-                input_overlay_rows,
-                app.items.len(),
-            );
-            app.follow_tail = follow_tail;
+        app.resolve_scroll(0, effective_viewport, 0, app.items.len());
+        app.last_item_ranges.clear();
+    } else {
+        app.startup_focus = crate::app::StartupFocus::Input;
+        app.startup_selected_session = 0;
+        app.startup_hovered_session = None;
+        app.startup_container_rect = None;
+        app.startup_session_rects.clear();
+        app.startup_last_click = None;
+        if app.items.is_empty() {
+            app.resolve_scroll(0, effective_viewport, 0, app.items.len());
+            app.last_item_ranges.clear();
+            // Clear outside content padding so the sliding startup overlay cannot leak through.
+            f.render_widget(ratatui::widgets::Clear, l.transcript);
+            f.render_widget(output::empty_hint(), transcript_area);
         } else {
-            app.resolve_scroll(
-                total_rows,
-                document_visible_rows,
-                input_overlay_rows,
-                app.items.len(),
+            let messages_lock = app.session.as_ref().map(|s| s.messages_handle());
+            let messages_guard = messages_lock.as_ref().and_then(|h| h.lock().ok());
+            let empty_messages: Vec<atman_runtime::message::Message> = Vec::new();
+            let messages: &[atman_runtime::message::Message] =
+                messages_guard.as_deref().unwrap_or(&empty_messages);
+            let work_folds = app.work_fold_projections();
+            let animating_fold = work_folds
+                .iter()
+                .rev()
+                .find(|fold| fold.animating)
+                .map(|fold| (fold.key, fold.start_index));
+            if animating_fold.is_none() {
+                app.clear_work_fold_scroll_anchor();
+            }
+            let ctx = output::RenderCtx {
+                expanded_tools: &app.expanded_tools,
+                messages,
+                animation_frame: app.animation_frame,
+                panel_width: transcript_area.width,
+                hovered_thinking_idx: app.hovered_thinking_idx,
+                hovered_output_node: app.hovered_output_node.as_ref(),
+            };
+            let cache_key = output::LayoutKey {
+                width: transcript_area.width,
+                theme: crate::theme::current_mode(),
+            };
+            let mut cache = std::mem::take(&mut app.layout_cache);
+            let old_total_rows = cache.total_rows();
+            let folding_above_viewport = !app.follow_tail
+                && work_folds.iter().any(|fold| {
+                    cache
+                        .item_row_end(fold.end_index)
+                        .is_some_and(|end| end <= app.scroll_offset)
+                });
+            cache.set_work_folds(work_folds);
+            let has_work_anchor =
+                animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
+            let follow_tail_rows = (app.follow_tail && !has_work_anchor).then(|| {
+                document_visible_rows
+                    .saturating_sub(input_overlay_rows)
+                    .saturating_sub(crate::layout::INPUT_TOP_GAP as u32)
+                    .max(1)
+            });
+            let request = output::LayoutRequest {
+                scroll_offset: app.scroll_offset,
+                viewport_rows: effective_viewport,
+                follow_tail_rows,
+            };
+            let mut metrics = cache.update_dirty(cache_key, &app.items, &ctx, request);
+            if folding_above_viewport && metrics.total_rows != old_total_rows {
+                let anchored_offset = if metrics.total_rows > old_total_rows {
+                    app.scroll_offset
+                        .saturating_add(metrics.total_rows - old_total_rows)
+                } else {
+                    app.scroll_offset
+                        .saturating_sub(old_total_rows - metrics.total_rows)
+                };
+                metrics = cache.update_dirty(
+                    cache_key,
+                    &app.items,
+                    &ctx,
+                    output::LayoutRequest {
+                        scroll_offset: anchored_offset,
+                        ..request
+                    },
+                );
+            }
+            if let Some((key, start_index)) = animating_fold
+                && let Some(header_row) = cache.item_row_start(start_index)
+            {
+                if let Some(screen_row) = app.work_fold_scroll_anchor(key) {
+                    let anchored_offset = header_row.saturating_sub(screen_row);
+                    if anchored_offset != metrics.scroll_offset {
+                        metrics = cache.update_dirty(
+                            cache_key,
+                            &app.items,
+                            &ctx,
+                            output::LayoutRequest {
+                                scroll_offset: anchored_offset,
+                                follow_tail_rows: None,
+                                ..request
+                            },
+                        );
+                    }
+                } else if header_row >= metrics.scroll_offset
+                    && header_row < metrics.scroll_offset.saturating_add(effective_viewport)
+                {
+                    app.set_work_fold_scroll_anchor(key, header_row - metrics.scroll_offset);
+                }
+            }
+            let (lines, ranges, node_regions) = cache.visible_slice(
+                metrics.scroll_offset,
+                effective_viewport,
+                app.animation_frame,
             );
+            let total_rows = metrics.total_rows;
+            app.last_item_ranges = ranges;
+            app.last_node_regions = node_regions;
+            app.layout_cache = cache;
+            let preserve_work_anchor =
+                animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
+            if preserve_work_anchor {
+                let follow_tail = app.follow_tail;
+                app.follow_tail = false;
+                app.scroll_offset = metrics.scroll_offset;
+                app.resolve_scroll(
+                    total_rows,
+                    document_visible_rows,
+                    input_overlay_rows,
+                    app.items.len(),
+                );
+                app.follow_tail = follow_tail;
+            } else {
+                app.resolve_scroll(
+                    total_rows,
+                    document_visible_rows,
+                    input_overlay_rows,
+                    app.items.len(),
+                );
+            }
+            let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
+            f.render_widget(paragraph, transcript_area);
         }
-        let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
-        f.render_widget(paragraph, transcript_area);
     }
     if let Some(area) = sidebar_rect {
         let project_root = app
@@ -711,6 +744,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             f.set_cursor_position((x, y));
         }
     } else if !intro_active
+        && (!startup_active || app.startup_focus == crate::app::StartupFocus::Input)
         && !ui.wm.modals.onboarding_open
         && !ui.wm.modals.provider_manager.open
         && ui.wm.focused_id().is_none()
@@ -740,7 +774,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }
-    if startup_active && !ui.wm.modals.onboarding_open && !app.hints_dismissed {
+    if startup_active
+        && app.startup_container_rect.is_none()
+        && !ui.wm.modals.onboarding_open
+        && !app.hints_dismissed
+    {
         render_startup_hints(
             f,
             l.transcript,
