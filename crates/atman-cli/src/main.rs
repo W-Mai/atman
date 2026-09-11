@@ -3059,11 +3059,12 @@ fn append_stats(
     usage: &[(String, String); 2],
     work: &[(String, String, String); 2],
 ) {
-    if content_width >= 68 {
+    let stats_width = content_width.saturating_sub(4).max(1);
+    if stats_width >= 68 {
         let gap = 6;
-        let left_width = (content_width - gap) / 2;
-        let right_width = content_width - gap - left_width;
-        rows.push(outer_row(
+        let left_width = (stats_width - gap) / 2;
+        let right_width = stats_width - gap - left_width;
+        rows.push(inset_outer_row(
             palette,
             join_columns(
                 vec![SummarySpan::new("USAGE", palette.title).bold()],
@@ -3074,7 +3075,7 @@ fn append_stats(
             ),
         ));
         for row in 0..2 {
-            rows.push(outer_row(
+            rows.push(inset_outer_row(
                 palette,
                 join_columns(
                     usage_grid_row(usage, row, left_width, palette),
@@ -3086,28 +3087,33 @@ fn append_stats(
             ));
         }
     } else {
-        rows.push(outer_row(
+        rows.push(inset_outer_row(
             palette,
             vec![SummarySpan::new("USAGE", palette.title).bold()],
         ));
         for row in 0..2 {
-            rows.push(outer_row(
+            rows.push(inset_outer_row(
                 palette,
-                usage_grid_row(usage, row, content_width, palette),
+                usage_grid_row(usage, row, stats_width, palette),
             ));
         }
         rows.push(SummaryRow::blank(palette.outer_bg));
-        rows.push(outer_row(
+        rows.push(inset_outer_row(
             palette,
             vec![SummarySpan::new("WORK", palette.title).bold()],
         ));
         for row in 0..2 {
-            rows.push(outer_row(
+            rows.push(inset_outer_row(
                 palette,
-                work_grid_row(work, row, content_width, palette),
+                work_grid_row(work, row, stats_width, palette),
             ));
         }
     }
+}
+
+fn inset_outer_row(palette: SummaryPalette, mut spans: Vec<SummarySpan>) -> SummaryRow {
+    spans.insert(0, SummarySpan::new("  ", palette.primary));
+    outer_row(palette, spans)
 }
 
 fn usage_grid_row(
@@ -3243,12 +3249,12 @@ fn append_labeled_text(
     label: &str,
     text: &str,
 ) {
-    let content_width = width.saturating_sub(4).max(1);
+    let content_width = width.saturating_sub(8).max(1);
     let label = format!("{label:<8}");
     let label_width = atman_tui::width::width(&label);
     let lines = atman_tui::width::word_wrap(text, content_width.saturating_sub(label_width).max(1));
     for (index, line) in lines.into_iter().enumerate() {
-        rows.push(outer_row(
+        rows.push(inset_outer_row(
             palette,
             vec![
                 SummarySpan::new(
@@ -7916,6 +7922,21 @@ mod tests {
         let remove_end = atman_tui::width::width(&stat_rows[1][..remove_start])
             + atman_tui::width::width("−37 lines");
         assert_eq!(add_end, remove_end);
+        assert_eq!(add_end, layout.width - 4);
+
+        let title_row = layout.rows[4].plain(layout.width);
+        let usage_header = layout.rows[8].plain(layout.width);
+        let goal_row = layout.rows[12].plain(layout.width);
+        let plan_row = layout.rows[13].plain(layout.width);
+        for (line, text) in [
+            (&title_row, "DSL闭包实现与意图字段复盘"),
+            (&usage_header, "USAGE"),
+            (&goal_row, "goal"),
+            (&plan_row, "plan"),
+        ] {
+            let start = line.find(text).unwrap();
+            assert_eq!(atman_tui::width::width(&line[..start]), 4);
+        }
     }
 
     #[test]
