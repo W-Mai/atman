@@ -782,6 +782,10 @@ impl WindowManager {
             self.modals.handle_provider_mouse(event, app, control_tx);
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::SessionSwitcher) {
+            self.modals.handle_session_switcher_mouse(event);
+            return (true, Vec::new());
+        }
         let Some(id) = self
             .hit_test_panel(event.column, event.row)
             .map(|panel| panel.id)
@@ -1686,6 +1690,34 @@ mod tests {
         assert_eq!(wm.top_kind(), Some(ModalKind::ProviderManager));
         assert_eq!(app.toasts.len(), 1);
         assert_eq!(app.toasts[0].level, crate::app::NoteLevel::Error);
+    }
+
+    #[test]
+    fn session_switcher_consumes_mouse_before_panel_fallback() {
+        let mut wm = WindowManager::default();
+        let id = wm.open(
+            "mouse",
+            ContentKey::Task("mouse".into()),
+            task_content("mouse"),
+            "mouse",
+            canvas(),
+        );
+        wm.modals.session_switcher.open = true;
+        wm.sync_modals();
+        let panel = wm.panels.iter().find(|panel| panel.id == id).unwrap();
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: panel.rect.x.saturating_add(3),
+            row: panel.rect.y.saturating_add(3),
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let mut app = crate::app::AppState::new("session".into(), None);
+
+        let (consumed, commands) = wm.dispatch_mouse(&event, &mut app, None);
+
+        assert!(consumed);
+        assert!(commands.is_empty());
+        assert_eq!(wm.panels[0].scroll, 0);
     }
 
     #[test]

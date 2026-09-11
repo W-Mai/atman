@@ -1,9 +1,10 @@
 use crate::wm::modal::ModalAction;
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use tokio::sync::mpsc;
 
@@ -59,6 +60,12 @@ impl SessionSortMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionRowHit {
+    index: usize,
+    rect: Rect,
+}
+
 #[derive(Default)]
 pub struct SessionSwitcher {
     pub open: bool,
@@ -73,6 +80,10 @@ pub struct SessionSwitcher {
     pub rename_mode: bool,
     pub rename_buf: String,
     pub rename_target: Option<String>,
+    viewport_offset: usize,
+    hovered: Option<usize>,
+    list_rect: Option<Rect>,
+    row_hits: Vec<SessionRowHit>,
 }
 
 impl std::fmt::Debug for SessionSwitcher {
@@ -109,6 +120,7 @@ impl SessionSwitcher {
         self.filter.clear();
         self.filter_mode = false;
         self.delete_armed = None;
+        self.reset_viewport();
     }
 
     pub fn toggle_sort(&mut self) {
@@ -163,6 +175,102 @@ impl SessionSwitcher {
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
         }
+        self.reset_viewport();
+    }
+
+    fn reset_viewport(&mut self) {
+        self.viewport_offset = 0;
+        self.hovered = None;
+        self.list_rect = None;
+        self.row_hits.clear();
+    }
+
+    fn invalidate_hits(&mut self) {
+        self.hovered = None;
+        self.row_hits.clear();
+    }
+
+    pub(crate) fn desired_list_height(&self) -> u16 {
+        self.rows
+            .iter()
+            .map(session_row_height)
+            .fold(0, u16::saturating_add)
+            .max(3)
+    }
+
+    fn visible_indices(&self, height: u16) -> Vec<usize> {
+        let mut used = 0;
+        self.rows
+            .iter()
+            .enumerate()
+            .skip(self.viewport_offset)
+            .take_while(|(_, row)| {
+                let next = used + session_row_height(row);
+                if next <= height {
+                    used = next;
+                    true
+                } else {
+                    false
+                }
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        if self.rows.is_empty() {
+            self.viewport_offset = 0;
+            return;
+        }
+        self.selected = self.selected.min(self.rows.len() - 1);
+        self.viewport_offset = self.viewport_offset.min(self.selected);
+        let height = self.list_rect.map_or(0, |rect| rect.height);
+        if height == 0 {
+            return;
+        }
+        while self.viewport_offset < self.selected {
+            let selected_visible = self
+                .visible_indices(height)
+                .last()
+                .is_some_and(|last| *last >= self.selected);
+            if selected_visible {
+                break;
+            }
+            self.viewport_offset += 1;
+        }
+    }
+
+    fn row_at(&self, column: u16, row: u16) -> Option<usize> {
+        self.row_hits
+            .iter()
+            .find(|hit| crate::render::rect_contains(hit.rect, column, row))
+            .map(|hit| hit.index)
+    }
+
+    pub fn handle_mouse(&mut self, event: &MouseEvent) {
+        let over_list = self
+            .list_rect
+            .is_some_and(|rect| crate::render::rect_contains(rect, event.column, event.row));
+        match event.kind {
+            MouseEventKind::Moved => {
+                self.hovered = self.row_at(event.column, event.row);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.hovered = self.row_at(event.column, event.row);
+                if let Some(index) = self.hovered {
+                    self.selected = index;
+                    self.delete_armed = None;
+                    self.ensure_selected_visible();
+                }
+            }
+            MouseEventKind::ScrollUp if over_list => self.move_up(),
+            MouseEventKind::ScrollDown if over_list => self.move_down(),
+            _ => {
+                if !over_list {
+                    self.hovered = None;
+                }
+            }
+        }
     }
 
     pub fn remove_selected(&mut self) -> Option<String> {
@@ -175,6 +283,8 @@ impl SessionSwitcher {
             self.selected = self.rows.len().saturating_sub(1);
         }
         self.delete_armed = None;
+        self.invalidate_hits();
+        self.ensure_selected_visible();
         Some(removed.id)
     }
 
@@ -219,6 +329,8 @@ impl SessionSwitcher {
         }
         self.rename_mode = false;
         self.rename_buf.clear();
+        self.invalidate_hits();
+        self.ensure_selected_visible();
         Some((sid, value))
     }
 
@@ -238,16 +350,28 @@ impl SessionSwitcher {
 
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.ensure_selected_visible();
+        self.invalidate_hits();
     }
 
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.rows.len() {
             self.selected += 1;
         }
+        self.ensure_selected_visible();
+        self.invalidate_hits();
     }
 
     pub fn selected_id(&self) -> Option<String> {
         self.rows.get(self.selected).map(|r| r.id.clone())
+    }
+}
+
+fn session_row_height(row: &SessionPickerRow) -> u16 {
+    if row.goal.as_deref().is_some_and(|goal| !goal.is_empty()) {
+        4
+    } else {
+        3
     }
 }
 
@@ -406,120 +530,122 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         } else {
             area.height
         };
-        if self.rows.is_empty() {
-            let hint = match self.scope {
-                SessionScope::Project => {
-                    "no sessions found in this project · press Tab to see all projects"
-                }
-                SessionScope::All => "no other sessions exist yet",
-            };
-            let empty_area = Rect {
-                x: area.x.saturating_add(1),
-                y: area.y.saturating_add(1),
-                width: area.width.saturating_sub(2),
-                height: list_height.saturating_sub(2),
-            };
-            f.render_widget(
-                ratatui::widgets::Paragraph::new(Line::from(Span::styled(
-                    hint,
-                    Style::default().fg(t.subtle_fg.into()),
-                )))
-                .style(Style::default().bg(t.modal_bg.into())),
-                empty_area,
-            );
-            return;
-        }
         let list_area = Rect {
             x: area.x.saturating_add(1),
             y: area.y.saturating_add(1),
             width: area.width.saturating_sub(2),
             height: list_height.saturating_sub(2),
         };
-        let items: Vec<ListItem<'static>> = self
-            .rows
-            .iter()
-            .map(|row| {
-                let current = if row.is_current { "● " } else { "  " };
-                let inner_width = list_area.width.saturating_sub(4) as usize;
-                let meta_width = 31.min(inner_width / 3);
-                let base_project_width = 30.min(inner_width / 3);
-                let base_name_width = inner_width
-                    .saturating_sub(meta_width)
-                    .saturating_sub(base_project_width)
-                    .saturating_sub(4);
-                let name_width = (base_name_width / 2).max(12);
-                let project_width = inner_width
-                    .saturating_sub(meta_width)
-                    .saturating_sub(name_width)
-                    .saturating_sub(4);
-                let name_column_width = name_width.saturating_sub(2);
-                let name = crate::width::pad_right(
-                    &crate::width::truncate(
-                        row.name.as_deref().unwrap_or("Untitled session"),
-                        name_column_width,
-                    ),
-                    name_column_width,
-                );
-                let timestamp =
-                    crate::width::pad_right(&format_local_timestamp(&row.updated_at), 11);
-                let message_label = format!("{} msgs", row.message_count);
-                let message_width = meta_width.saturating_sub(14);
-                let meta = format!(
-                    "{} · {timestamp}  ",
-                    crate::width::pad_right(&message_label, message_width),
-                );
-                let project_label = crate::width::pad_right(
-                    &crate::width::middle_truncate(
-                        row.project.as_deref().unwrap_or("-"),
-                        project_width,
-                    ),
-                    project_width,
-                );
-                let goal_snippet = crate::width::pad_right(
-                    &crate::width::truncate(row.goal.as_deref().unwrap_or("No goal"), inner_width),
-                    inner_width,
-                );
-                ListItem::new(vec![
-                    Line::from(vec![
-                        Span::styled(
-                            current,
-                            Style::default()
-                                .fg(t.accent.into())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            name,
-                            Style::default()
-                                .fg(t.heading.into())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(meta, Style::default().fg(t.subtle_fg.into())),
-                        Span::styled(project_label, Style::default().fg(t.success.into())),
-                    ]),
-                    Line::from(Span::styled(
-                        format!("  {}", goal_snippet),
-                        Style::default().fg(t.tinted_fg.into()),
-                    )),
-                    Line::raw(""),
-                ])
-                .style(Style::default().bg(t.modal_bg.into()))
-            })
-            .collect();
-        let list = List::new(items)
-            .style(Style::default().bg(t.modal_bg.into()))
-            .highlight_style(
-                Style::default()
-                    .fg(t.heading.into())
-                    .bg(t.code_bg.into())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▌ ");
-        let mut state = ListState::default();
-        if !self.rows.is_empty() {
-            state.select(Some(self.selected));
+        self.list_rect = Some(list_area);
+        self.row_hits.clear();
+        if self.rows.is_empty() {
+            self.hovered = None;
+            let hint = match self.scope {
+                SessionScope::Project => {
+                    "no sessions found in this project · press Tab to see all projects"
+                }
+                SessionScope::All => "no other sessions exist yet",
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(t.subtle_fg.into()),
+                )))
+                .style(Style::default().bg(t.modal_bg.into())),
+                list_area,
+            );
+            return;
         }
-        let list_rect = list_area;
-        f.render_stateful_widget(list, list_rect, &mut state);
+        self.ensure_selected_visible();
+        let visible = self.visible_indices(list_area.height);
+        let mut y = list_area.y;
+        for index in visible {
+            let row = self.rows[index].clone();
+            let selected = index == self.selected;
+            let hovered = self.hovered == Some(index);
+            let height = session_row_height(&row);
+            let rect = Rect::new(list_area.x, y, list_area.width, height);
+            let background = if selected {
+                t.modal_bg.lerp(t.accent, 0.22)
+            } else if hovered {
+                t.modal_bg.lerp(t.highlight_bg, 0.24)
+            } else {
+                t.modal_bg.lerp(t.panel_bg, 0.14)
+            };
+            let marker = if selected { "▌ " } else { "  " };
+            let marker_style = Style::default().fg(t.accent.into()).bg(background);
+            let inner_width = rect.width.saturating_sub(4) as usize;
+            let meta_width = 24.min(inner_width / 3);
+            let project_width = 30.min(inner_width / 3);
+            let name_width = inner_width
+                .saturating_sub(meta_width)
+                .saturating_sub(project_width)
+                .saturating_sub(4)
+                .max(12);
+            let name_column_width = name_width.saturating_sub(2);
+            let name = crate::width::pad_right(
+                &crate::width::truncate(
+                    row.name.as_deref().unwrap_or("Untitled session"),
+                    name_column_width,
+                ),
+                name_column_width,
+            );
+            let timestamp = crate::width::pad_right(&format_local_timestamp(&row.updated_at), 11);
+            let message_label = format!("{} msgs", row.message_count);
+            let message_width = meta_width.saturating_sub(14);
+            let meta = format!(
+                "{} · {timestamp}  ",
+                crate::width::pad_right(&message_label, message_width),
+            );
+            let project_label = crate::width::pad_right(
+                &crate::width::middle_truncate(
+                    row.project.as_deref().unwrap_or("-"),
+                    project_width,
+                ),
+                project_width,
+            );
+            let current = if row.is_current { "● " } else { "  " };
+            let mut lines = vec![Line::from(Span::styled(marker, marker_style))];
+            lines.push(Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::styled(
+                    current,
+                    Style::default()
+                        .fg(t.accent.into())
+                        .bg(background)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    name,
+                    Style::default()
+                        .fg(t.heading.into())
+                        .bg(background)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(meta, Style::default().fg(t.subtle_fg.into()).bg(background)),
+                Span::styled(
+                    project_label,
+                    Style::default().fg(t.success.into()).bg(background),
+                ),
+            ]));
+            if let Some(goal) = row.goal.as_deref().filter(|goal| !goal.is_empty()) {
+                let goal = crate::width::truncate(goal, inner_width.saturating_sub(4));
+                lines.push(Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(
+                        format!("  {goal}"),
+                        Style::default().fg(t.tinted_fg.into()).bg(background),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(marker, marker_style)));
+            f.render_widget(
+                Paragraph::new(lines).style(Style::default().bg(background)),
+                rect,
+            );
+            self.row_hits.push(SessionRowHit { index, rect });
+            y = y.saturating_add(height);
+        }
     }
 
     fn handle_key(
@@ -826,5 +952,168 @@ mod tests {
     fn scope_toggle_flips_between_project_and_all() {
         assert_eq!(SessionScope::Project.toggle(), SessionScope::All);
         assert_eq!(SessionScope::All.toggle(), SessionScope::Project);
+    }
+
+    #[test]
+    fn row_height_tracks_optional_goal() {
+        assert_eq!(session_row_height(&row("plain", 1)), 3);
+        assert_eq!(
+            session_row_height(&row_with(
+                "goal",
+                1,
+                "2026-07-08T00:00:00Z",
+                Some("ship it")
+            )),
+            4
+        );
+    }
+
+    #[test]
+    fn mixed_rows_only_include_complete_records() {
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(
+            vec![
+                row_with("a", 1, "2026-07-10T00:00:00Z", Some("goal")),
+                row_with("b", 1, "2026-07-09T00:00:00Z", None),
+                row_with("c", 1, "2026-07-08T00:00:00Z", Some("goal")),
+            ],
+            SessionScope::Project,
+        );
+
+        assert_eq!(switcher.visible_indices(6), vec![0]);
+        assert_eq!(switcher.visible_indices(7), vec![0, 1]);
+    }
+
+    #[test]
+    fn selection_moves_viewport_to_keep_whole_row_visible() {
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(
+            vec![
+                row_with("a", 1, "2026-07-10T00:00:00Z", Some("goal")),
+                row_with("b", 1, "2026-07-09T00:00:00Z", None),
+                row_with("c", 1, "2026-07-08T00:00:00Z", Some("goal")),
+            ],
+            SessionScope::Project,
+        );
+        switcher.list_rect = Some(Rect::new(2, 3, 40, 7));
+
+        switcher.move_down();
+        assert_eq!(switcher.viewport_offset, 0);
+        switcher.move_down();
+        assert_eq!(switcher.viewport_offset, 1);
+        assert_eq!(switcher.visible_indices(7), vec![1, 2]);
+    }
+
+    #[test]
+    fn mouse_hits_every_line_and_click_only_selects() {
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(
+            vec![
+                row_with("a", 1, "2026-07-10T00:00:00Z", Some("goal")),
+                row_with("b", 1, "2026-07-09T00:00:00Z", None),
+            ],
+            SessionScope::Project,
+        );
+        switcher.list_rect = Some(Rect::new(5, 10, 30, 7));
+        switcher.row_hits = vec![
+            SessionRowHit {
+                index: 0,
+                rect: Rect::new(5, 10, 30, 4),
+            },
+            SessionRowHit {
+                index: 1,
+                rect: Rect::new(5, 14, 30, 3),
+            },
+        ];
+
+        for row in 10..14 {
+            assert_eq!(switcher.row_at(8, row), Some(0));
+        }
+        switcher.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: 16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(switcher.open);
+        assert_eq!(switcher.selected, 1);
+    }
+
+    #[test]
+    fn hover_clears_outside_list_and_wheel_clamps() {
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(
+            vec![
+                row_with("a", 1, "2026-07-10T00:00:00Z", None),
+                row_with("b", 1, "2026-07-09T00:00:00Z", None),
+            ],
+            SessionScope::Project,
+        );
+        switcher.list_rect = Some(Rect::new(5, 10, 30, 6));
+        switcher.row_hits = vec![SessionRowHit {
+            index: 0,
+            rect: Rect::new(5, 10, 30, 3),
+        }];
+        let event = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        switcher.handle_mouse(&event(MouseEventKind::Moved, 8, 11));
+        assert_eq!(switcher.hovered, Some(0));
+        switcher.handle_mouse(&event(MouseEventKind::Moved, 1, 1));
+        assert_eq!(switcher.hovered, None);
+        switcher.handle_mouse(&event(MouseEventKind::ScrollUp, 8, 11));
+        assert_eq!(switcher.selected, 0);
+        switcher.handle_mouse(&event(MouseEventKind::ScrollDown, 8, 11));
+        switcher.handle_mouse(&event(MouseEventKind::ScrollDown, 8, 11));
+        assert_eq!(switcher.selected, 1);
+    }
+
+    #[test]
+    fn selected_marker_and_background_cover_the_whole_record() {
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(
+            vec![row_with(
+                "selected",
+                1,
+                "2026-07-10T00:00:00Z",
+                Some("goal goal goal goal goal goal goal goal goal goal goal goal goal goal goal goal goal goal goal goal"),
+            )],
+            SessionScope::Project,
+        );
+        let app = crate::app::AppState::new("selected".into(), None);
+        let theme = crate::theme::theme();
+        let expected_background = theme.modal_bg.lerp(theme.accent, 0.22);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <SessionSwitcher as ModalOverlay>::render_content(
+                    &mut switcher,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &theme,
+                );
+            })
+            .unwrap();
+
+        let rect = switcher.row_hits[0].rect;
+        assert_eq!(rect.height, 4);
+        let buffer = terminal.backend().buffer();
+        for y in rect.y..rect.y + rect.height {
+            assert_eq!(buffer[(rect.x, y)].symbol(), "▌");
+            for x in rect.x..rect.x + rect.width {
+                assert_eq!(buffer[(x, y)].bg, expected_background);
+            }
+        }
+        let goal_y = rect.y + 2;
+        for x in rect.x + rect.width - 4..rect.x + rect.width {
+            assert_eq!(buffer[(x, goal_y)].symbol(), " ");
+        }
     }
 }

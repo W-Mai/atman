@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Session switcher records** — Session entries use goal-aware spacing, full-height selection markers, distinct default, hover, and selected backgrounds, item-based wheel navigation, and whole-record pointer hit regions without passing modal input through to content underneath.
+
 ## [1.11.0] — 2026-09-09
 
 ### ⚠️ Breaking Changes

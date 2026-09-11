@@ -422,6 +422,10 @@ impl ModalManager {
         self.drain_provider_feedback(app);
     }
 
+    pub(super) fn handle_session_switcher_mouse(&mut self, event: &crossterm::event::MouseEvent) {
+        self.session_switcher.handle_mouse(event);
+    }
+
     fn drain_provider_feedback(&mut self, app: &mut crate::app::AppState) {
         while let Some(feedback) = self.provider_manager.take_feedback() {
             let (message, level, duration) = match feedback {
@@ -535,7 +539,10 @@ impl ModalManager {
                     .saturating_sub(4)
                     .clamp(72, crate::session_switcher::SESSION_SWITCHER_WIDTH);
                 let max_height = canvas.height.saturating_sub(4);
-                let h = session_switcher_height(self.session_switcher.rows.len(), max_height);
+                let h = session_switcher_height(
+                    self.session_switcher.desired_list_height(),
+                    max_height,
+                );
                 center_rect(canvas, w, h)
             }
             ModalKind::HistorySearch => {
@@ -1065,14 +1072,13 @@ const SESSION_SWITCHER_SHELL_HEIGHT: u16 = 3;
 const SESSION_SWITCHER_IDENTITY_HEIGHT: u16 = 4;
 const SESSION_SWITCHER_FOOTER_HEIGHT: u16 = 2;
 const SESSION_SWITCHER_LIST_INSET_HEIGHT: u16 = 2;
-const SESSION_SWITCHER_ITEM_HEIGHT: u16 = 3;
 
-fn session_switcher_height(row_count: usize, max_height: u16) -> u16 {
+fn session_switcher_height(list_height: u16, max_height: u16) -> u16 {
     let desired = SESSION_SWITCHER_SHELL_HEIGHT
         + SESSION_SWITCHER_IDENTITY_HEIGHT
         + SESSION_SWITCHER_FOOTER_HEIGHT
         + SESSION_SWITCHER_LIST_INSET_HEIGHT
-        + (row_count.max(1) as u16).saturating_mul(SESSION_SWITCHER_ITEM_HEIGHT);
+        + list_height;
     desired.max(SESSION_SWITCHER_MIN_HEIGHT).min(max_height)
 }
 
@@ -1090,12 +1096,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_switcher_height_accounts_for_fixed_regions_and_viewport() {
-        assert_eq!(session_switcher_height(0, 40), 14);
-        assert_eq!(session_switcher_height(1, 40), 14);
-        assert_eq!(session_switcher_height(3, 40), 20);
-        assert_eq!(session_switcher_height(3, 16), 16);
-        assert_eq!(session_switcher_height(1, 8), 8);
+    fn session_switcher_height_accounts_for_dynamic_list_height() {
+        assert_eq!(session_switcher_height(3, 40), 14);
+        assert_eq!(session_switcher_height(4, 40), 15);
+        assert_eq!(session_switcher_height(10, 40), 21);
+        assert_eq!(session_switcher_height(10, 16), 16);
+        assert_eq!(session_switcher_height(3, 8), 8);
     }
 
     #[test]
