@@ -1591,7 +1591,8 @@ async fn boot_first_session(
         return Ok((prebuild_session(resume_sid, None, None).await?, None));
     }
     let version = env!("CARGO_PKG_VERSION").to_string();
-    let recent = build_startup_recent(&data_dir()?, "", 5);
+    let project_root = std::env::current_dir()?;
+    let recent = build_startup_recent(&data_dir()?, &project_root, "", 5);
 
     // Replace CliSink with ToastCollector during boot so codex/other
     // startup logs don't leak to the raw terminal.
@@ -1743,7 +1744,13 @@ async fn cmd_repl_once(
             &output_store,
         );
         if is_fresh_session {
-            let recent = build_startup_recent(&root, &session.id().to_string(), 5);
+            let recent = session
+                .meta()
+                .and_then(|meta| meta.project_root)
+                .map(|project_root| {
+                    build_startup_recent(&root, &project_root, &session.id().to_string(), 5)
+                })
+                .unwrap_or_default();
             initial_items.insert(
                 0,
                 atman_tui::app::OutputItem::StartupCard {
@@ -2519,7 +2526,7 @@ async fn cmd_repl_once(
                     if let Some(tx) = cmd_tx_for_repl.as_ref() {
                         let _ = tx.send(atman_tui::TuiCommand::OpenSessionSwitcher);
                     } else {
-                        match list_recent_sessions(&data_dir()?, 20) {
+                        match list_recent_sessions(&data_dir()?, 20, None) {
                             Ok(rows) => print_sessions_table(&rows, &reporter),
                             Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
                         }
@@ -4149,10 +4156,12 @@ struct SessionRow {
 
 fn build_startup_recent(
     root: &Path,
+    project_root: &Path,
     exclude_sid: &str,
     cap: usize,
 ) -> Vec<atman_tui::app::StartupSessionEntry> {
-    let Ok(rows) = list_recent_sessions(root, cap.saturating_add(1)) else {
+    let query = atman_runtime::session_meta::SessionDiscoveryQuery::current_project(project_root);
+    let Ok(rows) = list_recent_sessions(root, cap.saturating_add(1), Some(&query)) else {
         return Vec::new();
     };
     let now = std::time::SystemTime::now();
@@ -4182,7 +4191,11 @@ fn build_startup_recent(
         .collect()
 }
 
-fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
+fn list_recent_sessions(
+    root: &Path,
+    cap: usize,
+    query: Option<&atman_runtime::session_meta::SessionDiscoveryQuery>,
+) -> Result<Vec<SessionRow>> {
     let sessions_dir = root.join("sessions");
     if !sessions_dir.exists() {
         return Ok(Vec::new());
@@ -4192,6 +4205,10 @@ fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
         let e = entry?;
         let path = e.path();
         if !path.is_dir() {
+            continue;
+        }
+        let meta = atman_runtime::session_meta::SessionMeta::load(&path);
+        if query.is_some_and(|query| !query.matches_meta(meta.as_ref())) {
             continue;
         }
         let sid = e.file_name().to_string_lossy().to_string();
@@ -4205,7 +4222,7 @@ fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
             .ok()
             .map(|s| s.trim_end().to_string())
             .filter(|s| !s.is_empty());
-        let project = atman_runtime::session_meta::SessionMeta::load(&path)
+        let project = meta
             .and_then(|m| m.project_root)
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
         rows.push(SessionRow {
@@ -7777,6 +7794,51 @@ async fn test_provider_endpoint(
 mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
+
+    fn create_recent_session(
+        root: &Path,
+        id: &str,
+        project_root: Option<&Path>,
+        modified_secs: u64,
+    ) {
+        let session_dir = root.join("sessions").join(id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let events_path = session_dir.join("events.jsonl");
+        let events = std::fs::File::create(&events_path).unwrap();
+        events
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_secs),
+            ))
+            .unwrap();
+        let meta = project_root
+            .map(|path| atman_runtime::session_meta::SessionMeta::from_start_path(Some(path)))
+            .unwrap_or_default();
+        meta.save(&session_dir).unwrap();
+    }
+
+    #[test]
+    fn startup_recent_filters_project_before_applying_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("project");
+        let other_project = root.join("other-project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other_project).unwrap();
+        create_recent_session(root, "current-1", Some(&project), 10);
+        create_recent_session(root, "current-2", Some(&project), 20);
+        create_recent_session(root, "current-3", Some(&project), 30);
+        create_recent_session(root, "current-4", Some(&project), 40);
+        create_recent_session(root, "other", Some(&other_project), 100);
+        create_recent_session(root, "legacy", None, 200);
+
+        let recent = build_startup_recent(root, &project, "", 2);
+        let ids = recent
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["current-4", "current-3"]);
+    }
 
     fn summary_fixture() -> SessionSummary {
         let mut plan = atman_runtime::memory::plan::Plan::new(

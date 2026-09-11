@@ -31,6 +31,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Model and session dialogs** — Add-model forms submit on `Esc` while edit forms retain cancel behavior, session switcher sizing keeps sparse lists visible, and startup recent-session cards are filtered to the current project before limiting results.
 - **Terminal restoration** — TUI shutdown restores mouse capture, bracketed paste, keyboard enhancement, synchronized updates, cursor visibility, text attributes, alternate-screen state, and raw mode before returning control to the shell, then reasserts shell-safe input modes after rendering the exit summary.
 - **Stable work folding** — Work summaries use an aligned neutral marker, show their complete wrapped description, keep their header anchored during synchronized transitions, frame expanded content with subtle side rails and a closed lower boundary, preserve an external gap before final prose, restore the complete pre-answer activity range including final thinking after session replay, rehydrate evicted member content before expansion, and report the same visible tool-call progress during live rendering and replay.
 - **Stable context accounting** — Failed LLM attempts no longer replace the active model-window measurement or contribute estimated usage to live and replayed context totals, successful root calls calibrate fresh compaction estimates for provider tokenizer differences, and persisted same-model measurements remain a conservative preflight floor for legacy sessions.

@@ -534,9 +534,8 @@ impl ModalManager {
                     .width
                     .saturating_sub(4)
                     .clamp(72, crate::session_switcher::SESSION_SWITCHER_WIDTH);
-                let desired =
-                    4 + (self.session_switcher.rows.len().max(1) as u16).saturating_mul(3) + 3;
-                let h = canvas.height.saturating_sub(4).min(desired).max(10);
+                let max_height = canvas.height.saturating_sub(4);
+                let h = session_switcher_height(self.session_switcher.rows.len(), max_height);
                 center_rect(canvas, w, h)
             }
             ModalKind::HistorySearch => {
@@ -1061,6 +1060,22 @@ fn next_policy_action(
     }
 }
 
+const SESSION_SWITCHER_MIN_HEIGHT: u16 = 10;
+const SESSION_SWITCHER_SHELL_HEIGHT: u16 = 3;
+const SESSION_SWITCHER_IDENTITY_HEIGHT: u16 = 4;
+const SESSION_SWITCHER_FOOTER_HEIGHT: u16 = 2;
+const SESSION_SWITCHER_LIST_INSET_HEIGHT: u16 = 2;
+const SESSION_SWITCHER_ITEM_HEIGHT: u16 = 3;
+
+fn session_switcher_height(row_count: usize, max_height: u16) -> u16 {
+    let desired = SESSION_SWITCHER_SHELL_HEIGHT
+        + SESSION_SWITCHER_IDENTITY_HEIGHT
+        + SESSION_SWITCHER_FOOTER_HEIGHT
+        + SESSION_SWITCHER_LIST_INSET_HEIGHT
+        + (row_count.max(1) as u16).saturating_mul(SESSION_SWITCHER_ITEM_HEIGHT);
+    desired.max(SESSION_SWITCHER_MIN_HEIGHT).min(max_height)
+}
+
 fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
     Rect {
         x: canvas.x + canvas.width.saturating_sub(w) / 2,
@@ -1073,6 +1088,15 @@ fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_switcher_height_accounts_for_fixed_regions_and_viewport() {
+        assert_eq!(session_switcher_height(0, 40), 14);
+        assert_eq!(session_switcher_height(1, 40), 14);
+        assert_eq!(session_switcher_height(3, 40), 20);
+        assert_eq!(session_switcher_height(3, 16), 16);
+        assert_eq!(session_switcher_height(1, 8), 8);
+    }
 
     #[test]
     fn trust_picker_starts_from_the_active_session_mode() {

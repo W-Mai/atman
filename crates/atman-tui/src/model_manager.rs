@@ -284,6 +284,7 @@ impl ModelManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         match action {
+            KeyAction::Escape if self.editing.is_none() => self.commit_form(control_tx),
             KeyAction::Escape => {
                 self.show_form = false;
                 self.editing = None;
@@ -673,13 +674,18 @@ impl ModelManager {
         }
         y += 1;
         if y < inner.bottom() {
+            let escape_action = if self.editing.is_some() {
+                "Esc: cancel"
+            } else {
+                "Esc: add"
+            };
             let help = if matches!(self.form_field, 2 | 4) {
                 crate::directional_selector::footer_help(
                     " Tab: next field",
-                    "Enter: save  Esc: cancel",
+                    &format!("Enter: save  {escape_action}"),
                 )
             } else {
-                " Tab: next field  Enter: save  Esc: cancel".to_string()
+                format!(" Tab: next field  Enter: save  {escape_action}")
             };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -748,6 +754,47 @@ mod tests {
         manager.thinking_editor.replace_with("default");
         manager.handle_key(&KeyAction::CursorRight, None);
         assert_eq!(manager.thinking_editor.buf(), "off");
+    }
+
+    #[test]
+    fn add_form_escape_submits_model() {
+        let mut manager = ModelManager::default();
+        manager.open_form();
+        manager.name_editor.insert_str("vendor/model");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        manager.handle_key(&KeyAction::Escape, Some(&tx));
+
+        assert!(!manager.show_form);
+        match rx.try_recv().unwrap() {
+            crate::TuiControl::UpsertConfigModel {
+                old_name,
+                name,
+                model,
+                ..
+            } => {
+                assert_eq!(old_name, None);
+                assert_eq!(name, "vendor/model");
+                assert_eq!(model, "vendor/model");
+            }
+            _ => panic!("unexpected control message"),
+        }
+    }
+
+    #[test]
+    fn edit_form_escape_cancels_without_submitting() {
+        let mut manager = ModelManager {
+            show_form: true,
+            editing: Some("vendor/model".into()),
+            ..Default::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        manager.handle_key(&KeyAction::Escape, Some(&tx));
+
+        assert!(!manager.show_form);
+        assert!(manager.editing.is_none());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
