@@ -411,8 +411,10 @@ mod tests {
         let mut modal = CompactReviewModal::new(sample_pending());
         modal.enter_editing();
         modal.summary_rect = Some(Rect::new(2, 3, 40, 2));
-        let mut manager = crate::wm::modal::ModalManager::default();
-        manager.compact_review = Some(modal);
+        let manager = crate::wm::modal::ModalManager {
+            compact_review: Some(modal),
+            ..Default::default()
+        };
         assert!(manager.cursor_visible(crate::wm::modal::ModalKind::CompactReview));
         assert_eq!(
             manager.cursor_position(crate::wm::modal::ModalKind::CompactReview),
