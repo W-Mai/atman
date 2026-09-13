@@ -31,6 +31,7 @@ pub struct ReplayBundle {
     pub compacted_messages: Vec<(u64, Message)>,
     pub all_messages: Vec<(u64, Message)>,
     pub context: ContextSnapshot,
+    pub deferred_form_answers: Vec<crate::form::DeferredFormAnswer>,
 }
 
 #[derive(Debug, Default)]
@@ -108,6 +109,7 @@ impl SessionReplay {
         let mut compacted_positions = HashMap::new();
         let mut all_messages = Vec::new();
         let mut all_positions = HashMap::new();
+        let mut deferred_answers = Vec::new();
         for record in &records {
             apply_envelope_to_messages(
                 &record.envelope,
@@ -116,6 +118,23 @@ impl SessionReplay {
                 &mut compacted_positions,
             );
             match &record.envelope.event {
+                Event::DeferredFormRecorded { answer } => {
+                    if !deferred_answers
+                        .iter()
+                        .any(|pending: &crate::form::DeferredFormAnswer| {
+                            pending.prompt_id == answer.prompt_id
+                        })
+                    {
+                        deferred_answers.push(answer.clone());
+                    }
+                }
+                Event::DeferredFormApplied {
+                    prompt_id, message, ..
+                } => {
+                    deferred_answers.retain(|pending| &pending.prompt_id != prompt_id);
+                    all_positions.insert(record.envelope.seq, all_messages.len());
+                    all_messages.push((record.envelope.seq, message.clone()));
+                }
                 Event::UserMsg {
                     message,
                     flow_run_id,
@@ -170,6 +189,7 @@ impl SessionReplay {
             compacted_messages,
             all_messages,
             context,
+            deferred_form_answers: deferred_answers,
         }
     }
 }

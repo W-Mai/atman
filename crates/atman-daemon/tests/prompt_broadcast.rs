@@ -22,6 +22,7 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
         sink: sink.clone(),
+        session: Arc::new(atman_runtime::Session::open_ephemeral()),
     }));
 
     let src = format!(
@@ -123,6 +124,47 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     }
     let (p, r) = (pending_seq.unwrap(), resolved_seq.unwrap());
     assert!(p < r, "resolved seq {r} must come after pending seq {p}");
+}
+
+#[tokio::test]
+async fn expired_form_answer_is_recorded_once_for_its_session() {
+    let tmp = TempDir::new().unwrap();
+    let state = DaemonState::new(tmp.path().to_path_buf());
+    let session = atman_runtime::Session::open_ephemeral();
+    let sink = session.sink().clone();
+    let prompt_id = atman_proto::PromptId(uuid::Uuid::now_v7());
+    let form = atman_runtime::form::CompositeForm {
+        questions: vec![atman_runtime::form::FormQuestion {
+            id: "question".into(),
+            kind: atman_runtime::form::FormKind::Confirm {
+                prompt: "Proceed?".into(),
+            },
+        }],
+    };
+    let rx = state.register_pending_prompt_broadcast_with_session(
+        prompt_id.clone(),
+        "form_ask",
+        serde_json::to_value(form).unwrap(),
+        sink.clone(),
+        Some(&session),
+    );
+    state.expire_pending_prompt(&prompt_id);
+    assert!(rx.await.is_err());
+    let answer = serde_json::to_value(atman_runtime::form::FormSubmission::Submitted {
+        answers: vec![atman_runtime::form::FormAnswer::Confirmed { value: true }],
+    })
+    .unwrap();
+    let wrong_session = atman_proto::SessionId(uuid::Uuid::now_v7());
+    assert!(!state.resolve_prompt_for_session(&prompt_id, answer.clone(), Some(&wrong_session)));
+    let owner = atman_proto::SessionId(session.id().0);
+    assert!(state.resolve_prompt_for_session(&prompt_id, answer.clone(), Some(&owner)));
+    assert!(!state.resolve_prompt_for_session(&prompt_id, answer, Some(&owner)));
+    assert_eq!(session.deferred_form_inbox().pending_count(), 1);
+    assert!(
+        sink.snapshot()
+            .iter()
+            .any(|event| matches!(event, Event::PromptExpired { .. }))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

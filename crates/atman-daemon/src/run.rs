@@ -414,6 +414,7 @@ async fn run_flow_inner(
             Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
                 state,
                 sink: session.sink().clone(),
+                session: session.clone(),
             }));
     }
     let (lifecycle_tx, mut lifecycle_rx) =

@@ -65,6 +65,70 @@ pub struct CompositeForm {
     pub questions: Vec<FormQuestion>,
 }
 
+impl CompositeForm {
+    pub fn accepts(&self, submission: &FormSubmission) -> bool {
+        let FormSubmission::Submitted { answers } = submission else {
+            return true;
+        };
+        answers.len() == self.questions.len()
+            && self
+                .questions
+                .iter()
+                .zip(answers)
+                .all(|(question, answer)| match (&question.kind, answer) {
+                    (_, FormAnswer::Cancelled) => true,
+                    (FormKind::Confirm { .. }, FormAnswer::Confirmed { .. })
+                    | (FormKind::Text { .. }, FormAnswer::TextEntered { .. }) => true,
+                    (
+                        FormKind::SingleSelect { options, .. },
+                        FormAnswer::Selected { index, label },
+                    ) => options.get(*index) == Some(label),
+                    (
+                        FormKind::MultiSelect {
+                            options, min, max, ..
+                        },
+                        FormAnswer::MultiSelected { indices, labels },
+                    ) => {
+                        indices.len() == labels.len()
+                            && min.is_none_or(|min| indices.len() >= min)
+                            && max.is_none_or(|max| indices.len() <= max)
+                            && indices
+                                .iter()
+                                .zip(labels)
+                                .all(|(index, label)| options.get(*index) == Some(label))
+                    }
+                    _ => false,
+                })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeferredFormAnswer {
+    pub prompt_id: String,
+    pub form: CompositeForm,
+    pub submission: FormSubmission,
+}
+
+impl DeferredFormAnswer {
+    pub fn as_user_text(&self) -> String {
+        let FormSubmission::Submitted { answers } = &self.submission else {
+            return String::new();
+        };
+        let mut lines = vec!["Answer to an earlier form:".to_string()];
+        for (question, answer) in self.form.questions.iter().zip(answers) {
+            let value = match answer {
+                FormAnswer::Confirmed { value } => value.to_string(),
+                FormAnswer::Selected { label, .. } => label.clone(),
+                FormAnswer::MultiSelected { labels, .. } => labels.join(", "),
+                FormAnswer::TextEntered { text } => text.clone(),
+                FormAnswer::Cancelled => "Cancelled".into(),
+            };
+            lines.push(format!("{}: {}", question.kind.prompt(), value));
+        }
+        lines.join("\n")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum FormSubmission {
     Submitted { answers: Vec<FormAnswer> },
@@ -128,6 +192,31 @@ mod tests {
         let s = serde_json::to_string(&k).unwrap();
         assert!(s.contains(r#""kind":"single_select""#));
         assert!(s.contains(r#""prompt":"pick""#));
+    }
+
+    #[test]
+    fn submitted_answers_must_match_the_question_schema() {
+        let form = CompositeForm {
+            questions: vec![FormQuestion {
+                id: "pick".into(),
+                kind: FormKind::SingleSelect {
+                    prompt: "Choose".into(),
+                    options: vec!["A".into(), "B".into()],
+                },
+            }],
+        };
+        assert!(form.accepts(&FormSubmission::Submitted {
+            answers: vec![FormAnswer::Selected {
+                index: 1,
+                label: "B".into(),
+            }],
+        }));
+        assert!(!form.accepts(&FormSubmission::Submitted {
+            answers: vec![FormAnswer::Selected {
+                index: 1,
+                label: "A".into(),
+            }],
+        }));
     }
 
     #[test]

@@ -128,13 +128,25 @@ fn role_to_kind(role: &str) -> Option<&'static str> {
     }
 }
 
-const MESSAGE_KINDS: &[&str] = &["user_msg", "assistant_msg", "tool_result_msg", "system_msg"];
+const MESSAGE_KINDS: &[&str] = &[
+    "user_msg",
+    "deferred_form_applied",
+    "assistant_msg",
+    "tool_result_msg",
+    "system_msg",
+];
 
 fn roles_to_kinds(roles: Option<&[&str]>) -> Vec<&'static str> {
     match roles {
         Some(rs) if !rs.is_empty() => rs
             .iter()
-            .filter_map(|r| role_to_kind(r))
+            .flat_map(|role| {
+                let mut kinds = role_to_kind(role).into_iter().collect::<Vec<_>>();
+                if *role == "user" {
+                    kinds.push("deferred_form_applied");
+                }
+                kinds
+            })
             .collect::<Vec<_>>(),
         _ => MESSAGE_KINDS.to_vec(),
     }
@@ -157,6 +169,7 @@ fn extract_message_from_payload(payload: &str) -> Option<Message> {
         | crate::event::Event::AssistantMsg { message, .. }
         | crate::event::Event::ToolResultMsg { message, .. }
         | crate::event::Event::SystemMsg { message, .. } => Some(message),
+        crate::event::Event::DeferredFormApplied { message, .. } => Some(message),
         _ => None,
     }
 }

@@ -203,7 +203,8 @@ impl SessionStats {
             stats.first_ts = Some(envelope.ts);
         }
         match &envelope.event {
-            crate::event::Event::UserMsg { .. } => {
+            crate::event::Event::UserMsg { .. }
+            | crate::event::Event::DeferredFormApplied { .. } => {
                 stats.user_message_count = stats.user_message_count.saturating_add(1);
                 stats.message_count = stats.message_count.saturating_add(1);
             }

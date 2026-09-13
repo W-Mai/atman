@@ -200,6 +200,11 @@ impl MessageStream {
                     message,
                     flow_run_id,
                     ..
+                }
+                | crate::event::Event::DeferredFormApplied {
+                    message,
+                    flow_run_id,
+                    ..
                 } if crate::projection::message_window::message_belongs_to_root(
                     flow_run_id.as_ref(),
                     &acc.ownership.spawned,

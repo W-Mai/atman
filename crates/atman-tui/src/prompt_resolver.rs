@@ -28,6 +28,10 @@ impl PromptResolver for TuiPromptResolver {
         self.forms.submit(&form_id, FormSubmission::Rejected);
     }
 
+    fn expire_pending(&self, id: &PromptId) -> bool {
+        self.forms.expire(&format!("prompt_{}", id))
+    }
+
     fn register_with_payload(
         &self,
         id: PromptId,

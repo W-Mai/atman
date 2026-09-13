@@ -26,6 +26,11 @@ pub trait PromptResolver: Send + Sync {
     fn register(&self, id: PromptId) -> oneshot::Receiver<serde_json::Value>;
     fn drop_pending(&self, id: &PromptId);
 
+    fn expire_pending(&self, id: &PromptId) -> bool {
+        self.drop_pending(id);
+        true
+    }
+
     fn register_with_payload(
         &self,
         id: PromptId,
@@ -73,6 +78,37 @@ pub async fn await_prompt_with_payload(
         timeout,
     )
     .await
+}
+
+pub async fn await_expirable_prompt_with_payload(
+    resolver: &Arc<dyn PromptResolver>,
+    id: PromptId,
+    kind: &str,
+    payload: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value, RuntimeError> {
+    let mut rx = resolver.register_with_payload(id, kind, payload);
+    match tokio::time::timeout(timeout, &mut rx).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => {
+            resolver.drop_pending(&id);
+            Err(RuntimeError::ToolFailed(format!(
+                "prompt {id} channel closed before answer"
+            )))
+        }
+        Err(_) => {
+            if resolver.expire_pending(&id) {
+                Err(RuntimeError::ToolFailed(format!(
+                    "prompt {id} timed out after {}s",
+                    timeout.as_secs()
+                )))
+            } else {
+                rx.await.map_err(|_| {
+                    RuntimeError::ToolFailed(format!("prompt {id} channel closed before answer"))
+                })
+            }
+        }
+    }
 }
 
 async fn await_prompt_inner(

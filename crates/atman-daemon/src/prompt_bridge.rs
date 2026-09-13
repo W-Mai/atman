@@ -10,6 +10,7 @@ use crate::DaemonState;
 pub struct DaemonPromptResolver {
     pub state: Arc<DaemonState>,
     pub sink: EventSink,
+    pub session: Arc<atman_runtime::Session>,
 }
 
 impl PromptResolver for DaemonPromptResolver {
@@ -23,15 +24,20 @@ impl PromptResolver for DaemonPromptResolver {
         kind: &str,
         payload: serde_json::Value,
     ) -> oneshot::Receiver<serde_json::Value> {
-        self.state.register_pending_prompt_broadcast(
+        self.state.register_pending_prompt_broadcast_with_session(
             ProtoPromptId(id.0),
             kind,
             payload,
             self.sink.clone(),
+            Some(&self.session),
         )
     }
 
     fn drop_pending(&self, id: &RuntimePromptId) {
         self.state.drop_pending_prompt(&ProtoPromptId(id.0));
+    }
+
+    fn expire_pending(&self, id: &RuntimePromptId) -> bool {
+        self.state.expire_pending_prompt(&ProtoPromptId(id.0))
     }
 }

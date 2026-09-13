@@ -239,6 +239,9 @@ pub struct GetEventsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePromptRequest {
     pub prompt_id: PromptId,
+    /// Required to submit an answer after a form prompt has expired.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
     #[schema(value_type = Object)]
     pub answer: serde_json::Value,
 }

@@ -148,7 +148,11 @@ pub async fn dispatch_as(
             let parsed: Result<ResolvePromptRequest, _> = serde_json::from_value(params);
             match parsed {
                 Ok(p) => {
-                    let resolved = state.resolve_prompt(&p.prompt_id, p.answer);
+                    let resolved = state.resolve_prompt_for_session(
+                        &p.prompt_id,
+                        p.answer,
+                        p.session_id.as_ref(),
+                    );
                     JsonRpcResponse::ok(id, json!({"resolved": resolved}))
                 }
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),

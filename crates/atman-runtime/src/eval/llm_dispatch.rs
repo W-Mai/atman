@@ -86,7 +86,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .capabilities
                 .input_modalities
                 .contains(&crate::provider::InputModality::Image);
-        let claimed = session.claim_queued_submissions_for_llm(&turn_id, accepts_images);
+        let mut claimed = session.claim_deferred_form_answers_for_llm(&turn_id);
+        claimed.extend(session.claim_queued_submissions_for_llm(&turn_id, accepts_images));
         if ctx.session_runtime.is_none()
             && let Some(messages) = ctx.session_messages_handle.as_ref()
         {

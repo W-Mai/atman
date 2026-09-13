@@ -9,8 +9,13 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 struct PendingPrompt {
-    tx: oneshot::Sender<serde_json::Value>,
+    tx: Option<oneshot::Sender<serde_json::Value>>,
     broadcast_sink: Option<EventSink>,
+    form_context: Option<(
+        SessionId,
+        atman_runtime::form::CompositeForm,
+        std::sync::Arc<atman_runtime::session::DeferredFormInbox>,
+    )>,
 }
 
 pub struct DaemonState {
@@ -96,8 +101,9 @@ impl DaemonState {
         self.prompts.lock().unwrap().insert(
             id,
             PendingPrompt {
-                tx,
+                tx: Some(tx),
                 broadcast_sink: None,
+                form_context: None,
             },
         );
         rx
@@ -110,12 +116,46 @@ impl DaemonState {
         payload: serde_json::Value,
         sink: EventSink,
     ) -> oneshot::Receiver<serde_json::Value> {
+        self.register_pending_prompt_broadcast_with_session(id, kind, payload, sink, None)
+    }
+
+    pub fn register_pending_prompt_broadcast_with_session(
+        &self,
+        id: PromptId,
+        kind: &str,
+        payload: serde_json::Value,
+        sink: EventSink,
+        session: Option<&atman_runtime::Session>,
+    ) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
+        let form_context = session.and_then(|session| {
+            if kind != "form_ask" {
+                return None;
+            }
+            let form =
+                serde_json::from_value::<atman_runtime::form::CompositeForm>(payload.clone())
+                    .or_else(|_| {
+                        serde_json::from_value::<atman_runtime::form::FormKind>(payload.clone())
+                            .map(|kind| atman_runtime::form::CompositeForm {
+                                questions: vec![atman_runtime::form::FormQuestion {
+                                    id: "question".into(),
+                                    kind,
+                                }],
+                            })
+                    })
+                    .ok()?;
+            Some((
+                SessionId(session.id().0),
+                form,
+                session.deferred_form_inbox(),
+            ))
+        });
         self.prompts.lock().unwrap().insert(
             id.clone(),
             PendingPrompt {
-                tx,
+                tx: Some(tx),
                 broadcast_sink: Some(sink.clone()),
+                form_context,
             },
         );
         sink.emit(Event::PendingPrompt {
@@ -127,16 +167,80 @@ impl DaemonState {
     }
 
     pub fn resolve_prompt(&self, id: &PromptId, answer: serde_json::Value) -> bool {
-        let Some(entry) = self.prompts.lock().unwrap().remove(id) else {
+        self.resolve_prompt_for_session(id, answer, None)
+    }
+
+    pub fn resolve_prompt_for_session(
+        &self,
+        id: &PromptId,
+        answer: serde_json::Value,
+        session_id: Option<&SessionId>,
+    ) -> bool {
+        let mut prompts = self.prompts.lock().unwrap();
+        let Some(entry) = prompts.get(id) else {
             return false;
         };
+        let late = entry.tx.is_none();
+        let submission = if late {
+            let Some((owner, form, _)) = &entry.form_context else {
+                return false;
+            };
+            if session_id != Some(owner) {
+                return false;
+            }
+            let Ok(submission) =
+                serde_json::from_value::<atman_runtime::form::FormSubmission>(answer.clone())
+            else {
+                return false;
+            };
+            if !form.accepts(&submission) {
+                return false;
+            }
+            Some(submission)
+        } else {
+            None
+        };
+        let entry = prompts
+            .remove(id)
+            .expect("pending prompt was checked under the same lock");
+        if let (Some(submission), Some((_, form, inbox))) = (submission, entry.form_context) {
+            inbox.record(atman_runtime::form::DeferredFormAnswer {
+                prompt_id: id.0.to_string(),
+                form,
+                submission,
+            });
+        }
         if let Some(sink) = &entry.broadcast_sink {
             sink.emit(Event::PromptResolved {
                 prompt_id: id.0,
                 answer: answer.clone(),
             });
         }
-        entry.tx.send(answer).is_ok()
+        if let Some(tx) = entry.tx {
+            tx.send(answer).is_ok()
+        } else {
+            true
+        }
+    }
+
+    pub fn expire_pending_prompt(&self, id: &PromptId) -> bool {
+        let mut prompts = self.prompts.lock().unwrap();
+        let Some(entry) = prompts.get_mut(id) else {
+            return false;
+        };
+        if entry.form_context.is_none() {
+            drop(prompts);
+            self.drop_pending_prompt(id);
+            return false;
+        }
+        if entry.tx.is_none() {
+            return true;
+        }
+        entry.tx.take();
+        if let Some(sink) = &entry.broadcast_sink {
+            sink.emit(Event::PromptExpired { prompt_id: id.0 });
+        }
+        true
     }
 
     pub fn drop_pending_prompt(&self, id: &PromptId) {

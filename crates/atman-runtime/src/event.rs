@@ -281,9 +281,21 @@ pub enum Event {
         kind: String,
         payload: serde_json::Value,
     },
+    PromptExpired {
+        prompt_id: uuid::Uuid,
+    },
     PromptResolved {
         prompt_id: uuid::Uuid,
         answer: serde_json::Value,
+    },
+    DeferredFormRecorded {
+        answer: crate::form::DeferredFormAnswer,
+    },
+    DeferredFormApplied {
+        prompt_id: String,
+        #[serde(default)]
+        flow_run_id: Option<FlowRunId>,
+        message: crate::message::Message,
     },
     FlowGraph {
         run_id: FlowRunId,

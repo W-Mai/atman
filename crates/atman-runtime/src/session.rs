@@ -257,11 +257,11 @@ pub struct InteractionServices {
 }
 
 impl InteractionServices {
-    fn new() -> Self {
+    fn new(inbox: std::sync::Arc<DeferredFormInbox>) -> Self {
         Self {
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
-            forms: std::sync::Arc::new(FormRegistry::new()),
+            forms: std::sync::Arc::new(FormRegistry::with_inbox(inbox)),
         }
     }
 }
@@ -291,6 +291,7 @@ pub struct Session {
     injection_tx: broadcast::Sender<Injection>,
     submission_queue: Mutex<VecDeque<crate::submission_queue::QueuedSubmission>>,
     submission_watch: watch::Sender<Vec<crate::submission_queue::QueuedSubmissionView>>,
+    deferred_form_inbox: std::sync::Arc<DeferredFormInbox>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     pending_images: Mutex<Vec<crate::message::ImageSource>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
@@ -419,14 +420,71 @@ pub enum ApprovalDecision {
     Deny { reason: String },
 }
 
+pub struct DeferredFormInbox {
+    entries: std::sync::Mutex<VecDeque<crate::form::DeferredFormAnswer>>,
+    sink: EventSink,
+}
+
+impl DeferredFormInbox {
+    fn new(sink: EventSink, pending: Vec<crate::form::DeferredFormAnswer>) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(pending.into()),
+            sink,
+        }
+    }
+
+    pub fn record(&self, answer: crate::form::DeferredFormAnswer) -> bool {
+        if !matches!(
+            answer.submission,
+            crate::form::FormSubmission::Submitted { .. }
+        ) {
+            return false;
+        }
+        let mut entries = self.entries.lock().unwrap();
+        if entries
+            .iter()
+            .any(|item| item.prompt_id == answer.prompt_id)
+        {
+            return false;
+        }
+        self.sink.emit(Event::DeferredFormRecorded {
+            answer: answer.clone(),
+        });
+        entries.push_back(answer);
+        true
+    }
+
+    fn claim(&self, turn_id: &TurnId) -> Vec<Message> {
+        let mut entries = self.entries.lock().unwrap();
+        let mut claimed = Vec::with_capacity(entries.len());
+        while let Some(answer) = entries.pop_front() {
+            let mut message = Message::user_text(turn_id.clone(), answer.as_user_text());
+            message.origin = crate::message::MessageOrigin::Interjection;
+            self.sink.emit(Event::DeferredFormApplied {
+                prompt_id: answer.prompt_id,
+                flow_run_id: None,
+                message: message.clone(),
+            });
+            claimed.push(message);
+        }
+        claimed
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.entries.lock().unwrap().len()
+    }
+}
+
 pub struct FormRegistry {
     entries: std::sync::Mutex<Vec<FormEntry>>,
     watch_tx: watch::Sender<Vec<crate::form::PendingForm>>,
+    inbox: std::sync::Arc<DeferredFormInbox>,
 }
 
 struct FormEntry {
     pending: crate::form::PendingForm,
-    responder: tokio::sync::oneshot::Sender<crate::form::FormSubmission>,
+    responder: Option<tokio::sync::oneshot::Sender<crate::form::FormSubmission>>,
+    expired: bool,
 }
 
 impl Default for FormRegistry {
@@ -437,10 +495,18 @@ impl Default for FormRegistry {
 
 impl FormRegistry {
     pub fn new() -> Self {
+        Self::with_inbox(std::sync::Arc::new(DeferredFormInbox::new(
+            EventSink::new(),
+            Vec::new(),
+        )))
+    }
+
+    fn with_inbox(inbox: std::sync::Arc<DeferredFormInbox>) -> Self {
         let (watch_tx, _) = watch::channel(Vec::new());
         Self {
             entries: std::sync::Mutex::new(Vec::new()),
             watch_tx,
+            inbox,
         }
     }
 
@@ -476,7 +542,8 @@ impl FormRegistry {
             let mut entries = self.entries.lock().unwrap();
             entries.push(FormEntry {
                 pending: pending.clone(),
-                responder: tx,
+                responder: Some(tx),
+                expired: false,
             });
         }
         self.broadcast_snapshot();
@@ -487,11 +554,20 @@ impl FormRegistry {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             let pos = entries.iter().position(|e| e.pending.form_id == form_id);
-            pos.map(|p| entries.remove(p))
+            pos.filter(|&p| entries[p].pending.form.accepts(&submission))
+                .map(|p| entries.remove(p))
         };
         match entry {
             Some(e) => {
-                let _ = e.responder.send(submission);
+                if e.expired {
+                    self.inbox.record(crate::form::DeferredFormAnswer {
+                        prompt_id: e.pending.form_id,
+                        form: e.pending.form,
+                        submission,
+                    });
+                } else if let Some(responder) = e.responder {
+                    let _ = responder.send(submission);
+                }
                 self.broadcast_snapshot();
                 true
             }
@@ -503,13 +579,30 @@ impl FormRegistry {
         self.submit(form_id, crate::form::FormSubmission::Rejected)
     }
 
+    pub fn expire(&self, form_id: &str) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let Some(entry) = entries.iter_mut().find(|e| e.pending.form_id == form_id) else {
+            return false;
+        };
+        if entry.expired {
+            return true;
+        }
+        entry.expired = true;
+        entry.responder.take();
+        drop(entries);
+        self.broadcast_snapshot();
+        true
+    }
+
     pub fn cancel_all(&self) {
         let drained: Vec<FormEntry> = {
             let mut entries = self.entries.lock().unwrap();
             std::mem::take(&mut *entries)
         };
         for e in drained {
-            let _ = e.responder.send(crate::form::FormSubmission::Rejected);
+            if let Some(responder) = e.responder {
+                let _ = responder.send(crate::form::FormSubmission::Rejected);
+            }
         }
         self.broadcast_snapshot();
     }
@@ -998,6 +1091,8 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
+        let deferred_form_inbox =
+            std::sync::Arc::new(DeferredFormInbox::new(sink.clone(), Vec::new()));
         Ok(Self {
             id,
             dir,
@@ -1025,11 +1120,12 @@ impl Session {
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
-            interactions: InteractionServices::new(),
+            interactions: InteractionServices::new(deferred_form_inbox.clone()),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             submission_queue: Mutex::new(VecDeque::new()),
             submission_watch: watch::channel(Vec::new()).0,
+            deferred_form_inbox,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -1210,6 +1306,10 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
+        let deferred_form_inbox = std::sync::Arc::new(DeferredFormInbox::new(
+            sink.clone(),
+            replay.deferred_form_answers,
+        ));
         Ok(Self {
             id,
             dir,
@@ -1257,11 +1357,12 @@ impl Session {
                 }
                 c
             },
-            interactions: InteractionServices::new(),
+            interactions: InteractionServices::new(deferred_form_inbox.clone()),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             submission_queue: Mutex::new(VecDeque::new()),
             submission_watch: watch::channel(Vec::new()).0,
+            deferred_form_inbox,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -1284,6 +1385,8 @@ impl Session {
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
         let (flow_registry, permission_broker) = new_permission_pipeline(&sink, &stream_tx);
+        let deferred_form_inbox =
+            std::sync::Arc::new(DeferredFormInbox::new(sink.clone(), Vec::new()));
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -1311,11 +1414,12 @@ impl Session {
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
-            interactions: InteractionServices::new(),
+            interactions: InteractionServices::new(deferred_form_inbox.clone()),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
             submission_queue: Mutex::new(VecDeque::new()),
             submission_watch: watch::channel(Vec::new()).0,
+            deferred_form_inbox,
             last_image_user_msg: Mutex::new(None),
             pending_images: Mutex::new(Vec::new()),
             read_files: std::sync::Arc::new(
@@ -2756,6 +2860,23 @@ impl Session {
             }
             self.publish_submission_queue(&queue);
         }
+        claimed
+    }
+
+    pub fn deferred_form_inbox(&self) -> std::sync::Arc<DeferredFormInbox> {
+        self.deferred_form_inbox.clone()
+    }
+
+    pub fn claim_deferred_form_answers_for_llm(&self, turn_id: &TurnId) -> Vec<Message> {
+        let current_turn = self.turn.current_turn.lock().unwrap();
+        if current_turn.as_ref() != Some(turn_id) {
+            return Vec::new();
+        }
+        let claimed = self.deferred_form_inbox.claim(turn_id);
+        self.messages
+            .lock()
+            .unwrap()
+            .extend(claimed.iter().cloned());
         claimed
     }
 
@@ -4360,6 +4481,59 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(session.queued_submissions().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deferred_form_answer_survives_replay_until_claimed() {
+        let root = tempfile::tempdir().unwrap();
+        let session = Session::open(root.path()).unwrap();
+        let id = session.id().to_string();
+        let answer = crate::form::DeferredFormAnswer {
+            prompt_id: "prompt-1".into(),
+            form: crate::form::CompositeForm {
+                questions: vec![crate::form::FormQuestion {
+                    id: "question".into(),
+                    kind: crate::form::FormKind::Text {
+                        prompt: "Where?".into(),
+                        placeholder: None,
+                        multiline: false,
+                    },
+                }],
+            },
+            submission: crate::form::FormSubmission::Submitted {
+                answers: vec![crate::form::FormAnswer::TextEntered {
+                    text: "the next turn".into(),
+                }],
+            },
+        };
+        assert!(session.deferred_form_inbox().record(answer.clone()));
+        session.flush_writer().await;
+        drop(session);
+
+        let reopened = Session::open_existing(root.path(), &id).unwrap();
+        assert_eq!(reopened.deferred_form_inbox().pending_count(), 1);
+        let turn_id = TurnId::now();
+        reopened.begin_turn(Message::user_text(turn_id.clone(), "continue"));
+        let claimed = reopened.claim_deferred_form_answers_for_llm(&turn_id);
+        assert_eq!(claimed.len(), 1);
+        assert!(claimed[0].text_concat().contains("Where?: the next turn"));
+        assert!(
+            reopened
+                .claim_deferred_form_answers_for_llm(&turn_id)
+                .is_empty()
+        );
+        reopened.flush_writer().await;
+        drop(reopened);
+
+        let replayed = Session::open_existing(root.path(), &id).unwrap();
+        assert_eq!(replayed.deferred_form_inbox().pending_count(), 0);
+        assert!(
+            replayed
+                .messages()
+                .iter()
+                .any(|message| message == &claimed[0])
+        );
+        replayed.shutdown().await;
     }
 
     #[test]

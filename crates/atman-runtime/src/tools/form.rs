@@ -90,7 +90,7 @@ impl Tool for FormAsk {
                     serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null)
                 };
                 let timeout = std::time::Duration::from_secs(300);
-                let answer_json = crate::rendezvous::await_prompt_with_payload(
+                let answer_json = crate::rendezvous::await_expirable_prompt_with_payload(
                     &resolver, id, "form_ask", payload, timeout,
                 )
                 .await?;
@@ -131,14 +131,21 @@ impl Tool for FormAsk {
 async fn await_local_submission(
     forms: &crate::session::FormRegistry,
     form_id: String,
-    rx: tokio::sync::oneshot::Receiver<crate::form::FormSubmission>,
+    mut rx: tokio::sync::oneshot::Receiver<crate::form::FormSubmission>,
     timeout: std::time::Duration,
 ) -> crate::form::FormSubmission {
-    match tokio::time::timeout(timeout, rx).await {
+    match tokio::time::timeout(timeout, &mut rx).await {
         Ok(Ok(submission)) => submission,
-        Ok(Err(_)) | Err(_) => {
+        Ok(Err(_)) => {
             forms.cancel(&form_id);
             crate::form::FormSubmission::Rejected
+        }
+        Err(_) => {
+            if forms.expire(&form_id) {
+                crate::form::FormSubmission::Rejected
+            } else {
+                rx.await.unwrap_or(crate::form::FormSubmission::Rejected)
+            }
         }
     }
 }
@@ -384,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_form_timeout_cancels_pending_entry() {
+    async fn local_form_timeout_keeps_pending_entry_answerable() {
         let forms = crate::session::FormRegistry::new();
         let _subscriber = forms.subscribe();
         let form_id = "timed-out".to_string();
@@ -407,6 +414,13 @@ mod tests {
             await_local_submission(&forms, form_id, rx, std::time::Duration::ZERO).await,
             crate::form::FormSubmission::Rejected
         );
+        assert_eq!(forms.list_pending().len(), 1);
+        assert!(forms.submit(
+            "timed-out",
+            crate::form::FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            }
+        ));
         assert!(forms.list_pending().is_empty());
     }
 

@@ -191,6 +191,8 @@ While a flow is running you can:
 - `!redirect <flow>` — L3 (switch to another flow).
 - `!stop` — L4 (kill immediately).
 
+A `form.ask` that times out can still be answered while its form remains open. The answer is recorded with the original question and added to the next task-facing `llm.call` as user context; it does not start or interrupt a flow by itself.
+
 ## 6. Anchor the agent on a session goal
 
 The default agent uses the active session message window. As the conversation grows, automatic compaction replaces older ranges with an operational summary while retaining recent turns. Put the objective that must remain explicit outside that lossy window in the session goal:

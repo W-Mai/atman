@@ -27,6 +27,7 @@ LlmRequest
 
 `schema` controls structured output; it is not conversation history. Pending runtime
 injections may also be rendered into the message list immediately before dispatch.
+Ordinary queued input and answers submitted after a `form.ask` timeout are claimed only by a task-facing general `llm.call` and added as trailing user messages, not to the stable system prefix. Late form answers are recorded before consumption and survive session replay; a consumed answer is recorded with its user message in one event. Internal classification, extraction, and compaction calls do not claim them.
 Provider adapters serialize these components into the provider-specific wire format.
 Explicit tool selectors retain their declared order, wildcard matches are sorted by
 qualified name, and overlaps are removed. Tool schema object keys are recursively

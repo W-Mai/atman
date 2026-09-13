@@ -483,7 +483,10 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::ContextTruncated { .. } => "context_truncated",
         Event::WatchWarn { .. } => "watch_warn",
         Event::PendingPrompt { .. } => "pending_prompt",
+        Event::PromptExpired { .. } => "prompt_expired",
         Event::PromptResolved { .. } => "prompt_resolved",
+        Event::DeferredFormRecorded { .. } => "deferred_form_recorded",
+        Event::DeferredFormApplied { .. } => "deferred_form_applied",
         Event::LlmPartialCall { .. } => "llm_partial_call",
         Event::FlowGraph { .. } => "flow_graph",
         Event::FlowNodeStart { .. } => "flow_node_start",
@@ -638,9 +641,12 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         ),
         Event::LlmCall { .. }
         | Event::PendingPrompt { .. }
+        | Event::PromptExpired { .. }
         | Event::PromptResolved { .. }
+        | Event::DeferredFormRecorded { .. }
         | Event::TerminalFinalState { .. }
         | Event::MermaidDiagram { .. } => (None, None),
+        Event::DeferredFormApplied { message, .. } => (Some(message.turn_id.to_string()), None),
     }
 }
 
@@ -650,6 +656,7 @@ pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
         | Event::AssistantMsg { message, .. }
         | Event::ToolResultMsg { message, .. }
         | Event::SystemMsg { message, .. } => Some(message.text_concat()),
+        Event::DeferredFormApplied { message, .. } => Some(message.text_concat()),
         Event::WatchWarn { message, .. } => Some(message.clone()),
         Event::CompactionSummary { summary, .. } => Some(summary.clone()),
         Event::AttachmentDegraded {

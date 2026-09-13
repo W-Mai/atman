@@ -170,6 +170,10 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
                 positions.insert(env.seq, messages.len());
                 messages.push((env.seq, message.clone()));
             }
+            crate::event::Event::DeferredFormApplied { message, .. } => {
+                positions.insert(env.seq, messages.len());
+                messages.push((env.seq, message.clone()));
+            }
             crate::event::Event::AttachmentDegraded {
                 message_seq,
                 part_index,
@@ -1079,6 +1083,11 @@ pub(crate) fn project_transcript_records(
                 message,
                 flow_run_id,
                 ..
+            }
+            | crate::event::Event::DeferredFormApplied {
+                message,
+                flow_run_id,
+                ..
             } => {
                 let mut message = message.clone();
                 let belongs_to_root =
@@ -1648,6 +1657,11 @@ pub(crate) fn apply_envelope_to_messages(
             ..
         }
         | crate::event::Event::ToolResultMsg {
+            message,
+            flow_run_id,
+            ..
+        }
+        | crate::event::Event::DeferredFormApplied {
             message,
             flow_run_id,
             ..
