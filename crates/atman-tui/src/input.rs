@@ -320,6 +320,17 @@ pub fn wrapped_cursor_col(input: &str, cursor: usize, content_width: usize) -> u
     0
 }
 
+/// Cursor row and column, advancing to the next row at an exact right edge.
+pub fn wrapped_cursor_position(input: &str, cursor: usize, content_width: usize) -> (usize, usize) {
+    let row = wrapped_cursor_row(input, cursor, content_width);
+    let col = wrapped_cursor_col(input, cursor, content_width);
+    if content_width > 0 && col >= content_width {
+        (row + col / content_width, col % content_width)
+    } else {
+        (row, col)
+    }
+}
+
 pub fn visual_line_count(input: &str, content_width: usize) -> usize {
     compute_wrapped_lines(input, content_width).len().max(1)
 }
@@ -398,6 +409,16 @@ impl InputEditor {
 
     pub fn insert_newline(&mut self) {
         self.insert_char('\n');
+    }
+
+    pub fn paste_single_line(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let single_line = normalized.split('\n').collect::<Vec<_>>().join(" ");
+        self.insert_str(&single_line);
+    }
+
+    pub fn paste_multiline(&mut self, text: &str) {
+        self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
     }
 
     /// Apply a key that edits a single-line or multiline text buffer.

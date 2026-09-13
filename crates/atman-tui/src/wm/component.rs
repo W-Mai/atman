@@ -74,6 +74,12 @@ pub struct HitRegion {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpPanelAction {
+    Add,
+    Edit,
+}
+
 #[derive(Debug, Clone)]
 pub enum HitTarget {
     Button(PanelBtn),
@@ -83,6 +89,7 @@ pub enum HitTarget {
     HistoryRow(String),
     WorkflowNode(usize, String),
     McpRow(String),
+    McpAction(McpPanelAction),
     ToolHeader(String),
 }
 

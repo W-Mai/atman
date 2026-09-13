@@ -280,7 +280,7 @@ Every tool declares a tier. Flow `contract.scope` statically validates all tool 
 
 ## Context management
 
-Long sessions don't die when the context fills up. `atman` runs proactive auto-compaction before an LLM call would overflow, generates a structured handoff summary, and holds a `compact_lock` so parallel workflow branches never race the compactor. Compaction is a first-class event in the transcript — you see it start, spin, and finish.
+`atman` runs proactive auto-compaction before an LLM call would overflow, generates a structured handoff summary, and holds a `compact_lock` so parallel workflow branches never race the compactor. A failed anchored summary leaves its selected history range intact and reports a failed compaction instead of replacing that range with a placeholder. Compaction is a first-class event in the transcript — you see it start, spin, and finish.
 
 Three memory layers:
 
@@ -413,7 +413,7 @@ Yes, when configured with file-editing tools. Use `contract.scope` to statically
 Those are LLM-driven chat-first agents. atman is orchestration-driven: you write the flow, the flow decides what happens next, the LLM executes what it's assigned. This makes runs reproducible, auditable, and scriptable.
 
 **What is MCP?**
-Model Context Protocol. atman is an MCP consumer — any MCP server you configure in `mcp_servers.json` is auto-connected at boot and its tools appear alongside the built-in ones.
+Model Context Protocol. atman is an MCP consumer — any MCP server you configure in `mcp_servers.json` is auto-connected at boot and its tools appear alongside the built-in ones. The TUI MCP panel supports adding and editing local server configurations with keyboard or mouse controls.
 
 ## Contributing
 

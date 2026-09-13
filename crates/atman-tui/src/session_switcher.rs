@@ -75,10 +75,10 @@ pub struct SessionSwitcher {
     pub selected: usize,
     pub delete_armed: Option<String>,
     pub sort_mode: SessionSortMode,
-    pub filter: String,
+    pub filter: crate::input::InputEditor,
     pub filter_mode: bool,
     pub rename_mode: bool,
-    pub rename_buf: String,
+    pub rename_buf: crate::input::InputEditor,
     pub rename_target: Option<String>,
     viewport_offset: usize,
     hovered: Option<usize>,
@@ -137,12 +137,12 @@ impl SessionSwitcher {
     }
 
     pub fn filter_push(&mut self, c: char) {
-        self.filter.push(c);
+        self.filter.insert_char(c);
         self.rebuild_view();
     }
 
     pub fn filter_pop(&mut self) {
-        self.filter.pop();
+        self.filter.backspace();
         self.rebuild_view();
     }
 
@@ -152,7 +152,7 @@ impl SessionSwitcher {
     }
 
     fn rebuild_view(&mut self) {
-        let needle = self.filter.to_lowercase();
+        let needle = self.filter.buf().to_lowercase();
         let mut view: Vec<SessionPickerRow> = self
             .all_rows
             .iter()
@@ -308,14 +308,15 @@ impl SessionSwitcher {
     pub fn begin_rename(&mut self) -> Option<&str> {
         let row = self.rows.get(self.selected)?;
         self.rename_target = Some(row.id.clone());
-        self.rename_buf = row.goal.clone().unwrap_or_default();
+        self.rename_buf
+            .replace_with(row.goal.as_deref().unwrap_or_default());
         self.rename_mode = true;
         self.rename_target.as_deref()
     }
 
     pub fn commit_rename(&mut self) -> Option<(String, Option<String>)> {
         let sid = self.rename_target.take()?;
-        let title = self.rename_buf.trim();
+        let title = self.rename_buf.buf().trim();
         let value = if title.is_empty() {
             None
         } else {
@@ -341,11 +342,11 @@ impl SessionSwitcher {
     }
 
     pub fn rename_push(&mut self, c: char) {
-        self.rename_buf.push(c);
+        self.rename_buf.insert_char(c);
     }
 
     pub fn rename_pop(&mut self) {
-        self.rename_buf.pop();
+        self.rename_buf.backspace();
     }
 
     pub fn move_up(&mut self) {
@@ -678,8 +679,16 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         app.push_note(msg, crate::app::NoteLevel::Info);
                     }
                 }
-                KeyAction::Backspace => self.rename_pop(),
-                KeyAction::Char(c) => self.rename_push(*c),
+                KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::DeleteWordBackward
+                | KeyAction::CursorLeft
+                | KeyAction::CursorRight
+                | KeyAction::CursorHome
+                | KeyAction::CursorEnd
+                | KeyAction::Char(_) => {
+                    self.rename_buf.handle_key(action);
+                }
                 _ => {}
             }
             return Some(ModalAction::Consumed);
@@ -689,8 +698,17 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 KeyAction::Escape | KeyAction::Submit => {
                     self.leave_filter_mode();
                 }
-                KeyAction::Backspace => self.filter_pop(),
-                KeyAction::Char(c) => self.filter_push(*c),
+                KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::DeleteWordBackward
+                | KeyAction::CursorLeft
+                | KeyAction::CursorRight
+                | KeyAction::CursorHome
+                | KeyAction::CursorEnd
+                | KeyAction::Char(_) => {
+                    self.filter.handle_key(action);
+                    self.rebuild_view();
+                }
                 _ => {}
             }
             return Some(ModalAction::Consumed);
@@ -745,8 +763,8 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         }
         match action {
             KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::CursorLeft => self.move_up(),
-            KeyAction::HistoryDown | KeyAction::CursorRight => self.move_down(),
+            KeyAction::HistoryUp => self.move_up(),
+            KeyAction::HistoryDown => self.move_down(),
             KeyAction::Tab => {
                 let new_scope = self.scope.toggle();
                 let rows = enumerate_session_rows(app, new_scope);
@@ -768,6 +786,18 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         Some(ModalAction::Consumed)
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        if self.rename_mode {
+            self.rename_buf.paste_single_line(text);
+        } else {
+            if !self.filter_mode {
+                self.enter_filter_mode();
+            }
+            self.filter.paste_single_line(text);
+            self.rebuild_view();
+        }
+    }
+
     fn cursor_position(&self) -> Option<(u16, u16)> {
         None
     }
@@ -776,12 +806,15 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         if self.rename_mode {
             Line::from(format!(
                 " Rename · {}▏ · Enter save · Esc cancel ",
-                self.rename_buf
+                self.rename_buf.buf()
             ))
         } else if self.delete_armed.is_some() {
             Line::from(" Delete? · d again to confirm · any other key cancels ")
         } else if self.filter_mode {
-            Line::from(format!(" Filter · {}▏ · Esc/Enter done ", self.filter))
+            Line::from(format!(
+                " Filter · {}▏ · Esc/Enter done ",
+                self.filter.buf()
+            ))
         } else {
             Line::from(format!(" Sessions · {} ", self.scope.label()))
         }
@@ -916,7 +949,7 @@ mod tests {
 
         switcher.handle_key(&KeyAction::Char('r'), &mut app, Some(&tx));
         assert!(switcher.rename_mode);
-        switcher.rename_buf = "New name".into();
+        switcher.rename_buf.replace_with("New name");
         switcher.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
         assert_eq!(app.session_name.as_deref(), Some("New name"));
         assert!(matches!(

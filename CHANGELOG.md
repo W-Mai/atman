@@ -13,6 +13,11 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Compaction model routing** — Summary requests resolve the provider's API model ID and retain the selected range if anchored summarization fails.
+- **Form submission results** — Single-question `form.ask` confirmations retain their submitted result; malformed responses report an error instead of becoming a rejection.
+- **Form input and confirmation** — Text fields accept paste according to their single-line or multiline setting, and confirmation choices respond to mouse clicks.
+- **TUI edit cursors** — Dynamic forms and compaction summary editing place the cursor on the displayed row through newlines, wrapping, and scrolling. Long history-search queries and MCP configuration values keep the cursor in their single-line viewport.
+- **MCP server editing** — The MCP panel supports keyboard and mouse actions for adding and editing local server configurations.
 - **Provider, model, and alias management** — Editing forms save on `Esc`, destructive actions require confirmation, configuration-backed entries delete through acknowledged persistence paths, and referenced providers or models remain intact with an actionable error.
 - **Session exit summary alignment** — Usage, work, goal, and plan content share the same left and right boundaries as the surrounding session identity and resume blocks.
 

@@ -41,17 +41,18 @@ impl PromptResolver for TuiPromptResolver {
         let payload_clone = payload;
         let kind_str = kind.to_string();
         tokio::spawn(async move {
-            let submission = answer_rx.await.unwrap_or(FormSubmission::Rejected);
-            let value = if kind_str == "form_ask"
-                && serde_json::from_value::<CompositeForm>(payload_clone.clone()).is_ok()
-            {
-                serde_json::to_value(&submission).unwrap_or(serde_json::json!({"kind":"rejected"}))
+            let Ok(submission) = answer_rx.await else {
+                return;
+            };
+            // FormAsk decodes FormSubmission for both single and composite forms.
+            let value = if kind_str == "form_ask" {
+                serde_json::to_value(&submission).unwrap_or(serde_json::Value::Null)
             } else {
                 let answer = match submission {
                     FormSubmission::Submitted { mut answers } => answers.pop(),
                     FormSubmission::Rejected => Some(FormAnswer::Cancelled),
                 };
-                answer_to_value(answer, &kind_str, &payload_clone)
+                answer_to_value(answer, &payload_clone)
             };
             let _ = tx.send(value);
         });
@@ -129,17 +130,7 @@ fn build_form_kind(kind: &str, payload: &serde_json::Value) -> FormKind {
     }
 }
 
-fn answer_to_value(
-    answer: Option<FormAnswer>,
-    kind: &str,
-    payload: &serde_json::Value,
-) -> serde_json::Value {
-    if kind == "form_ask" {
-        return match answer {
-            Some(a) => serde_json::to_value(&a).unwrap_or(serde_json::json!({})),
-            None => serde_json::to_value(&FormAnswer::Cancelled).unwrap_or(serde_json::json!({})),
-        };
-    }
+fn answer_to_value(answer: Option<FormAnswer>, payload: &serde_json::Value) -> serde_json::Value {
     let hunks = payload["hunks"].as_array().cloned().unwrap_or_default();
     let all_ids: Vec<u64> = hunks.iter().filter_map(|h| h["id"].as_u64()).collect();
     match answer {
@@ -155,5 +146,48 @@ fn answer_to_value(
             serde_json::json!({ "hunks": all_ids.into_iter().map(serde_json::Value::from).collect::<Vec<_>>() })
         }
         _ => serde_json::json!({ "hunks": [] }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wm::modal::ModalOverlay;
+
+    #[tokio::test]
+    async fn single_confirm_returns_submission_not_bare_answer() {
+        let forms = Arc::new(FormRegistry::new());
+        let _watch = forms.subscribe();
+        let resolver = TuiPromptResolver::new(Arc::clone(&forms));
+        let id = PromptId::now();
+        let rx = resolver.register_with_payload(
+            id,
+            "form_ask",
+            serde_json::to_value(FormKind::Confirm {
+                prompt: "Proceed?".into(),
+            })
+            .unwrap(),
+        );
+        let mut modal = crate::form_modal::FormModal::default();
+        modal.attach(forms.list_pending().remove(0));
+        let mut app = crate::app::AppState::default();
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+        modal.handle_key(&crate::keys::KeyAction::Submit, &mut app, Some(&control_tx));
+        modal.handle_key(&crate::keys::KeyAction::Submit, &mut app, Some(&control_tx));
+        let crate::TuiControl::FormSubmit {
+            form_id,
+            submission,
+        } = control_rx.try_recv().unwrap()
+        else {
+            panic!("expected form submission");
+        };
+        assert!(forms.submit(&form_id, submission));
+        let response: FormSubmission = serde_json::from_value(rx.await.unwrap()).unwrap();
+        assert_eq!(
+            response,
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            }
+        );
     }
 }

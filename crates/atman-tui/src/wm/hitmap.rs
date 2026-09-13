@@ -12,6 +12,7 @@ pub struct WmHitmap {
     pub history_row_rects: Vec<(WindowId, String, Rect)>,
     pub workflow_node_rects: Vec<(WindowId, usize, String, Rect)>,
     pub mcp_row_rects: Vec<(WindowId, String, Rect)>,
+    pub mcp_action_rects: Vec<(WindowId, super::component::McpPanelAction, Rect)>,
     pub tool_header_rects: Vec<(WindowId, String, Rect)>,
 }
 

@@ -13,6 +13,7 @@ pub enum ModalKind {
     AliasManager,
     ModelPicker,
     ModelManager,
+    McpEditor,
     Onboarding,
     Palette,
     ThemePicker,
@@ -27,6 +28,7 @@ pub struct ModalManager {
     pub alias_manager: crate::alias_manager::AliasManager,
     pub model_picker: crate::model_picker::ModelPicker,
     pub model_manager: crate::model_manager::ModelManager,
+    pub mcp_editor: crate::mcp_manager::McpEditor,
     pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub history_search: crate::history_search_modal::HistorySearchModal,
     pub onboarding: crate::onboarding::OnboardingState,
@@ -38,6 +40,21 @@ pub struct ModalManager {
 }
 
 impl ModalManager {
+    pub fn open_mcp_add(&mut self) {
+        self.mcp_editor.open_add();
+    }
+
+    pub fn open_mcp_edit(&mut self, name: &str) -> Result<(), String> {
+        let hub = atman_runtime::config_hub::ConfigHub::global().map_err(|e| e.to_string())?;
+        let config = hub
+            .load_local_mcp()
+            .into_iter()
+            .find(|config| config.name == name)
+            .ok_or_else(|| format!("MCP server {name:?} is not locally editable"))?;
+        self.mcp_editor.open_edit(config);
+        Ok(())
+    }
+
     pub fn open_trust_mode_picker(&mut self, app: &mut crate::app::AppState) {
         self.trust_mode_picker_open = true;
         self.trust_draft = Some(app.trust.clone());
@@ -51,10 +68,11 @@ impl ModalManager {
         match kind {
             ModalKind::ProviderManager => self.provider_manager.in_form,
             ModalKind::ModelManager => self.model_manager.has_text_focus(),
-            ModalKind::Palette
+            ModalKind::Form
+            | ModalKind::CompactReview
             | ModalKind::HistorySearch
-            | ModalKind::Form
-            | ModalKind::AliasManager => true,
+            | ModalKind::McpEditor => self.cursor_position(kind).is_some(),
+            ModalKind::Palette | ModalKind::AliasManager => true,
             _ => false,
         }
     }
@@ -66,6 +84,7 @@ impl ModalManager {
             || self.alias_manager.open
             || self.model_picker.open
             || self.model_manager.open
+            || self.mcp_editor.open
             || self.session_switcher.open
             || self.history_search.open
             || self.onboarding_open
@@ -99,6 +118,9 @@ impl ModalManager {
         }
         if self.model_manager.open {
             kinds.push(ModalKind::ModelManager);
+        }
+        if self.mcp_editor.open {
+            kinds.push(ModalKind::McpEditor);
         }
         if self.onboarding_open {
             kinds.push(ModalKind::Onboarding);
@@ -177,38 +199,29 @@ pub trait ModalOverlay {
 impl ModalManager {
     pub fn dispatch_paste(
         &mut self,
+        kind: ModalKind,
         text: &str,
         _app: &mut crate::app::AppState,
         _tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        let kinds = self.open_kinds();
-        for kind in kinds.iter().rev() {
-            let handled = match kind {
-                ModalKind::ProviderManager => {
-                    if self.provider_manager.in_form {
-                        self.provider_manager.handle_paste(text);
-                        true
-                    } else {
-                        false
-                    }
+        match kind {
+            ModalKind::Palette => self.palette.handle_paste(text),
+            ModalKind::Form => self.form_modal.handle_paste(text),
+            ModalKind::CompactReview => {
+                if let Some(modal) = self.compact_review.as_mut() {
+                    modal.handle_paste(text);
                 }
-                ModalKind::ModelManager => {
-                    self.model_manager.handle_paste(text);
-                    true
-                }
-                ModalKind::AliasManager => {
-                    self.alias_manager.handle_paste(text);
-                    true
-                }
-                ModalKind::Form => {
-                    self.form_modal.handle_paste(text);
-                    true
-                }
-                _ => false,
-            };
-            if handled {
-                break;
             }
+            ModalKind::SessionSwitcher => self.session_switcher.handle_paste(text),
+            ModalKind::HistorySearch => self.history_search.handle_paste(text),
+            ModalKind::ProviderManager => self.provider_manager.handle_paste(text),
+            ModalKind::AliasManager => self.alias_manager.handle_paste(text),
+            ModalKind::ModelManager => self.model_manager.handle_paste(text),
+            ModalKind::McpEditor => self.mcp_editor.handle_paste(text),
+            ModalKind::ModelPicker
+            | ModalKind::Onboarding
+            | ModalKind::ThemePicker
+            | ModalKind::TrustModePicker => {}
         }
     }
 
@@ -235,6 +248,7 @@ impl ModalManager {
             ModalKind::AliasManager => self.alias_manager.render_content(f, area, app, t),
             ModalKind::ModelPicker => self.model_picker.render_content(f, area, app, t),
             ModalKind::ModelManager => self.model_manager.render_content(f, area, app, t),
+            ModalKind::McpEditor => self.mcp_editor.render_content(f, area, app, t),
             ModalKind::Onboarding => self.onboarding.render_content(f, area, app, t),
             ModalKind::ThemePicker => self.render_theme_picker_content(f, area, app, t),
             ModalKind::TrustModePicker => self.render_trust_mode_picker_content(f, area, app, t),
@@ -295,6 +309,14 @@ impl ModalManager {
                 } else {
                     (false, None)
                 }
+            }
+            ModalKind::McpEditor => {
+                let result = if self.mcp_editor.open {
+                    self.mcp_editor.handle_key(action, app, tx)
+                } else {
+                    None
+                };
+                (result.is_some(), result)
             }
             ModalKind::Onboarding => {
                 if self.onboarding_open {
@@ -517,7 +539,9 @@ impl ModalManager {
             ModalKind::Palette => self.palette.cursor_position(),
             ModalKind::HistorySearch => self.history_search.cursor_position(),
             ModalKind::Form => self.form_modal.cursor_position(),
+            ModalKind::CompactReview => self.compact_review.as_ref()?.cursor_position(),
             ModalKind::AliasManager => self.alias_manager.cursor_position(),
+            ModalKind::McpEditor => self.mcp_editor.cursor_position(),
             _ => None,
         }
     }
@@ -596,6 +620,11 @@ impl ModalManager {
                 let h = canvas.height.saturating_sub(2).clamp(10, 24);
                 center_rect(canvas, w, h)
             }
+            ModalKind::McpEditor => {
+                let w = canvas.width.saturating_sub(4).clamp(50, 60);
+                let h = canvas.height.saturating_sub(2).clamp(18, 22);
+                center_rect(canvas, w, h)
+            }
             ModalKind::Onboarding => {
                 if canvas.width < 60 || canvas.height < 20 {
                     canvas
@@ -665,14 +694,14 @@ impl ModalManager {
                 let title = if self.session_switcher.rename_mode {
                     format!(
                         " Rename · {}▏ · Enter save · Esc cancel ",
-                        self.session_switcher.rename_buf
+                        self.session_switcher.rename_buf.buf()
                     )
                 } else if self.session_switcher.delete_armed.is_some() {
                     " Delete? · d again to confirm · any other key cancels ".to_string()
                 } else if self.session_switcher.filter_mode {
                     format!(
                         " Filter · {}▏ · Esc/Enter done ",
-                        self.session_switcher.filter
+                        self.session_switcher.filter.buf()
                     )
                 } else {
                     format!(" Sessions · {} ", self.session_switcher.scope.label())
@@ -725,6 +754,7 @@ impl ModalManager {
                 "Model Manager",
                 Style::default().fg(t.tinted_fg.into()),
             )),
+            ModalKind::McpEditor => self.mcp_editor.title(),
             ModalKind::Onboarding => Line::from(Span::styled(
                 "Welcome to atman",
                 Style::default().fg(t.tinted_fg.into()),
@@ -752,6 +782,7 @@ impl ModalManager {
             ModalKind::AliasManager => "@",
             ModalKind::ModelPicker => "\u{25C6}",
             ModalKind::ModelManager => "\u{25C6}",
+            ModalKind::McpEditor => "⚙",
             ModalKind::Onboarding => "\u{2726}",
             ModalKind::ThemePicker => "◐",
             ModalKind::TrustModePicker => "⚡",

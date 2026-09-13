@@ -1711,6 +1711,30 @@ impl ConfigHub {
         self.write_mcp(&configs)
     }
 
+    pub fn replace_mcp(
+        &self,
+        original_name: &str,
+        config: crate::mcp::McpServerConfig,
+    ) -> Result<(), ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let mut configs = self.load_local_mcp();
+        let index = configs
+            .iter()
+            .position(|current| current.name == original_name)
+            .ok_or_else(|| {
+                ConfigError::Invalid(format!("MCP server {original_name:?} not found"))
+            })?;
+        if config.name != original_name && configs.iter().any(|current| current.name == config.name)
+        {
+            return Err(ConfigError::NameConflict {
+                domain: "MCP servers",
+                name: config.name,
+            });
+        }
+        configs[index] = config;
+        self.write_mcp(&configs)
+    }
+
     pub fn toggle_mcp(&self, name: &str) -> Result<bool, ConfigError> {
         let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
         let mut configs = self.load_local_mcp();
@@ -4487,6 +4511,68 @@ provider = "openai"
         let configs = hub.load_local_mcp();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "second");
+        assert!(!hub.config_dir().join(".mcp_servers.json.tmp").exists());
+    }
+
+    #[test]
+    fn mcp_replace_renames_atomically_and_rejects_conflicts() {
+        let (_dir, hub) = temp_hub();
+        let mut first = crate::mcp::McpServerConfig::http(
+            "first",
+            "https://old.example",
+            Some("secret".into()),
+            crate::tool::Tier::Three,
+            45_000,
+        );
+        first.headers = vec![("X-Test".into(), "value".into())];
+        first.disabled = true;
+        hub.save_mcp(&[
+            first.clone(),
+            crate::mcp::McpServerConfig::stdio(
+                "second",
+                "echo",
+                vec![],
+                crate::tool::Tier::Two,
+                30_000,
+            ),
+        ])
+        .unwrap();
+
+        first.name = "renamed".into();
+        first.url = Some("https://new.example".into());
+        hub.replace_mcp("first", first).unwrap();
+
+        let configs = hub.load_local_mcp();
+        let renamed = configs
+            .iter()
+            .find(|config| config.name == "renamed")
+            .unwrap();
+        assert_eq!(renamed.auth_token.as_deref(), Some("secret"));
+        assert_eq!(renamed.headers, [("X-Test".into(), "value".into())]);
+        assert_eq!(renamed.timeout_ms, 45_000);
+        assert!(renamed.disabled);
+        assert!(configs.iter().all(|config| config.name != "first"));
+        assert!(configs.iter().any(|config| config.name == "second"));
+
+        let before = std::fs::read_to_string(hub.mcp_json_path()).unwrap();
+        let conflict = crate::mcp::McpServerConfig::stdio(
+            "second",
+            "false",
+            vec![],
+            crate::tool::Tier::One,
+            1,
+        );
+        assert!(matches!(
+            hub.replace_mcp("renamed", conflict),
+            Err(ConfigError::NameConflict {
+                domain: "MCP servers",
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(hub.mcp_json_path()).unwrap(),
+            before
+        );
         assert!(!hub.config_dir().join(".mcp_servers.json.tmp").exists());
     }
 

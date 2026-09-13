@@ -1,6 +1,6 @@
 use crate::wm::modal::ModalAction;
 
-use crate::input::InputEditor;
+use crate::input::{InputEditor, visual_line_count, wrapped_cursor_col, wrapped_cursor_position};
 use crate::keys::KeyAction;
 use atman_runtime::PendingCompactReview;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -19,6 +19,9 @@ pub struct CompactReviewModal {
     pub mode: CompactReviewMode,
     pub editor: InputEditor,
     pub scroll: u16,
+    summary_scroll: u16,
+    summary_rect: Option<Rect>,
+    follow_cursor: bool,
 }
 
 impl std::fmt::Debug for CompactReviewModal {
@@ -40,11 +43,15 @@ impl CompactReviewModal {
             mode: CompactReviewMode::Viewing,
             editor,
             scroll: 0,
+            summary_scroll: 0,
+            summary_rect: None,
+            follow_cursor: false,
         }
     }
 
     pub fn enter_editing(&mut self) {
         self.mode = CompactReviewMode::Editing;
+        self.follow_cursor = true;
     }
 
     pub fn leave_editing(&mut self) {
@@ -123,7 +130,7 @@ fn render_slice_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewMo
     f.render_widget(para, inner);
 }
 
-fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal) {
+fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &mut CompactReviewModal) {
     let theme = crate::theme::theme();
     let title = match modal.mode {
         CompactReviewMode::Viewing => "Summary",
@@ -136,7 +143,8 @@ fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReview
         width: rect.width,
         height: rect.height.saturating_sub(2).saturating_sub(1),
     };
-    let content = if modal.mode == CompactReviewMode::Editing {
+    modal.summary_rect = Some(inner);
+    let mut content = if modal.mode == CompactReviewMode::Editing {
         modal.editor.buf().to_string()
     } else {
         let base = if modal.summary_is_dirty() {
@@ -146,7 +154,39 @@ fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReview
         };
         base.to_string()
     };
-    let para = Paragraph::new(content).wrap(Wrap { trim: false });
+    if modal.mode == CompactReviewMode::Editing
+        && !modal.editor.buf().is_empty()
+        && modal.editor.cursor() == modal.editor.buf().len()
+        && inner.width > 0
+        && wrapped_cursor_col(
+            modal.editor.buf(),
+            modal.editor.cursor(),
+            inner.width as usize,
+        ) >= inner.width as usize
+    {
+        content.push(' ');
+    }
+    let height = visual_line_count(&content, inner.width as usize) as u16;
+    modal.summary_scroll = modal
+        .summary_scroll
+        .min(height.saturating_sub(inner.height));
+    if modal.mode == CompactReviewMode::Editing && modal.follow_cursor && inner.height > 0 {
+        let (row, _) = wrapped_cursor_position(
+            modal.editor.buf(),
+            modal.editor.cursor(),
+            inner.width as usize,
+        );
+        let row = row as u16;
+        if row < modal.summary_scroll {
+            modal.summary_scroll = row;
+        } else if row >= modal.summary_scroll.saturating_add(inner.height) {
+            modal.summary_scroll = row.saturating_sub(inner.height - 1);
+        }
+        modal.follow_cursor = false;
+    }
+    let para = Paragraph::new(content)
+        .wrap(Wrap { trim: false })
+        .scroll((modal.summary_scroll, 0));
     f.render_widget(para, inner);
 }
 
@@ -227,7 +267,7 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
                     Some(ModalAction::Consumed)
                 }
                 KeyAction::Char('e') => {
-                    self.mode = CompactReviewMode::Editing;
+                    self.enter_editing();
                     Some(ModalAction::Consumed)
                 }
                 KeyAction::Escape | KeyAction::Char('r') => {
@@ -263,6 +303,16 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
                     self.mode = CompactReviewMode::Viewing;
                     Some(ModalAction::Consumed)
                 }
+                KeyAction::HistoryUp => {
+                    self.editor.move_line_up();
+                    self.follow_cursor = true;
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::HistoryDown => {
+                    self.editor.move_line_down();
+                    self.follow_cursor = true;
+                    Some(ModalAction::Consumed)
+                }
                 KeyAction::Backspace
                 | KeyAction::Delete
                 | KeyAction::DeleteWordBackward
@@ -272,6 +322,7 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
                 | KeyAction::CursorEnd
                 | KeyAction::Char(_) => {
                     self.editor.handle_key(action);
+                    self.follow_cursor = true;
                     Some(ModalAction::Consumed)
                 }
                 _ => Some(ModalAction::Consumed),
@@ -279,8 +330,23 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
         }
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        if self.mode == CompactReviewMode::Editing {
+            self.editor.paste_multiline(text);
+            self.follow_cursor = true;
+        }
+    }
+
     fn cursor_position(&self) -> Option<(u16, u16)> {
-        None
+        if self.mode != CompactReviewMode::Editing {
+            return None;
+        }
+        let rect = self.summary_rect?;
+        let (row, col) =
+            wrapped_cursor_position(self.editor.buf(), self.editor.cursor(), rect.width as usize);
+        let visible_row = row.checked_sub(self.summary_scroll as usize)?;
+        (visible_row < rect.height as usize && col < rect.width as usize)
+            .then_some((rect.x + col as u16, rect.y + visible_row as u16))
     }
 
     fn title(&self) -> Line<'static> {
@@ -299,6 +365,7 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wm::modal::ModalOverlay;
 
     fn sample_pending() -> PendingCompactReview {
         PendingCompactReview {
@@ -311,6 +378,46 @@ mod tests {
             tokens_before: 1234,
             emitted_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn editing_cursor_tracks_multiline_summary_and_viewport() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut modal = CompactReviewModal::new(sample_pending());
+        modal.enter_editing();
+        modal.editor.replace_with("first\nsecond\nthird\nfourth");
+        let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+        terminal
+            .draw(|frame| render_summary_pane(frame, Rect::new(2, 1, 8, 5), &mut modal))
+            .unwrap();
+        assert_eq!(modal.summary_scroll, 2);
+        assert_eq!(modal.cursor_position(), Some((8, 4)));
+
+        modal.editor.replace_with("12345678");
+        modal.follow_cursor = true;
+        terminal
+            .draw(|frame| render_summary_pane(frame, Rect::new(2, 1, 8, 5), &mut modal))
+            .unwrap();
+        assert_eq!(modal.summary_scroll, 0);
+        assert_eq!(modal.cursor_position(), Some((2, 4)));
+
+        modal.leave_editing();
+        assert_eq!(modal.cursor_position(), None);
+    }
+
+    #[test]
+    fn modal_manager_routes_the_editing_cursor() {
+        let mut modal = CompactReviewModal::new(sample_pending());
+        modal.enter_editing();
+        modal.summary_rect = Some(Rect::new(2, 3, 40, 2));
+        let mut manager = crate::wm::modal::ModalManager::default();
+        manager.compact_review = Some(modal);
+        assert!(manager.cursor_visible(crate::wm::modal::ModalKind::CompactReview));
+        assert_eq!(
+            manager.cursor_position(crate::wm::modal::ModalKind::CompactReview),
+            Some((22, 3))
+        );
     }
 
     #[test]

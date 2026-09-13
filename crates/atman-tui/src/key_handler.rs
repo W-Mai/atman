@@ -588,108 +588,6 @@ pub(crate) fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<crate::TuiSubmission>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
-    // MCP add form intercepts all keys when open
-    if app.mcp_add_form.is_some() {
-        let mut form = app.mcp_add_form.take().unwrap();
-        let mut close = false;
-        let mut reload = false;
-        let mut toast: Option<(String, app::NoteLevel)> = None;
-
-        match action {
-            KeyAction::Escape => {
-                close = true;
-            }
-            KeyAction::Tab => {
-                form.next_field();
-            }
-            KeyAction::BackTab => {
-                form.prev_field();
-            }
-            KeyAction::Submit => match form.build_config() {
-                Ok(cfg) => {
-                    match atman_runtime::config_hub::ConfigHub::global()
-                        .and_then(|hub| hub.upsert_mcp(cfg))
-                    {
-                        Ok(()) => {
-                            reload = true;
-                            close = true;
-                            toast = Some(("MCP server added".into(), app::NoteLevel::Success));
-                        }
-                        Err(e) => form.error = Some(format!("save failed: {e}")),
-                    }
-                }
-                Err(e) => form.error = Some(e),
-            },
-            KeyAction::Char(_)
-            | KeyAction::Backspace
-            | KeyAction::Delete
-            | KeyAction::DeleteWordBackward
-            | KeyAction::CursorHome
-            | KeyAction::CursorEnd
-            | KeyAction::Newline => {
-                form.error = None;
-                let editor = match form.field {
-                    0 => Some(&mut form.name),
-                    2 if form.transport_idx == 0 => Some(&mut form.command),
-                    2 => Some(&mut form.url),
-                    3 => Some(&mut form.args),
-                    4 => Some(&mut form.env),
-                    _ => None,
-                };
-                if let Some(editor) = editor {
-                    editor.handle_key(&action);
-                }
-            }
-            KeyAction::CursorLeft => {
-                form.error = None;
-                match form.field {
-                    1 if form.transport_idx > 0 => form.transport_idx -= 1,
-                    5 if form.tier_idx > 0 => form.tier_idx -= 1,
-                    0 => form.name.move_left(),
-                    2 if form.transport_idx == 0 => form.command.move_left(),
-                    2 => form.url.move_left(),
-                    3 => form.args.move_left(),
-                    4 => form.env.move_left(),
-                    _ => {}
-                }
-            }
-            KeyAction::CursorRight => {
-                form.error = None;
-                match form.field {
-                    1 if form.transport_idx < 2 => form.transport_idx += 1,
-                    5 if form.tier_idx < 2 => form.tier_idx += 1,
-                    0 => form.name.move_right(),
-                    2 if form.transport_idx == 0 => form.command.move_right(),
-                    2 => form.url.move_right(),
-                    3 => form.args.move_right(),
-                    4 => form.env.move_right(),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-
-        if close {
-            app.mcp_add_form = None;
-        } else {
-            app.mcp_add_form = Some(form);
-        }
-        if reload {
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::McpReload);
-            }
-        }
-        if let Some((msg, level)) = toast {
-            app.push_toast(
-                msg,
-                level,
-                std::time::Duration::from_secs(3),
-                app::ToastPosition::TopRight,
-            );
-        }
-        return;
-    }
-
     match action {
         crate::keys::KeyAction::CyclePanelForward => {
             app.wm.cycle_focus(true);
@@ -827,7 +725,21 @@ pub(crate) fn handle_key(
                 return;
             }
             KeyAction::Char('a') => {
-                app.mcp_add_form = Some(crate::mcp_manager::McpAddForm::default());
+                app.wm.modals.open_mcp_add();
+                return;
+            }
+            KeyAction::Char('e') => {
+                if let Some(server) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = server.name.clone();
+                    if let Err(error) = app.wm.modals.open_mcp_edit(&name) {
+                        app.push_toast(
+                            error,
+                            app::NoteLevel::Warn,
+                            std::time::Duration::from_secs(4),
+                            app::ToastPosition::TopRight,
+                        );
+                    }
+                }
                 return;
             }
             KeyAction::Char('t') => {
@@ -1464,7 +1376,6 @@ pub(crate) fn handle_key(
 pub(crate) fn input_has_focus(app: &UiState) -> bool {
     app.wm.focused_id().is_none()
         && !app.wm.any_modal_open()
-        && app.mcp_add_form.is_none()
         && app.modal_notification.is_none()
         && !app.submission_focus
 }

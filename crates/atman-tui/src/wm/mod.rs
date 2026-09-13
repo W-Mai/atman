@@ -165,6 +165,20 @@ impl WindowManager {
     pub fn any_modal_open(&self) -> bool {
         self.modals.any_open()
     }
+
+    pub fn dispatch_paste(
+        &mut self,
+        text: &str,
+        app: &mut crate::app::AppState,
+        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        self.sync_modals();
+        let Some(kind) = self.top_kind() else {
+            return false;
+        };
+        self.modals.dispatch_paste(kind, text, app, control_tx);
+        true
+    }
 }
 
 const DEFAULT_PANEL_W: u16 = 88;
@@ -543,7 +557,7 @@ impl WindowManager {
                 .unwrap_or_default();
             return (consumed, commands);
         }
-        if app.mcp_add_form.is_some() || app.modal_notification.is_some() {
+        if app.modal_notification.is_some() {
             return (false, Vec::new());
         }
         if !app.submission_focus
@@ -778,6 +792,10 @@ impl WindowManager {
         control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
+        if self.top_kind() == Some(ModalKind::Form) {
+            self.modals.form_modal.handle_mouse(event, control_tx);
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::ProviderManager) {
             self.modals.handle_provider_mouse(event, app, control_tx);
             return (true, Vec::new());
@@ -788,6 +806,9 @@ impl WindowManager {
         }
         if self.top_kind() == Some(ModalKind::AliasManager) {
             self.modals.handle_alias_mouse(event, control_tx);
+            return (true, Vec::new());
+        }
+        if self.top_kind() == Some(ModalKind::McpEditor) {
             return (true, Vec::new());
         }
         if self.top_kind() == Some(ModalKind::SessionSwitcher) {
@@ -1181,6 +1202,77 @@ mod tests {
         Rect::new(0, 0, 100, 40)
     }
 
+    #[test]
+    fn top_form_receives_paste_and_mouse_confirmation() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::default();
+        wm.modals
+            .form_modal
+            .attach(atman_runtime::form::PendingForm {
+                form_id: "confirm_test".into(),
+                run_id: atman_runtime::event::FlowRunId::now(),
+                tool_use_id: "tool_test".into(),
+                form: atman_runtime::form::CompositeForm {
+                    questions: vec![atman_runtime::form::FormQuestion {
+                        id: "question".into(),
+                        kind: atman_runtime::form::FormKind::Confirm {
+                            prompt: "Proceed?".into(),
+                        },
+                    }],
+                },
+                kind: atman_runtime::form::FormKind::Confirm {
+                    prompt: "Proceed?".into(),
+                },
+                emitted_at: chrono::Utc::now(),
+            });
+        assert!(wm.dispatch_paste("ignored", &mut app, None));
+        assert!(wm.modals.form_modal.text_editor.buf().is_empty());
+
+        wm.modals.form_modal.yes_rect = Some(Rect::new(2, 3, 7, 1));
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
+        assert!(wm.dispatch_mouse(&click, &mut app, Some(&tx)).0);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::TuiControl::FormSubmit {
+                submission: atman_runtime::form::FormSubmission::Submitted { .. },
+                ..
+            })
+        ));
+
+        wm.modals
+            .form_modal
+            .attach(atman_runtime::form::PendingForm {
+                form_id: "text_test".into(),
+                run_id: atman_runtime::event::FlowRunId::now(),
+                tool_use_id: "tool_text".into(),
+                form: atman_runtime::form::CompositeForm {
+                    questions: vec![atman_runtime::form::FormQuestion {
+                        id: "path".into(),
+                        kind: atman_runtime::form::FormKind::Text {
+                            prompt: "Path".into(),
+                            placeholder: None,
+                            multiline: false,
+                        },
+                    }],
+                },
+                kind: atman_runtime::form::FormKind::Text {
+                    prompt: "Path".into(),
+                    placeholder: None,
+                    multiline: false,
+                },
+                emitted_at: chrono::Utc::now(),
+            });
+        assert!(wm.dispatch_paste("one\r\ntwo", &mut app, None));
+        assert_eq!(wm.modals.form_modal.text_editor.buf(), "one two");
+    }
+
     fn task_content(handle: &str) -> WindowContent {
         WindowContent::Task {
             handle: handle.to_string(),
@@ -1194,6 +1286,21 @@ mod tests {
             .find(|panel| panel.label == label)
             .unwrap()
             .id
+    }
+
+    #[test]
+    fn paste_is_dispatched_to_the_actual_top_modal() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::new("session".into(), None);
+
+        wm.modals.palette.open();
+        wm.sync_modals();
+        wm.modals.open_mcp_add();
+        assert!(wm.dispatch_paste("server", &mut app, None));
+
+        assert_eq!(wm.top_kind(), Some(ModalKind::McpEditor));
+        assert_eq!(wm.modals.mcp_editor.name.buf(), "server");
+        assert!(wm.modals.palette.input.buf().is_empty());
     }
 
     #[test]

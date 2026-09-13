@@ -60,20 +60,6 @@ impl LayerStack {
         if let Some(ref msg) = app.modal_notification {
             crate::render_notify_modal(f, area, msg);
         }
-        if let Some(form) = &app.mcp_add_form {
-            let w = 60.min(area.width);
-            let h = 22.min(area.height);
-            let x = area.x + (area.width - w) / 2;
-            let y = area.y + (area.height - h) / 2;
-            let form_area = Rect {
-                x,
-                y,
-                width: w,
-                height: h,
-            };
-            crate::wm::render_shadow(f, form_area, &crate::theme::theme());
-            crate::mcp_manager::render_mcp_add_form(f, form_area, form);
-        }
     }
 
     pub fn render_toasts(&self, f: &mut Frame, area: Rect, app: &AppState) {

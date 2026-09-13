@@ -794,14 +794,14 @@ impl ProviderManager {
                         return self.commit_form(control_tx);
                     }
                     KeyAction::Char('t') => self.test_form(control_tx),
-                    KeyAction::Tab => {
+                    KeyAction::Tab | KeyAction::HistoryDown => {
                         self.form_field = if self.editing_provider.is_some() {
                             1
                         } else {
                             0
                         };
                     }
-                    KeyAction::BackTab => {
+                    KeyAction::BackTab | KeyAction::HistoryUp => {
                         self.form_field = 6;
                     }
                     _ => {}
@@ -822,13 +822,13 @@ impl ProviderManager {
                 KeyAction::Escape | KeyAction::Submit => {
                     return self.commit_form(control_tx);
                 }
-                KeyAction::Tab => {
+                KeyAction::Tab | KeyAction::HistoryDown => {
                     self.form_field = (self.form_field + 1) % 8;
                     if name_locked && self.form_field == 0 {
                         self.form_field = 1;
                     }
                 }
-                KeyAction::BackTab => {
+                KeyAction::BackTab | KeyAction::HistoryUp => {
                     self.form_field = if self.form_field == 0 {
                         7
                     } else {
@@ -1845,6 +1845,25 @@ mod tests {
         manager.form_field = 0;
         <ProviderManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "provider");
         assert_eq!(manager.name_editor.buf(), "provider");
+    }
+
+    #[test]
+    fn config_form_env_horizontal_keys_edit_and_test_row_vertical_keys_change_fields() {
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, None);
+        manager.form_field = 3;
+        let original_cursor = manager.api_key_env_editor.cursor();
+
+        manager.handle_key(&KeyAction::CursorLeft, None);
+        assert_eq!(manager.form_field, 3);
+        assert!(manager.api_key_env_editor.cursor() < original_cursor);
+
+        manager.form_field = 7;
+        manager.handle_key(&KeyAction::HistoryUp, None);
+        assert_eq!(manager.form_field, 6);
+        manager.form_field = 7;
+        manager.handle_key(&KeyAction::HistoryDown, None);
+        assert_eq!(manager.form_field, 0);
     }
 
     #[test]

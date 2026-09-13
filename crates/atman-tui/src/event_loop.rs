@@ -346,14 +346,19 @@ pub(crate) async fn run_frames(
                             }
                         }
                         Some(Ok(CtEvent::Paste(s))) => {
-                            if app.wm.modals.any_open() {
-                                app.wm.modals.dispatch_paste(&s, &mut app.app, handle.control_tx.as_ref());
-                            } else if let Some(edit) = app.app.queued_submission_edit.as_mut() {
-                                edit.editor.insert_str(&s);
-                            } else {
-                                editor.ingest_paste(&s);
-                                interrupt_prompt = None;
-                                app.app.refresh_popup(editor.buf());
+                            let paste_consumed = app.wm.dispatch_paste(
+                                &s,
+                                &mut app.app,
+                                handle.control_tx.as_ref(),
+                            );
+                            if !paste_consumed {
+                                if let Some(edit) = app.app.queued_submission_edit.as_mut() {
+                                    edit.editor.insert_str(&s);
+                                } else {
+                                    editor.ingest_paste(&s);
+                                    interrupt_prompt = None;
+                                    app.app.refresh_popup(editor.buf());
+                                }
                             }
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
@@ -571,6 +576,18 @@ pub(crate) async fn run_frames(
                                                 && rect_contains(pr, r.x, r.y)
                                         })
                                         .map(|(_, h, _)| h.clone());
+                                    let mcp_action_hit = app
+                                        .wm
+                                        .interaction
+                                        .last_hitmap
+                                        .mcp_action_rects
+                                        .iter()
+                                        .find(|(pid, _, rect)| {
+                                            pid == &panel_id
+                                                && rect_contains(*rect, me.column, me.row)
+                                                && rect_contains(pr, rect.x, rect.y)
+                                        })
+                                        .map(|(_, action, _)| *action);
                                     let mcp_hit = app.wm.interaction.last_hitmap
                                         .mcp_row_rects
                                         .iter()
@@ -593,7 +610,42 @@ pub(crate) async fn run_frames(
                                         let canvas =
                                             app.app.last_transcript_rect.unwrap_or_default();
                                         app.open_task_panel(&handle, canvas);
+                                    } else if let Some(action) = mcp_action_hit {
+                                        match action {
+                                            crate::wm::component::McpPanelAction::Add => {
+                                                app.wm.modals.open_mcp_add();
+                                            }
+                                            crate::wm::component::McpPanelAction::Edit => {
+                                                if let Some(server) = app
+                                                    .app
+                                                    .context
+                                                    .mcp_servers
+                                                    .get(app.app.mcp_selected)
+                                                {
+                                                    let name = server.name.clone();
+                                                    if let Err(error) =
+                                                        app.wm.modals.open_mcp_edit(&name)
+                                                    {
+                                                        app.app.push_toast(
+                                                            error,
+                                                            crate::app::NoteLevel::Warn,
+                                                            std::time::Duration::from_secs(4),
+                                                            crate::app::ToastPosition::TopRight,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     } else if let Some(name) = mcp_hit {
+                                        if let Some(index) = app
+                                            .app
+                                            .context
+                                            .mcp_servers
+                                            .iter()
+                                            .position(|server| server.name == name)
+                                        {
+                                            app.app.mcp_selected = index;
+                                        }
                                         if !app.app.expanded_mcp_servers.remove(&name) {
                                             app.app.expanded_mcp_servers.insert(name);
                                         }

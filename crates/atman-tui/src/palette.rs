@@ -5,6 +5,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::wm::modal::ModalAction;
 
+use crate::input::InputEditor;
 use crate::keys::KeyAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +204,7 @@ impl PaletteEntryId {
 #[derive(Default)]
 pub struct CommandPalette {
     pub open: bool,
-    pub input: String,
+    pub input: InputEditor,
     pub filtered: Vec<PaletteEntryId>,
     pub selected: usize,
     /// Display items include group headers. Only Entry variants are selectable.
@@ -240,12 +241,12 @@ impl CommandPalette {
     }
 
     pub fn push_char(&mut self, c: char) {
-        self.input.push(c);
+        self.input.insert_char(c);
         self.refresh();
     }
 
     pub fn backspace(&mut self) {
-        self.input.pop();
+        self.input.backspace();
         self.refresh();
     }
 
@@ -289,7 +290,7 @@ impl CommandPalette {
     }
 
     fn refresh(&mut self) {
-        let query = self.input.to_lowercase();
+        let query = self.input.buf().to_lowercase();
         let query = query.trim();
         self.filtered = if query.is_empty() {
             PaletteEntryId::all()
@@ -360,13 +361,13 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
         let hint_line = Line::from(vec![
             Span::styled("▸ ", Style::default().fg(t.subtle_fg.into())),
             Span::styled(
-                self.input.clone(),
+                self.input.buf().to_string(),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(" _", Style::default().fg(t.accent.into())),
         ]);
         f.render_widget(Paragraph::new(hint_line), input_rect);
-        let cursor_x = input_rect.x + 2 + crate::width::width(&self.input) as u16;
+        let cursor_x = input_rect.x + 2 + self.input.cursor_display_col() as u16;
         f.set_cursor_position((cursor_x, input_rect.y));
         let list_rect = Rect {
             x: area.x,
@@ -422,8 +423,17 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
         use crate::wm::modal::ModalAction;
         match action {
             KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::CursorLeft => self.move_up(),
-            KeyAction::HistoryDown | KeyAction::CursorRight => self.move_down(),
+            KeyAction::HistoryUp => self.move_up(),
+            KeyAction::HistoryDown => self.move_down(),
+            KeyAction::CursorLeft
+            | KeyAction::CursorRight
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd
+            | KeyAction::Delete
+            | KeyAction::DeleteWordBackward => {
+                self.input.handle_key(action);
+                self.refresh();
+            }
             KeyAction::Backspace => self.backspace(),
             KeyAction::Char(c) => self.push_char(*c),
             KeyAction::Submit => {
@@ -437,9 +447,14 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
         Some(ModalAction::Consumed)
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        self.input.paste_single_line(text);
+        self.refresh();
+    }
+
     fn cursor_position(&self) -> Option<(u16, u16)> {
         self.last_input_rect
-            .map(|r| (r.x + 2 + self.input.chars().count() as u16, r.y))
+            .map(|r| (r.x + 2 + self.input.cursor_display_col() as u16, r.y))
     }
 
     fn title(&self) -> Line<'static> {
@@ -534,7 +549,7 @@ mod tests {
         p.push_char('y');
         p.close();
         assert!(!p.open);
-        assert!(p.input.is_empty());
+        assert!(p.input.buf().is_empty());
         assert!(p.filtered.is_empty());
     }
 

@@ -60,6 +60,7 @@ pub struct HistorySearchModal {
     pub preview_rect: Option<Rect>,
     pub results_rect: Option<Rect>,
     pub last_input_rect: Option<Rect>,
+    query_scroll: usize,
     pub input_focused: bool,
 }
 
@@ -87,6 +88,7 @@ impl HistorySearchModal {
         self.preview_rect = None;
         self.results_rect = None;
         self.input_focused = true;
+        self.query_scroll = 0;
     }
 
     pub fn close(&mut self) {
@@ -368,14 +370,22 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         Some(ModalAction::Consumed)
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        self.input_focused = true;
+        self.editor.paste_single_line(text);
+    }
+
     fn cursor_position(&self) -> Option<(u16, u16)> {
         if !self.input_focused {
             return None;
         }
-        self.last_input_rect.map(|r| {
+        self.last_input_rect.filter(|r| r.width > 0).map(|r| {
             let before_cursor = &self.editor.buf()[..self.editor.cursor()];
-            let col = crate::width::width(before_cursor) as u16;
-            (r.x + col, r.y)
+            let col = crate::width::width(before_cursor).saturating_sub(self.query_scroll);
+            (
+                r.x + col.min(r.width.saturating_sub(1) as usize) as u16,
+                r.y,
+            )
         })
     }
 
@@ -450,7 +460,7 @@ fn render_help_bar(f: &mut ratatui::Frame, area: Rect) {
     );
 }
 
-fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
+fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
     let t = crate::theme::theme();
     crate::wm::shell::render_section_header(
         f,
@@ -459,16 +469,15 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchMod
         &t,
     );
     let inner = section_inner(rect);
-    let cursor_indicator = "▏";
-    let text = format!("{}{cursor_indicator}", modal.editor.buf());
-    let para = Paragraph::new(text).wrap(Wrap { trim: false });
+    let cursor_col = crate::width::width(&modal.editor.buf()[..modal.editor.cursor()]);
+    modal.query_scroll = cursor_col.saturating_sub(inner.width.saturating_sub(1) as usize);
+    let text = crate::width::trim_display_offset(
+        modal.editor.buf(),
+        modal.query_scroll,
+        inner.width as usize,
+    );
+    let para = Paragraph::new(text);
     f.render_widget(para, inner);
-    let content_w = inner.width as usize;
-    let col = crate::input::wrapped_cursor_col(modal.editor.buf(), modal.editor.cursor(), content_w)
-        as u16;
-    let row = crate::input::wrapped_cursor_row(modal.editor.buf(), modal.editor.cursor(), content_w)
-        as u16;
-    f.set_cursor_position((inner.x + col, inner.y + row));
 }
 
 fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
@@ -666,6 +675,23 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySea
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wm::modal::ModalOverlay;
+
+    #[test]
+    fn long_query_keeps_cursor_in_single_line_viewport() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut modal = HistorySearchModal::default();
+        modal.open();
+        modal.editor.replace_with("abcdefghijkl");
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal
+            .draw(|frame| render_query_row(frame, Rect::new(2, 1, 8, 3), &mut modal))
+            .unwrap();
+        modal.last_input_rect = Some(Rect::new(2, 3, 8, 1));
+        assert_eq!(modal.query_scroll, 5);
+        assert_eq!(modal.cursor_position(), Some((9, 3)));
+    }
 
     fn hit(sid: &str, seq: u64, snippet: &str) -> HistoryHit {
         HistoryHit {

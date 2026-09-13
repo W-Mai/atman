@@ -34,14 +34,24 @@ impl WindowComponent for McpPanelContent {
             ctx.window_id,
             &mut self.projection,
         );
-        hitmap
+        let mut regions: Vec<_> = hitmap
             .mcp_row_rects
             .into_iter()
             .map(|(_, id, rect)| HitRegion {
                 target: HitTarget::McpRow(id),
                 rect,
             })
-            .collect()
+            .collect();
+        regions.extend(
+            hitmap
+                .mcp_action_rects
+                .into_iter()
+                .map(|(_, action, rect)| HitRegion {
+                    target: HitTarget::McpAction(action),
+                    rect,
+                }),
+        );
+        regions
     }
 
     fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {

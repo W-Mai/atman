@@ -441,8 +441,8 @@ impl ModelManager {
     ) {
         match action {
             KeyAction::Escape | KeyAction::Submit => self.commit_form(control_tx),
-            KeyAction::Tab => self.form_field = (self.form_field + 1) % 6,
-            KeyAction::BackTab => {
+            KeyAction::Tab | KeyAction::HistoryDown => self.form_field = (self.form_field + 1) % 6,
+            KeyAction::BackTab | KeyAction::HistoryUp => {
                 self.form_field = if self.form_field == 0 {
                     5
                 } else {

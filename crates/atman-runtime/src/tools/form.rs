@@ -95,7 +95,11 @@ impl Tool for FormAsk {
                 )
                 .await?;
                 let submission = serde_json::from_value::<crate::form::FormSubmission>(answer_json)
-                    .unwrap_or(crate::form::FormSubmission::Rejected);
+                    .map_err(|error| {
+                        RuntimeError::ToolFailed(format!(
+                            "form.ask: invalid prompt submission: {error}"
+                        ))
+                    })?;
                 return Ok(submission_to_value(&submission, composite));
             }
             let forms = ctx.forms.as_ref().ok_or_else(|| {

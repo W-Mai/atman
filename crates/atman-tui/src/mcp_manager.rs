@@ -152,11 +152,28 @@ pub fn render_panel(
     f.render_widget(Paragraph::new(visible), content_area);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " [a]dd  [Enter] expand  [Tab] switch  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close",
+            " [a] Add  [e] Edit  [Enter] expand  [Tab] switch  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close",
             Style::default().fg(t.subtle_fg.into()),
         ))),
         help_area,
     );
+    hitmap_out.mcp_action_rects.push((
+        window_id,
+        crate::wm::component::McpPanelAction::Add,
+        Rect::new(help_area.x + 1, help_area.y, 7.min(help_area.width), 1),
+    ));
+    if help_area.width > 9 {
+        hitmap_out.mcp_action_rects.push((
+            window_id,
+            crate::wm::component::McpPanelAction::Edit,
+            Rect::new(
+                help_area.x + 10,
+                help_area.y,
+                8.min(help_area.width - 10),
+                1,
+            ),
+        ));
+    }
 }
 
 fn clamp_scroll(scroll: u32, total_rows: u32, viewport_height: u16) -> u32 {
@@ -449,8 +466,6 @@ fn server_display(
     }
 }
 
-// ── MCP Add Form ──
-
 const MCP_ADD_FIELDS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -479,7 +494,17 @@ impl McpBrowserTab {
     }
 }
 
-pub struct McpAddForm {
+#[derive(Clone)]
+pub enum McpEditorMode {
+    Add,
+    Edit {
+        original_name: String,
+        original: Box<atman_runtime::mcp::McpServerConfig>,
+    },
+}
+
+pub struct McpEditor {
+    pub open: bool,
     pub name: crate::input::InputEditor,
     pub command: crate::input::InputEditor,
     pub url: crate::input::InputEditor,
@@ -489,14 +514,17 @@ pub struct McpAddForm {
     pub tier_idx: usize,
     pub field: usize,
     pub error: Option<String>,
+    mode: McpEditorMode,
+    cursor_position: Option<(u16, u16)>,
 }
 
 const TRANSPORT_OPTIONS: [&str; 3] = ["stdio", "http", "sse"];
 const TIER_OPTIONS: [u8; 3] = [1, 2, 3];
 
-impl Default for McpAddForm {
+impl Default for McpEditor {
     fn default() -> Self {
         Self {
+            open: false,
             name: crate::input::InputEditor::default(),
             command: crate::input::InputEditor::default(),
             url: crate::input::InputEditor::default(),
@@ -506,12 +534,52 @@ impl Default for McpAddForm {
             tier_idx: 2,
             field: 0,
             error: None,
+            mode: McpEditorMode::Add,
+            cursor_position: None,
         }
     }
 }
 
-impl McpAddForm {
-    pub fn transport(&self) -> atman_runtime::mcp::TransportKind {
+impl McpEditor {
+    pub fn open_add(&mut self) {
+        *self = Self::default();
+        self.open = true;
+    }
+
+    pub fn open_edit(&mut self, config: atman_runtime::mcp::McpServerConfig) {
+        let original_name = config.name.clone();
+        *self = Self::default();
+        self.open = true;
+        self.name.replace_with(&config.name);
+        self.command.replace_with(&config.command);
+        self.url
+            .replace_with(config.url.as_deref().unwrap_or_default());
+        self.args.replace_with(&config.args.join(" "));
+        self.env.replace_with(
+            &config
+                .env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        self.transport_idx = match config.transport {
+            atman_runtime::mcp::TransportKind::Stdio => 0,
+            atman_runtime::mcp::TransportKind::Http => 1,
+            atman_runtime::mcp::TransportKind::Sse => 2,
+        };
+        self.tier_idx = match config.tier {
+            atman_runtime::tool::Tier::One => 0,
+            atman_runtime::tool::Tier::Two => 1,
+            _ => 2,
+        };
+        self.mode = McpEditorMode::Edit {
+            original_name,
+            original: Box::new(config),
+        };
+    }
+
+    fn transport(&self) -> atman_runtime::mcp::TransportKind {
         match self.transport_idx {
             1 => atman_runtime::mcp::TransportKind::Http,
             2 => atman_runtime::mcp::TransportKind::Sse,
@@ -519,7 +587,7 @@ impl McpAddForm {
         }
     }
 
-    pub fn tier(&self) -> atman_runtime::tool::Tier {
+    fn tier(&self) -> atman_runtime::tool::Tier {
         match TIER_OPTIONS[self.tier_idx] {
             1 => atman_runtime::tool::Tier::One,
             2 => atman_runtime::tool::Tier::Two,
@@ -527,77 +595,102 @@ impl McpAddForm {
         }
     }
 
-    pub fn next_field(&mut self) {
+    fn next_field(&mut self) {
         self.field = (self.field + 1) % MCP_ADD_FIELDS;
     }
 
-    pub fn prev_field(&mut self) {
+    fn prev_field(&mut self) {
         self.field = (self.field + MCP_ADD_FIELDS - 1) % MCP_ADD_FIELDS;
     }
 
-    pub fn build_config(&self) -> Result<atman_runtime::mcp::McpServerConfig, String> {
+    fn current_editor(&mut self) -> Option<&mut crate::input::InputEditor> {
+        match self.field {
+            0 => Some(&mut self.name),
+            2 if self.transport_idx == 0 => Some(&mut self.command),
+            2 => Some(&mut self.url),
+            3 => Some(&mut self.args),
+            4 => Some(&mut self.env),
+            _ => None,
+        }
+    }
+
+    fn build_config(&self) -> Result<atman_runtime::mcp::McpServerConfig, String> {
         let name = self.name.buf().trim().to_string();
         if name.is_empty() {
             return Err("name is required".into());
         }
-
         let transport = self.transport();
-        let tier = self.tier();
-
-        let args: Vec<String> = self
-            .args
-            .buf()
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-
-        let env: Vec<(String, String)> = self
+        let command = self.command.buf().trim().to_string();
+        let url = self.url.buf().trim().to_string();
+        if transport == atman_runtime::mcp::TransportKind::Stdio && command.is_empty() {
+            return Err("command is required for stdio transport".into());
+        }
+        if transport != atman_runtime::mcp::TransportKind::Stdio && url.is_empty() {
+            return Err("url is required for http and sse transports".into());
+        }
+        let env = self
             .env
             .buf()
             .lines()
-            .filter_map(|l| {
-                let l = l.trim();
-                if l.is_empty() {
-                    return None;
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let (key, value) = line
+                    .split_once('=')
+                    .ok_or_else(|| format!("invalid environment entry {line:?}"))?;
+                let key = key.trim();
+                if key.is_empty() {
+                    return Err("environment variable name is required".into());
                 }
-                let (k, v) = l.split_once('=')?;
-                Some((k.trim().to_string(), v.trim().to_string()))
+                Ok((key.to_string(), value.trim().to_string()))
             })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut config = match &self.mode {
+            McpEditorMode::Add => {
+                atman_runtime::mcp::McpServerConfig::stdio("", "", Vec::new(), self.tier(), 30_000)
+            }
+            McpEditorMode::Edit { original, .. } => original.as_ref().clone(),
+        };
+        config.name = name;
+        config.transport = transport;
+        config.command = command;
+        config.url = (transport != atman_runtime::mcp::TransportKind::Stdio).then_some(url);
+        config.args = self
+            .args
+            .buf()
+            .split_whitespace()
+            .map(str::to_string)
             .collect();
+        config.env = env;
+        config.tier = self.tier();
+        Ok(config)
+    }
 
-        let timeout_ms = 30000;
-
-        Ok(match transport {
-            atman_runtime::mcp::TransportKind::Stdio => {
-                let command = self.command.buf().trim().to_string();
-                if command.is_empty() {
-                    return Err("command is required for stdio transport".into());
-                }
-                let mut cfg = atman_runtime::mcp::McpServerConfig::stdio(
-                    &name, &command, args, tier, timeout_ms,
-                );
-                cfg.env = env;
-                cfg
-            }
-            atman_runtime::mcp::TransportKind::Http => {
-                let url = self.url.buf().trim().to_string();
-                if url.is_empty() {
-                    return Err("url is required for http transport".into());
-                }
-                atman_runtime::mcp::McpServerConfig::http(&name, &url, None, tier, timeout_ms)
-            }
-            atman_runtime::mcp::TransportKind::Sse => {
-                let url = self.url.buf().trim().to_string();
-                if url.is_empty() {
-                    return Err("url is required for sse transport".into());
-                }
-                atman_runtime::mcp::McpServerConfig::sse(&name, &url, None, tier, timeout_ms)
-            }
+    fn save(&mut self) -> Result<&'static str, String> {
+        let config = self.build_config()?;
+        let hub = atman_runtime::config_hub::ConfigHub::global().map_err(|e| e.to_string())?;
+        match &self.mode {
+            McpEditorMode::Add => hub.upsert_mcp(config).map_err(|e| e.to_string())?,
+            McpEditorMode::Edit { original_name, .. } => hub
+                .replace_mcp(original_name, config)
+                .map_err(|e| e.to_string())?,
+        }
+        Ok(if matches!(self.mode, McpEditorMode::Add) {
+            "MCP server added"
+        } else {
+            "MCP server updated"
         })
+    }
+
+    fn mode_label(&self) -> &'static str {
+        if matches!(self.mode, McpEditorMode::Add) {
+            "Add MCP Server"
+        } else {
+            "Edit MCP Server"
+        }
     }
 }
 
-pub fn render_mcp_add_form(f: &mut ratatui::Frame, area: Rect, form: &McpAddForm) {
+fn render_mcp_editor(f: &mut ratatui::Frame, area: Rect, form: &mut McpEditor) {
     let t = theme();
     use ratatui::widgets::{Block, Clear};
 
@@ -609,7 +702,7 @@ pub fn render_mcp_add_form(f: &mut ratatui::Frame, area: Rect, form: &McpAddForm
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        " Add MCP Server",
+        format!(" {}", form.mode_label()),
         Style::default()
             .fg(t.accent.into())
             .add_modifier(Modifier::BOLD),
@@ -627,16 +720,38 @@ pub fn render_mcp_add_form(f: &mut ratatui::Frame, area: Rect, form: &McpAddForm
     };
 
     let val_style = Style::default().fg(t.tinted_fg.into());
+    let value_width = area.width.saturating_sub(2) as usize;
+    let mut cursor_offset = 0;
+    let display_value = |editor: &crate::input::InputEditor, active: bool, env: bool| {
+        let value = if env {
+            editor.buf().replace('\n', " · ")
+        } else {
+            editor.buf().to_owned()
+        };
+        let prefix = if env {
+            editor.buf()[..editor.cursor()].replace('\n', " · ")
+        } else {
+            editor.buf()[..editor.cursor()].to_owned()
+        };
+        let offset = if active {
+            width::width(&prefix).saturating_sub(value_width.saturating_sub(1))
+        } else {
+            0
+        };
+        (
+            width::trim_display_offset(&value, offset, value_width),
+            offset,
+        )
+    };
 
-    // Field 0: Name
     let active = form.field == 0;
     lines.push(Line::from(Span::styled(" Name:", label_style(active))));
-    lines.push(Line::from(Span::styled(
-        format!("  {}", form.name.buf()),
-        val_style,
-    )));
+    let (shown, offset) = display_value(&form.name, active, false);
+    if active {
+        cursor_offset = offset;
+    }
+    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
 
-    // Field 1: Transport
     let active = form.field == 1;
     lines.push(Line::from(Span::styled(" Transport:", label_style(active))));
     let transport_str = TRANSPORT_OPTIONS
@@ -656,33 +771,32 @@ pub fn render_mcp_add_form(f: &mut ratatui::Frame, area: Rect, form: &McpAddForm
         val_style,
     )));
 
-    // Field 2: Command (stdio) or URL (http/sse)
     let is_stdio = form.transport_idx == 0;
     let active = form.field == 2;
     let label = if is_stdio { " Command:" } else { " URL:" };
     lines.push(Line::from(Span::styled(label, label_style(active))));
-    let val = if is_stdio {
-        form.command.buf()
-    } else {
-        form.url.buf()
-    };
-    lines.push(Line::from(Span::styled(format!("  {val}"), val_style)));
+    let val = if is_stdio { &form.command } else { &form.url };
+    let (shown, offset) = display_value(val, active, false);
+    if active {
+        cursor_offset = offset;
+    }
+    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
 
-    // Field 3: Args
     let active = form.field == 3;
     lines.push(Line::from(Span::styled(" Args:", label_style(active))));
-    lines.push(Line::from(Span::styled(
-        format!("  {}", form.args.buf()),
-        val_style,
-    )));
+    let (shown, offset) = display_value(&form.args, active, false);
+    if active {
+        cursor_offset = offset;
+    }
+    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
 
-    // Field 4: Env
     let active = form.field == 4;
     lines.push(Line::from(Span::styled(" Env:", label_style(active))));
-    lines.push(Line::from(Span::styled(
-        format!("  {}", form.env.buf()),
-        val_style,
-    )));
+    let (shown, offset) = display_value(&form.env, active, true);
+    if active {
+        cursor_offset = offset;
+    }
+    lines.push(Line::from(Span::styled(format!("  {shown}"), val_style)));
 
     // Field 5: Tier
     let active = form.field == 5;
@@ -712,12 +826,115 @@ pub fn render_mcp_add_form(f: &mut ratatui::Frame, area: Rect, form: &McpAddForm
     }
 
     lines.push(Line::from(Span::styled(
-        " Tab cycle · ←→ change select · Enter save · Esc cancel",
+        " ←→ edit/select · ↑↓/Tab fields · Enter/Esc save",
         Style::default().fg(t.subtle_fg.into()),
     )));
 
     let para = Paragraph::new(lines);
     f.render_widget(para, area);
+
+    let field = form.field;
+    let cursor_y = area.y.saturating_add(match field {
+        0 => 3,
+        2 => 7,
+        3 => 9,
+        4 => 11,
+        _ => 0,
+    });
+    form.cursor_position = form.current_editor().and_then(|editor| {
+        let prefix = editor.buf()[..editor.cursor()].replace('\n', " · ");
+        let col = width::width(&prefix).saturating_sub(cursor_offset) as u16;
+        let x = area.x.saturating_add(2).saturating_add(col);
+        (x < area.right() && cursor_y < area.bottom()).then_some((x, cursor_y))
+    });
+}
+
+impl crate::wm::modal::ModalOverlay for McpEditor {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        _t: &crate::theme::Theme,
+    ) {
+        render_mcp_editor(f, area, self);
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        app: &mut crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> Option<crate::wm::modal::ModalAction> {
+        use crate::keys::KeyAction;
+        self.error = None;
+        match action {
+            KeyAction::Submit | KeyAction::Escape => match self.save() {
+                Ok(message) => {
+                    self.open = false;
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::TuiControl::McpReload);
+                    }
+                    app.push_toast(
+                        message.to_string(),
+                        crate::app::NoteLevel::Success,
+                        std::time::Duration::from_secs(3),
+                        crate::app::ToastPosition::TopRight,
+                    );
+                }
+                Err(error) => self.error = Some(error),
+            },
+            KeyAction::Tab | KeyAction::HistoryDown => self.next_field(),
+            KeyAction::BackTab | KeyAction::HistoryUp => self.prev_field(),
+            KeyAction::CursorLeft if self.field == 1 => {
+                self.transport_idx = self.transport_idx.saturating_sub(1);
+            }
+            KeyAction::CursorRight if self.field == 1 => {
+                self.transport_idx = (self.transport_idx + 1).min(TRANSPORT_OPTIONS.len() - 1);
+            }
+            KeyAction::CursorLeft if self.field == 5 => {
+                self.tier_idx = self.tier_idx.saturating_sub(1);
+            }
+            KeyAction::CursorRight if self.field == 5 => {
+                self.tier_idx = (self.tier_idx + 1).min(TIER_OPTIONS.len() - 1);
+            }
+            KeyAction::Newline if self.field != 4 => {}
+            _ => {
+                if let Some(editor) = self.current_editor() {
+                    editor.handle_key(action);
+                }
+            }
+        }
+        Some(crate::wm::modal::ModalAction::Consumed)
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        self.cursor_position
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from(self.mode_label())
+    }
+
+    fn icon(&self) -> &str {
+        "⚙"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        let field = self.field;
+        if let Some(editor) = self.current_editor() {
+            if field == 4 {
+                editor.paste_multiline(text);
+            } else {
+                editor.paste_single_line(text);
+            }
+        }
+        self.error = None;
+    }
 }
 
 #[cfg(test)]
@@ -728,6 +945,137 @@ mod tests {
     };
     use ratatui::backend::TestBackend;
     use std::collections::HashMap;
+
+    #[test]
+    fn editor_env_horizontal_keys_edit_and_vertical_keys_change_fields() {
+        let mut editor = McpEditor::default();
+        editor.open_add();
+        editor.field = 4;
+        editor.env.replace_with("FIRST=one\nSECOND=two");
+        let original_cursor = editor.env.cursor();
+        let mut app = crate::app::AppState::new("session".into(), None);
+
+        crate::wm::modal::ModalOverlay::handle_key(
+            &mut editor,
+            &crate::keys::KeyAction::CursorLeft,
+            &mut app,
+            None,
+        );
+        assert_eq!(editor.field, 4);
+        assert!(editor.env.cursor() < original_cursor);
+
+        crate::wm::modal::ModalOverlay::handle_key(
+            &mut editor,
+            &crate::keys::KeyAction::HistoryUp,
+            &mut app,
+            None,
+        );
+        assert_eq!(editor.field, 3);
+        crate::wm::modal::ModalOverlay::handle_key(
+            &mut editor,
+            &crate::keys::KeyAction::HistoryDown,
+            &mut app,
+            None,
+        );
+        assert_eq!(editor.field, 4);
+
+        editor.env.move_end();
+        crate::wm::modal::ModalOverlay::handle_paste(&mut editor, "\r\nTHIRD=three");
+        assert_eq!(editor.env.buf(), "FIRST=one\nSECOND=two\nTHIRD=three");
+    }
+
+    #[test]
+    fn editor_long_values_keep_cursor_inside_the_visible_row() {
+        let mut editor = McpEditor::default();
+        editor.open_add();
+        editor.field = 4;
+        editor
+            .env
+            .replace_with("FIRST=one\nSECOND=a-very-long-environment-value");
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(30, 20)).unwrap();
+        let area = Rect::new(2, 1, 20, 18);
+        terminal
+            .draw(|frame| render_mcp_editor(frame, area, &mut editor))
+            .unwrap();
+        assert_eq!(editor.cursor_position, Some((21, 12)));
+
+        editor.field = 0;
+        editor.name.replace_with("a-very-long-server-name");
+        terminal
+            .draw(|frame| render_mcp_editor(frame, area, &mut editor))
+            .unwrap();
+        assert_eq!(editor.cursor_position, Some((21, 4)));
+    }
+
+    #[test]
+    fn editor_edit_preserves_fields_not_exposed_by_the_form() {
+        let mut original = atman_runtime::mcp::McpServerConfig::http(
+            "server",
+            "https://old.example",
+            Some("secret".into()),
+            atman_runtime::tool::Tier::Three,
+            45_000,
+        );
+        original.headers = vec![("X-Test".into(), "value".into())];
+        original.disabled = true;
+        let mut editor = McpEditor::default();
+        editor.open_edit(original);
+        editor.name.replace_with("renamed");
+        editor.url.replace_with("https://new.example");
+
+        let updated = editor.build_config().unwrap();
+        assert_eq!(updated.name, "renamed");
+        assert_eq!(updated.url.as_deref(), Some("https://new.example"));
+        assert_eq!(updated.auth_token.as_deref(), Some("secret"));
+        assert_eq!(updated.headers, [("X-Test".into(), "value".into())]);
+        assert_eq!(updated.timeout_ms, 45_000);
+        assert!(updated.disabled);
+    }
+
+    #[test]
+    fn panel_exposes_add_and_edit_mouse_actions() {
+        let servers = vec![connected_server("server", Vec::new())];
+        let expanded = HashSet::new();
+        let resources = HashMap::new();
+        let prompts = HashMap::new();
+        let mut hitmap = WmHitmap::default();
+        let mut projection = McpPanelProjection::default();
+        let mut scroll = 0;
+        let backend = TestBackend::new(90, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_panel(
+                    frame,
+                    frame.area(),
+                    &mut scroll,
+                    &servers,
+                    &expanded,
+                    0,
+                    &None,
+                    &mut hitmap,
+                    &McpBrowserState {
+                        tab: McpBrowserTab::Tools,
+                        content_revision: 0,
+                        resources: &resources,
+                        prompts: &prompts,
+                    },
+                    crate::wm::WindowId(1),
+                    &mut projection,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(hitmap.mcp_action_rects.len(), 2);
+        assert_eq!(
+            hitmap.mcp_action_rects[0].1,
+            crate::wm::component::McpPanelAction::Add
+        );
+        assert_eq!(
+            hitmap.mcp_action_rects[1].1,
+            crate::wm::component::McpPanelAction::Edit
+        );
+    }
 
     fn connected_server(name: &str, tools: Vec<McpToolInfo>) -> McpServerStatus {
         McpServerStatus {

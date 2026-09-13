@@ -1084,7 +1084,6 @@ pub struct AppState {
     pub expanded_mcp_servers: HashSet<String>,
     pub mcp_selected: usize,
     pub mcp_remove_armed: Option<String>,
-    pub mcp_add_form: Option<crate::mcp_manager::McpAddForm>,
     pub mcp_browser_tab: crate::mcp_manager::McpBrowserTab,
     pub mcp_content_revision: u64,
     pub mcp_resources_cache:
