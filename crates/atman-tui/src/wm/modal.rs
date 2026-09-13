@@ -422,6 +422,22 @@ impl ModalManager {
         self.drain_provider_feedback(app);
     }
 
+    pub(super) fn handle_model_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        self.model_manager.handle_mouse(event, tx);
+    }
+
+    pub(super) fn handle_alias_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        self.alias_manager.handle_mouse(event, tx);
+    }
+
     pub(super) fn handle_session_switcher_mouse(&mut self, event: &crossterm::event::MouseEvent) {
         self.session_switcher.handle_mouse(event);
     }

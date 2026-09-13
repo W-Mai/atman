@@ -103,6 +103,16 @@ impl ModelBrowser {
         self.selected
     }
 
+    pub fn select_visible_row(&mut self, row: usize) -> bool {
+        let index = self.viewport.saturating_add(row);
+        if !self.rows.get(index).is_some_and(|entry| entry.selectable) {
+            return false;
+        }
+        self.selected = index;
+        self.ensure_visible(self.visible_rows);
+        true
+    }
+
     pub fn viewport(&self) -> usize {
         self.viewport
     }

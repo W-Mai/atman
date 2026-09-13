@@ -35,6 +35,13 @@ pub struct ModelManager {
     context_budget_editor: InputEditor,
     thinking_editor: InputEditor,
     max_tokens_editor: InputEditor,
+    next_request_id: u64,
+    pending: Option<crate::ModelMutationRequest>,
+    confirm_delete: Option<String>,
+    list_rect: Option<Rect>,
+    save_rect: Option<Rect>,
+    confirm_yes_rect: Option<Rect>,
+    confirm_no_rect: Option<Rect>,
 }
 
 impl ModelManager {
@@ -54,10 +61,121 @@ impl ModelManager {
     pub fn close(&mut self) {
         self.open = false;
         self.show_form = false;
+        self.confirm_delete = None;
     }
 
     pub fn has_text_focus(&self) -> bool {
         self.show_form
+    }
+
+    pub fn handle_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if self.pending.is_some() {
+            return;
+        }
+        let point = (event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_yes_rect, point) => {
+                self.handle_key(&KeyAction::Submit, control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_no_rect, point) => {
+                self.handle_key(&KeyAction::Escape, control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.save_rect, point) => {
+                self.handle_key(&KeyAction::Submit, control_tx);
+            }
+            MouseEventKind::Down(button) if rect_hit(self.list_rect, point) => {
+                let rect = self.list_rect.expect("matched list rect");
+                if self
+                    .browser
+                    .select_visible_row(usize::from(event.row.saturating_sub(rect.y)))
+                {
+                    self.apply_browser_selection();
+                    if button == MouseButton::Right {
+                        self.handle_key(&KeyAction::Char('d'), control_tx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn is_config_model(name: &str) -> bool {
+        atman_runtime::config_hub::ConfigHub::global()
+            .and_then(|hub| hub.model_config())
+            .ok()
+            .flatten()
+            .is_some_and(|config| config.models.contains_key(name))
+    }
+
+    fn begin_mutation(
+        &mut self,
+        action: crate::ModelMutation,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        let Some(tx) = control_tx else {
+            atman_runtime::notify!(error, "Model operation is unavailable");
+            return false;
+        };
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let request = crate::ModelMutationRequest {
+            request_id: self.next_request_id,
+            action,
+        };
+        if tx
+            .send(crate::TuiControl::MutateModel(request.clone()))
+            .is_err()
+        {
+            atman_runtime::notify!(error, "Model operation is unavailable");
+            return false;
+        }
+        self.pending = Some(request);
+        true
+    }
+
+    pub(crate) fn resolve_mutation(
+        &mut self,
+        request: &crate::ModelMutationRequest,
+        result: &Result<crate::ModelMutationSuccess, String>,
+    ) -> bool {
+        if self.pending.as_ref() != Some(request) {
+            return false;
+        }
+        self.pending = None;
+        let matches = matches!(
+            (&request.action, result),
+            (
+                crate::ModelMutation::Upsert { name, .. },
+                Ok(crate::ModelMutationSuccess::Saved { name: saved })
+            ) if name == saved
+        ) || matches!(
+            (&request.action, result),
+            (
+                crate::ModelMutation::Remove { name },
+                Ok(crate::ModelMutationSuccess::Removed { name: removed })
+            ) if name == removed
+        );
+        if !matches {
+            return true;
+        }
+        match &request.action {
+            crate::ModelMutation::Upsert { .. } => {
+                self.show_form = false;
+                self.editing = None;
+            }
+            crate::ModelMutation::Remove { .. } => {
+                self.confirm_delete = None;
+            }
+        }
+        self.refresh();
+        true
     }
 
     pub fn refresh(&mut self) {
@@ -235,6 +353,21 @@ impl ModelManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
+        if self.pending.is_some() {
+            return;
+        }
+        if let Some(name) = self.confirm_delete.clone() {
+            match action {
+                KeyAction::Submit | KeyAction::Char('y') | KeyAction::Char('Y') => {
+                    self.begin_mutation(crate::ModelMutation::Remove { name }, control_tx);
+                }
+                KeyAction::Escape | KeyAction::Char('n') | KeyAction::Char('N') => {
+                    self.confirm_delete = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.show_form {
             self.handle_form_key(action, control_tx);
             return;
@@ -253,12 +386,35 @@ impl ModelManager {
                 self.apply_browser_selection();
             }
             KeyAction::Char('n') => self.open_form(),
+            KeyAction::Char('d') => {
+                if let Some(name) = self.current_model().map(|model| model.slug.clone()) {
+                    if Self::is_config_model(&name) {
+                        self.confirm_delete = Some(name);
+                    } else {
+                        atman_runtime::notify!(
+                            warn,
+                            "Discovered and preset models cannot be deleted"
+                        );
+                    }
+                }
+            }
             KeyAction::Char('a') => {
                 if let Some(m) = self.current_model() {
                     self.open_alias_model = Some(m.slug.clone());
                 }
             }
-            KeyAction::Submit => self.open_edit(),
+            KeyAction::Submit => {
+                if let Some(name) = self.current_model().map(|model| model.slug.clone()) {
+                    if Self::is_config_model(&name) {
+                        self.open_edit();
+                    } else {
+                        atman_runtime::notify!(
+                            warn,
+                            "Discovered and preset models cannot be edited"
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -284,12 +440,7 @@ impl ModelManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         match action {
-            KeyAction::Escape if self.editing.is_none() => self.commit_form(control_tx),
-            KeyAction::Escape => {
-                self.show_form = false;
-                self.editing = None;
-            }
-            KeyAction::Submit => self.commit_form(control_tx),
+            KeyAction::Escape | KeyAction::Submit => self.commit_form(control_tx),
             KeyAction::Tab => self.form_field = (self.form_field + 1) % 6,
             KeyAction::BackTab => {
                 self.form_field = if self.form_field == 0 {
@@ -373,41 +524,52 @@ impl ModelManager {
         }
         let model = self.model_editor.buf().trim().to_string();
         let provider = self.selected_provider.clone();
-        let context_budget: u64 = self
-            .context_budget_editor
-            .buf()
-            .trim()
-            .parse()
-            .unwrap_or(32768);
+        let context_budget = if self.context_budget_editor.buf().trim().is_empty() {
+            32768
+        } else {
+            let Ok(value) = self.context_budget_editor.buf().trim().parse() else {
+                atman_runtime::notify!(error, "Context Budget must be a positive integer");
+                return;
+            };
+            value
+        };
         let Some(reasoning) = parse_reasoning(self.thinking_editor.buf()) else {
+            atman_runtime::notify!(error, "Reasoning value is invalid");
             return;
         };
-        let max_tokens: Option<u32> = self.max_tokens_editor.buf().trim().parse().ok();
-
-        let Some(tx) = control_tx else {
-            return;
+        let max_tokens = if self.max_tokens_editor.buf().trim().is_empty() {
+            None
+        } else {
+            let Ok(value) = self.max_tokens_editor.buf().trim().parse() else {
+                atman_runtime::notify!(error, "Max Tokens must be a positive integer");
+                return;
+            };
+            Some(value)
         };
-        let _ = tx.send(crate::TuiControl::UpsertConfigModel {
-            old_name: self.editing.clone(),
-            name,
-            model: if model.is_empty() {
-                self.name_editor.buf().trim().to_string()
-            } else {
-                model
+        self.begin_mutation(
+            crate::ModelMutation::Upsert {
+                old_name: self.editing.clone(),
+                name: name.clone(),
+                model: if model.is_empty() { name } else { model },
+                provider: if provider.is_empty() {
+                    None
+                } else {
+                    Some(provider)
+                },
+                context_budget,
+                reasoning,
+                max_tokens,
+                enabled: true,
             },
-            provider: if provider.is_empty() {
-                None
-            } else {
-                Some(provider)
-            },
-            context_budget,
-            reasoning,
-            max_tokens,
-            enabled: true,
-        });
-        self.show_form = false;
-        self.editing = None;
+            control_tx,
+        );
     }
+}
+
+fn rect_hit(rect: Option<Rect>, point: (u16, u16)) -> bool {
+    rect.is_some_and(|rect| {
+        point.0 >= rect.x && point.0 < rect.right() && point.1 >= rect.y && point.1 < rect.bottom()
+    })
 }
 
 impl crate::wm::modal::ModalOverlay for ModelManager {
@@ -418,6 +580,27 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.list_rect = None;
+        self.save_rect = None;
+        self.confirm_yes_rect = None;
+        self.confirm_no_rect = None;
+        if let Some(name) = self.confirm_delete.as_deref() {
+            let button_y = area.y + area.height / 2 + 2;
+            self.confirm_yes_rect = Some(Rect {
+                x: area.x,
+                y: button_y,
+                width: area.width / 2,
+                height: 1,
+            });
+            self.confirm_no_rect = Some(Rect {
+                x: area.x + area.width / 2,
+                y: button_y,
+                width: area.width - area.width / 2,
+                height: 1,
+            });
+            render_delete_confirm(f, area, "model", name, t);
+            return;
+        }
         if self.show_form {
             self.render_form(f, area, t);
             return;
@@ -674,18 +857,16 @@ impl ModelManager {
         }
         y += 1;
         if y < inner.bottom() {
-            let escape_action = if self.editing.is_some() {
-                "Esc: cancel"
-            } else {
-                "Esc: add"
-            };
+            self.save_rect = Some(Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            });
             let help = if matches!(self.form_field, 2 | 4) {
-                crate::directional_selector::footer_help(
-                    " Tab: next field",
-                    &format!("Enter: save  {escape_action}"),
-                )
+                crate::directional_selector::footer_help(" Tab: next field", "Enter/Esc: save")
             } else {
-                format!(" Tab: next field  Enter: save  {escape_action}")
+                " Tab: next field  Enter/Esc: save".to_string()
             };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -699,6 +880,52 @@ impl ModelManager {
             f.set_cursor_position((x, y));
         }
     }
+}
+
+fn render_delete_confirm(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    kind: &str,
+    name: &str,
+    theme: &crate::theme::Theme,
+) {
+    let w = area.width.saturating_sub(4).clamp(40, 60);
+    let h = 9u16;
+    let dlg = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        dlg,
+        Line::from(" Delete? "),
+        "⚠",
+        theme.warn.into(),
+        true,
+        theme,
+    );
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("Delete {kind} \"{name}\"?"),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "This change cannot be undone.",
+                Style::default().fg(theme.meta_fg.into()),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  y / Enter: confirm    n / Esc: cancel",
+                Style::default().fg(theme.meta_fg.into()),
+            )),
+        ])
+        .alignment(ratatui::layout::Alignment::Center),
+        inner,
+    );
 }
 
 #[cfg(test)]
@@ -765,36 +992,117 @@ mod tests {
 
         manager.handle_key(&KeyAction::Escape, Some(&tx));
 
-        assert!(!manager.show_form);
-        match rx.try_recv().unwrap() {
-            crate::TuiControl::UpsertConfigModel {
-                old_name,
+        assert!(manager.show_form);
+        let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
+            panic!("unexpected control message");
+        };
+        assert!(matches!(
+            &request.action,
+            crate::ModelMutation::Upsert {
+                old_name: None,
                 name,
                 model,
                 ..
-            } => {
-                assert_eq!(old_name, None);
-                assert_eq!(name, "vendor/model");
-                assert_eq!(model, "vendor/model");
-            }
-            _ => panic!("unexpected control message"),
-        }
+            } if name == "vendor/model" && model == "vendor/model"
+        ));
+        assert!(manager.resolve_mutation(
+            &request,
+            &Ok(crate::ModelMutationSuccess::Saved {
+                name: "vendor/model".into()
+            })
+        ));
+        assert!(!manager.show_form);
     }
 
     #[test]
-    fn edit_form_escape_cancels_without_submitting() {
+    fn edit_form_escape_submits_and_failure_keeps_form() {
         let mut manager = ModelManager {
             show_form: true,
             editing: Some("vendor/model".into()),
+            selected_provider: "vendor".into(),
             ..Default::default()
         };
+        manager.name_editor.insert_str("vendor/model");
+        manager.thinking_editor.insert_str("default");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         manager.handle_key(&KeyAction::Escape, Some(&tx));
 
-        assert!(!manager.show_form);
-        assert!(manager.editing.is_none());
-        assert!(rx.try_recv().is_err());
+        let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
+            panic!("unexpected control message");
+        };
+        assert!(manager.show_form);
+        assert!(manager.resolve_mutation(&request, &Err("write failed".into())));
+        assert!(manager.show_form);
+        assert_eq!(manager.editing.as_deref(), Some("vendor/model"));
+    }
+
+    #[test]
+    fn delete_failure_keeps_confirmation_for_retry() {
+        let mut manager = ModelManager {
+            confirm_delete: Some("vendor/model".into()),
+            ..Default::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        manager.handle_key(&KeyAction::Submit, Some(&tx));
+
+        let crate::TuiControl::MutateModel(request) = rx.try_recv().unwrap() else {
+            panic!("unexpected control message");
+        };
+        assert!(matches!(
+            request.action,
+            crate::ModelMutation::Remove { ref name } if name == "vendor/model"
+        ));
+        assert!(manager.resolve_mutation(&request, &Err("write failed".into())));
+        assert_eq!(manager.confirm_delete.as_deref(), Some("vendor/model"));
+        assert!(manager.pending.is_none());
+    }
+
+    #[test]
+    fn delete_confirmation_renders_and_mouse_cancel_closes_it() {
+        let mut manager = ModelManager {
+            confirm_delete: Some("vendor/model".into()),
+            ..Default::default()
+        };
+        let app = crate::app::AppState::new("session".into(), None);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <ModelManager as crate::wm::modal::ModalOverlay>::render_content(
+                    &mut manager,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &theme,
+                );
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("Delete model \"vendor/model\"?"));
+        assert!(manager.list_rect.is_none());
+        assert!(manager.save_rect.is_none());
+        let cancel = manager.confirm_no_rect.unwrap();
+        manager.handle_mouse(
+            &crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: cancel.x,
+                row: cancel.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            None,
+        );
+        assert!(manager.confirm_delete.is_none());
     }
 
     #[test]

@@ -2156,42 +2156,11 @@ async fn cmd_repl_once(
                             async move { execute_provider_mutation(&lifecycle, action).await },
                         );
                     }
-                    atman_tui::TuiControl::UpsertConfigModel {
-                        old_name,
-                        name,
-                        model,
-                        provider,
-                        context_budget,
-                        reasoning,
-                        max_tokens,
-                        enabled,
-                    } => {
-                        match atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
-                            hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
-                                old_name: old_name.as_deref(),
-                                name: &name,
-                                model: &model,
-                                provider: provider.as_deref(),
-                                context_budget,
-                                reasoning,
-                                capabilities: None,
-                                image_detail: None,
-                                max_tokens,
-                                enabled,
-                            })
-                        }) {
-                            Ok(()) => {
-                                let _ = cmd_tx_for_models.send(
-                                    atman_tui::TuiCommand::ProviderCatalogChanged {
-                                        added_provider: None,
-                                    },
-                                );
-                                atman_runtime::notify!(success, "Model \"{name}\" saved");
-                            }
-                            Err(e) => {
-                                atman_runtime::notify!(error, "Model \"{name}\" save failed: {e}");
-                            }
-                        }
+                    atman_tui::TuiControl::MutateModel(request) => {
+                        let result = execute_model_mutation(&request.action)
+                            .map_err(|error| error.to_string());
+                        let _ = cmd_tx_for_models
+                            .send(atman_tui::TuiCommand::ModelMutationResult { request, result });
                     }
                     atman_tui::TuiControl::OpenAliasManager { .. } => {
                         // handled internally in the TUI — no-op here
@@ -3465,6 +3434,10 @@ async fn execute_provider_mutation(
                 catalog: None,
             })
         }
+        atman_tui::ProviderMutation::RemoveConfig { name } => {
+            lifecycle.remove_config_provider(&name)?;
+            Ok(atman_tui::ProviderMutationSuccess::ConfigRemoved { name })
+        }
         atman_tui::ProviderMutation::Refresh { provider_id } => {
             let delta = lifecycle.refresh_models(&provider_id).await?;
             Ok(atman_tui::ProviderMutationSuccess::Refreshed { provider_id, delta })
@@ -3514,6 +3487,42 @@ async fn execute_provider_mutation(
             })
         }
         _ => bail!("provider mutation is not supported by this host"),
+    }
+}
+
+fn execute_model_mutation(
+    action: &atman_tui::ModelMutation,
+) -> Result<atman_tui::ModelMutationSuccess> {
+    let hub = atman_runtime::config_hub::ConfigHub::global()?;
+    match action {
+        atman_tui::ModelMutation::Upsert {
+            old_name,
+            name,
+            model,
+            provider,
+            context_budget,
+            reasoning,
+            max_tokens,
+            enabled,
+        } => {
+            hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
+                old_name: old_name.as_deref(),
+                name,
+                model,
+                provider: provider.as_deref(),
+                context_budget: *context_budget,
+                reasoning: reasoning.clone(),
+                capabilities: None,
+                image_detail: None,
+                max_tokens: *max_tokens,
+                enabled: *enabled,
+            })?;
+            Ok(atman_tui::ModelMutationSuccess::Saved { name: name.clone() })
+        }
+        atman_tui::ModelMutation::Remove { name } => {
+            hub.remove_model(name)?;
+            Ok(atman_tui::ModelMutationSuccess::Removed { name: name.clone() })
+        }
     }
 }
 

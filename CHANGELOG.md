@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Provider, model, and alias management** — Editing forms save on `Esc`, destructive actions require confirmation, configuration-backed entries delete through acknowledged persistence paths, and referenced providers or models remain intact with an actionable error.
 - **Session exit summary alignment** — Usage, work, goal, and plan content share the same left and right boundaries as the surrounding session identity and resume blocks.
 
 ## [1.11.0] — 2026-09-09

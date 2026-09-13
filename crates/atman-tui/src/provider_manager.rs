@@ -93,6 +93,10 @@ pub struct ProviderManager {
     pub selected: usize,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
     pub test_btn_rect: Option<Rect>,
+    list_rect: Option<Rect>,
+    save_rect: Option<Rect>,
+    confirm_yes_rect: Option<Rect>,
+    confirm_no_rect: Option<Rect>,
     show_add: bool,
     focus: ProviderFocus,
     add_options: Vec<AddProviderOption>,
@@ -113,6 +117,7 @@ pub struct ProviderManager {
     confirm_kind: Option<ConfirmKind>,
     confirm_provider_id: Option<String>,
     confirm_provider_name: String,
+    confirm_config_provider: bool,
     next_mutation_request_id: u64,
     pending_mutation: Option<crate::ProviderMutationRequest>,
     feedback: Option<ProviderFeedback>,
@@ -157,26 +162,33 @@ impl ProviderManager {
         me: &crossterm::event::MouseEvent,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if self.pending_mutation.is_some() || !self.in_form {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if self.pending_mutation.is_some() {
             return;
         }
-        let Some(rect) = self.test_btn_rect else {
-            return;
-        };
-        let col = me.column;
-        let row = me.row;
-        let hit = col >= rect.x
-            && col < rect.x + rect.width
-            && row >= rect.y
-            && row < rect.y + rect.height;
-        use crossterm::event::MouseEventKind;
+        let point = (me.column, me.row);
         match me.kind {
-            MouseEventKind::Moved if hit => {
-                self.form_field = 7;
+            MouseEventKind::Down(MouseButton::Left) if hit(self.confirm_yes_rect, point) => {
+                self.execute_confirm(control_tx);
             }
-            MouseEventKind::Down(crossterm::event::MouseButton::Left) if hit => {
+            MouseEventKind::Down(MouseButton::Left) if hit(self.confirm_no_rect, point) => {
+                self.show_confirm = false;
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit(self.save_rect, point) => {
+                self.commit_form(control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if hit(self.test_btn_rect, point) => {
                 self.test_form(control_tx);
             }
+            MouseEventKind::Down(button) if hit(self.list_rect, point) => {
+                let rect = self.list_rect.expect("matched list rect");
+                self.selected = usize::from(me.row.saturating_sub(rect.y))
+                    .min(self.providers.len().saturating_sub(1));
+                if button == MouseButton::Right {
+                    self.request_confirm(ConfirmKind::Delete);
+                }
+            }
+            MouseEventKind::Moved if hit(self.test_btn_rect, point) => self.form_field = 7,
             _ => {}
         }
     }
@@ -208,13 +220,12 @@ impl ProviderManager {
     fn pending_help(&self) -> Option<&'static str> {
         let request = self.pending_mutation.as_ref()?;
         Some(match &request.action {
-            crate::ProviderMutation::Login { .. } => "waiting for OAuth login…  Esc:hide",
-            crate::ProviderMutation::SetEnabled { .. } => "updating provider state…  Esc:hide",
-            crate::ProviderMutation::Remove { .. } => "removing provider…  Esc:hide",
-            crate::ProviderMutation::Refresh { .. } => "refreshing models…  Esc:hide",
-            crate::ProviderMutation::UpsertConfig { .. } => {
-                "saving provider configuration…  Esc:hide"
-            }
+            crate::ProviderMutation::Login { .. } => "waiting for OAuth login…",
+            crate::ProviderMutation::SetEnabled { .. } => "updating provider state…",
+            crate::ProviderMutation::Remove { .. }
+            | crate::ProviderMutation::RemoveConfig { .. } => "removing provider…",
+            crate::ProviderMutation::Refresh { .. } => "refreshing models…",
+            crate::ProviderMutation::UpsertConfig { .. } => "saving provider configuration…",
         })
     }
 
@@ -378,7 +389,7 @@ impl ProviderManager {
     ) -> Option<ModalAction> {
         if self.pending_mutation.is_some() {
             if matches!(action, KeyAction::Escape) {
-                self.open = false;
+                self.close();
             }
             return Some(ModalAction::Consumed);
         }
@@ -515,17 +526,23 @@ impl ProviderManager {
     }
 
     fn request_confirm(&mut self, kind: ConfirmKind) {
-        if let Some(ProviderEntry {
-            source: ProviderSource::AuthStore { id },
-            name,
-            ..
-        }) = self.providers.get(self.selected)
-        {
-            self.show_confirm = true;
-            self.confirm_kind = Some(kind);
-            self.confirm_provider_id = Some(id.clone());
-            self.confirm_provider_name = name.clone();
-        }
+        let Some(provider) = self.providers.get(self.selected) else {
+            return;
+        };
+        let (id, config) = match &provider.source {
+            ProviderSource::AuthStore { id } => (id.clone(), false),
+            ProviderSource::Config if kind == ConfirmKind::Delete => (provider.name.clone(), true),
+            ProviderSource::Env => {
+                atman_runtime::notify!(warn, "Environment providers cannot be deleted");
+                return;
+            }
+            ProviderSource::Config => return,
+        };
+        self.show_confirm = true;
+        self.confirm_kind = Some(kind);
+        self.confirm_provider_id = Some(id);
+        self.confirm_provider_name = provider.name.clone();
+        self.confirm_config_provider = config;
     }
 
     fn execute_confirm(
@@ -535,11 +552,15 @@ impl ProviderManager {
         let Some(id) = self.confirm_provider_id.clone() else {
             return;
         };
+        let action = if self.confirm_config_provider {
+            crate::ProviderMutation::RemoveConfig { name: id }
+        } else {
+            crate::ProviderMutation::Remove { provider_id: id }
+        };
         let outcome = match self.confirm_kind {
-            Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => self.begin_mutation(
-                crate::ProviderMutation::Remove { provider_id: id },
-                control_tx,
-            ),
+            Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => {
+                self.begin_mutation(action, control_tx)
+            }
             None => ProviderDispatchOutcome::Busy,
         };
         if matches!(outcome, ProviderDispatchOutcome::Started) {
@@ -769,19 +790,10 @@ impl ProviderManager {
         if self.in_form {
             if self.form_field == 7 {
                 match action {
-                    KeyAction::Escape => {
-                        if self.editing_provider.is_some() {
-                            self.show_add = false;
-                            self.in_form = false;
-                            self.editing_provider = None;
-                            self.form_max_tokens = None;
-                        } else {
-                            self.in_form = false;
-                        }
+                    KeyAction::Escape | KeyAction::Submit => {
+                        return self.commit_form(control_tx);
                     }
-                    KeyAction::Submit => {
-                        self.test_form(control_tx);
-                    }
+                    KeyAction::Char('t') => self.test_form(control_tx),
                     KeyAction::Tab => {
                         self.form_field = if self.editing_provider.is_some() {
                             1
@@ -807,17 +819,7 @@ impl ProviderManager {
                 _ => &mut self.enabled_editor,
             };
             match action {
-                KeyAction::Escape => {
-                    if self.editing_provider.is_some() {
-                        self.show_add = false;
-                        self.in_form = false;
-                        self.editing_provider = None;
-                        self.form_max_tokens = None;
-                    } else {
-                        self.in_form = false;
-                    }
-                }
-                KeyAction::Submit => {
+                KeyAction::Escape | KeyAction::Submit => {
                     return self.commit_form(control_tx);
                 }
                 KeyAction::Tab => {
@@ -1040,6 +1042,12 @@ impl ProviderManager {
     }
 }
 
+fn hit(rect: Option<Rect>, point: (u16, u16)) -> bool {
+    rect.is_some_and(|rect| {
+        point.0 >= rect.x && point.0 < rect.right() && point.1 >= rect.y && point.1 < rect.bottom()
+    })
+}
+
 fn non_empty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -1077,6 +1085,10 @@ fn mutation_success_matches(
                 ..
             },
         ) => provider_id == changed_id,
+        (
+            crate::ProviderMutation::RemoveConfig { name },
+            crate::ProviderMutationSuccess::ConfigRemoved { name: removed_name },
+        ) => name == removed_name,
         (
             crate::ProviderMutation::Refresh { provider_id },
             crate::ProviderMutationSuccess::Refreshed {
@@ -1436,8 +1448,8 @@ fn render_add_dialog(
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 crate::directional_selector::footer_help(
-                    "Tab/Shift+Tab cycle · Enter:save/test",
-                    "Esc:cancel",
+                    "Tab/Shift+Tab cycle · t:test",
+                    "Enter/Esc:save",
                 ),
                 Style::default().fg(theme.subtle_fg.into()),
             ))),
@@ -1598,6 +1610,19 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             return;
         }
         if self.show_confirm {
+            let button_y = area.y + area.height / 2 + 2;
+            self.confirm_yes_rect = Some(Rect {
+                x: area.x,
+                y: button_y,
+                width: area.width / 2,
+                height: 1,
+            });
+            self.confirm_no_rect = Some(Rect {
+                x: area.x + area.width / 2,
+                y: button_y,
+                width: area.width - area.width / 2,
+                height: 1,
+            });
             render_confirm_dialog(f, area, self, t);
             return;
         }
@@ -1619,6 +1644,12 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(main);
         let left_col = columns[0];
+        self.list_rect = Some(Rect {
+            x: left_col.x,
+            y: left_col.y + 2,
+            width: left_col.width,
+            height: left_col.height.saturating_sub(3),
+        });
         let right_col = Rect {
             x: columns[1].x + 1,
             width: columns[1].width.saturating_sub(1),
@@ -2088,6 +2119,32 @@ mod tests {
             .unwrap();
 
         assert!(manager.test_btn_rect.is_none());
+    }
+
+    #[test]
+    fn config_edit_escape_submits_and_failure_keeps_form() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = ProviderManager::default();
+        populate_config_form(&mut manager, Some("gateway"));
+
+        manager.handle_add_key(&KeyAction::Escape, Some(&tx));
+
+        let request = receive_mutation(&mut rx);
+        assert!(matches!(
+            request.action,
+            crate::ProviderMutation::UpsertConfig {
+                ref name,
+                create: false,
+                ..
+            } if name == "gateway"
+        ));
+        assert!(manager.in_form);
+        assert_eq!(
+            manager.resolve_mutation(&request, &Err("write failed".into())),
+            ProviderMutationResolution::Failed
+        );
+        assert!(manager.in_form);
+        assert_eq!(manager.editing_provider.as_deref(), Some("gateway"));
     }
 
     #[test]

@@ -1625,6 +1625,9 @@ pub(crate) async fn run_frames(
                         TuiCommand::ProviderMutationResult { request, result } => {
                             apply_provider_mutation_result(&mut app, request, result);
                         }
+                        TuiCommand::ModelMutationResult { request, result } => {
+                            apply_model_mutation_result(&mut app, request, result);
+                        }
                         TuiCommand::ProviderTestResult((msg, ok)) => {
                             let level = if ok {
                                 app::NoteLevel::Success
@@ -1810,11 +1813,66 @@ fn apply_provider_mutation_result(
                 },
                 app::NoteLevel::Success,
             ),
+            Ok(crate::ProviderMutationSuccess::ConfigRemoved { name }) => {
+                (format!("{name} removed"), app::NoteLevel::Success)
+            }
             Err(error) => (
                 format!("provider update failed: {error}"),
                 app::NoteLevel::Error,
             ),
         }
+    };
+    app.app.push_toast(
+        message,
+        level,
+        std::time::Duration::from_secs(5),
+        app::ToastPosition::TopRight,
+    );
+}
+
+fn apply_model_mutation_result(
+    app: &mut UiState,
+    request: crate::ModelMutationRequest,
+    result: Result<crate::ModelMutationSuccess, String>,
+) {
+    if !app
+        .wm
+        .modals
+        .model_manager
+        .resolve_mutation(&request, &result)
+    {
+        return;
+    }
+    let matched = matches!(
+        (&request.action, &result),
+        (
+            crate::ModelMutation::Upsert { name, .. },
+            Ok(crate::ModelMutationSuccess::Saved { name: saved })
+        ) if name == saved
+    ) || matches!(
+        (&request.action, &result),
+        (
+            crate::ModelMutation::Remove { name },
+            Ok(crate::ModelMutationSuccess::Removed { name: removed })
+        ) if name == removed
+    );
+    let (message, level) = match result {
+        Ok(crate::ModelMutationSuccess::Saved { name }) if matched => {
+            apply_provider_catalog_changed(app, None);
+            (format!("{name} saved"), app::NoteLevel::Success)
+        }
+        Ok(crate::ModelMutationSuccess::Removed { name }) if matched => {
+            apply_provider_catalog_changed(app, None);
+            (format!("{name} removed"), app::NoteLevel::Success)
+        }
+        Ok(_) => (
+            "model mutation returned a mismatched result".to_string(),
+            app::NoteLevel::Error,
+        ),
+        Err(error) => (
+            format!("model update failed: {error}"),
+            app::NoteLevel::Error,
+        ),
     };
     app.app.push_toast(
         message,

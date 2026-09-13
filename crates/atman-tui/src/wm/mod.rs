@@ -782,6 +782,14 @@ impl WindowManager {
             self.modals.handle_provider_mouse(event, app, control_tx);
             return (true, Vec::new());
         }
+        if self.top_kind() == Some(ModalKind::ModelManager) {
+            self.modals.handle_model_mouse(event, control_tx);
+            return (true, Vec::new());
+        }
+        if self.top_kind() == Some(ModalKind::AliasManager) {
+            self.modals.handle_alias_mouse(event, control_tx);
+            return (true, Vec::new());
+        }
         if self.top_kind() == Some(ModalKind::SessionSwitcher) {
             self.modals.handle_session_switcher_mouse(event);
             return (true, Vec::new());
@@ -1681,7 +1689,7 @@ mod tests {
         };
         let mut app = crate::app::AppState::new("session".into(), None);
         let (consumed, _) = wm.dispatch_mouse(&event, &mut app, None);
-        assert!(!consumed);
+        assert!(consumed);
         assert!(app.toasts.is_empty());
 
         wm.modals.alias_manager.close();

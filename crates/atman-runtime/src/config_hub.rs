@@ -1382,8 +1382,39 @@ impl ConfigHub {
         })
     }
 
+    pub fn remove_model(&self, name: &str) -> Result<(), ConfigError> {
+        self.update_config_toml(|doc| {
+            let aliases = table_entries(doc, "alias")?;
+            let mut dependents = aliases
+                .into_iter()
+                .filter_map(|(alias, entry)| {
+                    (entry.get("model").and_then(toml_edit::Item::as_str) == Some(name))
+                        .then_some(alias)
+                })
+                .collect::<Vec<_>>();
+            dependents.sort();
+            if !dependents.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "model `{name}` is referenced by aliases: {}",
+                    dependents.join(", ")
+                )));
+            }
+            let models = required_table_mut(doc, "models")?;
+            if models.remove(name).is_none() {
+                return Err(ConfigError::Invalid(format!(
+                    "config model `{name}` does not exist"
+                )));
+            }
+            Ok(())
+        })
+    }
+
     pub fn upsert_provider(&self, update: ProviderConfigUpdate<'_>) -> Result<(), ConfigError> {
         crate::provider_lifecycle::upsert_config_provider_for_hub(self, update)
+    }
+
+    pub fn remove_provider(&self, name: &str) -> Result<(), ConfigError> {
+        crate::provider_lifecycle::remove_config_provider_for_hub(self, name)
     }
 
     #[cfg(test)]
@@ -1554,11 +1585,63 @@ impl ConfigHub {
 
     pub fn remove_alias(&self, alias: &str) -> Result<(), ConfigError> {
         self.update_config_toml(|doc| {
-            if let Some(aliases) = doc.get_mut("alias").and_then(toml_edit::Item::as_table_mut) {
-                aliases.remove(alias);
+            let Some(aliases) = doc.get_mut("alias") else {
+                return Err(ConfigError::Invalid(format!(
+                    "config alias `{alias}` does not exist"
+                )));
+            };
+            let aliases = aliases
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::Invalid("alias is not a table".into()))?;
+            if aliases.remove(alias).is_none() {
+                return Err(ConfigError::Invalid(format!(
+                    "config alias `{alias}` does not exist"
+                )));
             }
             Ok(())
         })
+    }
+
+    pub(crate) fn remove_provider_config_and_then<T>(
+        &self,
+        name: &str,
+        after_commit: impl FnOnce() -> T,
+    ) -> Result<T, ConfigError> {
+        self.update_config_toml_and_then(
+            |doc| {
+                let models = table_entries(doc, "models")?;
+                let mut dependents = models
+                    .into_iter()
+                    .filter_map(|(model, entry)| {
+                        (entry.get("provider").and_then(toml_edit::Item::as_str) == Some(name))
+                            .then_some(model)
+                    })
+                    .collect::<Vec<_>>();
+                dependents.sort();
+                if !dependents.is_empty() {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider `{name}` is referenced by models: {}",
+                        dependents.join(", ")
+                    )));
+                }
+                let Some(providers) = doc.get_mut("providers") else {
+                    return Err(ConfigError::Invalid(format!(
+                        "config provider `{name}` does not exist"
+                    )));
+                };
+                let providers = providers
+                    .as_table_mut()
+                    .ok_or_else(|| ConfigError::Invalid("providers is not a table".into()))?;
+                if providers.remove(name).is_none() {
+                    return Err(ConfigError::Invalid(format!(
+                        "config provider `{name}` does not exist"
+                    )));
+                }
+                Ok(())
+            },
+            |_| after_commit(),
+        )
+        .map(|(_, result)| result)
     }
 
     pub fn reload(&self) -> Result<(), ConfigError> {
@@ -2018,6 +2101,34 @@ fn table_contains(
             .map(|items| items.contains_key(name))
             .ok_or_else(|| ConfigError::Invalid(format!("{table} is not a table"))),
     }
+}
+
+fn table_entries<'a>(
+    doc: &'a toml_edit::DocumentMut,
+    table: &'static str,
+) -> Result<Vec<(String, &'a toml_edit::Table)>, ConfigError> {
+    match doc.get(table) {
+        None => Ok(Vec::new()),
+        Some(item) => item
+            .as_table()
+            .ok_or_else(|| ConfigError::Invalid(format!("{table} is not a table")))?
+            .iter()
+            .map(|(name, item)| {
+                item.as_table()
+                    .map(|entry| (name.to_string(), entry))
+                    .ok_or_else(|| ConfigError::Invalid(format!("{table}.{name} is not a table")))
+            })
+            .collect(),
+    }
+}
+
+fn required_table_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    table: &'static str,
+) -> Result<&'a mut toml_edit::Table, ConfigError> {
+    doc.get_mut(table)
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| ConfigError::Invalid(format!("{table} is not a table")))
 }
 
 #[cfg(test)]
@@ -4166,6 +4277,43 @@ provider = "openai"
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn model_delete_rejects_alias_dependents_without_writing() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK.lock().unwrap();
+        let (_dir, hub) = temp_hub();
+        hub.upsert_model(model(None, "chat", "provider/chat"))
+            .unwrap();
+        hub.add_alias("fast", "chat").unwrap();
+        let before = hub.read_config_toml().unwrap();
+
+        let error = hub.remove_model("chat").unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid(message) if message.contains("referenced by aliases: fast")
+        ));
+        assert_eq!(hub.read_config_toml().unwrap(), before);
+    }
+
+    #[test]
+    fn provider_delete_rejects_model_dependents_without_writing() {
+        let _registry_lock = crate::model_registry::MODEL_CONFIG_LOCK.lock().unwrap();
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[providers.gateway]\nkind = \"openai-compatible\"\n\n[models.chat]\nmodel = \"chat\"\nprovider = \"gateway\"\n",
+        );
+        let before = hub.read_config_toml().unwrap();
+
+        let error = hub.remove_provider("gateway").unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::Invalid(message) if message.contains("referenced by models: chat")
+        ));
+        assert_eq!(hub.read_config_toml().unwrap(), before);
     }
 
     #[test]

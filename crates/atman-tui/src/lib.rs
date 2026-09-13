@@ -154,16 +154,7 @@ pub enum TuiControl {
     },
     /// Execute a provider mutation; completed operations return one matching result.
     MutateProvider(ProviderMutationRequest),
-    UpsertConfigModel {
-        old_name: Option<String>,
-        name: String,
-        model: String,
-        provider: Option<String>,
-        context_budget: u64,
-        reasoning: atman_runtime::provider::ReasoningSelection,
-        max_tokens: Option<u32>,
-        enabled: bool,
-    },
+    MutateModel(ModelMutationRequest),
     OpenAliasManager {
         model: Option<String>,
     },
@@ -232,6 +223,10 @@ pub enum TuiCommand {
         request: ProviderMutationRequest,
         result: Result<ProviderMutationSuccess, String>,
     },
+    ModelMutationResult {
+        request: ModelMutationRequest,
+        result: Result<ModelMutationSuccess, String>,
+    },
     ProviderTestResult((String, bool)),
     McpTestResult {
         name: String,
@@ -287,6 +282,9 @@ pub enum ProviderMutation {
     Remove {
         provider_id: String,
     },
+    RemoveConfig {
+        name: String,
+    },
     Refresh {
         provider_id: String,
     },
@@ -327,6 +325,38 @@ pub enum ProviderMutationSuccess {
         name: String,
         created: bool,
     },
+    ConfigRemoved {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelMutationRequest {
+    pub request_id: u64,
+    pub action: ModelMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelMutation {
+    Upsert {
+        old_name: Option<String>,
+        name: String,
+        model: String,
+        provider: Option<String>,
+        context_budget: u64,
+        reasoning: atman_runtime::provider::ReasoningSelection,
+        max_tokens: Option<u32>,
+        enabled: bool,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelMutationSuccess {
+    Saved { name: String },
+    Removed { name: String },
 }
 
 #[derive(Debug, Clone)]

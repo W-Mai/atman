@@ -31,6 +31,11 @@ pub struct AliasManager {
     provider_idx: usize,
     model_idx: Vec<usize>,
     browser: ModelBrowser,
+    confirm_delete: Option<String>,
+    list_rect: Option<Rect>,
+    save_rect: Option<Rect>,
+    confirm_yes_rect: Option<Rect>,
+    confirm_no_rect: Option<Rect>,
 }
 
 impl AliasManager {
@@ -51,10 +56,40 @@ impl AliasManager {
     pub fn close(&mut self) {
         self.open = false;
         self.show_form = false;
+        self.confirm_delete = None;
     }
 
     pub fn show_form(&self) -> bool {
         self.show_form
+    }
+
+    pub fn handle_mouse(
+        &mut self,
+        event: &crossterm::event::MouseEvent,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let point = (event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_yes_rect, point) => {
+                self.handle_key(&KeyAction::Submit, control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.confirm_no_rect, point) => {
+                self.handle_key(&KeyAction::Escape, control_tx);
+            }
+            MouseEventKind::Down(MouseButton::Left) if rect_hit(self.save_rect, point) => {
+                self.handle_key(&KeyAction::Submit, control_tx);
+            }
+            MouseEventKind::Down(button) if rect_hit(self.list_rect, point) => {
+                let rect = self.list_rect.expect("matched list rect");
+                self.selected = usize::from(event.row.saturating_sub(rect.y))
+                    .min(self.aliases.len().saturating_sub(1));
+                if button == MouseButton::Right {
+                    self.handle_key(&KeyAction::Char('d'), control_tx);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn refresh_list(&mut self) {
@@ -156,8 +191,29 @@ impl AliasManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
+        if let Some(alias) = self.confirm_delete.clone() {
+            match action {
+                KeyAction::Submit | KeyAction::Char('y') | KeyAction::Char('Y') => {
+                    match atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.remove_alias(&alias))
+                    {
+                        Ok(()) => {
+                            self.confirm_delete = None;
+                            self.refresh_list();
+                        }
+                        Err(error) => {
+                            atman_runtime::notify!(error, "Alias {alias:?} delete failed: {error}");
+                        }
+                    }
+                }
+                KeyAction::Escape | KeyAction::Char('n') | KeyAction::Char('N') => {
+                    self.confirm_delete = None;
+                }
+                _ => {}
+            }
+            return;
+        }
         if !self.show_form {
-            // Alias list mode
             match action {
                 KeyAction::HistoryUp | KeyAction::Char('k') => {
                     if self.selected > 0 {
@@ -178,16 +234,8 @@ impl AliasManager {
                     }
                 }
                 KeyAction::Char('d') => {
-                    if let Some((a, _)) = self.aliases.get(self.selected) {
-                        let a = a.clone();
-                        match atman_runtime::config_hub::ConfigHub::global()
-                            .and_then(|hub| hub.remove_alias(&a))
-                        {
-                            Ok(()) => self.refresh_list(),
-                            Err(error) => {
-                                atman_runtime::notify!(error, "Alias {a:?} delete failed: {error}");
-                            }
-                        }
+                    if let Some((alias, _)) = self.aliases.get(self.selected) {
+                        self.confirm_delete = Some(alias.clone());
                     }
                 }
                 KeyAction::Escape => self.close(),
@@ -198,11 +246,7 @@ impl AliasManager {
 
         match self.focus {
             Focus::NameInput => match action {
-                KeyAction::Escape => self.show_form = false,
-                KeyAction::Tab => {
-                    self.focus = Focus::Tree;
-                }
-                KeyAction::Submit => self.commit_alias(control_tx),
+                KeyAction::Escape | KeyAction::Submit => self.commit_alias(control_tx),
                 KeyAction::Backspace
                 | KeyAction::Delete
                 | KeyAction::DeleteWordBackward
@@ -216,7 +260,7 @@ impl AliasManager {
                 _ => {}
             },
             Focus::Tree => match action {
-                KeyAction::Escape => self.show_form = false,
+                KeyAction::Escape | KeyAction::Submit => self.commit_alias(control_tx),
                 KeyAction::Tab => {
                     let total = self.groups.len();
                     if total == 0 {
@@ -258,7 +302,6 @@ impl AliasManager {
                     let selected = self.current_model().map(|model| model.slug.clone());
                     self.sync_browser(selected.as_deref());
                 }
-                KeyAction::Submit => self.commit_alias(control_tx),
                 _ => {}
             },
         }
@@ -297,6 +340,12 @@ impl AliasManager {
             }
         }
     }
+}
+
+fn rect_hit(rect: Option<Rect>, point: (u16, u16)) -> bool {
+    rect.is_some_and(|rect| {
+        point.0 >= rect.x && point.0 < rect.right() && point.1 >= rect.y && point.1 < rect.bottom()
+    })
 }
 
 fn render_tree_panel(
@@ -448,6 +497,27 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.list_rect = None;
+        self.save_rect = None;
+        self.confirm_yes_rect = None;
+        self.confirm_no_rect = None;
+        if let Some(alias) = self.confirm_delete.as_deref() {
+            let button_y = area.y + area.height / 2 + 2;
+            self.confirm_yes_rect = Some(Rect {
+                x: area.x,
+                y: button_y,
+                width: area.width / 2,
+                height: 1,
+            });
+            self.confirm_no_rect = Some(Rect {
+                x: area.x + area.width / 2,
+                y: button_y,
+                width: area.width - area.width / 2,
+                height: 1,
+            });
+            render_delete_confirm(f, area, "alias", alias, t);
+            return;
+        }
         if !self.show_form {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
@@ -455,6 +525,7 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
                 .split(area);
             let list_area = rows[0];
             let footer_area = rows[1];
+            self.list_rect = Some(list_area);
             let items: Vec<ListItem> = self
                 .aliases
                 .iter()
@@ -507,12 +578,13 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
         render_tree_panel(f, cols[0], self, t);
         render_preview_panel(f, cols[1], self, t);
         let help = match self.focus {
-            Focus::NameInput => "Tab:model tree  Enter:save  Esc:cancel".to_string(),
+            Focus::NameInput => "Tab:model tree  Enter/Esc:save".to_string(),
             Focus::Tree => crate::directional_selector::footer_help(
                 "Tab:name input  ↑↓/jk:navigate",
-                "Enter:save  Esc:cancel",
+                "Enter/Esc:save",
             ),
         };
+        self.save_rect = Some(footer_area);
         let footer = Paragraph::new(Line::from(Span::styled(
             help,
             Style::default().fg(t.meta_fg.into()),
@@ -553,6 +625,52 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
     }
 }
 
+fn render_delete_confirm(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    kind: &str,
+    name: &str,
+    theme: &crate::theme::Theme,
+) {
+    let w = area.width.saturating_sub(4).clamp(40, 60);
+    let h = 9u16;
+    let dlg = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        dlg,
+        Line::from(" Delete? "),
+        "⚠",
+        theme.warn.into(),
+        true,
+        theme,
+    );
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!("Delete {kind} \"{name}\"?"),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "This change cannot be undone.",
+                Style::default().fg(theme.meta_fg.into()),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  y / Enter: confirm    n / Esc: cancel",
+                Style::default().fg(theme.meta_fg.into()),
+            )),
+        ])
+        .alignment(ratatui::layout::Alignment::Center),
+        inner,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +689,67 @@ mod tests {
         assert_eq!(manager.provider_idx, 1);
         manager.handle_key(&KeyAction::CursorRight, None);
         assert_eq!(manager.provider_idx, 0);
+    }
+
+    #[test]
+    fn delete_requires_confirmation_and_escape_cancels_it() {
+        let mut manager = AliasManager {
+            aliases: vec![("fast".into(), "vendor/model".into())],
+            ..Default::default()
+        };
+
+        manager.handle_key(&KeyAction::Char('d'), None);
+        assert_eq!(manager.confirm_delete.as_deref(), Some("fast"));
+
+        manager.handle_key(&KeyAction::Escape, None);
+        assert!(manager.confirm_delete.is_none());
+        assert_eq!(manager.aliases.len(), 1);
+    }
+
+    #[test]
+    fn delete_confirmation_renders_and_mouse_cancel_closes_it() {
+        let mut manager = AliasManager {
+            confirm_delete: Some("fast".into()),
+            ..Default::default()
+        };
+        let app = crate::app::AppState::new("session".into(), None);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                <AliasManager as crate::wm::modal::ModalOverlay>::render_content(
+                    &mut manager,
+                    frame,
+                    frame.area(),
+                    &app,
+                    &theme,
+                );
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("Delete alias \"fast\"?"));
+        assert!(manager.list_rect.is_none());
+        assert!(manager.save_rect.is_none());
+        let cancel = manager.confirm_no_rect.unwrap();
+        manager.handle_mouse(
+            &crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: cancel.x,
+                row: cancel.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            None,
+        );
+        assert!(manager.confirm_delete.is_none());
     }
 
     fn provider_group(name: &str) -> atman_runtime::model_registry::ProviderGroup {

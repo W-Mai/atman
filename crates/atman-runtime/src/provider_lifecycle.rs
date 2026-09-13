@@ -296,6 +296,11 @@ impl ProviderLifecycle {
         self.commit_config_provider(update, ProviderConfigWriteMode::Update)
     }
 
+    pub fn remove_config_provider(&self, name: &str) -> Result<(), ProviderLifecycleError> {
+        remove_config_provider_for_hub(&self.hub, name)?;
+        Ok(())
+    }
+
     fn commit_config_provider(
         &self,
         update: ProviderConfigUpdate<'_>,
@@ -1646,6 +1651,30 @@ pub(crate) fn upsert_config_provider_for_hub(
     update: ProviderConfigUpdate<'_>,
 ) -> Result<(), ConfigError> {
     mutate_config_provider_for_hub(hub, update, ProviderConfigWriteMode::Upsert)
+}
+
+pub(crate) fn remove_config_provider_for_hub(
+    hub: &ConfigHub,
+    name: &str,
+) -> Result<(), ConfigError> {
+    let state = shared_config_provider_state(hub);
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut replaced = Vec::new();
+    hub.remove_provider_config_and_then(name, || {
+        state.registries.retain(|registry| {
+            let Some(registry) = registry.upgrade() else {
+                return false;
+            };
+            replaced.extend(registry.take_named(&format!("config:{name}")));
+            true
+        });
+        state.config_providers.remove(name);
+    })?;
+    drop(state);
+    drop(replaced);
+    Ok(())
 }
 
 fn mutate_config_provider_for_hub(
