@@ -109,6 +109,7 @@ pub struct ToolCtx {
     pub session_messages_handle:
         Option<std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>>,
     pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
+    pub(crate) deferred_input_session: Option<std::sync::Arc<crate::session::Session>>,
     pub compact_lock_handle: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
     pub(crate) context_epoch_handle: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) context_prefix_tracker:
@@ -314,6 +315,7 @@ impl ToolCtx {
         mut self,
         session: std::sync::Arc<crate::session::Session>,
     ) -> Self {
+        self.deferred_input_session = Some(session.clone());
         self.session_runtime = Some(session);
         self
     }

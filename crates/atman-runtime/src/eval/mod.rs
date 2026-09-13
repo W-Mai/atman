@@ -109,6 +109,7 @@ pub(super) fn rebuild_session_llm_messages(
         ));
     }
     messages.extend_from_slice(extra_messages);
+    llm_context::move_current_turn_interjections_to_tail(&mut messages, turn_id);
     messages
 }
 

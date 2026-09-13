@@ -71,6 +71,31 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .turn_id
         .clone()
         .unwrap_or_else(crate::event::TurnId::now);
+    let model_info = crate::model_registry::model_info(&model);
+    if model_info.context_budget == 0 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
+        )));
+    }
+    let claimed_submissions = if args.call_purpose
+        == crate::context_plan::ContextCallPurpose::General
+        && let Some(session) = ctx.deferred_input_session.as_ref()
+    {
+        let accepts_images = model_info.capabilities.input_modalities.is_empty()
+            || model_info
+                .capabilities
+                .input_modalities
+                .contains(&crate::provider::InputModality::Image);
+        let claimed = session.claim_queued_submissions_for_llm(&turn_id, accepts_images);
+        if ctx.session_runtime.is_none()
+            && let Some(messages) = ctx.session_messages_handle.as_ref()
+        {
+            messages.lock().unwrap().extend(claimed.iter().cloned());
+        }
+        claimed
+    } else {
+        Vec::new()
+    };
     if ctx.session_runtime.is_some()
         || (matches!(ctx.history_segment, crate::tool::HistorySegment::Spawned)
             && ctx.session_messages_handle.is_some())
@@ -162,6 +187,12 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         Err(v) => return v,
     };
     let mut final_messages = llm_context.messages;
+    if has_messages_override
+        || matches!(context_mode, ContextMode::None)
+        || (ctx.session_runtime.is_none() && ctx.session_messages_handle.is_none())
+    {
+        final_messages.extend(claimed_submissions);
+    }
     let prompt_for_budget = llm_context.budget_text;
     let session_messages_len = llm_context.session_messages_len;
     if let Some(session) = ctx.session_runtime.as_ref()
@@ -240,12 +271,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let mut saw_context_overflow = false;
     let mut last_err: Option<RuntimeError> = None;
     let retry_kinds_ref = retry_kinds.as_ref();
-    let model_info = crate::model_registry::model_info(&model);
-    if model_info.context_budget == 0 {
-        return Value::Err(RuntimeError::ToolFailed(format!(
-            "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
-        )));
-    }
     let has_images = final_messages.iter().any(|message| {
         message
             .parts

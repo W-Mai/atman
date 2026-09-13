@@ -20,6 +20,10 @@ impl InvocationEnv {
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.0.get(key)
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 #[cfg(test)]

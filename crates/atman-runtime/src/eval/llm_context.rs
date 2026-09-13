@@ -71,6 +71,8 @@ pub fn build_llm_context(
         messages.push(user_msg);
         (messages, prompt_text)
     };
+    let mut final_messages = final_messages;
+    move_current_turn_interjections_to_tail(&mut final_messages, turn_id);
     let session_messages_len = final_messages.len();
 
     Ok(LlmContext {
@@ -78,6 +80,24 @@ pub fn build_llm_context(
         budget_text: prompt_for_budget,
         session_messages_len,
     })
+}
+
+pub(super) fn move_current_turn_interjections_to_tail(
+    messages: &mut Vec<crate::message::Message>,
+    turn_id: &crate::event::TurnId,
+) {
+    let mut interjections = Vec::new();
+    messages.retain(|message| {
+        if message.origin == crate::message::MessageOrigin::Interjection
+            && message.turn_id == *turn_id
+        {
+            interjections.push(message.clone());
+            false
+        } else {
+            true
+        }
+    });
+    messages.extend(interjections);
 }
 
 pub(super) fn project_session_messages(
@@ -106,7 +126,17 @@ pub(super) fn project_session_messages(
                 })
                 .collect();
             let start = ordinary.len().saturating_sub(n);
-            projected.extend_from_slice(&ordinary[start..]);
+            projected.extend(
+                ordinary
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, message)| {
+                        (index >= start
+                            || (message.origin == crate::message::MessageOrigin::Interjection
+                                && message.turn_id == *current_turn_id))
+                            .then_some(message)
+                    }),
+            );
             projected
         }
         ContextMode::None => crate::context_plan::latest_live_context_record_messages(messages),
@@ -196,6 +226,45 @@ mod tests {
 
         assert_eq!(context.messages.len(), 1);
         assert_eq!(context.messages[0].text_concat(), "second");
+    }
+
+    #[test]
+    fn recent_context_keeps_current_turn_interjections_outside_the_recent_limit() {
+        let turn_id = TurnId::now();
+        let mut interjection = Message::user_text(turn_id.clone(), "new direction");
+        interjection.origin = MessageOrigin::Interjection;
+        let messages = vec![interjection, message("later assistant context")];
+
+        let projected =
+            project_session_messages(&messages, ContextMode::SessionRecent(1), &turn_id);
+
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].text_concat(), "new direction");
+    }
+
+    #[test]
+    fn claimed_user_input_follows_the_current_prompt() {
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let turn_id = TurnId::now();
+        let mut input = Message::user_text(turn_id.clone(), "change direction");
+        input.origin = MessageOrigin::Interjection;
+        session.append_message(input, None);
+        let mut request = args();
+        request.prompt = Some("original task".into());
+
+        let context = build_llm_context(
+            &request,
+            ContextMode::Session,
+            Some(&session),
+            None,
+            &turn_id,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(context.messages[0].text_concat(), "original task");
+        assert_eq!(context.messages[1].text_concat(), "change direction");
     }
 
     #[test]

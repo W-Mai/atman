@@ -2018,6 +2018,20 @@ mod tests {
 
     struct SessionTextProbe;
 
+    #[test]
+    fn spawned_context_keeps_only_deferred_input_access_to_root_session() {
+        let session = Arc::new(crate::session::Session::open_ephemeral());
+        let parent = ToolCtx::new().with_session_runtime(session.clone());
+
+        let child = super::sanitize_child_ctx(&parent);
+
+        assert!(child.session_runtime.is_none());
+        assert!(Arc::ptr_eq(
+            child.deferred_input_session.as_ref().unwrap(),
+            &session
+        ));
+    }
+
     fn root_identity(
         registry: &FlowRegistry,
         session_id: &str,

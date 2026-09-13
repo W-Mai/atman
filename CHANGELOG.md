@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Queued follow-ups** — Ordinary input submitted during a flow enters the next task-facing LLM request as trailing user context without interrupting the flow; commands and explicit per-submission settings remain queued for a new turn.
 - **Final answer validation** — A `final.answer` call with a non-empty `message` remains valid when the assistant response also contains text; the tool's `message` is the single displayed answer.
 - **Compaction model routing** — Summary requests resolve the provider's API model ID and retain the selected range if anchored summarization fails.
 - **Form submission results** — Single-question `form.ask` confirmations retain their submitted result; malformed responses report an error instead of becoming a rejection.

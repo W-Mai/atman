@@ -2712,6 +2712,53 @@ impl Session {
         submission
     }
 
+    pub fn claim_queued_submissions_for_llm(
+        &self,
+        turn_id: &TurnId,
+        allow_images: bool,
+    ) -> Vec<Message> {
+        let current_turn = self.turn.current_turn.lock().unwrap();
+        if current_turn.as_ref() != Some(turn_id) {
+            return Vec::new();
+        }
+        let mut queue = self.submission_queue.lock().unwrap();
+        let mut claimed = Vec::new();
+        while let Some(front) = queue.front() {
+            let text = front.text.trim_start();
+            let has_path_attachment = text.split_whitespace().any(|word| {
+                word.starts_with("@./") || word.starts_with("@../") || word.starts_with("@/")
+            });
+            if text.starts_with(':')
+                || text.starts_with('/')
+                || has_path_attachment
+                || !front.invocation_env.is_empty()
+                || (!allow_images && !front.images.is_empty())
+            {
+                break;
+            }
+            let submission = queue
+                .pop_front()
+                .expect("queued submission was checked under the same lock");
+            let mut message = Message::user_text(turn_id.clone(), submission.text);
+            message.origin = crate::message::MessageOrigin::Interjection;
+            message.parts.extend(
+                submission
+                    .images
+                    .into_iter()
+                    .map(|source| crate::message::MessagePart::Image { source }),
+            );
+            self.append_message(message.clone(), None);
+            claimed.push(message);
+        }
+        if !claimed.is_empty() {
+            for remaining in queue.iter_mut() {
+                remaining.revision = remaining.revision.saturating_add(claimed.len() as u64);
+            }
+            self.publish_submission_queue(&queue);
+        }
+        claimed
+    }
+
     pub fn cancel_flow(&self) {
         self.turn.flow_cancel.lock().unwrap().cancel();
     }
@@ -4248,6 +4295,71 @@ mod tests {
         assert_eq!(session.pop_queued_submission().unwrap().id, second.id);
         assert_eq!(session.pop_queued_submission().unwrap().id, first.id);
         assert!(session.pop_queued_submission().is_none());
+    }
+
+    #[test]
+    fn llm_claim_stops_at_commands_and_records_consumed_messages() {
+        let session = Session::open_ephemeral();
+        let turn_id = TurnId::now();
+        session.begin_turn(Message::user_text(turn_id.clone(), "initial"));
+        for text in ["change direction", ":goal inspect", "later"] {
+            session
+                .enqueue_submission(
+                    text,
+                    Vec::new(),
+                    crate::InvocationEnv::default(),
+                    crate::message::MessageOrigin::User,
+                )
+                .unwrap();
+        }
+
+        let claimed = session.claim_queued_submissions_for_llm(&turn_id, false);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].text_concat(), "change direction");
+        assert_eq!(claimed[0].turn_id, turn_id);
+        assert_eq!(
+            claimed[0].origin,
+            crate::message::MessageOrigin::Interjection
+        );
+        assert_eq!(session.messages().last().unwrap(), &claimed[0]);
+        assert_eq!(
+            session
+                .queued_submissions()
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            [":goal inspect", "later"]
+        );
+    }
+
+    #[test]
+    fn llm_claim_preserves_effort_images_and_path_attachments_for_new_turns() {
+        let session = Session::open_ephemeral();
+        let turn_id = TurnId::now();
+        for (text, env) in [
+            ("@./image.png inspect", crate::InvocationEnv::default()),
+            (
+                "think harder",
+                crate::InvocationEnv::single("effort", crate::Value::Str("high".into())),
+            ),
+        ] {
+            session
+                .enqueue_submission(text, Vec::new(), env, crate::message::MessageOrigin::User)
+                .unwrap();
+        }
+
+        assert!(
+            session
+                .claim_queued_submissions_for_llm(&turn_id, true)
+                .is_empty()
+        );
+        session.begin_turn(Message::user_text(turn_id.clone(), "initial"));
+        assert!(
+            session
+                .claim_queued_submissions_for_llm(&turn_id, true)
+                .is_empty()
+        );
+        assert_eq!(session.queued_submissions().len(), 2);
     }
 
     #[test]
