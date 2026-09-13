@@ -178,13 +178,7 @@ selection preserves a recent tail using all of these lower bounds:
 
 The trigger uses a preflight estimate of the current materialized messages plus the current system/tool prefix. A successful root call calibrates later fresh estimates for the same provider and model, so provider tokenizer differences are retained without treating an older request total as the current window.
 
-The summary replaces the selected range only when the replacement is smaller. Tool
-use/result parts are sanitized without dropping valid text or valid pairs from a
-mixed message, the replacement is checkpointed, and the live session window is
-updated. Depending on `[compaction].review`, manual or all
-compactions may be reviewed before commit. If the provider reports an actual context
-overflow, the runtime can compact and rebuild the request once before normal retry
-handling continues.
+The summary call resolves the same configured model ID as a normal `llm.call`. If the anchored summary request fails, the selected range remains in place and a failed compaction event is emitted; an unavailable anchored summary is never committed as a placeholder. A successful summary replaces the selected range only when the replacement is smaller. Tool use/result parts are sanitized without dropping valid text or valid pairs from a mixed message, the replacement is checkpointed, and the live session window is updated. Depending on `[compaction].review`, manual or all compactions may be reviewed before commit. If the provider reports an actual context overflow, the runtime can compact and rebuild the request once before normal retry handling continues.
 
 Compaction is lossy by design. It preserves an operational handoff, not every detail.
 Use history search for older evidence and durable memory for facts that must remain

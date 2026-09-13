@@ -65,15 +65,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             "no provider registered for model `{model}`"
         )));
     };
-    let api_model = crate::model_registry::model_entry(&model)
-        .and_then(|e| {
-            if e.model.is_empty() {
-                None
-            } else {
-                Some(e.model)
-            }
-        })
-        .unwrap_or_else(|| model.clone());
+    let api_model = crate::model_registry::api_model_id(&model);
     let has_messages_override = args.messages_override.is_some();
     let turn_id = ctx
         .turn_id

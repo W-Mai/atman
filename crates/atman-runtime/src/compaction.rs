@@ -454,18 +454,15 @@ async fn maybe_auto_compact_locked(
     {
         Ok(text) => text,
         Err(err) => {
+            send_failed(session, &format!("LLM summary failed: {err}"));
             session.emit_compact_warning(
                 model,
                 current,
                 trigger,
                 info.context_budget,
-                &format!("LLM summary failed: {err}. Degraded to placeholder."),
+                &format!("LLM summary failed: {err}; keeping full transcript"),
             );
-            format!(
-                "[atman: compacted {} messages, LLM summary unavailable at {}]",
-                range.end - range.start,
-                chrono::Utc::now().to_rfc3339()
-            )
+            return;
         }
     };
     let final_summary =
@@ -664,7 +661,7 @@ async fn generate_llm_summary_with_delta(
         );
     }
     let req = crate::provider::LlmRequest {
-        model: model.into(),
+        model: crate::model_registry::api_model_id(model),
         messages,
         system: Some(SUMMARY_SYSTEM_PROMPT.into()),
         input: crate::value::Value::Unit,
@@ -1076,12 +1073,7 @@ pub async fn maybe_auto_compact_handle_locked(
                 .unwrap_or_else(|| (None, filtered));
             let summary = generate_llm_summary(anchor.as_deref(), &new_messages, model, providers)
                 .await
-                .unwrap_or_else(|_| {
-                    format!(
-                        "[atman: compacted {} messages; summary unavailable]",
-                        range.end - range.start
-                    )
-                });
+                .ok()?;
             let replacement =
                 build_budgeted_replacement(&snapshot, &range, &summary, target, model, providers)
                     .await;

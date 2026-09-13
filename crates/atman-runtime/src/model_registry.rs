@@ -1305,6 +1305,12 @@ pub fn model_entry(name: &str) -> Option<ModelEntry> {
     resolved_model_in_state(&REGISTRY_STATE.read().unwrap(), name).map(|model| model.entry)
 }
 
+pub fn api_model_id(name: &str) -> String {
+    model_entry(name)
+        .and_then(|entry| (!entry.model.is_empty()).then_some(entry.model))
+        .unwrap_or_else(|| name.to_string())
+}
+
 pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
     resolved_models_in_state(&REGISTRY_STATE.read().unwrap())
         .into_iter()
@@ -3655,6 +3661,7 @@ input_modalities = ["text", "image"]
             Err(CatalogError::RegistryKeyInUse { .. })
         ));
         assert_eq!(model_entry("stable:gpt-4o").unwrap().model, "gpt-4o");
+        assert_eq!(api_model_id("stable:gpt-4o"), "gpt-4o");
     }
 
     #[test]
