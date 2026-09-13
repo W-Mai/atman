@@ -29,14 +29,8 @@ fn raw_candidate(message: &Message) -> Result<Option<Candidate<'_>>, &'static st
         .iter()
         .filter(|part| matches!(part, MessagePart::ToolUse { .. }))
         .count();
-    let has_text = message
-        .parts
-        .iter()
-        .any(|part| matches!(part, MessagePart::Text { text } if !text.trim().is_empty()));
-    if tool_calls != 1 || has_text {
-        return Err(
-            "final.answer must be emitted alone, without sibling tool calls or assistant text",
-        );
+    if tool_calls != 1 {
+        return Err("final.answer must be emitted without sibling tool calls");
     }
     let Some(MessagePart::ToolUse { input, intent, .. }) = message.parts.iter().find(
         |part| matches!(part, MessagePart::ToolUse { name, .. } if name == FINAL_ANSWER_TOOL),
@@ -363,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_final_control_mixed_with_text_or_other_tools() {
+    fn accepts_final_control_with_text_but_rejects_other_tools() {
         let mut message = control_message();
         let MessagePart::ToolUse { intent, .. } = &mut message.parts[0] else {
             unreachable!();
@@ -372,12 +366,10 @@ mod tests {
         message.parts.push(MessagePart::Text {
             text: "preface".into(),
         });
-        assert_eq!(
-            validation_error(&message),
-            Some(
-                "final.answer must be emitted alone, without sibling tool calls or assistant text"
-            )
-        );
+        assert_eq!(validation_error(&message), None);
+        assert_eq!(extract(&message).as_deref(), Some("Done."));
+        let normalized = normalized_for_history(&message).unwrap();
+        assert_eq!(normalized.text_concat(), "Done.");
 
         message.parts.pop();
         message.parts.push(MessagePart::ToolUse {
@@ -388,9 +380,7 @@ mod tests {
         });
         assert_eq!(
             validation_error(&message),
-            Some(
-                "final.answer must be emitted alone, without sibling tool calls or assistant text"
-            )
+            Some("final.answer must be emitted without sibling tool calls")
         );
     }
 

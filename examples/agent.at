@@ -84,7 +84,7 @@ flow agent_loop(completion_state: string) -> string {
             return subflow(agent_loop, completion_state)
         }
         when completion_state == "worked" {
-            session.push(message.user("Agent loop control: your next response MUST be exactly one final.answer tool call. Put the complete user-facing Markdown in message, include a concise _atman_intent for the work header, and do not emit ordinary assistant text before or after the tool call."))
+            session.push(message.user("Agent loop control: your next response MUST include exactly one final.answer tool call and no other tool calls. Put the complete user-facing Markdown in message and include a concise _atman_intent for the work header. Any accompanying assistant text does not replace message."))
             return subflow(agent_loop, "reminded")
         }
         return candidate

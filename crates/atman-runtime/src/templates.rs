@@ -194,7 +194,7 @@ pub const LOOP_CONTINUATION_MD: &str = r#"Agent loop control (not a new user req
 
 pub const LOOP_ACTION_MD: &str = r#"Agent loop control (not a new user request): an internal check found that the previous response may have described an action without issuing its tool call. Re-read the current request and transcript. If that action is still necessary and available, invoke the appropriate tool now instead of describing it again. If it is not necessary, provide the concrete result or evidence that resolves the current request. Do not infer that the wider project or repository is unfinished. Ask for user input only when the action genuinely depends on unavailable information or authority."#;
 
-pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): the current turn contains completed internal tool work, but the previous response was emitted as ordinary assistant text. Re-read that candidate and the current request. IMPORTANT: your next response MUST be exactly one `final.answer` tool call. Put the complete user-facing Markdown in `message`, include a concise `_atman_intent` summarizing the completed work for the work header, and do not emit ordinary assistant text before or after the tool call. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. Do not infer that the wider project or repository is unfinished."#;
+pub const LOOP_FINAL_ANSWER_MD: &str = r#"Agent loop control (not a new user request): the current turn contains completed internal tool work, but the previous response was emitted as ordinary assistant text. Re-read that candidate and the current request. IMPORTANT: your next response MUST include exactly one `final.answer` tool call and no other tool calls. Put the complete user-facing Markdown in `message` and include a concise `_atman_intent` summarizing the completed work for the work header. Any accompanying assistant text does not replace `message`. If new evidence or queued user input means more work is required, handle that first rather than falsely finalizing. Do not infer that the wider project or repository is unfinished."#;
 
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
@@ -835,9 +835,9 @@ mod tests {
         assert!(SYSTEM_MD.contains("summary in `_atman_intent`"));
         assert!(SYSTEM_MD.contains("Direct conversational replies"));
         assert!(!SYSTEM_MD.contains("does not take `_atman_intent`"));
-        assert!(LOOP_FINAL_ANSWER_MD.contains("MUST be exactly one `final.answer` tool call"));
+        assert!(LOOP_FINAL_ANSWER_MD.contains("MUST include exactly one `final.answer` tool call"));
         assert!(LOOP_FINAL_ANSWER_MD.contains("`_atman_intent`"));
-        assert!(LOOP_FINAL_ANSWER_MD.contains("do not emit ordinary assistant text"));
+        assert!(LOOP_FINAL_ANSWER_MD.contains("Any accompanying assistant text does not replace"));
         assert!(AGENT_AT.contains("\"final.answer\""));
         assert_eq!(AGENT_AT.matches("extract_final_answer(reply)").count(), 1);
         let extract = AGENT_AT

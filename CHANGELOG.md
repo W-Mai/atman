@@ -13,6 +13,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Final answer validation** — A `final.answer` call with a non-empty `message` remains valid when the assistant response also contains text; the tool's `message` is the single displayed answer.
 - **Compaction model routing** — Summary requests resolve the provider's API model ID and retain the selected range if anchored summarization fails.
 - **Form submission results** — Single-question `form.ask` confirmations retain their submitted result; malformed responses report an error instead of becoming a rejection.
 - **Form input and confirmation** — Text fields accept paste according to their single-line or multiline setting, and confirmation choices respond to mouse clicks.
