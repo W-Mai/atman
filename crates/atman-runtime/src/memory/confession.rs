@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{collections::HashMap, io::Write};
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::error::RuntimeError;
@@ -176,26 +177,26 @@ impl ConfessionStore {
         let dir = self.dir.clone();
         let index_path = self.index_path.clone();
         let for_write = confession.clone();
+        let anchor_index = self.anchor_index.clone();
         tokio::task::spawn_blocking(move || {
             with_store_lock(&dir, || {
                 let md_path = dir.join(for_write.md_slug());
                 std::fs::write(&md_path, for_write.render_md()).map_err(store_error)?;
-                append_line(&index_path, &for_write)
+                append_line(&index_path, &for_write)?;
+                if let Some(index) = &anchor_index
+                    && let Err(error) = insert_confession(index, &for_write)
+                {
+                    crate::notify!(
+                        warn,
+                        "confession index insert failed (id={}): {error}",
+                        for_write.id
+                    );
+                }
+                Ok(())
             })
         })
         .await
         .map_err(|e| RuntimeError::ToolFailed(format!("confession writer: {e}")))??;
-        if let Some(idx) = &self.anchor_index
-            && let Err(e) = insert_confession(idx, &confession)
-        {
-            let key = format!("confession.index:{id}");
-            crate::notify!(
-                warn,
-                location = Inline,
-                stack = dedupe(key, 60_000),
-                "confession index insert failed (id={id}): {e}"
-            );
-        }
         Ok(id)
     }
 
@@ -324,13 +325,7 @@ impl ConfessionStore {
             fields,
             changed_at: chrono::Utc::now(),
         };
-        let view = self.append_changes(vec![change]).await?.remove(0);
-        if let Some(index) = &self.anchor_index
-            && let Err(error) = insert_confession(index, &view.confession)
-        {
-            crate::notify!(warn, "confession index insert failed (id={id}): {error}");
-        }
-        Ok(view)
+        Ok(self.append_changes(vec![change]).await?.remove(0))
     }
 
     pub async fn organize(
@@ -355,6 +350,7 @@ impl ConfessionStore {
         let dir = self.dir.clone();
         let index_path = self.index_path.clone();
         let changes_path = self.changes_path.clone();
+        let anchor_index = self.anchor_index.clone();
         tokio::task::spawn_blocking(move || {
             with_store_lock(&dir, || {
                 let originals = read_lines::<Confession>(&index_path)?;
@@ -411,6 +407,27 @@ impl ConfessionStore {
                         .collect(),
                     true,
                 )?;
+                if let Some(index) = &anchor_index {
+                    for view in all.iter().filter(|view| {
+                        changes.iter().any(|change| {
+                            change.id() == &view.confession.id
+                                && !matches!(change, ConfessionChange::Organized { .. })
+                        })
+                    }) {
+                        let result = if view.archived {
+                            remove_confession_index(index, &view.confession.id)
+                        } else {
+                            insert_confession(index, &view.confession)
+                        };
+                        if let Err(error) = result {
+                            crate::notify!(
+                                warn,
+                                "confession index update failed (id={}): {error}",
+                                view.confession.id
+                            );
+                        }
+                    }
+                }
                 Ok(all
                     .into_iter()
                     .filter(|view| seen.contains(&view.confession.id))
@@ -590,10 +607,51 @@ fn project_changes(
     Ok(views)
 }
 
+fn remove_confession_index(index: &AnchorIndex, id: &MemoryId) -> rusqlite::Result<()> {
+    let mut conn = index.conn();
+    let tx = conn.transaction()?;
+    let rowid = tx
+        .query_row(
+            "SELECT rowid FROM confessions WHERE id = ?",
+            rusqlite::params![id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(rowid) = rowid {
+        tx.execute(
+            "DELETE FROM confessions_fts WHERE rowid = ?",
+            rusqlite::params![rowid],
+        )?;
+        tx.execute(
+            "DELETE FROM confessions WHERE id = ?",
+            rusqlite::params![id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM anchors WHERE subject_kind = 'confession' AND subject_id = ?",
+            rusqlite::params![id.to_string()],
+        )?;
+    }
+    tx.commit()
+}
+
 fn insert_confession(index: &AnchorIndex, c: &Confession) -> rusqlite::Result<()> {
-    let conn = index.conn();
+    let mut conn = index.conn();
+    let tx = conn.transaction()?;
+    let old_rowid = tx
+        .query_row(
+            "SELECT rowid FROM confessions WHERE id = ?",
+            rusqlite::params![c.id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(rowid) = old_rowid {
+        tx.execute(
+            "DELETE FROM confessions_fts WHERE rowid = ?",
+            rusqlite::params![rowid],
+        )?;
+    }
     let body = c.render_md();
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO confessions \
            (id, trigger, rule_violated, what_i_did, why, mitigation, body, created_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -608,8 +666,8 @@ fn insert_confession(index: &AnchorIndex, c: &Confession) -> rusqlite::Result<()
             c.created_at.to_rfc3339(),
         ],
     )?;
-    let rowid: i64 = conn.last_insert_rowid();
-    conn.execute(
+    let rowid: i64 = tx.last_insert_rowid();
+    tx.execute(
         "INSERT OR REPLACE INTO confessions_fts \
            (rowid, trigger, rule_violated, what_i_did, why, mitigation, body) \
          VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -623,16 +681,20 @@ fn insert_confession(index: &AnchorIndex, c: &Confession) -> rusqlite::Result<()
             body,
         ],
     )?;
+    tx.execute(
+        "DELETE FROM anchors WHERE subject_kind = 'confession' AND subject_id = ?",
+        rusqlite::params![c.id.to_string()],
+    )?;
     for anchor in &c.anchors {
         if let Some((kind, r)) = anchor.split_once(':') {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO anchors (kind, ref, subject_kind, subject_id, session_id, created_at) \
                  VALUES (?, ?, 'confession', ?, NULL, ?)",
                 rusqlite::params![kind, r, c.id.to_string(), c.created_at.to_rfc3339()],
             )?;
         }
     }
-    Ok(())
+    tx.commit()
 }
 
 #[cfg(test)]
@@ -789,6 +851,67 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn revision_replaces_fts_and_anchor_projection() {
+        let dir = TempDir::new().unwrap();
+        let index = Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
+        let store = ConfessionStore::at(dir.path().join("confessions")).with_index(index.clone());
+        let mut original = sample("old trigger", "rule");
+        original.anchors.push("turn:one".into());
+        store.append(original.clone()).await.unwrap();
+        let mut fields = ConfessionFields::from(&original);
+        fields.trigger = "new trigger".into();
+        store.revise(original.id.clone(), 0, fields).await.unwrap();
+        let conn = index.conn();
+        let fts_old: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM confessions_fts WHERE confessions_fts MATCH 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fts_new: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM confessions_fts WHERE confessions_fts MATCH 'new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let anchors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM anchors WHERE subject_kind = 'confession' AND subject_id = ?",
+                rusqlite::params![original.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((fts_old, fts_new, anchors), (0, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn archived_record_remains_in_history_but_leaves_search_index() {
+        let dir = TempDir::new().unwrap();
+        let index = Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
+        let store = ConfessionStore::at(dir.path().join("confessions")).with_index(index.clone());
+        let original = sample("old trigger", "rule");
+        store.append(original.clone()).await.unwrap();
+        store
+            .append_changes(vec![ConfessionChange::Archived {
+                id: original.id.clone(),
+                base_revision: 0,
+                reason: "superseded".into(),
+                changed_at: chrono::Utc::now(),
+            }])
+            .await
+            .unwrap();
+        assert!(store.list().await.unwrap().is_empty());
+        assert_eq!(store.list_with_meta(true).await.unwrap().len(), 1);
+        let count: i64 = index
+            .conn()
+            .query_row("SELECT COUNT(*) FROM confessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
