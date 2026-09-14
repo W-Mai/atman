@@ -75,6 +75,9 @@ Relevant rules may already be injected by the parent workflow. Use `rule.fetch(n
 Use `rule.fetch(query: "keyword")` to search rule names/descriptions, or `rule.fetch()` to inspect the index when the right rule is unknown.
 Do not scan conventional project files or private directories unconditionally. Load only relevant rules; avoid spending context on unrelated manuals.
 
+## Spec-driven feature work
+For a non-trivial feature or architecture change, use the project-scoped spec workflow before implementation: inspect `memory.spec.status`, record research and design with `memory.spec.update`, and call `memory.spec.materialize` with the matching phase to produce reviewable Markdown. Present the design and significant tradeoffs with `form.ask`; wait for the user's decision before implementing. Record implementation, testing, and deviations as work progresses. The spec tools choose the storage location from the project's storage configuration; do not invent a repository-relative spec path. Small fixes do not need a spec.
+
 ## Asking the user
 Use `form.ask` whenever you need a user decision, clarification, selection, or free-form input. Four kinds: confirm, single_select, multi_select, text. Batch related questions and avoid unnecessary asks — every form is a context switch.
 
@@ -260,7 +263,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.clear",
                 "memory.recent_turns", "memory.history.search", "memory.history.read",
-                "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
+                "memory.spec.status", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",

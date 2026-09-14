@@ -66,6 +66,7 @@ impl SpecStore {
     }
 
     pub async fn status(&self, feature: &str) -> Result<SpecStatus, RuntimeError> {
+        validate_feature(feature)?;
         let entries: Vec<SpecEntry> = super::read_jsonl(&self.entries_path(feature)).await?;
         if entries.is_empty() {
             return Ok(SpecStatus {
@@ -164,10 +165,12 @@ impl SpecStore {
     }
 
     pub async fn deviations(&self, feature: &str) -> Result<Vec<SpecDeviation>, RuntimeError> {
+        validate_feature(feature)?;
         super::read_jsonl(&self.deviations_path(feature)).await
     }
 
     pub async fn entries(&self, feature: &str) -> Result<Vec<SpecEntry>, RuntimeError> {
+        validate_feature(feature)?;
         super::read_jsonl(&self.entries_path(feature)).await
     }
 }
@@ -234,12 +237,39 @@ impl SpecStore {
         feature: &str,
         expected_revision: Option<&str>,
     ) -> Result<SpecMaterializeResult, RuntimeError> {
+        self.materialize_phase(feature, None, expected_revision)
+            .await
+    }
+
+    pub async fn materialize_phase(
+        &self,
+        feature: &str,
+        phase: Option<&str>,
+        expected_revision: Option<&str>,
+    ) -> Result<SpecMaterializeResult, RuntimeError> {
+        validate_feature(feature)?;
+        if let Some(phase) = phase
+            && !PHASES.contains(&phase)
+        {
+            return Err(RuntimeError::ToolFailed(format!(
+                "spec.materialize: unknown phase `{phase}`"
+            )));
+        }
         let entries: Vec<SpecEntry> = super::read_jsonl(&self.entries_path(feature)).await?;
         let deviations: Vec<SpecDeviation> =
             super::read_jsonl(&self.deviations_path(feature)).await?;
-        let markdown = render_materialized_markdown(feature, &entries, &deviations);
+        let markdown = match phase {
+            Some(phase) if phase != "implementation" => {
+                render_phase_markdown(feature, phase, &entries)
+            }
+            _ => render_materialized_markdown(feature, &entries, &deviations),
+        };
         let revision = revision_for(&markdown);
-        let path = self.feature_dir(feature).join("IMPLEMENTATION.md");
+        let filename = match phase {
+            Some(phase) if phase != "implementation" => format!("{phase}.md"),
+            _ => "IMPLEMENTATION.md".into(),
+        };
+        let path = self.feature_dir(feature).join(filename);
         let existing = tokio::fs::read_to_string(&path).await.ok();
         if let Some(expected) = expected_revision
             && existing
@@ -277,6 +307,29 @@ impl SpecStore {
             changed: true,
         })
     }
+}
+
+fn validate_feature(feature: &str) -> Result<(), RuntimeError> {
+    if feature.is_empty()
+        || feature == "."
+        || feature == ".."
+        || feature.contains('/')
+        || feature.contains('\\')
+        || feature.chars().any(char::is_control)
+    {
+        return Err(RuntimeError::ToolFailed(
+            "spec feature must be a single directory name".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn render_phase_markdown(feature: &str, phase: &str, entries: &[SpecEntry]) -> String {
+    let mut out = format!("# {phase} — {feature}\n\n");
+    for entry in entries.iter().filter(|entry| entry.phase == phase) {
+        out.push_str(&format!("## {}\n\n{}\n\n", entry.id.0, entry.content));
+    }
+    out
 }
 
 fn revision_for(text: &str) -> String {
@@ -387,6 +440,59 @@ mod tests {
                 .unwrap(),
             "user edit\n"
         );
+    }
+
+    #[tokio::test]
+    async fn materialize_phase_keeps_phase_documents_in_the_store() {
+        let (s, dir) = store().await;
+        s.update("x", "research", "Observed behavior".into())
+            .await
+            .unwrap();
+        s.update("x", "design", "Chosen design".into())
+            .await
+            .unwrap();
+        let research = s
+            .materialize_phase("x", Some("research"), None)
+            .await
+            .unwrap();
+        let design = s
+            .materialize_phase("x", Some("design"), None)
+            .await
+            .unwrap();
+        assert_eq!(research.path, dir.path().join("x/research.md"));
+        assert_eq!(design.path, dir.path().join("x/design.md"));
+        assert!(
+            tokio::fs::read_to_string(&research.path)
+                .await
+                .unwrap()
+                .contains("Observed behavior")
+        );
+        assert!(
+            !tokio::fs::read_to_string(&research.path)
+                .await
+                .unwrap()
+                .contains("Chosen design")
+        );
+        assert!(
+            tokio::fs::read_to_string(&design.path)
+                .await
+                .unwrap()
+                .contains("Chosen design")
+        );
+        assert_eq!(
+            s.materialize_phase("x", Some("implementation"), None)
+                .await
+                .unwrap()
+                .path,
+            dir.path().join("x/IMPLEMENTATION.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn feature_cannot_escape_spec_root() {
+        let (s, _dir) = store().await;
+        assert!(s.status("../outside").await.is_err());
+        assert!(s.materialize("..", None).await.is_err());
     }
 
     #[tokio::test]

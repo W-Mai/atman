@@ -863,7 +863,9 @@ impl Tool for MemorySpecMaterialize {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Materialize runtime JSONL spec state to Markdown with revision conflict protection.")
+        Some(
+            "Materialize project-scoped JSONL spec state to Markdown with revision conflict protection. Set phase for a phase document; omit it for the aggregate IMPLEMENTATION.md.",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -871,6 +873,7 @@ impl Tool for MemorySpecMaterialize {
             "type": "object",
             "properties": {
                 "feature": {"type": "string"},
+                "phase": {"type": "string", "enum": ["research", "design", "implementation", "testing", "retrospective"]},
                 "expected_revision": {"type": "string"}
             },
             "required": ["feature"]
@@ -884,7 +887,14 @@ impl Tool for MemorySpecMaterialize {
                 Some(Value::Str(value)) => Some(value.as_str()),
                 _ => None,
             };
-            let result = self.store.materialize(&feature, expected).await?;
+            let phase = match args.named("phase") {
+                Some(Value::Str(value)) => Some(value.as_str()),
+                _ => None,
+            };
+            let result = self
+                .store
+                .materialize_phase(&feature, phase, expected)
+                .await?;
             Ok(Value::Struct(vec![
                 ("path".into(), Value::Str(result.path.display().to_string())),
                 ("revision".into(), Value::Str(result.revision)),

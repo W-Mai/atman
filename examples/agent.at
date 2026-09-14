@@ -25,7 +25,7 @@ flow agent_loop(completion_state: string) -> string {
             "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
             "memory.goal.get", "memory.goal.set", "memory.goal.clear",
             "memory.recent_turns", "memory.history.search", "memory.history.read",
-            "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
+            "memory.spec.status", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
             "plan.write", "plan.read", "plan.tick",
             "permission.list", "permission.get", "permission.group", "permission.ungroup",
             "permission.approve", "permission.deny", "permission.defer", "permission.batch",
