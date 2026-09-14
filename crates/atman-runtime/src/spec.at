@@ -1,0 +1,156 @@
+flow spec(user_prompt: string) -> string {
+    contract {
+        invocation { user_message: user_prompt }
+    }
+    return subflow(interview, user_prompt, "project-intake", "explicit", "")
+}
+
+flow describe() -> string {
+    return "Synchronous requirements interview. Entry: interview(user_prompt, feature, trigger, context). Researches the project, asks the user focused questions, previews the design, and records explicit approval."
+}
+
+flow interview(user_prompt: string, feature: string = "project-intake", trigger: string = "explicit", context: string = "") -> string {
+    contract {
+        invocation { user_message: user_prompt }
+    }
+    previous = memory.spec.read(feature: feature)
+    previous_research = memory.spec.read(feature: feature, phase: "research")
+    previous_design = memory.spec.read(feature: feature, phase: "design")
+    when previous_research.file_revision != "" {
+        when previous_research.file_revision != previous_research.phase_revision {
+            return "pending: research.md has edits outside the spec store"
+        }
+    }
+    when previous_design.file_revision != "" {
+        when previous_design.file_revision != previous_design.phase_revision {
+            return "pending: design.md has edits outside the spec store"
+        }
+    }
+    expected_design_file_revision = previous_design.file_revision
+    project_files = fs.list(path: ".")
+    research_prompt = "Request: " + user_prompt
+        + "\nTrigger: " + trigger
+        + "\nParent context: " + context
+        + "\nExisting spec: " + to_json_string(previous)
+        + "\nProject root entries: " + to_json_string(project_files)
+    loop {
+        research_reply = llm.call(
+            model: "smart",
+            effort: env("effort"),
+            context: "session",
+            system: @"../prompts/spec.md",
+            prompt: research_prompt,
+            cache: true,
+            retry: 12,
+            tools: ["fs.read", "fs.list", "fs.grep", "rule.fetch"],
+        )
+        research_tools = extract_tool_uses(research_reply)
+        when is_empty(research_tools) {
+            break
+        }
+        research_results = dispatch_all(research_tools)
+        session.push(research_results)
+        research_prompt = "Continue the read-only investigation. State concrete findings and remaining questions."
+    }
+    findings = text_concat(research_reply)
+    answers = ""
+    rounds = 0
+    loop {
+        next = llm.extract(
+            model: "smart",
+            prompt: @"../prompts/spec-questions.md"
+                + "\nRequest: " + user_prompt
+                + "\nFindings: " + findings
+                + "\nPrior answers: " + answers,
+            fields: {
+                complete: bool -- "true only when the material requirements are clear after at least one user answer",
+                question: string -- "one precise question or a small related batch for the user",
+            },
+        )
+        when next.complete {
+            when rounds > 0 {
+                break
+            }
+        }
+        question = next.question
+        when question == "" {
+            question = "What outcome should this work achieve, and what constraints matter most?"
+        }
+        answer = form.ask(kind: "text", prompt: question, multiline: true)
+        when answer.kind == "cancelled" {
+            return "pending"
+        }
+        answers = answers + "\nQuestion: " + question + "\nAnswer: " + answer.text
+        rounds = rounds + 1
+    }
+    research = llm.extract(
+        model: "smart",
+        prompt: "Write concise research notes with verified facts, assumptions, and unknowns.\nRequest: " + user_prompt
+            + "\nFindings: " + findings + "\nAnswers: " + answers,
+        fields: { content: string -- "research Markdown" },
+    )
+    saved_research = memory.spec.update(feature: feature, phase: "research", content: research.content)
+    research_file = memory.spec.materialize(
+        feature: feature,
+        phase: "research",
+        expected_revision: previous_research.file_revision,
+    )
+    review_context = answers
+    loop {
+        design = llm.extract(
+            model: "smart",
+            prompt: @"../prompts/spec-design.md"
+                + "\nRequest: " + user_prompt
+                + "\nResearch: " + research.content
+                + "\nDiscussion: " + review_context,
+            fields: { content: string -- "complete design Markdown, including alternatives, behavior, tradeoffs, and validation" },
+        )
+        saved_design = memory.spec.update(feature: feature, phase: "design", content: design.content)
+        design_file = memory.spec.materialize(
+            feature: feature,
+            phase: "design",
+            expected_revision: expected_design_file_revision,
+        )
+        expected_design_file_revision = design_file.revision
+        current = memory.spec.read(feature: feature, phase: "design")
+        preview = preview.push(
+            topic: "spec-designs",
+            title: "Design review: " + feature,
+            kind: "markdown",
+            content: current.markdown,
+        )
+        when preview.status != "ok" {
+            return "pending"
+        }
+        decision = form.ask(
+            kind: "confirm",
+            prompt: "Review the design preview before deciding:\n" + preview.url
+                + "\n\nApprove this exact design revision for implementation?",
+        )
+        when decision.kind == "cancelled" {
+            return "pending"
+        }
+        when decision.value == true {
+            recorded = memory.spec.review(
+                feature: feature,
+                design_revision: current.design_revision,
+                approved: true,
+            )
+            return "approved"
+        }
+        rejected = memory.spec.review(
+            feature: feature,
+            design_revision: current.design_revision,
+            approved: false,
+        )
+        feedback = form.ask(
+            kind: "text",
+            prompt: "What should change in the design? You can give concrete examples or constraints.",
+            multiline: true,
+        )
+        when feedback.kind == "cancelled" {
+            return "pending"
+        }
+        review_context = review_context + "\nDesign feedback: " + feedback.text
+    }
+}

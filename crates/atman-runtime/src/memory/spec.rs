@@ -34,6 +34,14 @@ pub struct SpecDeviation {
     pub ts: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpecReview {
+    pub feature: String,
+    pub design_revision: String,
+    pub approved: bool,
+    pub ts: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone)]
 pub struct SpecStore {
     root: PathBuf,
@@ -65,6 +73,98 @@ impl SpecStore {
         self.feature_dir(feature).join("deviations.jsonl")
     }
 
+    fn reviews_path(&self, feature: &str) -> PathBuf {
+        self.feature_dir(feature).join("reviews.jsonl")
+    }
+
+    pub async fn design_revision(&self, feature: &str) -> Result<Option<String>, RuntimeError> {
+        let entries = self.entries(feature).await?;
+        if !entries.iter().any(|entry| entry.phase == "design") {
+            return Ok(None);
+        }
+        Ok(Some(revision_for(&render_phase_markdown(
+            feature, "design", &entries,
+        ))))
+    }
+
+    pub async fn phase_markdown(&self, feature: &str, phase: &str) -> Result<String, RuntimeError> {
+        validate_feature(feature)?;
+        if !PHASES.contains(&phase) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "spec.read: unknown phase `{phase}`"
+            )));
+        }
+        let entries = self.entries(feature).await?;
+        Ok(render_phase_markdown(feature, phase, &entries))
+    }
+
+    pub async fn phase_revision(
+        &self,
+        feature: &str,
+        phase: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let entries = self.entries(feature).await?;
+        if !entries.iter().any(|entry| entry.phase == phase) {
+            return Ok(None);
+        }
+        Ok(Some(revision_for(
+            &self.phase_markdown(feature, phase).await?,
+        )))
+    }
+
+    pub async fn materialized_revision(
+        &self,
+        feature: &str,
+        phase: &str,
+    ) -> Result<String, RuntimeError> {
+        validate_feature(feature)?;
+        if !PHASES.contains(&phase) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "spec.read: unknown phase `{phase}`"
+            )));
+        }
+        let filename = if phase == "implementation" {
+            "IMPLEMENTATION.md".to_owned()
+        } else {
+            format!("{phase}.md")
+        };
+        let path = self.feature_dir(feature).join(filename);
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => Ok(revision_for(&content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(RuntimeError::ToolFailed(format!(
+                "spec.read: materialized file: {error}"
+            ))),
+        }
+    }
+
+    pub async fn review(
+        &self,
+        feature: &str,
+        design_revision: &str,
+        approved: bool,
+    ) -> Result<SpecReview, RuntimeError> {
+        if self.design_revision(feature).await?.as_deref() != Some(design_revision) {
+            return Err(RuntimeError::ToolFailed(
+                "spec.review: design revision is missing or stale".into(),
+            ));
+        }
+        let file_revision = self.materialized_revision(feature, "design").await?;
+        if file_revision != design_revision {
+            return Err(RuntimeError::ToolFailed(
+                "spec.review: materialized design differs from the current revision".into(),
+            ));
+        }
+        let review = SpecReview {
+            feature: feature.into(),
+            design_revision: design_revision.into(),
+            approved,
+            ts: chrono::Utc::now(),
+        };
+        super::append_jsonl(&self.reviews_path(feature), &review).await?;
+        Ok(review)
+    }
+
     pub async fn status(&self, feature: &str) -> Result<SpecStatus, RuntimeError> {
         validate_feature(feature)?;
         let entries: Vec<SpecEntry> = super::read_jsonl(&self.entries_path(feature)).await?;
@@ -74,17 +174,36 @@ impl SpecStore {
                 phase: "not_started".into(),
                 entry_count: 0,
                 deviation_count: 0,
+                design_revision: None,
+                approved_design_revision: None,
             });
         }
         let latest = latest_phase(&entries);
         let dev_count = super::read_jsonl::<SpecDeviation>(&self.deviations_path(feature))
             .await?
             .len();
+        let design_revision = entries
+            .iter()
+            .any(|entry| entry.phase == "design")
+            .then(|| revision_for(&render_phase_markdown(feature, "design", &entries)));
+        let reviews: Vec<SpecReview> = super::read_jsonl(&self.reviews_path(feature)).await?;
+        let materialized_revision = self.materialized_revision(feature, "design").await?;
+        let approved_design_revision =
+            reviews
+                .last()
+                .filter(|review| review.approved)
+                .and_then(|review| {
+                    (design_revision.as_deref() == Some(review.design_revision.as_str())
+                        && materialized_revision == review.design_revision)
+                        .then(|| review.design_revision.clone())
+                });
         Ok(SpecStatus {
             feature: feature.into(),
             phase: latest,
             entry_count: entries.len(),
             deviation_count: dev_count,
+            design_revision,
+            approved_design_revision,
         })
     }
 
@@ -222,6 +341,8 @@ pub struct SpecStatus {
     pub phase: String,
     pub entry_count: usize,
     pub deviation_count: usize,
+    pub design_revision: Option<String>,
+    pub approved_design_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +623,46 @@ mod tests {
         assert_eq!(s.status("x").await.unwrap().phase, "research");
         s.update("x", "design", "spec".into()).await.unwrap();
         assert_eq!(s.status("x").await.unwrap().phase, "design");
+    }
+
+    #[tokio::test]
+    async fn approval_tracks_only_the_current_design_revision() {
+        let (s, dir) = store().await;
+        s.update("x", "research", "observations".into())
+            .await
+            .unwrap();
+        s.update("x", "design", "first design".into())
+            .await
+            .unwrap();
+        s.materialize_phase("x", Some("design"), Some(""))
+            .await
+            .unwrap();
+        let first = s.status("x").await.unwrap().design_revision.unwrap();
+        assert!(s.review("x", "stale", true).await.is_err());
+        s.review("x", &first, true).await.unwrap();
+        assert_eq!(
+            s.status("x").await.unwrap().approved_design_revision,
+            Some(first.clone())
+        );
+        s.update("x", "design", "changed design".into())
+            .await
+            .unwrap();
+        assert_eq!(s.status("x").await.unwrap().approved_design_revision, None);
+        s.materialize_phase("x", Some("design"), Some(&first))
+            .await
+            .unwrap();
+        let second = s.status("x").await.unwrap().design_revision.unwrap();
+        s.review("x", &second, false).await.unwrap();
+        assert_eq!(s.status("x").await.unwrap().approved_design_revision, None);
+        s.review("x", &second, true).await.unwrap();
+        assert_eq!(
+            s.status("x").await.unwrap().approved_design_revision,
+            Some(second)
+        );
+        tokio::fs::write(dir.path().join("x/design.md"), "external edit")
+            .await
+            .unwrap();
+        assert_eq!(s.status("x").await.unwrap().approved_design_revision, None);
     }
 
     #[tokio::test]

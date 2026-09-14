@@ -276,6 +276,12 @@ pub fn register_spec_memory(reg: &ToolRegistry, spec_store: Arc<crate::memory::s
     reg.register(Arc::new(memory::MemorySpecStatus {
         store: spec_store.clone(),
     }));
+    reg.register(Arc::new(memory::MemorySpecRead {
+        store: spec_store.clone(),
+    }));
+    reg.register(Arc::new(memory::MemorySpecReview {
+        store: spec_store.clone(),
+    }));
     reg.register(Arc::new(memory::MemorySpecMaterialize {
         store: spec_store.clone(),
     }));

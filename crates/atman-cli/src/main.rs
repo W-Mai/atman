@@ -1365,7 +1365,7 @@ fn resolve_slash_command_from(
         bail!("empty slash command");
     }
     let name = name_full.strip_prefix('/').unwrap_or(name_full);
-    if name == "agent" {
+    if name == "agent" || name == "spec" {
         atman_runtime::templates::ensure_managed_agent_at(cfg)?;
     }
     let path =
@@ -5377,7 +5377,7 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
         }
     }
     println!(
-        "Note: commands/agent.at is managed by atman and refreshed when bundled content changes. Do not edit it."
+        "Note: commands/agent.at and commands/spec.at are managed by atman and refreshed when bundled content changes. Do not edit them."
     );
     println!("To customize behavior, create your own .at file and route to it from routes.at.");
     println!();
@@ -8461,6 +8461,20 @@ mod tests {
         assert_eq!(args[0].0, "input");
         assert!(matches!(&args[0].1, Value::Str(value) if value == "inspect this"));
         assert_eq!(source_dir, Some(project_commands));
+    }
+
+    #[test]
+    fn spec_slash_command_accepts_a_freeform_request() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let (_, flow_name, args, _) =
+            resolve_slash_command_from("/spec discuss the project goals", &config, None).unwrap();
+        assert_eq!(flow_name, "spec");
+        assert!(matches!(
+            &args[..],
+            [(name, Value::Str(value))]
+                if name == "user_prompt" && value == "discuss the project goals"
+        ));
     }
 
     #[test]

@@ -24,15 +24,19 @@ fn init_writes_config_tree_and_prints_next_steps() {
     let cfg = tmp.path().join("atman");
     let (out, err, code) = run_init(&cfg);
     assert_eq!(code, 0, "stderr={err}");
-    assert!(out.contains("wrote 10 template"), "want write count: {out}");
+    assert!(out.contains("wrote 14 template"), "want write count: {out}");
     assert!(out.contains("next steps:"), "want next-steps block: {out}");
     for entry in [
         "config.toml",
         "routes.at",
         "on_session_start.at",
         "commands/agent.at",
+        "commands/spec.at",
         "commands/hello.at",
         "prompts/system.md",
+        "prompts/spec.md",
+        "prompts/spec-questions.md",
+        "prompts/spec-design.md",
         "prompts/loop-disposition.md",
         "prompts/loop-continuation.md",
         "prompts/loop-action.md",

@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Requirements interview** — The managed agent synchronously gathers project and feature requirements, previews the design, and waits for approval of the current design revision before continuing.
 - **Spec documents** — The managed agent records phase progress and materializes reviewable spec Markdown in the configured project scope.
 - **Project skills** — `rule.fetch` discovers skills in project assistant directories and resolves duplicate names with project precedence.
 - **Artifact preview** — Atman serves `preview.push` topics in a local browser workbench with project and topic navigation, artifact viewers, and automatic startup.

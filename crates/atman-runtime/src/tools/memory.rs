@@ -836,6 +836,7 @@ impl Tool for MemorySpecStatus {
         Box::pin(async move {
             let feature = required_string(&args, "feature")?;
             let st = self.store.status(&feature).await?;
+            let approved = st.approved_design_revision.is_some();
             Ok(Value::Struct(vec![
                 ("feature".into(), Value::Str(st.feature)),
                 ("phase".into(), Value::Str(st.phase)),
@@ -844,6 +845,156 @@ impl Tool for MemorySpecStatus {
                     "deviation_count".into(),
                     Value::Int(st.deviation_count as i64),
                 ),
+                (
+                    "design_revision".into(),
+                    st.design_revision.map(Value::Str).unwrap_or(Value::Unit),
+                ),
+                (
+                    "approved_design_revision".into(),
+                    st.approved_design_revision
+                        .map(Value::Str)
+                        .unwrap_or(Value::Unit),
+                ),
+                ("approved".into(), Value::Bool(approved)),
+            ]))
+        })
+    }
+}
+
+pub struct MemorySpecRead {
+    pub store: Arc<SpecStore>,
+}
+
+impl Tool for MemorySpecRead {
+    fn name(&self) -> &str {
+        "memory.spec.read"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Read stored entries for a project-scoped spec feature and optional phase.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string"},
+                "phase": {"type": "string"}
+            },
+            "required": ["feature"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let feature = required_string(&args, "feature")?;
+            let phase = args.named("phase").and_then(|value| match value {
+                Value::Str(text) => Some(text.as_str()),
+                _ => None,
+            });
+            let entries = self.store.entries(&feature).await?;
+            let entries = entries
+                .into_iter()
+                .filter(|entry| phase.is_none_or(|phase| entry.phase == phase))
+                .map(|entry| {
+                    Value::Struct(vec![
+                        ("id".into(), Value::Str(entry.id.to_string())),
+                        ("phase".into(), Value::Str(entry.phase)),
+                        ("content".into(), Value::Str(entry.content)),
+                    ])
+                })
+                .collect();
+            Ok(Value::Struct(vec![
+                ("entries".into(), Value::List(entries)),
+                (
+                    "markdown".into(),
+                    match phase {
+                        Some(phase) => {
+                            Value::Str(self.store.phase_markdown(&feature, phase).await?)
+                        }
+                        None => Value::Unit,
+                    },
+                ),
+                (
+                    "file_revision".into(),
+                    match phase {
+                        Some(phase) => {
+                            Value::Str(self.store.materialized_revision(&feature, phase).await?)
+                        }
+                        None => Value::Unit,
+                    },
+                ),
+                (
+                    "phase_revision".into(),
+                    match phase {
+                        Some(phase) => self
+                            .store
+                            .phase_revision(&feature, phase)
+                            .await?
+                            .map(Value::Str)
+                            .unwrap_or(Value::Unit),
+                        None => Value::Unit,
+                    },
+                ),
+                (
+                    "design_revision".into(),
+                    self.store
+                        .design_revision(&feature)
+                        .await?
+                        .map(Value::Str)
+                        .unwrap_or(Value::Unit),
+                ),
+            ]))
+        })
+    }
+}
+
+pub struct MemorySpecReview {
+    pub store: Arc<SpecStore>,
+}
+
+impl Tool for MemorySpecReview {
+    fn name(&self) -> &str {
+        "memory.spec.review"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Record the user's review of the exact current design revision.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string"},
+                "design_revision": {"type": "string"},
+                "approved": {"type": "boolean"}
+            },
+            "required": ["feature", "design_revision", "approved"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let feature = required_string(&args, "feature")?;
+            let revision = required_string(&args, "design_revision")?;
+            let approved = match args.named("approved") {
+                Some(Value::Bool(value)) => *value,
+                _ => return Err(crate::error::RuntimeError::MissingArg("approved".into())),
+            };
+            let record = self.store.review(&feature, &revision, approved).await?;
+            Ok(Value::Struct(vec![
+                ("feature".into(), Value::Str(record.feature)),
+                ("design_revision".into(), Value::Str(record.design_revision)),
+                ("approved".into(), Value::Bool(record.approved)),
             ]))
         })
     }

@@ -103,7 +103,9 @@ A `.at` file declares types, providers, tools, routes, lifecycle hooks, and flow
 
 ### The managed agent loop
 
-`atman init` writes a managed `commands/agent.at` template. The current template first records the user turn, loads relevant rules and past confessions, samples both edges of recent history, asks a cheap model to select relevant context, and then runs a tool loop with `llm.call`, retries, compaction, and tool dispatch. A candidate final response is checked against the current request and recent transcript before the loop exits; plain-text candidates that are ready to deliver are returned to the model with an internal request to use `final.answer`. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
+`atman init` writes managed `commands/agent.at` and `commands/spec.at` templates. The agent first loads relevant rules and past confessions, then routes the first substantive task in a project, unapproved feature or architecture work, and material requirement uncertainty through a synchronous requirements interview. The interview investigates project files, asks focused questions, stores research and design in the configured project scope, publishes the design to the local preview, and waits for approval of that exact revision before the agent can continue. A cancelled interview or failed preview leaves the task pending. The normal agent loop then runs `llm.call`, retries, compaction, and tool dispatch; a candidate final response is checked before the loop exits. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
+
+Run `/spec <request>` in the TUI to start project intake directly. The interview uses multiline forms for requirement answers and shows a preview URL before design approval.
 
 `loop` is unconditional. A flow must leave it with `break`, `return`, an error, or cancellation; use `continue` to start the next iteration:
 
@@ -258,7 +260,7 @@ See [`examples/`](examples/) for the canonical flows covering agent loops, code 
 | `git` | diff, show, log, status (0), add, commit, branch (2), push (3) | 0–3 |
 | `test` | run | 2 |
 | `hunk` | review (0), apply (1), plan_edit (2) | 0–2 |
-| `memory` | todo.list, goal.clear, recent_turns, history, fetch_confessions, spec.status (0), todo.set/done/cancel/delete, goal.get/set, confess, spec.update/deviate/materialize (1) | 0–1 |
+| `memory` | todo.list, goal.clear, recent_turns, history, fetch_confessions, spec.status/read (0), todo.set/done/cancel/delete, goal.get/set, confess, spec.update/deviate/materialize/review (1) | 0–1 |
 | `plan` | read (0), write, tick (1) | 0–1 |
 | `agent` | spawn | 2 |
 | `form` | ask | 0 |

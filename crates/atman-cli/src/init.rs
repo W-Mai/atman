@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use atman_runtime::templates::{
     AGENT_AT, LOOP_ACTION_MD, LOOP_CONTINUATION_MD, LOOP_DISPOSITION_MD, LOOP_FINAL_ANSWER_MD,
-    SYSTEM_MD, write_managed_template,
+    SPEC_AT, SPEC_DESIGN_MD, SPEC_MD, SPEC_QUESTIONS_MD, SYSTEM_MD, write_managed_template,
 };
 
 pub struct InitReport {
@@ -56,7 +56,11 @@ pub fn init_config_dir_with_mode(
         .with_context(|| format!("mkdir {}", prompts_dir.display()))?;
     let managed_templates = [
         (commands_dir.join("agent.at"), AGENT_AT),
+        (commands_dir.join("spec.at"), SPEC_AT),
         (prompts_dir.join("system.md"), SYSTEM_MD),
+        (prompts_dir.join("spec.md"), SPEC_MD),
+        (prompts_dir.join("spec-questions.md"), SPEC_QUESTIONS_MD),
+        (prompts_dir.join("spec-design.md"), SPEC_DESIGN_MD),
         (prompts_dir.join("loop-disposition.md"), LOOP_DISPOSITION_MD),
         (
             prompts_dir.join("loop-continuation.md"),
@@ -178,14 +182,18 @@ mod tests {
         let cfg = tmp.path().join("atman");
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.is_empty());
-        assert_eq!(rep.written.len(), 10, "written: {:?}", rep.written);
-        assert_eq!(rep.managed.len(), 6);
+        assert_eq!(rep.written.len(), 14, "written: {:?}", rep.written);
+        assert_eq!(rep.managed.len(), 10);
         assert!(cfg.join("config.toml").exists());
         assert!(cfg.join("routes.at").exists());
         assert!(cfg.join("on_session_start.at").exists());
         assert!(cfg.join("commands/agent.at").exists());
+        assert!(cfg.join("commands/spec.at").exists());
         assert!(cfg.join("commands/hello.at").exists());
         assert!(cfg.join("prompts/system.md").exists());
+        assert!(cfg.join("prompts/spec.md").exists());
+        assert!(cfg.join("prompts/spec-questions.md").exists());
+        assert!(cfg.join("prompts/spec-design.md").exists());
         assert!(cfg.join("prompts/loop-disposition.md").exists());
         assert!(cfg.join("prompts/loop-continuation.md").exists());
         assert!(cfg.join("prompts/loop-action.md").exists());
@@ -288,7 +296,7 @@ mod tests {
         let rep = init_config_dir(&cfg).unwrap();
 
         assert!(rep.written.is_empty(), "written: {:?}", rep.written);
-        assert_eq!(rep.managed.len(), 6);
+        assert_eq!(rep.managed.len(), 10);
         assert_eq!(rep.skipped.len(), 4);
     }
 
@@ -300,14 +308,14 @@ mod tests {
         std::fs::write(cfg.join("some-other.toml"), "unrelated").unwrap();
         let rep = init_config_dir(&cfg).unwrap();
         assert!(cfg.join("commands").is_dir());
-        assert_eq!(rep.written.len(), 10);
+        assert_eq!(rep.written.len(), 14);
     }
 
     #[test]
     fn agent_template_parses_as_valid_dsl() {
         let file = atman_dsl::parse::parse_file(AGENT_AT).expect("agent template must parse");
         let names: Vec<&str> = file.flows.iter().map(|f| f.name.name.as_str()).collect();
-        assert_eq!(names, vec!["agent"]);
+        assert_eq!(names, vec!["agent", "requirements_gate"]);
     }
 
     #[test]

@@ -79,6 +79,8 @@ fn validate_accepts_all_registered_memory_spec_tools() {
     let ex = build_executor_with_memory(&dir);
     for tool in &[
         "memory.spec.status",
+        "memory.spec.read",
+        "memory.spec.review",
         "memory.spec.update",
         "memory.spec.deviate",
         "memory.todo.set",

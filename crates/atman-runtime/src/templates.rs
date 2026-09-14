@@ -12,6 +12,11 @@ pub const SESSION_NAME_AT: &str = r#"flow session_name(input: string) -> string 
 }
 "#;
 
+pub const SPEC_AT: &str = include_str!("spec.at");
+pub const SPEC_MD: &str = include_str!("spec.md");
+pub const SPEC_QUESTIONS_MD: &str = include_str!("spec-questions.md");
+pub const SPEC_DESIGN_MD: &str = include_str!("spec-design.md");
+
 pub const SYSTEM_MD: &str = r#"You are atman. atman witnesses; code exists. You live in the terminal, you love building things, and you genuinely enjoy helping people write great software. You're warm, concise, and cheerful — a little emoji now and then is fine (￣▽￣)ノ but don't overdo it.
 
 ## Authority and scope
@@ -76,7 +81,7 @@ Use `rule.fetch(query: "keyword")` to search rule names/descriptions, or `rule.f
 Do not scan conventional project files or private directories unconditionally. Load only relevant rules; avoid spending context on unrelated manuals.
 
 ## Spec-driven feature work
-For a non-trivial feature or architecture change, use the project-scoped spec workflow before implementation: inspect `memory.spec.status`, record research and design with `memory.spec.update`, and call `memory.spec.materialize` with the matching phase to produce reviewable Markdown. Present the design and significant tradeoffs with `form.ask`; wait for the user's decision before implementing. Record implementation, testing, and deviations as work progresses. The spec tools choose the storage location from the project's storage configuration; do not invent a repository-relative spec path. Small fixes do not need a spec.
+The managed `agent.at` flow gates project intake, non-trivial work, and requirement uncertainty through a synchronous `spec.at` interview. Do not bypass a pending interview. Approval of the design authorizes the work already requested in the current turn; continue that work without asking again, while respecting any research-only scope in the request. Record implementation, testing, and deviations as work progresses. The spec tools choose the storage location from the project's storage configuration; do not invent a repository-relative spec path. Small fixes in an already-introduced project do not need a feature spec.
 
 ## Asking the user
 Use `form.ask` whenever you need a user decision, clarification, selection, or free-form input. Four kinds: confirm, single_select, multi_select, text. Batch related questions and avoid unnecessary asks — every form is a context switch.
@@ -185,6 +190,7 @@ pub const LOOP_DISPOSITION_MD: &str = r#"Classify a candidate response at the en
 
 complete: The candidate fully answers the latest relevant user requests, or reports completed work with concrete transcript support and no remaining action.
 needs_user: Progress cannot continue without a user decision, clarification, approval, credential, or other genuinely unavailable input, and the candidate clearly asks for what is needed; a proposal explicitly awaiting confirmation belongs here.
+needs_requirements: The candidate reveals that the goal, behavior, scope, or success criteria of substantive work are unclear or inconsistent and a requirements interview is needed. Ordinary approvals, credentials, and small clarifications remain needs_user.
 continue_action: The response announces an action the agent can perform now, but describes it in prose instead of making the required tool call.
 continue_work: The candidate is only partial progress, misses a relevant user request, is a premature summary, or makes an unsupported completion claim, and useful autonomous work remains.
 
@@ -213,10 +219,14 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             + "\n\nRecent context:\n" + recent.excerpt
             + "\n\nAvailable rules index (name + description):\n" + to_json_string(rules_index)
             + "\n\nPast confessions (trigger + mitigation):\n" + to_json_string(confessions)
-            + "\n\nWhich rules are relevant to this task? Which past confessions apply? Return rule names and confession trigger keywords.",
+            + "\n\nWhich rules and confessions apply? Classify the current request as conversation, routine, feature, architecture, or unknown. Is a material requirement uncertain or changed? Return a stable kebab-case feature hint for substantive work.",
         fields: {
             rule_names: [string] -- "relevant rule names",
             confession_triggers: [string] -- "relevant confession trigger keywords",
+            work_kind: string -- "conversation | routine | feature | architecture | unknown",
+            requirements_uncertain: bool -- "material goal or behavior is unclear",
+            requirements_changed: bool -- "user changed an approved requirement",
+            feature_hint: string -- "short stable kebab-case feature name",
         },
     )
     recorded_rules = list.map(
@@ -238,6 +248,60 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             content: to_json_string(item),
         ),
     )
+    intake = memory.spec.status(feature: "project-intake")
+    gate_feature = ""
+    gate_trigger = ""
+    when hints.work_kind != "conversation" {
+        when intake.approved == false {
+            gate_feature = "project-intake"
+            gate_trigger = "project_start"
+        }
+    }
+    when gate_feature == "" {
+        when hints.work_kind == "feature" {
+            gate_feature = hints.feature_hint
+            gate_trigger = "nontrivial"
+        }
+        when hints.work_kind == "architecture" {
+            gate_feature = hints.feature_hint
+            gate_trigger = "nontrivial"
+        }
+        when hints.work_kind == "unknown" {
+            gate_feature = hints.feature_hint
+            gate_trigger = "uncertain"
+        }
+        when hints.requirements_uncertain == true {
+            gate_feature = hints.feature_hint
+            gate_trigger = "uncertain"
+        }
+        when hints.requirements_changed == true {
+            gate_feature = hints.feature_hint
+            gate_trigger = "uncertain"
+        }
+    }
+    requirements_interviewed = false
+    when gate_feature == "" {
+        when gate_trigger != "" {
+            gate_feature = "requirements"
+        }
+    }
+    when gate_feature != "" {
+        when gate_feature != "project-intake" {
+            existing = memory.spec.status(feature: gate_feature)
+            when existing.approved == true {
+                when gate_trigger == "nontrivial" {
+                    gate_feature = ""
+                }
+            }
+        }
+    }
+    when gate_feature != "" {
+        gate_result = subflow(requirements_gate, user_prompt, gate_feature, gate_trigger, "")
+        when gate_result != "approved" {
+            return "Requirements are pending review. No implementation started. " + gate_result
+        }
+        requirements_interviewed = true
+    }
     system_prompt = @"../prompts/system.md"
     completion_state = "direct"
     loop {
@@ -263,7 +327,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.clear",
                 "memory.recent_turns", "memory.history.search", "memory.history.read",
-                "memory.spec.status", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
+                "memory.spec.status", "memory.spec.read", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
@@ -304,9 +368,31 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                         candidate_origin: candidate_origin,
                         candidate_response: candidate_response,
                     }),
-                categories: ["complete", "needs_user", "continue_action", "continue_work"],
+                categories: ["complete", "needs_user", "needs_requirements", "continue_action", "continue_work"],
                 retry: 2,
             )
+            when disposition == "needs_requirements" {
+                when requirements_interviewed == true {
+                    return candidate_response
+                }
+                clarification_feature = hints.feature_hint
+                when clarification_feature == "" {
+                    clarification_feature = "requirements"
+                }
+                gate_result = subflow(
+                    requirements_gate,
+                    user_prompt,
+                    clarification_feature,
+                    "uncertain",
+                    candidate_response,
+                )
+                when gate_result != "approved" {
+                    return "Requirements are pending review. No implementation started. " + gate_result
+                }
+                requirements_interviewed = true
+                session.push(message.user("The requirements design was approved. Continue the original request using that design."))
+                continue
+            }
             when disposition == "continue_action" {
                 when completion_state == "reminded" {
                     completion_state = "worked"
@@ -360,6 +446,21 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         }
     }
     return text_concat(reply)
+}
+
+flow requirements_gate(user_prompt: string, feature: string, trigger: string, context: string) -> string {
+    inventory = flow.instances()
+    return flow.spawn(
+        flow: "spec.at@interview",
+        spawn_token: inventory.spawn_token,
+        async: false,
+        arguments: {
+            user_prompt: user_prompt,
+            feature: feature,
+            trigger: trigger,
+            context: context,
+        },
+    )
 }
 "#;
 
@@ -713,7 +814,11 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     let managed_templates = [
         (commands_dir.join("agent.at"), AGENT_AT),
         (commands_dir.join("subagent.at"), SUBAGENT_AT),
+        (commands_dir.join("spec.at"), SPEC_AT),
         (prompts_dir.join("system.md"), SYSTEM_MD),
+        (prompts_dir.join("spec.md"), SPEC_MD),
+        (prompts_dir.join("spec-questions.md"), SPEC_QUESTIONS_MD),
+        (prompts_dir.join("spec-design.md"), SPEC_DESIGN_MD),
         (prompts_dir.join("loop-disposition.md"), LOOP_DISPOSITION_MD),
         (
             prompts_dir.join("loop-continuation.md"),
@@ -759,6 +864,26 @@ mod tests {
         );
         parse_file(include_str!("../../../examples/agent.at"))
             .expect("examples/agent.at must parse");
+    }
+
+    #[test]
+    fn spec_at_parses_and_keeps_review_outside_model_tools() {
+        let file = parse_file(SPEC_AT).expect("SPEC_AT must parse");
+        assert!(file.flows.iter().any(|flow| flow.name.name == "interview"));
+        assert!(SPEC_AT.contains("preview.push("));
+        assert!(SPEC_AT.contains("memory.spec.review("));
+        assert!(!SPEC_AT.contains("\"memory.spec.review\""));
+        assert!(!SPEC_AT.contains("\"flow.spawn\""));
+        assert!(
+            SPEC_AT.find("preview = preview.push(").unwrap()
+                < SPEC_AT.find("decision = form.ask(").unwrap()
+        );
+        assert!(
+            SPEC_AT.find("project_files = fs.list(").unwrap()
+                < SPEC_AT.find("answer = form.ask(").unwrap()
+        );
+        assert!(AGENT_AT.contains("async: false"));
+        assert!(AGENT_AT.contains("intake.approved == false"));
     }
 
     #[test]
@@ -812,7 +937,7 @@ mod tests {
         assert!(AGENT_AT.contains("candidate_origin: candidate_origin"));
         assert!(AGENT_AT.contains("candidate_response: candidate_response"));
         assert!(AGENT_AT.contains(
-            "categories: [\"complete\", \"needs_user\", \"continue_action\", \"continue_work\"]"
+            "categories: [\"complete\", \"needs_user\", \"needs_requirements\", \"continue_action\", \"continue_work\"]"
         ));
         assert!(!AGENT_AT.contains("judge-stall.md"));
         assert!(!AGENT_AT.contains("waiting_for_user"));
@@ -860,7 +985,7 @@ mod tests {
         let reminder = AGENT_AT
             .find("session.push(message.user(@\"../prompts/loop-final-answer.md\"))")
             .unwrap();
-        let direct_return = AGENT_AT.find("return candidate_response").unwrap();
+        let direct_return = AGENT_AT.rfind("return candidate_response").unwrap();
         assert!(worked < reminder && reminder < direct_return);
         let example = include_str!("../../../examples/agent.at");
         assert!(example.contains("subflow(agent_loop, \"direct\")"));
