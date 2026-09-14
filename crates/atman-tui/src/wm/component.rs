@@ -168,6 +168,11 @@ pub trait WindowComponent: Send {
     /// Handle a key or mouse event. Return Consumed/Ignored.
     fn handle_event(&mut self, event: &WmEvent, ctx: &mut EventCtx) -> WmEventResult;
 
+    /// Whether the focused content placed a visible terminal cursor this frame.
+    fn cursor_visible(&self) -> bool {
+        false
+    }
+
     /// Preferred size for floating placement.
     #[allow(dead_code)]
     fn preferred_size(&self, viewport: Rect) -> SizeHint;

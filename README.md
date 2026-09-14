@@ -419,7 +419,7 @@ Those are LLM-driven chat-first agents. atman is orchestration-driven: you write
 Model Context Protocol. atman is an MCP consumer — any MCP server you configure in `mcp_servers.json` is auto-connected at boot and its tools appear alongside the built-in ones. The TUI MCP panel supports adding and editing local server configurations with keyboard or mouse controls.
 
 **How are confessions and rules managed?**
-Open **Manage Memory & Rules** from the TUI command palette (Ctrl+P). Search confessions and the rules loaded by the current agent, edit confession fields, and inspect revision history; original records remain intact. **Organize** generates category and related-record suggestions with the active model. Review the suggestions, select individual rows or **Select All**, then apply the chosen categories. Rules are read-only in this panel; **Reload** refreshes their source files.
+Open **Manage Memory & Rules** from the TUI command palette (Ctrl+P). Action labels show their keys, including **[E]dit**. In the editor, click to place the cursor, use Tab or Shift+Tab to change fields, Shift+Enter for a newline, Enter to save, or Esc to cancel. Search confessions and the rules loaded by the current agent, edit confession fields, and inspect revision history; original records remain intact. **Organize** generates category and related-record suggestions with the active model. Review the suggestions, select individual rows or **Select All**, then apply the chosen categories. Rules are read-only in this panel; **Reload** refreshes their source files.
 
 ## Contributing
 

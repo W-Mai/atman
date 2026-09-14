@@ -216,6 +216,13 @@ impl WindowManager {
         self.focus.active
     }
 
+    pub fn focused_content_cursor_visible(&self) -> bool {
+        self.focused_id()
+            .and_then(|id| self.panels.iter().find(|panel| panel.id == id))
+            .and_then(|panel| panel.content.as_deref())
+            .is_some_and(WindowComponent::cursor_visible)
+    }
+
     pub fn label(&self, id: WindowId) -> Option<&str> {
         self.panels
             .iter()

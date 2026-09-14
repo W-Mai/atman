@@ -1,18 +1,18 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::MouseEventKind;
+use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use atman_runtime::memory::MemoryId;
 use atman_runtime::memory::confession::{ConfessionChange, ConfessionFields, ConfessionView};
 
-use crate::input::InputEditor;
+use crate::input::{InputEditor, cursor_from_wrapped, visual_line_count, wrapped_cursor_position};
 use crate::keys::KeyAction;
 use crate::wm::component::{
     CloseOutcome, EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
@@ -41,6 +41,8 @@ struct EditState {
     fields: [InputEditor; 5],
     focused: usize,
     saving: bool,
+    scroll: [u16; 5],
+    follow_cursor: bool,
 }
 
 impl EditState {
@@ -65,6 +67,8 @@ impl EditState {
             fields,
             focused: 0,
             saving: false,
+            scroll: [0; 5],
+            follow_cursor: true,
         }
     }
 
@@ -79,6 +83,15 @@ impl EditState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoverTarget {
+    Action(&'static str),
+    Tab(usize),
+    Row(usize),
+    Search,
+    Field(usize),
+}
+
 pub struct KnowledgePanelContent {
     state: Arc<Mutex<KnowledgeState>>,
     control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
@@ -88,16 +101,21 @@ pub struct KnowledgePanelContent {
     detail_scroll: u16,
     detail_rect: Rect,
     body_height: u16,
-    search: String,
+    search: InputEditor,
     search_focused: bool,
+    search_scroll: u16,
     edit: Option<EditState>,
     selected_proposals: HashSet<MemoryId>,
     show_history: bool,
     tab_rects: [Rect; 3],
     search_rect: Rect,
+    search_input_rect: Rect,
     row_rects: Vec<(usize, Rect)>,
     action_rects: Vec<(&'static str, Rect)>,
-    edit_field_rects: [Rect; 5],
+    edit_segment_rects: [Rect; 5],
+    edit_text_rects: [Rect; 5],
+    hovered: Option<HoverTarget>,
+    cursor_on_screen: bool,
 }
 
 impl KnowledgePanelContent {
@@ -114,21 +132,26 @@ impl KnowledgePanelContent {
             detail_scroll: 0,
             detail_rect: Rect::default(),
             body_height: 0,
-            search: String::new(),
+            search: InputEditor::default(),
             search_focused: false,
+            search_scroll: 0,
             edit: None,
             selected_proposals: HashSet::new(),
             show_history: false,
             tab_rects: [Rect::default(); 3],
             search_rect: Rect::default(),
+            search_input_rect: Rect::default(),
             row_rects: Vec::new(),
             action_rects: Vec::new(),
-            edit_field_rects: [Rect::default(); 5],
+            edit_segment_rects: [Rect::default(); 5],
+            edit_text_rects: [Rect::default(); 5],
+            hovered: None,
+            cursor_on_screen: false,
         }
     }
 
     fn filtered_indices(&self, state: &KnowledgeState) -> Vec<usize> {
-        let needle = self.search.to_lowercase();
+        let needle = self.search.buf().to_lowercase();
         match self.tab {
             0 => state
                 .confessions
@@ -198,7 +221,51 @@ impl KnowledgePanelContent {
         }
     }
 
+    fn action_label(name: &str) -> &'static str {
+        match name {
+            "Edit" => "[E]dit",
+            "History" => "[H]istory",
+            "Organize" => "[O]rganize",
+            "Refresh" => "[R]efresh",
+            "Reload" => "[⇧R]eload",
+            "Stop" => "[C]ancel",
+            "Select All" => "[S]elect all",
+            "Apply" => "[A]pply",
+            "Applying…" => "Applying…",
+            _ => "",
+        }
+    }
+
+    fn hover_at(&self, x: u16, y: u16) -> Option<HoverTarget> {
+        let point = (x, y).into();
+        if let Some((name, _)) = self
+            .action_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+        {
+            return Some(HoverTarget::Action(name));
+        }
+        if self.edit.is_some() {
+            return self
+                .edit_segment_rects
+                .iter()
+                .position(|rect| rect.contains(point))
+                .map(HoverTarget::Field);
+        }
+        if let Some(index) = self.tab_rects.iter().position(|rect| rect.contains(point)) {
+            return Some(HoverTarget::Tab(index));
+        }
+        if self.search_rect.contains(point) {
+            return Some(HoverTarget::Search);
+        }
+        self.row_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+            .map(|(index, _)| HoverTarget::Row(*index))
+    }
+
     fn action(&mut self, name: &str) {
+        self.search_focused = false;
         let mut state = self.state.lock().unwrap();
         let indices = self.filtered_indices(&state);
         match name {
@@ -317,7 +384,7 @@ impl KnowledgePanelContent {
     }
 
     fn render_editor(&mut self, area: Rect, frame: &mut Frame) {
-        let Some(edit) = &self.edit else {
+        let Some(edit) = &mut self.edit else {
             return;
         };
         let t = crate::theme::theme();
@@ -335,61 +402,104 @@ impl KnowledgePanelContent {
                 (edit.fields[index].buf() != edit.original[index]).then_some(*label)
             })
             .collect::<Vec<_>>();
-        let mut lines = vec![Line::styled(
-            format!(
-                " Revision {} · Changed: {} · Tab: next · Shift+Enter: newline ",
-                edit.revision + 1,
-                if changed.is_empty() {
-                    "none".into()
-                } else {
-                    changed.join(", ")
-                }
-            ),
-            Style::default().fg(t.accent.into()),
-        )];
-        let mut next_row = 1u16;
-        let field_lines =
-            ((area.height.saturating_sub(4) / 5).saturating_sub(1)).clamp(1, 4) as usize;
-        for (index, label) in labels.into_iter().enumerate() {
-            let prefix = if edit.focused == index { "▸ " } else { "  " };
-            let field_start = next_row;
-            lines.push(Line::styled(
-                format!("{prefix}{label}"),
-                Style::default().fg(if edit.focused == index {
-                    t.accent.into()
-                } else {
-                    t.subtle_fg.into()
-                }),
-            ));
-            next_row = next_row.saturating_add(1);
-            let mut display = edit.fields[index].buf().to_owned();
-            let cursor_line = display[..edit.fields[index].cursor()]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count();
-            if edit.focused == index {
-                display.insert(edit.fields[index].cursor(), '▏');
-            }
-            let start = if edit.focused == index {
-                cursor_line.saturating_sub(field_lines - 1)
-            } else {
-                0
-            };
-            for raw in display.split('\n').skip(start).take(field_lines) {
-                lines.push(Line::raw(format!("    {raw}")));
-                next_row = next_row.saturating_add(1);
-            }
-            self.edit_field_rects[index] = Rect::new(
-                area.x,
-                area.y.saturating_add(field_start),
-                area.width,
-                next_row - field_start,
-            );
-        }
         frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }),
-            Rect::new(area.x, area.y, area.width, area.height.saturating_sub(2)),
+            Paragraph::new(format!(
+                " Edit confession · revision {} · Tab/Shift+Tab fields · ↑↓ move ",
+                edit.revision + 1
+            ))
+            .style(Style::default().fg(t.accent.into())),
+            Rect::new(area.x, area.y, area.width, 1),
         );
+        let body_rows = area.height.saturating_sub(3);
+        let base_rows = body_rows / 5;
+        let extra_rows = body_rows % 5;
+        let mut y = area.y + 1;
+        for (index, label) in labels.into_iter().enumerate() {
+            let rows = base_rows + u16::from(index < extra_rows as usize);
+            let segment = Rect::new(area.x, y, area.width, rows);
+            let text_rect = Rect::new(
+                area.x + 2,
+                y + 1,
+                area.width.saturating_sub(3),
+                rows.saturating_sub(1),
+            );
+            self.edit_segment_rects[index] = segment;
+            self.edit_text_rects[index] = text_rect;
+            let focused = edit.focused == index;
+            let hovered = self.hovered == Some(HoverTarget::Field(index));
+            let bg = if hovered {
+                t.highlight_bg.into()
+            } else if focused {
+                t.code_bg.into()
+            } else {
+                t.work_bg.into()
+            };
+            frame.render_widget(Block::default().style(Style::default().bg(bg)), segment);
+            frame.render_widget(
+                Paragraph::new(format!(" {} {label}", if focused { "▸" } else { " " })).style(
+                    Style::default()
+                        .fg(if focused || hovered {
+                            t.accent.into()
+                        } else {
+                            t.subtle_fg.into()
+                        })
+                        .bg(bg)
+                        .add_modifier(if focused || hovered {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            let content_width = text_rect.width.max(1) as usize;
+            let total_rows = visual_line_count(edit.fields[index].buf(), content_width);
+            let cursor_position = focused.then(|| {
+                wrapped_cursor_position(
+                    edit.fields[index].buf(),
+                    edit.fields[index].cursor(),
+                    content_width,
+                )
+            });
+            let max_scroll = total_rows
+                .max(cursor_position.map_or(0, |(row, _)| row + 1))
+                .saturating_sub(text_rect.height as usize);
+            if let Some((cursor_row, _)) = cursor_position {
+                if edit.follow_cursor {
+                    let scroll = edit.scroll[index] as usize;
+                    if cursor_row < scroll {
+                        edit.scroll[index] = cursor_row as u16;
+                    } else if cursor_row >= scroll + text_rect.height as usize {
+                        edit.scroll[index] = cursor_row
+                            .saturating_sub(text_rect.height as usize)
+                            .saturating_add(1) as u16;
+                    }
+                }
+            }
+            edit.scroll[index] = edit.scroll[index].min(max_scroll as u16);
+            frame.render_widget(
+                Paragraph::new(edit.fields[index].buf())
+                    .wrap(Wrap { trim: false })
+                    .scroll((edit.scroll[index], 0))
+                    .style(Style::default().bg(bg)),
+                text_rect,
+            );
+            if let Some((cursor_row, cursor_col)) = cursor_position.filter(|_| !edit.saving) {
+                let visible_row = cursor_row.saturating_sub(edit.scroll[index] as usize);
+                if cursor_row >= edit.scroll[index] as usize
+                    && visible_row < text_rect.height as usize
+                    && cursor_col < text_rect.width as usize
+                {
+                    frame.set_cursor_position((
+                        text_rect.x + cursor_col as u16,
+                        text_rect.y + visible_row as u16,
+                    ));
+                    self.cursor_on_screen = true;
+                }
+            }
+            y += rows;
+        }
+        edit.follow_cursor = false;
         self.action_rects.clear();
         let status = Rect::new(
             area.x,
@@ -400,19 +510,56 @@ impl KnowledgePanelContent {
         let message = if edit.saving {
             "Saving…".to_string()
         } else {
-            self.state.lock().unwrap().message.clone()
+            let state_message = self.state.lock().unwrap().message.clone();
+            if state_message.is_empty() || state_message.contains(" confessions · ") {
+                format!(
+                    " Changed: {}",
+                    if changed.is_empty() {
+                        "none".into()
+                    } else {
+                        changed.join(", ")
+                    }
+                )
+            } else {
+                state_message
+            }
         };
         frame.render_widget(Paragraph::new(message), status);
         let y = area.y + area.height.saturating_sub(1);
-        let save = Rect::new(area.x, y, 10.min(area.width), 1);
+        let save = Rect::new(area.x, y, 14.min(area.width), 1);
         let cancel = Rect::new(
-            area.x.saturating_add(12),
+            area.x.saturating_add(15),
             y,
-            10.min(area.width.saturating_sub(12)),
+            14.min(area.width.saturating_sub(15)),
             1,
         );
-        frame.render_widget(Paragraph::new("[ Save ]"), save);
-        frame.render_widget(Paragraph::new("[ Cancel ]"), cancel);
+        frame.render_widget(
+            Paragraph::new("Save [Enter]").style(Style::default().fg(
+                if self.hovered == Some(HoverTarget::Action("Save")) {
+                    t.accent.into()
+                } else {
+                    t.subtle_fg.into()
+                },
+            )),
+            save,
+        );
+        frame.render_widget(
+            Paragraph::new("Cancel [Esc]").style(Style::default().fg(
+                if self.hovered == Some(HoverTarget::Action("Cancel")) {
+                    t.accent.into()
+                } else {
+                    t.subtle_fg.into()
+                },
+            )),
+            cancel,
+        );
+        if area.width > 31 {
+            frame.render_widget(
+                Paragraph::new("Newline [Shift+Enter]")
+                    .style(Style::default().fg(t.subtle_fg.into())),
+                Rect::new(area.x + 30, y, area.width - 30, 1),
+            );
+        }
         self.action_rects
             .extend([("Save", save), ("Cancel", cancel)]);
     }
@@ -447,7 +594,9 @@ impl WindowComponent for KnowledgePanelContent {
             area.width.saturating_sub(2),
             area.height,
         );
-        if area.width < 25 || area.height < 5 {
+        self.cursor_on_screen = false;
+        if area.width < 25 || area.height < 13 {
+            frame.render_widget(Paragraph::new("Enlarge window to edit memory"), area);
             return Vec::new();
         }
         self.sync_edit_result();
@@ -466,10 +615,17 @@ impl WindowComponent for KnowledgePanelContent {
             frame.render_widget(
                 Paragraph::new(format!(" {name} ")).style(
                     Style::default()
-                        .fg(if self.tab == index {
-                            t.accent.into()
+                        .fg(
+                            if self.tab == index || self.hovered == Some(HoverTarget::Tab(index)) {
+                                t.accent.into()
+                            } else {
+                                t.subtle_fg.into()
+                            },
+                        )
+                        .bg(if self.hovered == Some(HoverTarget::Tab(index)) {
+                            t.highlight_bg.into()
                         } else {
-                            t.subtle_fg.into()
+                            t.work_bg.into()
                         })
                         .add_modifier(if self.tab == index {
                             Modifier::BOLD
@@ -482,11 +638,52 @@ impl WindowComponent for KnowledgePanelContent {
             x = x.saturating_add(width);
         }
         self.search_rect = Rect::new(area.x, area.y + 1, area.width, 1);
-        let cursor = if self.search_focused { "▏" } else { "" };
+        self.search_input_rect =
+            Rect::new(area.x + 12, area.y + 1, area.width.saturating_sub(12), 1);
+        let search_bg = if self.search_focused || self.hovered == Some(HoverTarget::Search) {
+            t.highlight_bg.into()
+        } else {
+            t.work_bg.into()
+        };
         frame.render_widget(
-            Paragraph::new(format!(" / Search: {}{}", self.search, cursor))
-                .style(Style::default().fg(t.subtle_fg.into())),
+            Block::default().style(Style::default().bg(search_bg)),
             self.search_rect,
+        );
+        frame.render_widget(
+            Paragraph::new(" Search [/]")
+                .style(Style::default().fg(t.subtle_fg.into()).bg(search_bg)),
+            Rect::new(area.x, area.y + 1, 12, 1),
+        );
+        let search_width = self.search_input_rect.width.max(1) as usize;
+        if self.search_focused {
+            let col = self.search.cursor_display_col();
+            if col < self.search_scroll as usize {
+                self.search_scroll = col as u16;
+            } else if col >= self.search_scroll as usize + search_width {
+                self.search_scroll = col.saturating_sub(search_width - 1) as u16;
+            }
+            frame.set_cursor_position((
+                self.search_input_rect.x + (col - self.search_scroll as usize) as u16,
+                self.search_input_rect.y,
+            ));
+            self.cursor_on_screen = true;
+        } else {
+            self.search_scroll = 0;
+        }
+        frame.render_widget(
+            Paragraph::new(self.search.buf())
+                .scroll((0, self.search_scroll))
+                .style(Style::default().bg(search_bg)),
+            self.search_input_rect,
+        );
+        let hint = if self.tab == 2 {
+            " ←/→ tabs · ↑/↓ rows · Space select · / search "
+        } else {
+            " ←/→ tabs · ↑/↓ rows · u/d detail · / search "
+        };
+        frame.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(t.subtle_fg.into())),
+            Rect::new(area.x, area.y + 2, area.width, 1),
         );
         let indices = self.filtered_indices(&state);
         self.selected = self.selected.min(indices.len().saturating_sub(1));
@@ -552,11 +749,19 @@ impl WindowComponent for KnowledgePanelContent {
                     "{marker} {}",
                     crate::width::truncate(&label, list_width.saturating_sub(3) as usize)
                 ),
-                Style::default().fg(if row == self.selected {
-                    t.accent.into()
-                } else {
-                    t.subtle_fg.into()
-                }),
+                Style::default()
+                    .fg(
+                        if row == self.selected || self.hovered == Some(HoverTarget::Row(row)) {
+                            t.accent.into()
+                        } else {
+                            t.subtle_fg.into()
+                        },
+                    )
+                    .bg(if self.hovered == Some(HoverTarget::Row(row)) {
+                        t.highlight_bg.into()
+                    } else {
+                        t.work_bg.into()
+                    }),
             ));
             self.row_rects.push((
                 row,
@@ -690,15 +895,33 @@ impl WindowComponent for KnowledgePanelContent {
         };
         let mut x = area.x;
         for &name in actions {
-            let width = name.len() as u16 + 4;
+            let label = Self::action_label(name);
+            let width = crate::width::width(label) as u16 + 1;
             let rect = Rect::new(
                 x,
                 area.y + area.height - 1,
                 width.min(area.x + area.width - x),
                 1,
             );
-            frame.render_widget(Paragraph::new(format!("[{name}]")), rect);
-            self.action_rects.push((name, rect));
+            frame.render_widget(
+                Paragraph::new(label).style(
+                    Style::default()
+                        .fg(if self.hovered == Some(HoverTarget::Action(name)) {
+                            t.accent.into()
+                        } else {
+                            t.subtle_fg.into()
+                        })
+                        .bg(if self.hovered == Some(HoverTarget::Action(name)) {
+                            t.highlight_bg.into()
+                        } else {
+                            t.work_bg.into()
+                        }),
+                ),
+                rect,
+            );
+            if name != "Applying…" {
+                self.action_rects.push((name, rect));
+            }
             x = x.saturating_add(width + 1);
             if x >= area.x + area.width {
                 break;
@@ -711,15 +934,26 @@ impl WindowComponent for KnowledgePanelContent {
         if let WmEvent::Paste(text) = event {
             if let Some(edit) = &mut self.edit {
                 if !edit.saving {
-                    edit.fields[edit.focused].insert_str(text);
+                    edit.fields[edit.focused].paste_multiline(text);
+                    edit.follow_cursor = true;
                 }
                 return WmEventResult::Consumed(Vec::new());
             }
             if self.search_focused {
-                self.search.push_str(text);
+                self.search.paste_single_line(text);
                 self.selected = 0;
                 return WmEventResult::Consumed(Vec::new());
             }
+        }
+        if let WmEvent::Mouse(mouse) = event
+            && matches!(mouse.kind, MouseEventKind::Moved)
+        {
+            self.hovered = self.hover_at(mouse.column, mouse.row);
+            return if self.hovered.is_some() {
+                WmEventResult::Consumed(Vec::new())
+            } else {
+                WmEventResult::Ignored
+            };
         }
         if let WmEvent::Mouse(mouse) = event
             && matches!(
@@ -728,6 +962,25 @@ impl WindowComponent for KnowledgePanelContent {
             )
         {
             let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+            if let Some(edit) = &mut self.edit {
+                if let Some(index) = self
+                    .edit_segment_rects
+                    .iter()
+                    .position(|rect| rect.contains((mouse.column, mouse.row).into()))
+                {
+                    let rect = self.edit_text_rects[index];
+                    let max_scroll =
+                        visual_line_count(edit.fields[index].buf(), rect.width.max(1) as usize)
+                            .saturating_sub(rect.height as usize) as u16;
+                    edit.scroll[index] = if down {
+                        edit.scroll[index].saturating_add(2).min(max_scroll)
+                    } else {
+                        edit.scroll[index].saturating_sub(2)
+                    };
+                    edit.follow_cursor = false;
+                }
+                return WmEventResult::Consumed(Vec::new());
+            }
             if self.detail_rect.contains((mouse.column, mouse.row).into()) {
                 self.detail_scroll = if down {
                     self.detail_scroll.saturating_add(3)
@@ -751,7 +1004,7 @@ impl WindowComponent for KnowledgePanelContent {
             return WmEventResult::Consumed(Vec::new());
         }
         if let WmEvent::Mouse(mouse) = event
-            && matches!(mouse.kind, MouseEventKind::Down(_))
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             if let Some((name, _)) = self
                 .action_rects
@@ -767,11 +1020,25 @@ impl WindowComponent for KnowledgePanelContent {
                     return WmEventResult::Consumed(Vec::new());
                 }
                 if let Some(index) = self
-                    .edit_field_rects
+                    .edit_segment_rects
                     .iter()
                     .position(|rect| rect.contains((mouse.column, mouse.row).into()))
                 {
                     edit.focused = index;
+                    let rect = self.edit_text_rects[index];
+                    if rect.contains((mouse.column, mouse.row).into()) {
+                        let row =
+                            mouse.row.saturating_sub(rect.y) as usize + edit.scroll[index] as usize;
+                        let col = mouse.column.saturating_sub(rect.x) as usize;
+                        let pos = cursor_from_wrapped(
+                            edit.fields[index].buf(),
+                            row,
+                            col,
+                            rect.width.max(1) as usize,
+                        );
+                        edit.fields[index].set_cursor(pos);
+                    }
+                    edit.follow_cursor = true;
                     return WmEventResult::Consumed(Vec::new());
                 }
             } else {
@@ -783,10 +1050,18 @@ impl WindowComponent for KnowledgePanelContent {
                     self.tab = index;
                     self.selected = 0;
                     self.scroll = 0;
+                    self.search_focused = false;
                     return WmEventResult::Consumed(Vec::new());
                 }
                 if self.search_rect.contains((mouse.column, mouse.row).into()) {
                     self.search_focused = true;
+                    let col = if mouse.column < self.search_input_rect.x {
+                        0
+                    } else {
+                        mouse.column.saturating_sub(self.search_input_rect.x) as usize
+                            + self.search_scroll as usize
+                    };
+                    self.search.set_cursor_by_display(0, col as u16);
                     return WmEventResult::Consumed(Vec::new());
                 }
                 if let Some((row, _)) = self
@@ -796,6 +1071,7 @@ impl WindowComponent for KnowledgePanelContent {
                 {
                     self.selected = *row;
                     self.show_history = false;
+                    self.search_focused = false;
                     if self.tab == 2 {
                         let state = self.state.lock().unwrap();
                         if let Some(&index) = self.filtered_indices(&state).get(self.selected) {
@@ -807,6 +1083,7 @@ impl WindowComponent for KnowledgePanelContent {
                     }
                     return WmEventResult::Consumed(Vec::new());
                 }
+                self.search_focused = false;
             }
         }
         let WmEvent::Key(action) = event else {
@@ -818,32 +1095,44 @@ impl WindowComponent for KnowledgePanelContent {
             }
             match action {
                 KeyAction::Escape => self.edit = None,
-                KeyAction::Tab => edit.focused = (edit.focused + 1) % 5,
-                KeyAction::BackTab => edit.focused = (edit.focused + 4) % 5,
+                KeyAction::Tab => {
+                    edit.focused = (edit.focused + 1) % 5;
+                    edit.follow_cursor = true;
+                }
+                KeyAction::BackTab => {
+                    edit.focused = (edit.focused + 4) % 5;
+                    edit.follow_cursor = true;
+                }
                 KeyAction::Submit => self.action("Save"),
-                KeyAction::Newline => edit.fields[edit.focused].insert_newline(),
-                KeyAction::Char(c) => edit.fields[edit.focused].insert_char(*c),
-                KeyAction::Backspace => edit.fields[edit.focused].backspace(),
-                KeyAction::CursorLeft => edit.fields[edit.focused].move_left(),
-                KeyAction::CursorRight => edit.fields[edit.focused].move_right(),
-                KeyAction::CursorHome => edit.fields[edit.focused].move_home(),
-                KeyAction::CursorEnd => edit.fields[edit.focused].move_end(),
-                _ => return WmEventResult::Ignored,
+                KeyAction::HistoryUp => {
+                    edit.fields[edit.focused].move_line_up_visual(
+                        self.edit_text_rects[edit.focused].width.max(1) as usize,
+                    );
+                    edit.follow_cursor = true;
+                }
+                KeyAction::HistoryDown => {
+                    edit.fields[edit.focused].move_line_down_visual(
+                        self.edit_text_rects[edit.focused].width.max(1) as usize,
+                    );
+                    edit.follow_cursor = true;
+                }
+                _ => {
+                    if edit.fields[edit.focused].handle_key(action) {
+                        edit.follow_cursor = true;
+                    }
+                }
             }
             return WmEventResult::Consumed(Vec::new());
         }
         if self.search_focused {
             match action {
                 KeyAction::Escape | KeyAction::Submit => self.search_focused = false,
-                KeyAction::Backspace => {
-                    self.search.pop();
-                    self.selected = 0;
+                KeyAction::Newline => {}
+                _ => {
+                    if self.search.handle_key(action) {
+                        self.selected = 0;
+                    }
                 }
-                KeyAction::Char(c) => {
-                    self.search.push(*c);
-                    self.selected = 0;
-                }
-                _ => return WmEventResult::Ignored,
             }
             return WmEventResult::Consumed(Vec::new());
         }
@@ -903,6 +1192,10 @@ impl WindowComponent for KnowledgePanelContent {
             self.scroll = (self.selected + 1).saturating_sub(self.body_height as usize) as u32;
         }
         WmEventResult::Consumed(Vec::new())
+    }
+
+    fn cursor_visible(&self) -> bool {
+        self.cursor_on_screen
     }
 
     fn on_close(&mut self) -> CloseOutcome {
@@ -1101,8 +1394,220 @@ mod tests {
                     .map(|cell| cell.symbol())
                     .collect::<String>();
                 assert!(content.contains(if tab == 0 { "initial" } else { "AGENTS.md" }));
+                if tab == 0 {
+                    assert!(content.contains("[E]dit"));
+                    assert!(content.contains("[H]istory"));
+                }
             }
         }
+    }
+
+    #[test]
+    fn editor_uses_real_cursor_and_clicks_inside_cjk_text() {
+        let mut view = sample_view();
+        view.confession.trigger = "你好world".into();
+        let state = Arc::new(Mutex::new(KnowledgeState {
+            confessions: vec![view],
+            ..Default::default()
+        }));
+        let mut panel = KnowledgePanelContent::new(state, None);
+        panel.action("Edit");
+        panel.edit.as_mut().unwrap().fields[0].set_cursor("你".len());
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal
+            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .unwrap();
+        let rect = panel.edit_text_rects[0];
+        let cursor = terminal.backend().cursor_position();
+        assert_eq!((cursor.x, cursor.y), (rect.x + 2, rect.y));
+        assert!(panel.cursor_visible());
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .all(|cell| cell.symbol() != "▏")
+        );
+        assert_eq!(panel.edit.as_ref().unwrap().fields[0].buf(), "你好world");
+
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        let moved = WmEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: rect.x + 4,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        panel.handle_event(&moved, &mut ctx);
+        assert_eq!(panel.hovered, Some(HoverTarget::Field(0)));
+        terminal
+            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .unwrap();
+        let segment = panel.edit_segment_rects[0];
+        assert_eq!(
+            terminal.backend().buffer()[(segment.x, segment.y)].bg,
+            crate::theme::theme().highlight_bg.into()
+        );
+        let outside = WmEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 59,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            panel.handle_event(&outside, &mut ctx),
+            WmEventResult::Ignored
+        ));
+        assert!(panel.hovered.is_none());
+        let clicked = WmEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 4,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        panel.handle_event(&clicked, &mut ctx);
+        assert_eq!(
+            panel.edit.as_ref().unwrap().fields[0].cursor(),
+            "你好".len()
+        );
+        panel.handle_event(&WmEvent::Key(KeyAction::Char('!')), &mut ctx);
+        assert_eq!(panel.edit.as_ref().unwrap().fields[0].buf(), "你好!world");
+    }
+
+    #[test]
+    fn editor_click_maps_wrapped_row_to_original_byte() {
+        let mut view = sample_view();
+        view.confession.trigger = "hello world".into();
+        let state = Arc::new(Mutex::new(KnowledgeState {
+            confessions: vec![view],
+            ..Default::default()
+        }));
+        let mut panel = KnowledgePanelContent::new(state, None);
+        panel.action("Edit");
+        panel.edit_segment_rects[0] = Rect::new(1, 3, 20, 3);
+        panel.edit_text_rects[0] = Rect::new(4, 4, 6, 2);
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        panel.handle_event(
+            &WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 6,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut ctx,
+        );
+        assert_eq!(panel.edit.as_ref().unwrap().fields[0].cursor(), 8);
+        panel.handle_event(&WmEvent::Key(KeyAction::Char('X')), &mut ctx);
+        assert_eq!(panel.edit.as_ref().unwrap().fields[0].buf(), "hello woXrld");
+    }
+
+    #[test]
+    fn editor_cursor_remains_visible_at_exact_wrap_edge() {
+        let mut view = sample_view();
+        view.confession.trigger = "abcdef".into();
+        let state = Arc::new(Mutex::new(KnowledgeState {
+            confessions: vec![view],
+            ..Default::default()
+        }));
+        let mut panel = KnowledgePanelContent::new(state, None);
+        panel.action("Edit");
+        let mut terminal = Terminal::new(TestBackend::new(20, 16)).unwrap();
+        terminal
+            .draw(|frame| panel.render_editor(Rect::new(0, 0, 9, 16), frame))
+            .unwrap();
+        let rect = panel.edit_text_rects[0];
+        assert_eq!(rect.width, 6);
+        let cursor = terminal.backend().cursor_position();
+        assert_eq!((cursor.x, cursor.y), (rect.x, rect.y + 1));
+        assert!(panel.cursor_visible());
+    }
+
+    #[test]
+    fn editor_scroll_and_click_keep_long_text_cursor_aligned() {
+        let mut view = sample_view();
+        view.confession.trigger = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj".into();
+        let state = Arc::new(Mutex::new(KnowledgeState {
+            confessions: vec![view],
+            ..Default::default()
+        }));
+        let mut panel = KnowledgePanelContent::new(state, None);
+        panel.action("Edit");
+        let mut terminal = Terminal::new(TestBackend::new(55, 16)).unwrap();
+        terminal
+            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .unwrap();
+        let rect = panel.edit_text_rects[0];
+        assert!(panel.edit.as_ref().unwrap().scroll[0] > 0);
+        assert!(panel.cursor_visible());
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        panel.handle_event(
+            &WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut ctx,
+        );
+        let visible_row = panel.edit.as_ref().unwrap().scroll[0] as usize;
+        panel.handle_event(
+            &WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut ctx,
+        );
+        let edit = panel.edit.as_ref().unwrap();
+        assert_eq!(edit.fields[0].cursor(), visible_row * 2);
+        panel.cursor_on_screen = false;
+        terminal
+            .draw(|frame| panel.render_editor(frame.area(), frame))
+            .unwrap();
+        assert!(panel.cursor_visible());
+    }
+
+    #[test]
+    fn search_click_moves_cursor_without_inserting_padding() {
+        let state = Arc::new(Mutex::new(KnowledgeState::default()));
+        let mut panel = KnowledgePanelContent::new(state, None);
+        panel.search.insert_str("hello world");
+        panel.search_rect = Rect::new(1, 1, 40, 1);
+        panel.search_input_rect = Rect::new(13, 1, 28, 1);
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        panel.handle_event(
+            &WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 19,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut ctx,
+        );
+        assert!(panel.search_focused);
+        panel.handle_event(&WmEvent::Key(KeyAction::Char('X')), &mut ctx);
+        assert_eq!(panel.search.buf(), "hello Xworld");
     }
 
     #[test]
@@ -1140,7 +1645,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
         panel.tab = 2;
-        panel.search = "initial".into();
+        panel.search.insert_str("initial");
         assert_eq!(panel.filtered_indices(&state.lock().unwrap()), vec![0]);
         panel.selected_proposals.insert(id);
         panel.action("Apply");

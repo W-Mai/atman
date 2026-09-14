@@ -160,8 +160,9 @@ pub(crate) async fn run_frames(
             } else {
                 terminal.hide_cursor()
             }
-        } else if app.wm.focused_id().is_none()
-            && (!app.app.submission_focus || app.app.queued_submission_edit.is_some())
+        } else if app.wm.focused_content_cursor_visible()
+            || (app.wm.focused_id().is_none()
+                && (!app.app.submission_focus || app.app.queued_submission_edit.is_some()))
         {
             terminal.show_cursor()
         } else {
