@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{collections::HashMap, io::Write};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::RuntimeError;
 use crate::index::AnchorIndex;
-use crate::memory::{MemoryId, append_jsonl, read_jsonl};
+use crate::memory::MemoryId;
+#[cfg(test)]
+use crate::memory::read_jsonl;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Confession {
@@ -18,6 +21,83 @@ pub struct Confession {
     #[serde(default)]
     pub anchors: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfessionFields {
+    pub trigger: String,
+    pub rule_violated: String,
+    pub what_i_did: String,
+    pub why: String,
+    pub mitigation: String,
+}
+
+impl From<&Confession> for ConfessionFields {
+    fn from(value: &Confession) -> Self {
+        Self {
+            trigger: value.trigger.clone(),
+            rule_violated: value.rule_violated.clone(),
+            what_i_did: value.what_i_did.clone(),
+            why: value.why.clone(),
+            mitigation: value.mitigation.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfessionChange {
+    Revised {
+        id: MemoryId,
+        base_revision: u64,
+        fields: ConfessionFields,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    },
+    Organized {
+        id: MemoryId,
+        base_revision: u64,
+        category: String,
+        related_ids: Vec<MemoryId>,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    },
+    Archived {
+        id: MemoryId,
+        base_revision: u64,
+        reason: String,
+        changed_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ChangeLogEntry {
+    Single(ConfessionChange),
+    Batch { changes: Vec<ConfessionChange> },
+}
+
+impl ConfessionChange {
+    fn id(&self) -> &MemoryId {
+        match self {
+            Self::Revised { id, .. } | Self::Organized { id, .. } | Self::Archived { id, .. } => id,
+        }
+    }
+
+    fn base_revision(&self) -> u64 {
+        match self {
+            Self::Revised { base_revision, .. }
+            | Self::Organized { base_revision, .. }
+            | Self::Archived { base_revision, .. } => *base_revision,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfessionView {
+    pub confession: Confession,
+    pub revision: u64,
+    pub category: Option<String>,
+    pub related_ids: Vec<MemoryId>,
+    pub archived: bool,
 }
 
 impl Confession {
@@ -61,6 +141,7 @@ impl Confession {
 pub struct ConfessionStore {
     dir: PathBuf,
     index_path: PathBuf,
+    changes_path: PathBuf,
     anchor_index: Option<Arc<AnchorIndex>>,
     redactor: Option<Arc<crate::redact::Redactor>>,
 }
@@ -69,9 +150,11 @@ impl ConfessionStore {
     pub fn at(scope_dir: impl AsRef<Path>) -> Self {
         let dir = scope_dir.as_ref().to_path_buf();
         let index_path = dir.join("confessions.jsonl");
+        let changes_path = dir.join("changes.jsonl");
         Self {
             dir,
             index_path,
+            changes_path,
             anchor_index: None,
             redactor: None,
         }
@@ -90,14 +173,18 @@ impl ConfessionStore {
     pub async fn append(&self, confession: Confession) -> Result<MemoryId, RuntimeError> {
         let confession = self.redact_if_needed(confession);
         let id = confession.id.clone();
-        tokio::fs::create_dir_all(&self.dir)
-            .await
-            .map_err(|e| RuntimeError::ToolFailed(format!("mkdir {}: {e}", self.dir.display())))?;
-        let md_path = self.dir.join(confession.md_slug());
-        tokio::fs::write(&md_path, confession.render_md())
-            .await
-            .map_err(|e| RuntimeError::ToolFailed(format!("write {}: {e}", md_path.display())))?;
-        append_jsonl(&self.index_path, &confession).await?;
+        let dir = self.dir.clone();
+        let index_path = self.index_path.clone();
+        let for_write = confession.clone();
+        tokio::task::spawn_blocking(move || {
+            with_store_lock(&dir, || {
+                let md_path = dir.join(for_write.md_slug());
+                std::fs::write(&md_path, for_write.render_md()).map_err(store_error)?;
+                append_line(&index_path, &for_write)
+            })
+        })
+        .await
+        .map_err(|e| RuntimeError::ToolFailed(format!("confession writer: {e}")))??;
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_confession(idx, &confession)
         {
@@ -174,10 +261,189 @@ impl ConfessionStore {
     }
 
     pub async fn list(&self) -> Result<Vec<Confession>, RuntimeError> {
-        read_jsonl(&self.index_path).await
+        Ok(self
+            .list_with_meta(false)
+            .await?
+            .into_iter()
+            .map(|view| view.confession)
+            .collect())
+    }
+
+    pub async fn list_with_meta(
+        &self,
+        include_archived: bool,
+    ) -> Result<Vec<ConfessionView>, RuntimeError> {
+        let dir = self.dir.clone();
+        let index_path = self.index_path.clone();
+        let changes_path = self.changes_path.clone();
+        tokio::task::spawn_blocking(move || {
+            with_store_lock(&dir, || {
+                project_changes(
+                    read_lines(&index_path)?,
+                    read_change_lines(&changes_path)?,
+                    include_archived,
+                )
+            })
+        })
+        .await
+        .map_err(|e| RuntimeError::ToolFailed(format!("confession reader: {e}")))?
+    }
+
+    pub async fn history(&self, id: &MemoryId) -> Result<Vec<ConfessionChange>, RuntimeError> {
+        let dir = self.dir.clone();
+        let changes_path = self.changes_path.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            with_store_lock(&dir, || {
+                Ok(read_change_lines(&changes_path)?
+                    .into_iter()
+                    .filter(|change| change.id() == &id)
+                    .collect())
+            })
+        })
+        .await
+        .map_err(|e| RuntimeError::ToolFailed(format!("confession reader: {e}")))?
+    }
+
+    pub async fn revise(
+        &self,
+        id: MemoryId,
+        base_revision: u64,
+        mut fields: ConfessionFields,
+    ) -> Result<ConfessionView, RuntimeError> {
+        if let Some(redactor) = &self.redactor {
+            fields.trigger = redactor.redact(&fields.trigger).0;
+            fields.rule_violated = redactor.redact(&fields.rule_violated).0;
+            fields.what_i_did = redactor.redact(&fields.what_i_did).0;
+            fields.why = redactor.redact(&fields.why).0;
+            fields.mitigation = redactor.redact(&fields.mitigation).0;
+        }
+        let change = ConfessionChange::Revised {
+            id: id.clone(),
+            base_revision,
+            fields,
+            changed_at: chrono::Utc::now(),
+        };
+        let view = self.append_changes(vec![change]).await?.remove(0);
+        if let Some(index) = &self.anchor_index
+            && let Err(error) = insert_confession(index, &view.confession)
+        {
+            crate::notify!(warn, "confession index insert failed (id={id}): {error}");
+        }
+        Ok(view)
+    }
+
+    pub async fn organize(
+        &self,
+        changes: Vec<ConfessionChange>,
+    ) -> Result<Vec<ConfessionView>, RuntimeError> {
+        if changes
+            .iter()
+            .any(|change| !matches!(change, ConfessionChange::Organized { .. }))
+        {
+            return Err(RuntimeError::ToolFailed(
+                "expected organization changes".into(),
+            ));
+        }
+        self.append_changes(changes).await
+    }
+
+    async fn append_changes(
+        &self,
+        changes: Vec<ConfessionChange>,
+    ) -> Result<Vec<ConfessionView>, RuntimeError> {
+        let dir = self.dir.clone();
+        let index_path = self.index_path.clone();
+        let changes_path = self.changes_path.clone();
+        tokio::task::spawn_blocking(move || {
+            with_store_lock(&dir, || {
+                let originals = read_lines::<Confession>(&index_path)?;
+                let existing = read_change_lines(&changes_path)?;
+                let current = project_changes(originals.clone(), existing.clone(), true)?;
+                let by_id: HashMap<_, _> = current
+                    .iter()
+                    .map(|view| (view.confession.id.clone(), view.revision))
+                    .collect();
+                let mut seen = std::collections::HashSet::new();
+                for change in &changes {
+                    if !seen.insert(change.id().clone()) {
+                        return Err(RuntimeError::ToolFailed(
+                            "duplicate confession id in batch".into(),
+                        ));
+                    }
+                    if by_id.get(change.id()) != Some(&change.base_revision()) {
+                        return Err(RuntimeError::ToolFailed(
+                            "confession revision conflict".into(),
+                        ));
+                    }
+                    if let ConfessionChange::Organized {
+                        category,
+                        related_ids,
+                        ..
+                    } = change
+                    {
+                        if category.trim().is_empty() || category.chars().count() > 60 {
+                            return Err(RuntimeError::ToolFailed(
+                                "invalid confession category".into(),
+                            ));
+                        }
+                        if related_ids
+                            .iter()
+                            .any(|related| !by_id.contains_key(related))
+                        {
+                            return Err(RuntimeError::ToolFailed(
+                                "unknown related confession".into(),
+                            ));
+                        }
+                    }
+                }
+                append_line(
+                    &changes_path,
+                    &ChangeLogEntry::Batch {
+                        changes: changes.clone(),
+                    },
+                )?;
+                let all = project_changes(
+                    originals,
+                    existing
+                        .into_iter()
+                        .chain(changes.iter().cloned())
+                        .collect(),
+                    true,
+                )?;
+                Ok(all
+                    .into_iter()
+                    .filter(|view| seen.contains(&view.confession.id))
+                    .collect())
+            })
+        })
+        .await
+        .map_err(|e| RuntimeError::ToolFailed(format!("confession writer: {e}")))?
     }
 
     pub async fn find_by_trigger(&self, needle: &str) -> Result<Vec<Confession>, RuntimeError> {
+        if tokio::fs::try_exists(&self.changes_path)
+            .await
+            .unwrap_or(false)
+        {
+            let needle = needle.to_lowercase();
+            return Ok(self
+                .list()
+                .await?
+                .into_iter()
+                .filter(|c| {
+                    [
+                        &c.trigger,
+                        &c.rule_violated,
+                        &c.what_i_did,
+                        &c.why,
+                        &c.mitigation,
+                    ]
+                    .iter()
+                    .any(|field| field.to_lowercase().contains(&needle))
+                })
+                .collect());
+        }
         if let Ok(Some(hits)) = self.find_by_trigger_fts(needle).await
             && !hits.is_empty()
         {
@@ -197,6 +463,131 @@ impl ConfessionStore {
     pub fn index_path(&self) -> &Path {
         &self.index_path
     }
+}
+
+fn store_error(error: std::io::Error) -> RuntimeError {
+    RuntimeError::ToolFailed(format!("confession storage: {error}"))
+}
+
+fn with_store_lock<T>(
+    dir: &Path,
+    operation: impl FnOnce() -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    std::fs::create_dir_all(dir).map_err(store_error)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(".confessions.lock"))
+        .map_err(store_error)?;
+    fs2::FileExt::lock_exclusive(&lock).map_err(store_error)?;
+    operation()
+}
+
+fn append_line(path: &Path, value: &impl Serialize) -> Result<(), RuntimeError> {
+    append_lines(path, std::slice::from_ref(value))
+}
+
+fn append_lines(path: &Path, values: &[impl Serialize]) -> Result<(), RuntimeError> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(store_error)?;
+    let mut output = Vec::new();
+    for value in values {
+        let mut line = serde_json::to_vec(value)
+            .map_err(|e| RuntimeError::ToolFailed(format!("encode confession: {e}")))?;
+        line.push(b'\n');
+        output.extend(line);
+    }
+    file.write_all(&output).map_err(store_error)?;
+    file.flush().map_err(store_error)
+}
+
+fn read_change_lines(path: &Path) -> Result<Vec<ConfessionChange>, RuntimeError> {
+    Ok(flatten_changes(read_lines::<ChangeLogEntry>(path)?))
+}
+
+fn flatten_changes(entries: Vec<ChangeLogEntry>) -> Vec<ConfessionChange> {
+    entries
+        .into_iter()
+        .flat_map(|entry| match entry {
+            ChangeLogEntry::Single(change) => vec![change],
+            ChangeLogEntry::Batch { changes } => changes,
+        })
+        .collect()
+}
+
+fn read_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, RuntimeError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(store_error(error)),
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|error| RuntimeError::ToolFailed(format!("decode confession: {error}")))
+        })
+        .collect()
+}
+
+fn project_changes(
+    originals: Vec<Confession>,
+    changes: Vec<ConfessionChange>,
+    include_archived: bool,
+) -> Result<Vec<ConfessionView>, RuntimeError> {
+    let mut views = originals
+        .into_iter()
+        .map(|confession| ConfessionView {
+            confession,
+            revision: 0,
+            category: None,
+            related_ids: Vec::new(),
+            archived: false,
+        })
+        .collect::<Vec<_>>();
+    let positions = views
+        .iter()
+        .enumerate()
+        .map(|(index, view)| (view.confession.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for change in changes {
+        let position = *positions.get(change.id()).ok_or_else(|| {
+            RuntimeError::ToolFailed("confession change refers to missing id".into())
+        })?;
+        let view = &mut views[position];
+        if view.revision != change.base_revision() {
+            return Err(RuntimeError::ToolFailed(
+                "confession change revision mismatch".into(),
+            ));
+        }
+        match change {
+            ConfessionChange::Revised { fields, .. } => {
+                view.confession.trigger = fields.trigger;
+                view.confession.rule_violated = fields.rule_violated;
+                view.confession.what_i_did = fields.what_i_did;
+                view.confession.why = fields.why;
+                view.confession.mitigation = fields.mitigation;
+            }
+            ConfessionChange::Organized {
+                category,
+                related_ids,
+                ..
+            } => {
+                view.category = Some(category);
+                view.related_ids = related_ids;
+            }
+            ConfessionChange::Archived { .. } => view.archived = true,
+        }
+        view.revision += 1;
+    }
+    if !include_archived {
+        views.retain(|view| !view.archived);
+    }
+    Ok(views)
 }
 
 fn insert_confession(index: &AnchorIndex, c: &Confession) -> rusqlite::Result<()> {
@@ -335,6 +726,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(anchor_count, 1);
+    }
+
+    #[tokio::test]
+    async fn revision_preserves_history_and_changes_agent_search() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfessionStore::at(dir.path());
+        let original = sample("old trigger", "old rule");
+        let id = original.id.clone();
+        store.append(original.clone()).await.unwrap();
+        let mut fields = ConfessionFields::from(&original);
+        fields.trigger = "new trigger".into();
+        fields.mitigation = "new mitigation".into();
+        let revised = store.revise(id.clone(), 0, fields).await.unwrap();
+        assert_eq!(revised.revision, 1);
+        assert_eq!(store.list().await.unwrap()[0].trigger, "new trigger");
+        assert_eq!(store.find_by_trigger("old trigger").await.unwrap().len(), 0);
+        assert_eq!(store.find_by_trigger("new trigger").await.unwrap().len(), 1);
+        assert_eq!(store.history(&id).await.unwrap().len(), 1);
+        let raw: Vec<Confession> = read_jsonl(&store.index_path).await.unwrap();
+        assert_eq!(raw[0].trigger, "old trigger");
+        assert!(
+            store
+                .revise(id, 0, ConfessionFields::from(&original))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn organization_batch_rejects_conflict_without_partial_write() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfessionStore::at(dir.path());
+        let first = sample("first", "rule");
+        let second = sample("second", "rule");
+        store.append(first.clone()).await.unwrap();
+        store.append(second.clone()).await.unwrap();
+        let make = |id, base_revision| ConfessionChange::Organized {
+            id,
+            base_revision,
+            category: "group".into(),
+            related_ids: Vec::new(),
+            changed_at: chrono::Utc::now(),
+        };
+        let result = store
+            .organize(vec![make(first.id.clone(), 0), make(second.id.clone(), 1)])
+            .await;
+        assert!(result.is_err());
+        assert!(store.history(&first.id).await.unwrap().is_empty());
+        store
+            .organize(vec![make(first.id.clone(), 0), make(second.id.clone(), 0)])
+            .await
+            .unwrap();
+        let rows = store.list_with_meta(false).await.unwrap();
+        assert!(
+            rows.iter()
+                .all(|view| view.category.as_deref() == Some("group"))
+        );
+        assert_eq!(
+            read_lines::<ChangeLogEntry>(&store.changes_path)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
