@@ -32,6 +32,7 @@ pub struct PreviewPush {
     config: Arc<PreviewConfig>,
     client: reqwest::Client,
     project_id: Mutex<Option<String>>,
+    startup_lock: tokio::sync::Mutex<()>,
 }
 
 impl PreviewPush {
@@ -44,6 +45,7 @@ impl PreviewPush {
             config: Arc::new(config),
             client,
             project_id: Mutex::new(None),
+            startup_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -60,9 +62,8 @@ impl PreviewPush {
             body.insert("hint_slug".into(), serde_json::Value::String(slug.clone()));
         }
         let url = format!("{}/api/projects", self.config.base_url);
-        let resp = self.client.post(&url).json(&body).send().await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
+        match self.post_json(&url, &serde_json::Value::Object(body)).await {
+            ResolveOutcome::Ok(r) if r.status().is_success() => {
                 let json: serde_json::Value = match r.json().await {
                     Ok(v) => v,
                     Err(e) => return ResolveOutcome::Fail(format!("decode projects: {e}")),
@@ -78,14 +79,82 @@ impl PreviewPush {
                 *self.project_id.lock().unwrap() = Some(pid.clone());
                 ResolveOutcome::Ok(pid)
             }
-            Ok(r) => ResolveOutcome::Fail(format!(
+            ResolveOutcome::Ok(r) => ResolveOutcome::Fail(format!(
                 "register project http {}: {}",
                 r.status(),
                 r.text().await.unwrap_or_default()
             )),
-            Err(e) if is_connection_refused(&e) => ResolveOutcome::Unavailable,
-            Err(e) => ResolveOutcome::Fail(format!("register project net: {e}")),
+            ResolveOutcome::Unavailable => ResolveOutcome::Unavailable,
+            ResolveOutcome::Fail(message) => {
+                ResolveOutcome::Fail(format!("register project {message}"))
+            }
         }
+    }
+
+    async fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> ResolveOutcome<reqwest::Response> {
+        let mut response = self.client.post(url).json(body).send().await;
+        if response.as_ref().err().is_some_and(is_connection_refused) {
+            match self.ensure_local_server().await {
+                Ok(true) => response = self.client.post(url).json(body).send().await,
+                Ok(false) => {}
+                Err(message) => return ResolveOutcome::Fail(message),
+            }
+        }
+        match response {
+            Ok(response) => ResolveOutcome::Ok(response),
+            Err(error) if is_connection_refused(&error) => ResolveOutcome::Unavailable,
+            Err(error) => ResolveOutcome::Fail(format!("net: {error}")),
+        }
+    }
+
+    async fn ensure_local_server(&self) -> Result<bool, String> {
+        if self.config.base_url != "http://127.0.0.1:65097"
+            && self.config.base_url != "http://localhost:65097"
+        {
+            return Ok(false);
+        }
+        let _guard = self.startup_lock.lock().await;
+        if matches!(ping(&self.config.base_url, 300).await, PingResult::Ok) {
+            return Ok(true);
+        }
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let name = executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let mut command = std::process::Command::new(&executable);
+        match name {
+            "atman" => {
+                command.args(["preview", "serve", "--port", "65097"]);
+            }
+            "atman-daemon" => {
+                command.arg("--preview-serve");
+            }
+            _ => return Ok(false),
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        command
+            .spawn()
+            .map_err(|error| format!("start preview server: {error}"))?;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if matches!(ping(&self.config.base_url, 150).await, PingResult::Ok) {
+                return Ok(true);
+            }
+        }
+        Err("preview server did not become healthy after startup".into())
     }
 
     async fn ensure_topic(&self, pid: &str, topic_id: &str, title: &str) -> Result<(), String> {
@@ -94,13 +163,11 @@ impl PreviewPush {
             "id": topic_id,
             "title": title,
         });
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("topic net: {e}"))?;
+        let resp = match self.post_json(&url, &body).await {
+            ResolveOutcome::Ok(response) => response,
+            ResolveOutcome::Unavailable => return Err("topic server unavailable".into()),
+            ResolveOutcome::Fail(message) => return Err(format!("topic {message}")),
+        };
         let status = resp.status();
         if status.is_success() || status.as_u16() == 409 {
             return Ok(());
@@ -181,9 +248,9 @@ impl Tool for PreviewPush {
                 "{}/api/projects/{pid}/topics/{topic}/blocks",
                 self.config.base_url
             );
-            let resp = self.client.post(&url).json(&block).send().await;
+            let resp = self.post_json(&url, &block).await;
             match resp {
-                Ok(r) if r.status().is_success() => {
+                ResolveOutcome::Ok(r) if r.status().is_success() => {
                     let json: serde_json::Value = r.json().await.map_err(|e| {
                         RuntimeError::ToolFailed(format!("preview.push decode: {e}"))
                     })?;
@@ -205,13 +272,15 @@ impl Tool for PreviewPush {
                         ("url".into(), Value::Str(preview_url)),
                     ]))
                 }
-                Ok(r) => Err(RuntimeError::ToolFailed(format!(
+                ResolveOutcome::Ok(r) => Err(RuntimeError::ToolFailed(format!(
                     "preview.push http {}: {}",
                     r.status(),
                     r.text().await.unwrap_or_default()
                 ))),
-                Err(e) if is_connection_refused(&e) => Ok(unavailable()),
-                Err(e) => Err(RuntimeError::ToolFailed(format!("preview.push net: {e}"))),
+                ResolveOutcome::Unavailable => Ok(unavailable()),
+                ResolveOutcome::Fail(message) => {
+                    Err(RuntimeError::ToolFailed(format!("preview.push {message}")))
+                }
             }
         })
     }

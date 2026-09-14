@@ -1,0 +1,12 @@
+[hidden]{display:none!important}
+.group-label{padding:10px 12px 4px;color:var(--text-muted);font:700 10px var(--font-mono);letter-spacing:.11em}
+.diagram-toolbar{display:flex;align-items:center;gap:7px;margin-bottom:12px}
+.diagram-toolbar .eyebrow{margin-right:auto;color:var(--accent)}
+.file-picker{max-width:45%;min-width:0;border:1px solid var(--border-strong);border-radius:0;background:var(--surface-raised);color:var(--text-secondary);padding:3px 6px;font:10px var(--font-mono)}
+.file-picker:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.diagram-frame{overflow:auto;display:grid;place-items:center;min-height:260px;background:var(--code-bg);border:1px solid var(--border-subtle);border-radius:0;padding:20px}
+.diagram-frame .mermaid{transform-origin:center center}
+.diagram-frame svg{max-width:none;min-width:600px;height:auto}
+.mermaidTooltip{border-radius:0!important}
+.diff-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1px;background:var(--border-strong);border:1px solid var(--border-subtle);overflow:auto}
+.diff-column{margin:0;padding:0;min-width:0;overflow:auto;background:var(--code-bg);font:11px/1.65 var(--font-mono)}

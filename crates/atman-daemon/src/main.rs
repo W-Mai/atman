@@ -12,6 +12,13 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--preview-serve") {
+        let port = std::env::args()
+            .nth(2)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(65097);
+        return atman_daemon::preview_server::serve(port).await;
+    }
     let data_dir = default_data_dir()?;
     let config_path = default_config_path()?;
     let config_dir = atman_daemon::bootstrap::default_config_dir()?;

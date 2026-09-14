@@ -81,6 +81,10 @@ enum Cmd {
         #[arg(long, default_value_t = 65098)]
         port: u16,
     },
+    Preview {
+        #[command(subcommand)]
+        action: PreviewAction,
+    },
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -221,6 +225,14 @@ enum DaemonAction {
         reasoning: Option<String>,
         #[arg(long = "image", value_name = "PATH")]
         images: Vec<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PreviewAction {
+    Serve {
+        #[arg(long, default_value_t = 65097)]
+        port: u16,
     },
 }
 
@@ -435,6 +447,9 @@ async fn async_main() -> Result<()> {
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::TuiPreview { scene }) => cmd_tui_preview(scene).await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
+        Some(Cmd::Preview {
+            action: PreviewAction::Serve { port },
+        }) => atman_daemon::preview_server::serve(port).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Start,
         }) => cmd_daemon_start().await,
@@ -6438,7 +6453,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
         atman_runtime::tools::preview::PingResult::Ok => ("✓", String::new()),
         atman_runtime::tools::preview::PingResult::Unavailable => (
             "✗",
-            " (server not running; preview.push will return status=unavailable)".to_string(),
+            " (server not running; preview.push will start it on first use)".to_string(),
         ),
         atman_runtime::tools::preview::PingResult::Fail(msg) => ("✗", format!(" ({msg})")),
     };
@@ -6473,7 +6488,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
                     desc,
                 );
             }
-            println!("  skills: {skill_count} referenced rule(s) from ~/.claude/skills/");
+            println!("  skills: {skill_count} rule(s) from project and user skill directories");
         }
     } else {
         println!("  (HOME env not set)");

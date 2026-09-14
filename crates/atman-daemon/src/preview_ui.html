@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090f14">
+  <title>Atman Preview</title>
+  <link rel="stylesheet" href="/preview.css">
+  <link rel="stylesheet" href="/preview_diagram.css">
+  <script defer src="/mermaid.min.js"></script>
+  <script defer src="/preview.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="project-rail" aria-label="Projects">
+      <a class="brand" href="/" aria-label="Atman Preview home">∴</a>
+      <span class="rail-caption">PROJECTS</span>
+      <div id="projects" class="project-stack"></div>
+      <span class="rail-bottom">ATMAN<br>PREVIEW</span>
+    </aside>
+    <aside class="topic-pane" id="topicPane" aria-label="Topics">
+      <div class="pane-head"><span class="eyebrow">ARTIFACT WORKBENCH</span><button class="icon-button mobile-only" id="closeTopics" aria-label="Close topics">×</button></div>
+      <div class="project-heading"><span class="pulse-dot"></span><span id="projectName">Select a project</span></div>
+      <nav class="mobile-projects" id="mobileProjects" aria-label="All projects"></nav>
+      <label class="search-box"><span aria-hidden="true">⌕</span><input id="topicSearch" type="search" placeholder="Find a topic" aria-label="Find a topic"><kbd>/</kbd></label>
+      <div class="topic-section"><div class="section-label"><span>TOPICS</span><span id="topicCount">0</span></div><div id="topics" class="topic-list"></div></div>
+      <div class="pane-foot"><span class="status-line"><span class="status-led"></span> LOCAL WORKSPACE</span><span>127.0.0.1</span></div>
+    </aside>
+    <main class="main-pane">
+      <header class="topbar"><button class="icon-button mobile-only" id="openTopics" aria-label="Open topics">☰</button><div class="breadcrumbs"><span id="crumbProject">PROJECT</span><span class="slash">/</span><span id="crumbTopic">PREVIEW</span></div><div class="top-actions"><span class="live-badge"><span class="status-led"></span> LOCAL</span><button class="text-button" id="copyLink" title="Copy topic URL">↗ <span>Copy link</span></button></div></header>
+      <div class="canvas" id="canvas"><div class="empty-state"><div class="empty-mark">∴</div><div class="eyebrow">PREVIEW IS READY</div><h1>Your work, in focus.</h1><p>Publish a Markdown note, diagram, diff, image, or HTML artifact with <code>preview.push</code>. The latest topic will appear here.</p><div class="command-line">preview.push(topic: "review", title: "Review", content: "# Ready")</div></div></div>
+    </main>
+    <aside class="inspector" id="inspector" aria-label="Artifact details"><div class="inspector-head"><span class="eyebrow">INSPECTOR</span><button class="icon-button mobile-inspector" id="closeInspector" aria-label="Close inspector">×</button></div><div id="inspectorContent" class="inspector-content"><div class="inspector-empty">Select a topic to inspect its artifacts.</div></div></aside>
+    <button class="inspector-trigger" id="openInspector" aria-label="Open inspector">ⓘ</button>
+    <div class="scrim" id="scrim"></div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </div>
+</body>
+</html>
