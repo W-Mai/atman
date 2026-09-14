@@ -116,7 +116,7 @@ fn render_history_content(
     let t = crate::theme::theme();
     let bar_color: Color = t.subtle_fg.into();
     let content_bg: Color = t.code_bg.into();
-    let hover_bg: Color = t.code_bg.lerp(t.highlight_bg, 0.3);
+    let hover_bg: Color = t.code_bg.lerp(t.work_hover_bg, 0.3);
     let visible_height = area.height as usize;
     let (render_start, render_end, scroll) =
         history_render_range(completed.len(), scroll, visible_height);

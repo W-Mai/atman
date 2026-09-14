@@ -18,6 +18,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Subtle TUI hover** — Memory controls, session rows, sidebar content, and task history use low-contrast hover colors while selection keeps its distinct highlight.
 - **Memory editor cursor** — Confession fields and search use the terminal cursor, align pointer placement with wrapped text, and show keyboard shortcuts and hover feedback.
 - **Workflow card stability** — Collapsed workflow cards use a smaller row cap and retain their observed height as nodes change, filling available rows with more nodes.
 - **Requirements interview cancellation** — An explicit stop request ends the synchronous interview and returns cancellation to the parent agent before a design can be approved.

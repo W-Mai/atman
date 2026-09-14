@@ -428,7 +428,7 @@ impl KnowledgePanelContent {
             let focused = edit.focused == index;
             let hovered = self.hovered == Some(HoverTarget::Field(index));
             let bg = if hovered {
-                t.highlight_bg.into()
+                t.work_hover_bg.into()
             } else if focused {
                 t.code_bg.into()
             } else {
@@ -438,13 +438,15 @@ impl KnowledgePanelContent {
             frame.render_widget(
                 Paragraph::new(format!(" {} {label}", if focused { "▸" } else { " " })).style(
                     Style::default()
-                        .fg(if focused || hovered {
+                        .fg(if focused {
                             t.accent.into()
+                        } else if hovered {
+                            t.tinted_fg.into()
                         } else {
                             t.subtle_fg.into()
                         })
                         .bg(bg)
-                        .add_modifier(if focused || hovered {
+                        .add_modifier(if focused {
                             Modifier::BOLD
                         } else {
                             Modifier::empty()
@@ -536,7 +538,7 @@ impl KnowledgePanelContent {
         frame.render_widget(
             Paragraph::new("Save [Enter]").style(Style::default().fg(
                 if self.hovered == Some(HoverTarget::Action("Save")) {
-                    t.accent.into()
+                    t.tinted_fg.into()
                 } else {
                     t.subtle_fg.into()
                 },
@@ -546,7 +548,7 @@ impl KnowledgePanelContent {
         frame.render_widget(
             Paragraph::new("Cancel [Esc]").style(Style::default().fg(
                 if self.hovered == Some(HoverTarget::Action("Cancel")) {
-                    t.accent.into()
+                    t.tinted_fg.into()
                 } else {
                     t.subtle_fg.into()
                 },
@@ -615,15 +617,15 @@ impl WindowComponent for KnowledgePanelContent {
             frame.render_widget(
                 Paragraph::new(format!(" {name} ")).style(
                     Style::default()
-                        .fg(
-                            if self.tab == index || self.hovered == Some(HoverTarget::Tab(index)) {
-                                t.accent.into()
-                            } else {
-                                t.subtle_fg.into()
-                            },
-                        )
+                        .fg(if self.tab == index {
+                            t.accent.into()
+                        } else if self.hovered == Some(HoverTarget::Tab(index)) {
+                            t.tinted_fg.into()
+                        } else {
+                            t.subtle_fg.into()
+                        })
                         .bg(if self.hovered == Some(HoverTarget::Tab(index)) {
-                            t.highlight_bg.into()
+                            t.work_hover_bg.into()
                         } else {
                             t.work_bg.into()
                         })
@@ -640,8 +642,10 @@ impl WindowComponent for KnowledgePanelContent {
         self.search_rect = Rect::new(area.x, area.y + 1, area.width, 1);
         self.search_input_rect =
             Rect::new(area.x + 12, area.y + 1, area.width.saturating_sub(12), 1);
-        let search_bg = if self.search_focused || self.hovered == Some(HoverTarget::Search) {
-            t.highlight_bg.into()
+        let search_bg = if self.search_focused {
+            t.code_bg.into()
+        } else if self.hovered == Some(HoverTarget::Search) {
+            t.work_hover_bg.into()
         } else {
             t.work_bg.into()
         };
@@ -750,15 +754,15 @@ impl WindowComponent for KnowledgePanelContent {
                     crate::width::truncate(&label, list_width.saturating_sub(3) as usize)
                 ),
                 Style::default()
-                    .fg(
-                        if row == self.selected || self.hovered == Some(HoverTarget::Row(row)) {
-                            t.accent.into()
-                        } else {
-                            t.subtle_fg.into()
-                        },
-                    )
+                    .fg(if row == self.selected {
+                        t.accent.into()
+                    } else if self.hovered == Some(HoverTarget::Row(row)) {
+                        t.tinted_fg.into()
+                    } else {
+                        t.subtle_fg.into()
+                    })
                     .bg(if self.hovered == Some(HoverTarget::Row(row)) {
-                        t.highlight_bg.into()
+                        t.work_hover_bg.into()
                     } else {
                         t.work_bg.into()
                     }),
@@ -907,12 +911,12 @@ impl WindowComponent for KnowledgePanelContent {
                 Paragraph::new(label).style(
                     Style::default()
                         .fg(if self.hovered == Some(HoverTarget::Action(name)) {
-                            t.accent.into()
+                            t.tinted_fg.into()
                         } else {
                             t.subtle_fg.into()
                         })
                         .bg(if self.hovered == Some(HoverTarget::Action(name)) {
-                            t.highlight_bg.into()
+                            t.work_hover_bg.into()
                         } else {
                             t.work_bg.into()
                         }),
@@ -1451,7 +1455,7 @@ mod tests {
         let segment = panel.edit_segment_rects[0];
         assert_eq!(
             terminal.backend().buffer()[(segment.x, segment.y)].bg,
-            crate::theme::theme().highlight_bg.into()
+            crate::theme::theme().work_hover_bg.into()
         );
         let outside = WmEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Moved,

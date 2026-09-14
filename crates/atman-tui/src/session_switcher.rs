@@ -569,7 +569,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             let background = if selected {
                 t.modal_bg.lerp(t.accent, 0.22)
             } else if hovered {
-                t.modal_bg.lerp(t.highlight_bg, 0.24)
+                t.modal_bg.lerp(t.work_hover_bg, 0.24)
             } else {
                 t.modal_bg.lerp(t.panel_bg, 0.14)
             };

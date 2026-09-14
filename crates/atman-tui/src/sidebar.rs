@@ -125,7 +125,7 @@ pub fn render(
     // Don't blanket-clear the entire sidebar area — only clear where panels
     // actually render. This avoids black gaps next to collapsed stripes.
     let panel_bg = t.modal_bg.into();
-    let content_bg_hover: ratatui::style::Color = t.modal_bg.lerp(t.highlight_bg, 0.3);
+    let content_bg_hover: ratatui::style::Color = t.modal_bg.lerp(t.work_hover_bg, 0.3);
 
     let gap: u16 = 1;
 

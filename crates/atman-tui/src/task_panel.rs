@@ -274,11 +274,7 @@ pub fn render(
                 .as_ref()
                 .is_some_and(|(r, n)| *r == node.run_id && *n == node.node_id);
             let fg = t.code_bg.lerp(t.tinted_fg, 0.15 + ratio * 0.85);
-            let label_fg = if is_hovered {
-                t.tinted_fg.lerp(t.highlight_bg, 0.3)
-            } else {
-                fg
-            };
+            let label_fg = if is_hovered { t.tinted_fg.into() } else { fg };
             let (kind_icon, _) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             let elapsed_w = crate::width::width(&elapsed);
@@ -380,8 +376,8 @@ pub fn render(
             let is_expanded = hover.expanded_tasks.contains(&snap.source_handle);
             let header_bg: Color = t.user_msg_bg.into();
             let content_bg: Color = t.code_bg.into();
-            let header_bg_hover: Color = t.user_msg_bg.lerp(t.highlight_bg, 0.3);
-            let content_bg_hover: Color = t.code_bg.lerp(t.highlight_bg, 0.3);
+            let header_bg_hover: Color = t.user_msg_bg.lerp(t.work_hover_bg, 0.3);
+            let content_bg_hover: Color = t.code_bg.lerp(t.work_hover_bg, 0.3);
             let bar_color: Color = t.subtle_fg.into();
             let bar = if is_task_hovered { "▌" } else { "▎" };
 
