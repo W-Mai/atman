@@ -16,6 +16,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Workflow card stability** — Collapsed workflow cards use a smaller row cap and retain their observed height as nodes change, filling available rows with more nodes.
 - **Requirements interview cancellation** — An explicit stop request ends the synchronous interview and returns cancellation to the parent agent before a design can be approved.
 - **Pages installer sync** — Successful stable releases trigger a docs deployment that serves the installer from the matching release tag, while docs-only deployments continue to use the latest published release.
 - **Interactive HTML preview** — HTML artifact scripts run in an isolated iframe with no same-origin access or network connections.

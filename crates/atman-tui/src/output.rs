@@ -459,6 +459,15 @@ pub fn render_item_with_regions(
     ctx: &RenderCtx<'_>,
     item_index: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    render_item_with_regions_min_workflow_rows(item, ctx, item_index, 0)
+}
+
+fn render_item_with_regions_min_workflow_rows(
+    item: &OutputItem,
+    ctx: &RenderCtx<'_>,
+    item_index: usize,
+    min_workflow_body_rows: usize,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     #[cfg(test)]
     update_perf_counters(|counters| {
         counters.item_renders = counters.item_renders.saturating_add(1);
@@ -477,7 +486,7 @@ pub fn render_item_with_regions(
         ..
     } = item
     {
-        render_workflow_projection_with_regions(
+        render_workflow_projection_with_regions_min_body_rows(
             graph,
             expanded_nodes,
             *panel_expanded,
@@ -485,6 +494,7 @@ pub fn render_item_with_regions(
             ctx.animation_frame,
             ctx.panel_width,
             MAX_COLLAPSED_BODY_ROWS,
+            min_workflow_body_rows,
         )
     } else if let OutputItem::ToolDispatch { calls } = item {
         render_tool_dispatch(calls, ctx, item_index)
@@ -577,6 +587,7 @@ pub struct LayoutCache {
     retention_dirty: bool,
     access_clock: u64,
     work_folds: Vec<WorkFoldProjection>,
+    workflow_body_rows: std::collections::HashMap<u64, usize>,
 }
 
 #[derive(Clone, Default)]
@@ -770,6 +781,7 @@ impl LayoutCache {
         if items.is_empty() {
             self.entries.clear();
             self.row_ends.clear();
+            self.workflow_body_rows.clear();
             self.total_rows = 0;
             self.store_revision = items.revision_clock();
             self.structure_revision = items.structure_revision();
@@ -803,6 +815,12 @@ impl LayoutCache {
             || self.entries.len() != items.len();
         if structure_changed {
             self.retention_dirty = true;
+            let live_ids = revisions
+                .iter()
+                .map(|revision| revision.id)
+                .collect::<std::collections::HashSet<_>>();
+            self.workflow_body_rows
+                .retain(|id, _| live_ids.contains(id));
             let changed_from = self.pending_structure_from.unwrap_or(0).min(items.len());
             if changed_from == self.entries.len() && self.entries.len() <= items.len() {
                 self.entries.resize(items.len(), ItemCacheEntry::default());
@@ -1184,7 +1202,38 @@ impl LayoutCache {
                 .hovered_output_node
                 .filter(|(item_index, _)| *item_index == idx),
         };
-        let (lines, regions) = render_item_with_regions(item, &item_ctx, idx);
+        let min_workflow_body_rows = if matches!(
+            item,
+            OutputItem::WorkflowPanel {
+                panel_expanded: false,
+                ..
+            }
+        ) {
+            self.workflow_body_rows
+                .get(&revision.id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let (lines, regions) = render_item_with_regions_min_workflow_rows(
+            item,
+            &item_ctx,
+            idx,
+            min_workflow_body_rows,
+        );
+        if matches!(
+            item,
+            OutputItem::WorkflowPanel {
+                panel_expanded: false,
+                ..
+            }
+        ) {
+            self.workflow_body_rows.insert(
+                revision.id,
+                min_workflow_body_rows.max(lines.len().saturating_sub(3)),
+            );
+        }
         let rows = lines.len().min(u32::MAX as usize) as u32;
         let dynamic = dynamic_paint_for_item(item, &lines, &item_ctx);
         self.access_clock = self.access_clock.wrapping_add(1);
@@ -1286,6 +1335,7 @@ impl LayoutCache {
     pub fn invalidate(&mut self) {
         self.key = None;
         self.pending_structure_from = Some(0);
+        self.workflow_body_rows.clear();
     }
 
     #[cfg(test)]
@@ -5209,6 +5259,7 @@ pub fn render_workflow_panel_with_regions(
         animation_frame,
         panel_width,
         max_body_rows,
+        0,
     )
 }
 
@@ -5221,6 +5272,29 @@ pub fn render_workflow_projection_with_regions(
     panel_width: u16,
     max_body_rows: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    render_workflow_projection_with_regions_min_body_rows(
+        graph,
+        expanded_nodes,
+        panel_expanded,
+        cancelled,
+        animation_frame,
+        panel_width,
+        max_body_rows,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_workflow_projection_with_regions_min_body_rows(
+    graph: &atman_runtime::projection::workflow::WorkflowProjection,
+    expanded_nodes: &std::collections::HashSet<String>,
+    panel_expanded: bool,
+    cancelled: bool,
+    animation_frame: u32,
+    panel_width: u16,
+    max_body_rows: usize,
+    min_body_rows: usize,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     render_workflow_panel_impl(
         graph.graph(),
         Some(graph),
@@ -5230,6 +5304,7 @@ pub fn render_workflow_projection_with_regions(
         animation_frame,
         panel_width,
         max_body_rows,
+        min_body_rows,
     )
 }
 
@@ -5243,6 +5318,7 @@ fn render_workflow_panel_impl(
     animation_frame: u32,
     panel_width: u16,
     max_body_rows: usize,
+    min_body_rows: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let t = crate::theme::theme();
     let summary = permission_projection.map(WorkflowProjection::summary);
@@ -5307,6 +5383,7 @@ fn render_workflow_panel_impl(
             panel_width,
             running,
             max_body_rows,
+            min_body_rows,
         );
     }
     let mut lines = vec![header];
@@ -5565,6 +5642,7 @@ fn render_collapsed_workflow_card(
     panel_width: u16,
     running: bool,
     max_body_rows: usize,
+    min_body_rows: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let t = crate::theme::theme();
     let outer_width = panel_width.clamp(40, MAX_BOX_WIDTH);
@@ -5683,55 +5761,24 @@ fn render_collapsed_workflow_card(
     // predicate ("< max_body_rows") is false.
     let idx = prefix_top_level_count[1..].partition_point(|&tc| (tc * 4) < max_body_rows);
     let target_count = (idx + 1).min(total);
-    let selected_paths: Vec<Vec<usize>> = ordered_pool.iter().take(target_count).cloned().collect();
-    let mut visible: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
-    for path in &selected_paths {
-        for i in 1..=path.len() {
-            visible.insert(path[..i].to_vec());
-        }
-    }
-    let visible_str: std::collections::HashSet<String> = visible
-        .iter()
-        .map(|p| {
-            p.iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .collect();
-    let mut seen_top_level = std::collections::HashSet::new();
-    let mut top_level = selected_paths
-        .iter()
-        .filter_map(|path| path.first().copied())
-        .filter(|root_index| seen_top_level.insert(*root_index))
-        .collect::<Vec<_>>();
-    top_level.reverse();
-    let mut body_lines: Vec<Line<'static>> = Vec::new();
-    let mut regions: Vec<NodeRegion> = Vec::new();
-    let mut pending_counter: u8 = 0;
-    let child_count = top_level.len();
-    for (position, root_index) in top_level.into_iter().enumerate() {
-        let Some(node) = root.get(root_index) else {
-            continue;
-        };
-        let path = root_index.to_string();
-        let is_last = position + 1 == child_count;
-        append_workflow_node_boxed(
-            &mut body_lines,
-            &mut regions,
+    let (mut body_lines, mut regions) = render_collapsed_workflow_body(
+        graph,
+        permission_projection,
+        &root,
+        &ordered_pool[..target_count],
+        outer_width,
+        animation_frame,
+        running,
+    );
+    if body_lines.len() < min_body_rows.min(max_body_rows) && target_count < total {
+        (body_lines, regions) = render_collapsed_workflow_body(
             graph,
             permission_projection,
-            node,
-            &std::collections::HashSet::new(),
-            &[],
-            is_last,
+            &root,
+            &ordered_pool,
             outer_width,
-            &path,
             animation_frame,
             running,
-            &mut pending_counter,
-            Some(&visible_str),
-            1,
         );
     }
     if body_lines.len() > max_body_rows {
@@ -5764,6 +5811,16 @@ fn render_collapsed_workflow_card(
         }
     }
     apply_lens_fade(&mut body_lines);
+    let pad = min_body_rows
+        .min(max_body_rows)
+        .saturating_sub(body_lines.len());
+    if pad > 0 {
+        body_lines.splice(0..0, std::iter::repeat_n(Line::raw(""), pad));
+        for region in &mut regions {
+            region.start_row = region.start_row.saturating_add(pad as u32);
+            region.end_row = region.end_row.saturating_add(pad as u32);
+        }
+    }
     let card_body_start_row = lines.len() as u32;
     for r in regions.iter_mut() {
         r.start_row = r.start_row.saturating_add(card_body_start_row);
@@ -5794,6 +5851,67 @@ fn render_collapsed_workflow_card(
         col_end: outer_width,
     });
     (lines, regions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_collapsed_workflow_body(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+    permission_projection: Option<&atman_runtime::projection::workflow::WorkflowProjection>,
+    root: &[atman_runtime::workflow::WorkflowNode],
+    selected_paths: &[Vec<usize>],
+    outer_width: u16,
+    animation_frame: u32,
+    running: bool,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    let mut visible: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    for path in selected_paths {
+        for i in 1..=path.len() {
+            visible.insert(path[..i].to_vec());
+        }
+    }
+    let visible_str: std::collections::HashSet<String> = visible
+        .iter()
+        .map(|path| {
+            path.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
+    let mut seen_top_level = std::collections::HashSet::new();
+    let mut top_level = selected_paths
+        .iter()
+        .filter_map(|path| path.first().copied())
+        .filter(|root_index| seen_top_level.insert(*root_index))
+        .collect::<Vec<_>>();
+    top_level.reverse();
+    let mut body_lines = Vec::new();
+    let mut regions = Vec::new();
+    let mut pending_counter = 0;
+    let child_count = top_level.len();
+    for (position, root_index) in top_level.into_iter().enumerate() {
+        let Some(node) = root.get(root_index) else {
+            continue;
+        };
+        append_workflow_node_boxed(
+            &mut body_lines,
+            &mut regions,
+            graph,
+            permission_projection,
+            node,
+            &std::collections::HashSet::new(),
+            &[],
+            position + 1 == child_count,
+            outer_width,
+            &root_index.to_string(),
+            animation_frame,
+            running,
+            &mut pending_counter,
+            Some(&visible_str),
+            1,
+        );
+    }
+    (body_lines, regions)
 }
 
 fn trim_line_left(line: &mut Line<'static>, n: usize) {
@@ -6052,7 +6170,7 @@ fn append_fanout_horizontal(
 
 const MAX_BOX_WIDTH: u16 = crate::layout::CONTENT_MAX_WIDTH;
 const INDENT_PER_DEPTH: u16 = 4;
-pub(crate) const MAX_COLLAPSED_BODY_ROWS: usize = 27;
+pub(crate) const MAX_COLLAPSED_BODY_ROWS: usize = 19;
 const MAX_COLLAPSED_INDENT: u16 = 12;
 
 fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {
@@ -10732,7 +10850,7 @@ mod tests {
             permission_groups: Default::default(),
             resolved_permission_groups: Default::default(),
         };
-        let (lines, _) = render_collapsed_workflow_card(&graph, None, 0, 100, false, 10);
+        let (lines, _) = render_collapsed_workflow_card(&graph, None, 0, 100, false, 10, 0);
         let rendered = flatten_lines(&lines);
         assert!(rendered.contains("Inspect active processes · bash.spawn"));
         assert!(!rendered.contains("secret command arguments"));
@@ -10788,12 +10906,91 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
         let total = lines.len();
-        assert!(
-            total <= 30,
-            "collapsed card should cap at ~30 rows, got {total}"
+        assert!(total <= MAX_COLLAPSED_BODY_ROWS + 3);
+    }
+
+    #[test]
+    fn collapsed_card_height_never_falls_below_its_observed_body() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let now = chrono::Utc::now();
+        let mut graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: (0..8)
+                .map(|index| {
+                    make_tool_node(
+                        &format!("node-{index}"),
+                        &format!("tool_{index}"),
+                        Some(now + chrono::Duration::milliseconds(index)),
+                    )
+                })
+                .collect(),
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let (before, _) =
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
+        let observed_body = before.len() - 3;
+        graph.root.truncate(1);
+        let (after, regions) = render_collapsed_workflow_card(
+            &graph,
+            None,
+            0,
+            80,
+            false,
+            MAX_COLLAPSED_BODY_ROWS,
+            observed_body,
         );
+        assert_eq!(after.len(), before.len());
+        assert!(after.len() <= MAX_COLLAPSED_BODY_ROWS + 3);
+        assert!(
+            regions
+                .iter()
+                .all(|region| region.end_row <= after.len() as u32)
+        );
+    }
+
+    #[test]
+    fn workflow_layout_cache_keeps_collapsed_height_when_nodes_disappear() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let now = chrono::Utc::now();
+        let mut graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: (0..8)
+                .map(|index| {
+                    make_tool_node(
+                        &format!("node-{index}"),
+                        &format!("tool_{index}"),
+                        Some(now + chrono::Duration::milliseconds(index)),
+                    )
+                })
+                .collect(),
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+        let panel = |graph: WorkflowGraph| OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph: graph.into(),
+            expanded_nodes: Default::default(),
+            panel_expanded: false,
+            started_at: Instant::now(),
+            ended_at: None,
+            cancelled: false,
+        };
+        let store = OutputStore::from(vec![panel(graph.clone())]);
+        let revision = store.revisions()[0];
+        let mut cache = LayoutCache::default();
+        cache.entries.resize(1, ItemCacheEntry::default());
+        let ctx = RenderCtx::empty();
+        assert!(cache.render_entry(0, &store[0], revision, &ctx, true, false));
+        let observed_rows = cache.entries[0].rows;
+
+        graph.root.truncate(1);
+        assert!(cache.render_entry(0, &panel(graph), revision, &ctx, true, false));
+        assert_eq!(cache.entries[0].rows, observed_rows);
     }
 
     #[test]
@@ -10904,7 +11101,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
         let flat = flatten_lines(&lines);
         let tool_count = flat.matches("tool_").count();
         assert!(
@@ -10934,7 +11131,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
         let total = lines.len() as u32;
         for r in &regions {
             assert!(
@@ -10968,7 +11165,7 @@ mod tests {
             resolved_permission_groups: Default::default(),
         };
         let (lines, _regions) =
-            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
+            render_collapsed_workflow_card(&graph, None, 0, 80, false, MAX_COLLAPSED_BODY_ROWS, 0);
         let flat = flatten_lines(&lines);
         let old_pos = flat.find("old_tool").unwrap_or(usize::MAX);
         let new_pos = flat.find("new_tool").unwrap_or(0);
