@@ -173,11 +173,27 @@ impl WindowManager {
         control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> bool {
         self.sync_modals();
-        let Some(kind) = self.top_kind() else {
+        if let Some(kind) = self.top_kind() {
+            self.modals.dispatch_paste(kind, text, app, control_tx);
+            return true;
+        }
+        let Some(id) = self.focused_id() else {
             return false;
         };
-        self.modals.dispatch_paste(kind, text, app, control_tx);
-        true
+        let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
+            return false;
+        };
+        let Some(content) = panel.content.as_mut() else {
+            return false;
+        };
+        let mut ctx = EventCtx {
+            scroll: &mut panel.scroll,
+            h_scroll: &mut panel.h_scroll,
+        };
+        matches!(
+            content.handle_event(&WmEvent::Paste(text.to_owned()), &mut ctx),
+            WmEventResult::Consumed(_)
+        )
     }
 }
 
@@ -607,6 +623,19 @@ impl WindowManager {
                 return (true, Vec::new());
             }
             crate::keys::KeyAction::Escape => {
+                if matches!(panel.content_kind, WindowContent::Knowledge)
+                    && let Some(content) = panel.content.as_mut()
+                {
+                    let mut ctx = EventCtx {
+                        scroll: &mut panel.scroll,
+                        h_scroll: &mut panel.h_scroll,
+                    };
+                    if let WmEventResult::Consumed(commands) =
+                        content.handle_event(&WmEvent::Key(action.clone()), &mut ctx)
+                    {
+                        return (true, commands);
+                    }
+                }
                 if let WindowContent::Task {
                     handle,
                     kind: atman_runtime::TaskKind::Flow,
@@ -751,6 +780,32 @@ impl WindowManager {
                     ));
                 }
             }
+            PaletteEntryId::ManageKnowledge => {
+                let canvas = app.last_transcript_rect.unwrap_or_default();
+                self.open(
+                    "memory-rules",
+                    crate::wm::ContentKey::Knowledge,
+                    crate::wm::WindowContent::Knowledge,
+                    "Memory & Rules",
+                    canvas,
+                );
+                if let Some(panel) = self
+                    .panels
+                    .iter_mut()
+                    .find(|panel| panel.content_key == crate::wm::ContentKey::Knowledge)
+                    && panel.content.is_none()
+                {
+                    panel.content = Some(Box::new(
+                        crate::window::knowledge_panel::KnowledgePanelContent::new(
+                            app.knowledge_state.clone(),
+                            control_tx.cloned(),
+                        ),
+                    ));
+                }
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(crate::TuiControl::ListKnowledge);
+                }
+            }
             PaletteEntryId::ShowHelp => {
                 let canvas = app.last_transcript_rect.unwrap_or_default();
                 self.open(
@@ -821,6 +876,9 @@ impl WindowManager {
         else {
             return (false, Vec::new());
         };
+        if matches!(event.kind, MouseEventKind::Down(_)) {
+            self.focus(id);
+        }
         let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
             return (false, Vec::new());
         };
@@ -1301,6 +1359,26 @@ mod tests {
         assert_eq!(wm.top_kind(), Some(ModalKind::McpEditor));
         assert_eq!(wm.modals.mcp_editor.name.buf(), "server");
         assert!(wm.modals.palette.input.buf().is_empty());
+    }
+
+    #[test]
+    fn reopening_knowledge_panel_preserves_its_content() {
+        let mut wm = WindowManager::default();
+        let mut app = crate::app::AppState::new("session".into(), None);
+        wm.apply_palette_action(
+            crate::palette::PaletteEntryId::ManageKnowledge,
+            &mut app,
+            None,
+        );
+        let original = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
+        wm.apply_palette_action(
+            crate::palette::PaletteEntryId::ManageKnowledge,
+            &mut app,
+            None,
+        );
+        let reopened = wm.panels[0].content.as_deref().unwrap() as *const dyn WindowComponent;
+        assert_eq!(wm.panels.len(), 1);
+        assert!(std::ptr::addr_eq(original, reopened));
     }
 
     #[test]

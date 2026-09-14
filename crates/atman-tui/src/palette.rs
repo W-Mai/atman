@@ -26,6 +26,7 @@ pub enum PaletteEntryId {
     ManageModels,
     SwitchModel,
     ManageMcp,
+    ManageKnowledge,
     SetTrustMode,
     SetModeTheme,
     ShowHelp,
@@ -156,6 +157,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Manage MCP Servers...",
         hint: "View MCP server status and tools",
         keyword: "mcp servers tools resources prompts",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ManageKnowledge,
+        group: "Context",
+        label: "Manage Memory & Rules...",
+        hint: "Browse and revise confessions; inspect loaded rules",
+        keyword: "memory confession rules organize",
     },
     PaletteEntry {
         id: PaletteEntryId::SetTrustMode,

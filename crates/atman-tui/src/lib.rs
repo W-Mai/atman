@@ -182,6 +182,39 @@ pub enum TuiControl {
     McpListPrompts {
         name: String,
     },
+    ListKnowledge,
+    ReloadRules,
+    GetConfessionHistory(atman_runtime::memory::MemoryId),
+    ReviseConfession {
+        id: atman_runtime::memory::MemoryId,
+        base_revision: u64,
+        fields: atman_runtime::memory::confession::ConfessionFields,
+    },
+    SuggestOrganization {
+        request_id: u64,
+    },
+    CancelOrganization,
+    OrganizeConfessions(Vec<atman_runtime::memory::confession::ConfessionChange>),
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RuleView {
+    pub name: String,
+    pub description: String,
+    pub scope: String,
+    pub source: String,
+    pub source_path: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OrganizationProposal {
+    pub id: atman_runtime::memory::MemoryId,
+    pub base_revision: u64,
+    pub category: String,
+    pub related_ids: Vec<atman_runtime::memory::MemoryId>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +267,30 @@ pub enum TuiCommand {
         ok: bool,
     },
     McpReloaded,
+    KnowledgeResult(
+        Result<
+            (
+                Vec<atman_runtime::memory::confession::ConfessionView>,
+                Vec<RuleView>,
+            ),
+            String,
+        >,
+    ),
+    ConfessionHistoryResult {
+        id: atman_runtime::memory::MemoryId,
+        result: Result<Vec<atman_runtime::memory::confession::ConfessionChange>, String>,
+    },
+    ConfessionSaved(atman_runtime::memory::MemoryId),
+    ConfessionSaveFailed {
+        id: atman_runtime::memory::MemoryId,
+        error: String,
+    },
+    OrganizationResult {
+        request_id: u64,
+        result: Result<Vec<OrganizationProposal>, String>,
+    },
+    OrganizationApplied,
+    OrganizationApplyFailed(String),
     QueueMutationRejected(String),
     Toast {
         message: String,

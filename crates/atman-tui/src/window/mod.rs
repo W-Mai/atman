@@ -4,6 +4,7 @@ pub mod cheatsheet_panel;
 pub mod common;
 pub mod flow_panel;
 pub mod history_panel;
+pub mod knowledge_panel;
 pub mod mcp_panel;
 pub mod mermaid_panel;
 pub mod output_panel;

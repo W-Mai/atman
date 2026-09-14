@@ -1714,6 +1714,55 @@ pub(crate) async fn run_frames(
                                 app::ToastPosition::TopRight,
                             );
                         }
+                        TuiCommand::KnowledgeResult(result) => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            match result {
+                                Ok((confessions, rules)) => {
+                                    state.message = format!("{} confessions · {} rules", confessions.len(), rules.len());
+                                    state.confessions = confessions;
+                                    state.rules = rules;
+                                }
+                                Err(error) => state.message = error,
+                            }
+                        }
+                        TuiCommand::ConfessionHistoryResult { id, result } => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            match result {
+                                Ok(changes) => { state.history_id = Some(id); state.history = changes; }
+                                Err(error) => state.message = error,
+                            }
+                        }
+                        TuiCommand::ConfessionSaved(id) => {
+                            app.app.knowledge_state.lock().unwrap().saved_id = Some(id);
+                        }
+                        TuiCommand::ConfessionSaveFailed { id, error } => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            state.failed_save_id = Some(id);
+                            state.message = error;
+                        }
+                        TuiCommand::OrganizationResult { request_id, result } => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            if request_id != state.organize_request { continue; }
+                            state.loading = false;
+                            match result {
+                                Ok(proposals) => {
+                                    state.message = format!("{} suggestions · select with Space, apply with A", proposals.len());
+                                    state.proposals = proposals;
+                                }
+                                Err(error) => state.message = error,
+                            }
+                        }
+                        TuiCommand::OrganizationApplied => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            state.applying = false;
+                            state.proposals.clear();
+                            state.message = "Organization applied".into();
+                        }
+                        TuiCommand::OrganizationApplyFailed(error) => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            state.applying = false;
+                            state.message = error;
+                        }
                         TuiCommand::QueueMutationRejected(message) => {
                             app.app.push_toast(
                                 format!("queue update rejected: {message}"),

@@ -941,6 +941,8 @@ pub struct QueuedSubmissionEdit {
 
 #[derive(Default)]
 pub struct AppState {
+    pub knowledge_state:
+        std::sync::Arc<std::sync::Mutex<crate::window::knowledge_panel::KnowledgeState>>,
     pub items: OutputStore,
     pub input: String,
     pub input_reasoning: Option<atman_runtime::provider::ReasoningSelection>,

@@ -13,6 +13,7 @@ use super::window::{ContentKey, WindowContent, WindowId};
 pub enum WmEvent {
     Key(KeyAction),
     Mouse(MouseEvent),
+    Paste(String),
     Scroll(u16, bool), // (delta, is_page)
 }
 

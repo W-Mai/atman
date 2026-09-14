@@ -24,6 +24,7 @@ pub enum ContentKey {
     Output(String),
     Cheatsheet,
     Mcp,
+    Knowledge,
 }
 
 /// Whether opening content with an existing key reuses or creates a new window.
@@ -63,6 +64,7 @@ pub enum WindowContent {
     },
     Cheatsheet,
     Mcp,
+    Knowledge,
 }
 
 impl WindowContent {
@@ -75,6 +77,7 @@ impl WindowContent {
             WindowContent::Output { item_id } => ContentKey::Output(item_id.clone()),
             WindowContent::Cheatsheet => ContentKey::Cheatsheet,
             WindowContent::Mcp => ContentKey::Mcp,
+            WindowContent::Knowledge => ContentKey::Knowledge,
         }
     }
 
@@ -91,6 +94,7 @@ impl WindowContent {
             WindowContent::Output { .. } => "≡",
             WindowContent::Cheatsheet => "?",
             WindowContent::Mcp => "⚡",
+            WindowContent::Knowledge => "§",
         }
     }
 }
