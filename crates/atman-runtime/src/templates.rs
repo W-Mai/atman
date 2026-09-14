@@ -297,6 +297,9 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     }
     when gate_feature != "" {
         gate_result = subflow(requirements_gate, user_prompt, gate_feature, gate_trigger, "")
+        when gate_result == "cancelled" {
+            return "Request cancelled. No implementation started."
+        }
         when gate_result != "approved" {
             return "Requirements are pending review. No implementation started. " + gate_result
         }
@@ -386,6 +389,9 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                     "uncertain",
                     candidate_response,
                 )
+                when gate_result == "cancelled" {
+                    return "Request cancelled. No implementation started."
+                }
                 when gate_result != "approved" {
                     return "Requirements are pending review. No implementation started. " + gate_result
                 }
@@ -881,6 +887,20 @@ mod tests {
         assert!(
             SPEC_AT.find("project_files = fs.list(").unwrap()
                 < SPEC_AT.find("answer = form.ask(").unwrap()
+        );
+        assert!(
+            SPEC_AT.find("when next.stop {").unwrap()
+                < SPEC_AT
+                    .find("saved_research = memory.spec.update(")
+                    .unwrap()
+        );
+        assert!(
+            SPEC_AT
+                .find("when feedback_disposition == \"stop\" {")
+                .unwrap()
+                < SPEC_AT
+                    .find("review_context = review_context + \"\\nDesign feedback:")
+                    .unwrap()
         );
         assert!(AGENT_AT.contains("async: false"));
         assert!(AGENT_AT.contains("intake.approved == false"));

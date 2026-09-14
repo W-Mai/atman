@@ -63,10 +63,14 @@ flow interview(user_prompt: string, feature: string = "project-intake", trigger:
                 + "\nFindings: " + findings
                 + "\nPrior answers: " + answers,
             fields: {
+                stop: bool -- "true only when the latest user answer explicitly ends the entire request",
                 complete: bool -- "true only when the material requirements are clear after at least one user answer",
                 question: string -- "one precise question or a small related batch for the user",
             },
         )
+        when next.stop {
+            return "cancelled"
+        }
         when next.complete {
             when rounds > 0 {
                 break
@@ -150,6 +154,14 @@ flow interview(user_prompt: string, feature: string = "project-intake", trigger:
         )
         when feedback.kind == "cancelled" {
             return "pending"
+        }
+        feedback_disposition = llm.classify(
+            model: "cheap",
+            prompt: "Does this latest user feedback explicitly end the entire request without replacement work? Reply stop only for an unambiguous stop request; otherwise reply continue.\nFeedback: " + feedback.text,
+            categories: ["stop", "continue"],
+        )
+        when feedback_disposition == "stop" {
+            return "cancelled"
         }
         review_context = review_context + "\nDesign feedback: " + feedback.text
     }
