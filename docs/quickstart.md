@@ -141,8 +141,8 @@ You should see:
 
 - Your `data_dir` and `config_dir` (both auto-created if missing).
 - One row per provider: `[✓]` if the env var is set, `[✗]` if not, plus `reachable (HTTP …)` / `unreachable: …` for the base URL.
-- Preview daemon status (optional — only matters if you use `preview.push`).
-- Any migrated rules picked up from CLAUDE.md / .cursorrules / etc.
+- Local preview status (`preview.push` starts Atman's preview service when needed).
+- Project and user rules and skills picked up from CLAUDE.md, `.agents/skills`, `.codex/skills`, `.claude/skills`, `.github/skills`, `.cursor/skills`, `.kiro/skills`, `.vscode/skills`, and the user-level Claude skills directory.
 
 If a provider row shows `unreachable`, fix that before moving on.
 
@@ -258,17 +258,22 @@ atman mcp call jira update_issue '{"key":"PROJ-1","summary":"Updated"}' --allow-
 
 Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`.
 
-`memory.spec.*` stores runtime state in JSONL. `memory.spec.materialize` writes a reviewable `IMPLEMENTATION.md` atomically and returns a revision; passing a stale `expected_revision` rejects the write instead of overwriting edits.
+`memory.spec.*` stores runtime state in JSONL according to `[storage] scope`: the central data directory's `projects/<fingerprint>/specs` by default, or `<project>/.atman/specs` with `scope = "local"`. `memory.spec.materialize(feature, phase)` writes `research.md`, `design.md`, `testing.md`, or `retrospective.md`; omitting `phase` or using `implementation` writes the aggregate `IMPLEMENTATION.md`. It returns a revision, and a stale `expected_revision` rejects the write instead of overwriting edits. The managed agent uses this workflow for non-trivial feature work and requests design confirmation before implementation.
 
 ## 9. Where to go from here
 
 - **`atman monitor`** starts an HTTP UI at `http://localhost:65098/` showing every session's event stream with FTS5 search.
+- **`atman preview serve`** starts the built-in artifact workbench at `http://127.0.0.1:65097/`; `preview.push` starts it automatically on the default local URL and saves topics in the selected project scope.
 - **`atman logs stream <session>`** tails a running daemon's SSE feed in the terminal.
 - **`atman sync init <url>`** turns `<project>/.atman/` into a git repo so your memory travels across machines.
 - **`atman migrate list --from opencode`** imports opencode / kiro session transcripts into a fresh atman session.
 - **[docs/context-strategy.md](./context-strategy.md)** covers the goal / todos / sliding-window / recall / compaction layering and when to reach for each.
 - **[docs/how-to-filter.md](./how-to-filter.md)** covers the list combinators plus the pipe operator.
 - **`examples/`** in the atman source tree has larger canonical flows (agent loop, hunk review, LSP-style code review, etc).
+
+Atman processes using the same preview `base_url` share one server. Projects appear after their first `preview.push`; use the left rail, or open the menu and choose **All Projects** in a narrow window, to switch between them.
+
+If another preview service already owns port 65097, `preview.push` continues to use that service when its API is compatible. To use the built-in workbench on another port, run `atman preview serve --port 65107` and set `[preview] base_url = "http://127.0.0.1:65107"` in the Atman config; custom URLs require an explicitly running server.
 
 ## Troubleshooting
 

@@ -258,7 +258,7 @@ See [`examples/`](examples/) for the canonical flows covering agent loops, code 
 | `git` | diff, show, log, status (0), add, commit, branch (2), push (3) | 0–3 |
 | `test` | run | 2 |
 | `hunk` | review (0), apply (1), plan_edit (2) | 0–2 |
-| `memory` | todo.list, goal.clear, recent_turns, history, fetch_confessions, spec.status (0), todo.set/done/cancel/delete, goal.get/set, confess, spec.update/deviate (1) | 0–1 |
+| `memory` | todo.list, goal.clear, recent_turns, history, fetch_confessions, spec.status (0), todo.set/done/cancel/delete, goal.get/set, confess, spec.update/deviate/materialize (1) | 0–1 |
 | `plan` | read (0), write, tick (1) | 0–1 |
 | `agent` | spawn | 2 |
 | `form` | ask | 0 |
@@ -299,7 +299,8 @@ atman logs tail [session] [--follow]
 atman session list | show | search | sanitize
 atman cost [session] [--all]
 atman upgrade [--yes] [--verbose] [--no-modify-path]
-atman monitor [--port 65098]       # web UI
+atman monitor [--port 65098]       # event monitor
+atman preview serve [--port 65097] # artifact preview workbench
 atman daemon start | stop | status | run [--reasoning <level>] [--image <path>]...
 atman flow snapshot | versions | diff | rollback | lint | test
 atman sync init | push | pull      # git-based cross-machine memory sync

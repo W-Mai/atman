@@ -6,6 +6,12 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Spec documents** — The managed agent records phase progress and materializes reviewable spec Markdown in the configured project scope.
+- **Project skills** — `rule.fetch` discovers skills in project assistant directories and resolves duplicate names with project precedence.
+- **Artifact preview** — Atman serves `preview.push` topics in a local browser workbench with project and topic navigation, artifact viewers, and automatic startup.
+
 ### 🐛 Bug Fixes
 
 - **Pages installer sync** — Successful stable releases trigger a docs deployment that serves the installer from the matching release tag, while docs-only deployments continue to use the latest published release.
