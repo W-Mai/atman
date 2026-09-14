@@ -48,7 +48,7 @@ impl Tool for RuleFetch {
     fn description(&self) -> Option<&str> {
         Some(
             "Load a skill/rule's full content by name, or search the rule index by keyword. \
-             Sources: CLAUDE.md, AGENTS.md, ~/.claude/skills/*/SKILL.md, .cursorrules, \
+             Sources: CLAUDE.md, AGENTS.md, project and user skills, .cursorrules, \
              .kiro/steering/*.md, and aider conventions.",
         )
     }
@@ -63,7 +63,7 @@ impl Tool for RuleFetch {
                 },
                 "query": {
                     "type": "string",
-                    "description": "Keyword to search across rule names and descriptions. Returns a list of {name, description, scope, source}. Omit both name and query to list the full index."
+                    "description": "Keyword to search across rule names and descriptions. Returns a list of {name, description, scope, source, source_path}. Omit both name and query to list the full index."
                 }
             }
         })
@@ -111,7 +111,7 @@ impl Tool for RuleFetch {
     }
 }
 
-/// Serialize a migrated rule into a compact index entry `{name, description, scope, source}`.
+/// Serialize a migrated rule into a compact index entry.
 fn rule_to_index_value(rule: &MigratedRule) -> Value {
     use crate::value::Value as V;
     V::Struct(vec![
@@ -122,6 +122,10 @@ fn rule_to_index_value(rule: &MigratedRule) -> Value {
         ),
         ("scope".into(), V::Str(rule.scope.as_str().to_string())),
         ("source".into(), V::Str(rule.source_tool.clone())),
+        (
+            "source_path".into(),
+            V::Str(rule.source_path.display().to_string()),
+        ),
     ])
 }
 

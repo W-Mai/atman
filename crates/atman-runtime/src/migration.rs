@@ -64,7 +64,7 @@ pub fn scan_migrated_rules(project_root: &Path, home: &Path) -> Vec<MigratedRule
     }
 
     scan_aider_yaml(project_root, &mut out);
-    scan_skill_references(home, &mut out);
+    scan_skill_references(project_root, home, &mut out);
 
     out
 }
@@ -134,17 +134,56 @@ fn strip_yaml_comment(line: &str) -> &str {
     }
 }
 
-fn scan_skill_references(home: &Path, out: &mut Vec<MigratedRule>) {
-    let skills_root = home.join(".claude").join("skills");
-    let Ok(entries) = std::fs::read_dir(&skills_root) else {
+fn scan_skill_references(project_root: &Path, home: &Path, out: &mut Vec<MigratedRule>) {
+    let mut seen = std::collections::HashSet::new();
+    for rel in [
+        ".agents/skills",
+        ".codex/skills",
+        ".claude/skills",
+        ".github/skills",
+        ".cursor/skills",
+        ".kiro/skills",
+        ".vscode/skills",
+    ] {
+        scan_skill_root(&project_root.join(rel), RuleScope::Project, out, &mut seen);
+    }
+    scan_skill_root(
+        &home.join(".claude/skills"),
+        RuleScope::Global,
+        out,
+        &mut seen,
+    );
+}
+
+fn scan_skill_root(
+    skills_root: &Path,
+    scope: RuleScope,
+    out: &mut Vec<MigratedRule>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Ok(canonical_root) = skills_root.canonicalize() else {
         return;
     };
-    for entry in entries.flatten() {
+    let Ok(entries) = std::fs::read_dir(skills_root) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let skill_dir = entry.path();
-        if !skill_dir.is_dir() {
+        let Ok(canonical_dir) = skill_dir.canonicalize() else {
+            continue;
+        };
+        if !canonical_dir.starts_with(&canonical_root) || !skill_dir.is_dir() {
             continue;
         }
         let skill_md = skill_dir.join("SKILL.md");
+        if !skill_md
+            .canonicalize()
+            .is_ok_and(|path| path.starts_with(&canonical_dir))
+        {
+            continue;
+        }
         let Ok(body) = std::fs::read_to_string(&skill_md) else {
             continue;
         };
@@ -162,6 +201,9 @@ fn scan_skill_references(home: &Path, out: &mut Vec<MigratedRule>) {
                     .map(str::to_string)
             })
             .unwrap_or_else(|| "unnamed".to_string());
+        if !seen.insert(skill_name.clone()) {
+            continue;
+        }
         let skill_description = front_matter
             .as_ref()
             .and_then(|fm| fm.get("description"))
@@ -173,14 +215,20 @@ fn scan_skill_references(home: &Path, out: &mut Vec<MigratedRule>) {
             name: skill_name.clone(),
             source_tool: "skill".into(),
             source_path: skill_md.clone(),
-            scope: RuleScope::Global,
+            scope,
             content: skill_content,
             description: skill_description.clone(),
         });
 
         for rel in parse_markdown_local_links(&body) {
             let full = skill_dir.join(&rel);
-            if let Some(mut rule) = load_file(&full, "skill", RuleScope::Global) {
+            if !full
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(&canonical_dir))
+            {
+                continue;
+            }
+            if let Some(mut rule) = load_file(&full, "skill", scope) {
                 rule.name = format!("skill:{skill_name}::{}", rel.display());
                 if let Some(desc) = &skill_description {
                     rule.description = Some(desc.clone());
@@ -630,6 +678,63 @@ mod tests {
         assert_eq!(
             ref_rule.description.as_deref(),
             Some("结构化代码审查，用于 review 请求。")
+        );
+    }
+
+    #[test]
+    fn project_skill_roots_are_scanned_before_home_skills() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        for root in [
+            ".agents", ".codex", ".claude", ".github", ".cursor", ".kiro", ".vscode",
+        ] {
+            write(
+                project.path(),
+                &format!("{root}/skills/{root}/SKILL.md"),
+                &format!("---\nname: {root}\ndescription: project skill\n---\nbody\n"),
+            );
+        }
+        write(
+            home.path(),
+            ".claude/skills/duplicate/SKILL.md",
+            "---\nname: .codex\n---\nhome body\n",
+        );
+        let rules = scan_migrated_rules(project.path(), home.path());
+        let skills = rules
+            .iter()
+            .filter(|rule| rule.source_tool == "skill")
+            .collect::<Vec<_>>();
+        assert_eq!(skills.len(), 7);
+        assert!(skills.iter().all(|rule| rule.scope == RuleScope::Project));
+        assert_eq!(resolve_by_name(&rules, ".codex").unwrap().content, "body\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_skill_reference_cannot_escape_its_directory() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            project.path(),
+            ".codex/skills/demo/SKILL.md",
+            "---\nname: demo\n---\nRead [private](references/private.md).\n",
+        );
+        write(project.path(), "private.md", "private text");
+        let target = project.path().join("private.md");
+        let link = project
+            .path()
+            .join(".codex/skills/demo/references/private.md");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(target, link).unwrap();
+
+        let rules = scan_migrated_rules(project.path(), home.path());
+        assert!(rules.iter().any(|rule| rule.name == "demo"));
+        assert!(
+            !rules
+                .iter()
+                .any(|rule| rule.name == "skill:demo::references/private.md")
         );
     }
 
