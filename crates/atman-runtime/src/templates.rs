@@ -12,10 +12,10 @@ pub const SESSION_NAME_AT: &str = r#"flow session_name(input: string) -> string 
 }
 "#;
 
-pub const SPEC_AT: &str = include_str!("spec.at");
-pub const SPEC_MD: &str = include_str!("spec.md");
-pub const SPEC_QUESTIONS_MD: &str = include_str!("spec-questions.md");
-pub const SPEC_DESIGN_MD: &str = include_str!("spec-design.md");
+pub const SPEC_AT: &str = include_str!("../templates/commands/spec.at");
+pub const SPEC_MD: &str = include_str!("../templates/prompts/spec.md");
+pub const SPEC_QUESTIONS_MD: &str = include_str!("../templates/prompts/spec-questions.md");
+pub const SPEC_DESIGN_MD: &str = include_str!("../templates/prompts/spec-design.md");
 
 pub const SYSTEM_MD: &str = r#"You are atman. atman witnesses; code exists. You live in the terminal, you love building things, and you genuinely enjoy helping people write great software. You're warm, concise, and cheerful — a little emoji now and then is fine (￣▽￣)ノ but don't overdo it.
 
