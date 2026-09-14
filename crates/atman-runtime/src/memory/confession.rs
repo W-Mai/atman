@@ -343,6 +343,21 @@ impl ConfessionStore {
         self.append_changes(changes).await
     }
 
+    pub async fn archive(
+        &self,
+        id: MemoryId,
+        base_revision: u64,
+        reason: String,
+    ) -> Result<ConfessionView, RuntimeError> {
+        let change = ConfessionChange::Archived {
+            id,
+            base_revision,
+            reason,
+            changed_at: chrono::Utc::now(),
+        };
+        Ok(self.append_changes(vec![change]).await?.remove(0))
+    }
+
     async fn append_changes(
         &self,
         changes: Vec<ConfessionChange>,
@@ -897,16 +912,15 @@ mod tests {
         let original = sample("old trigger", "rule");
         store.append(original.clone()).await.unwrap();
         store
-            .append_changes(vec![ConfessionChange::Archived {
-                id: original.id.clone(),
-                base_revision: 0,
-                reason: "superseded".into(),
-                changed_at: chrono::Utc::now(),
-            }])
+            .archive(original.id.clone(), 0, "superseded".into())
             .await
             .unwrap();
         assert!(store.list().await.unwrap().is_empty());
         assert_eq!(store.list_with_meta(true).await.unwrap().len(), 1);
+        assert!(matches!(
+            store.history(&original.id).await.unwrap().as_slice(),
+            [ConfessionChange::Archived { reason, .. }] if reason == "superseded"
+        ));
         let count: i64 = index
             .conn()
             .query_row("SELECT COUNT(*) FROM confessions", [], |row| row.get(0))

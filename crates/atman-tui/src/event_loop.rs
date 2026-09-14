@@ -1719,7 +1719,13 @@ pub(crate) async fn run_frames(
                             let mut state = app.app.knowledge_state.lock().unwrap();
                             match result {
                                 Ok((confessions, rules)) => {
-                                    state.message = format!("{} confessions · {} rules", confessions.len(), rules.len());
+                                    if !state.loading && !state.applying && !state.archiving
+                                        && (state.message.is_empty()
+                                            || state.message.contains(" confessions · ")
+                                            || state.message.starts_with("Refreshing memory")
+                                            || state.message.starts_with("Reloading rules")) {
+                                        state.message = format!("{} confessions · {} rules", confessions.len(), rules.len());
+                                    }
                                     state.confessions = confessions;
                                     state.rules = rules;
                                 }
@@ -1741,16 +1747,35 @@ pub(crate) async fn run_frames(
                             state.failed_save_id = Some(id);
                             state.message = error;
                         }
+                        TuiCommand::ConfessionArchived => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            state.archiving = false;
+                            state.message = "Confession archived · active memory and search updated".into();
+                        }
+                        TuiCommand::ConfessionArchiveFailed(error) => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            state.archiving = false;
+                            state.message = format!("Archive failed: {error}");
+                        }
+                        TuiCommand::OrganizationProgress { request_id, completed, total } => {
+                            let mut state = app.app.knowledge_state.lock().unwrap();
+                            if request_id != state.organize_request { continue; }
+                            state.message = format!("Analyzing confessions {completed}/{total}…");
+                        }
                         TuiCommand::OrganizationResult { request_id, result } => {
                             let mut state = app.app.knowledge_state.lock().unwrap();
                             if request_id != state.organize_request { continue; }
                             state.loading = false;
                             match result {
                                 Ok(proposals) => {
-                                    state.message = format!("{} suggestions · select with Space, apply with A", proposals.len());
+                                    state.message = if proposals.is_empty() {
+                                        "No active confessions to organize".into()
+                                    } else {
+                                        format!("{} suggestions · select with Space, apply with A", proposals.len())
+                                    };
                                     state.proposals = proposals;
                                 }
-                                Err(error) => state.message = error,
+                                Err(error) => state.message = format!("Organization failed: {error}"),
                             }
                         }
                         TuiCommand::OrganizationApplied => {

@@ -190,6 +190,10 @@ pub enum TuiControl {
         base_revision: u64,
         fields: atman_runtime::memory::confession::ConfessionFields,
     },
+    ArchiveConfession {
+        id: atman_runtime::memory::MemoryId,
+        base_revision: u64,
+    },
     SuggestOrganization {
         request_id: u64,
     },
@@ -284,6 +288,13 @@ pub enum TuiCommand {
     ConfessionSaveFailed {
         id: atman_runtime::memory::MemoryId,
         error: String,
+    },
+    ConfessionArchived,
+    ConfessionArchiveFailed(String),
+    OrganizationProgress {
+        request_id: u64,
+        completed: usize,
+        total: usize,
     },
     OrganizationResult {
         request_id: u64,

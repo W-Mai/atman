@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### ✨ Features
 
+- **Confession archiving** — The Memory & Rules panel confirms archival before hiding a confession from active memory and search while retaining its revision history.
 - **Memory and rules panel** — The TUI browses and edits confessions, displays loaded rule sources, and reviews model-generated organization suggestions before applying them.
 - **Confession revisions** — Confession edits and organization metadata are appended as versioned events, preserving original records while search reads the effective version.
 - **Requirements interview** — The managed agent synchronously gathers project and feature requirements, previews the design, and waits for approval of the current design revision before continuing.
@@ -18,6 +19,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Organization feedback** — Suggestions show generation progress and errors in the content pane, preserve task status across memory refreshes, and use the configured smart model in fresh sessions.
 - **Subtle TUI hover** — Memory controls, session rows, sidebar content, and task history use low-contrast hover colors while selection keeps its distinct highlight.
 - **Memory editor cursor** — Confession fields and search use the terminal cursor, align pointer placement with wrapped text, and show keyboard shortcuts and hover feedback.
 - **Workflow card stability** — Collapsed workflow cards use a smaller row cap and retain their observed height as nodes change, filling available rows with more nodes.

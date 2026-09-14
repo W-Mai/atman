@@ -1721,6 +1721,7 @@ async fn suggest_confession_organization(
     executor: &Executor,
     session: &Session,
     store: &atman_runtime::memory::ConfessionStore,
+    progress: impl Fn(usize, usize),
 ) -> Result<Vec<atman_tui::OrganizationProposal>> {
     use atman_runtime::provider::{LlmRequest, ReasoningSelection, user_text_message};
     let rows = store.list_with_meta(false).await?;
@@ -1731,6 +1732,11 @@ async fn suggest_confession_organization(
         bail!("Organization supports up to 500 active confessions per request");
     }
     let model = session.last_model();
+    let model = if model.is_empty() {
+        atman_runtime::model_registry::resolve_alias("smart")
+    } else {
+        model
+    };
     let provider = executor
         .providers
         .resolve(&model)
@@ -1740,6 +1746,7 @@ async fn suggest_confession_organization(
         .map(|view| (view.confession.id.clone(), view.revision))
         .collect::<std::collections::HashMap<_, _>>();
     let mut proposals = Vec::new();
+    progress(0, rows.len());
     for chunk in rows.chunks(25) {
         let inputs = chunk
             .iter()
@@ -1777,6 +1784,7 @@ async fn suggest_confession_organization(
             chunk,
             &known,
         )?);
+        progress(proposals.len(), rows.len());
     }
     Ok(proposals)
 }
@@ -2719,6 +2727,40 @@ async fn cmd_repl_once(
                             }
                         }
                     }
+                    atman_tui::TuiControl::ArchiveConfession { id, base_revision } => {
+                        let result = match &knowledge_store_for_ctrl {
+                            Some(store) => store
+                                .archive(id, base_revision, "Archived by user".into())
+                                .await
+                                .map(|_| ())
+                                .map_err(|error| error.to_string()),
+                            None => Err("Project scope is unavailable".into()),
+                        };
+                        match result {
+                            Ok(()) => {
+                                if let Some(store) = &knowledge_store_for_ctrl {
+                                    let rows = store
+                                        .list_with_meta(false)
+                                        .await
+                                        .map_err(|error| error.to_string());
+                                    let rules = loaded_rule_views(&executor_for_ctrl)
+                                        .await
+                                        .map_err(|error| error.to_string());
+                                    let _ = cmd_tx_for_models.send(
+                                        atman_tui::TuiCommand::KnowledgeResult(
+                                            rows.and_then(|rows| rules.map(|rules| (rows, rules))),
+                                        ),
+                                    );
+                                }
+                                let _ = cmd_tx_for_models
+                                    .send(atman_tui::TuiCommand::ConfessionArchived);
+                            }
+                            Err(error) => {
+                                let _ = cmd_tx_for_models
+                                    .send(atman_tui::TuiCommand::ConfessionArchiveFailed(error));
+                            }
+                        }
+                    }
                     atman_tui::TuiControl::SuggestOrganization { request_id } => {
                         if let Some(task) = organization_task.take() {
                             task.abort();
@@ -2730,9 +2772,23 @@ async fn cmd_repl_once(
                         organization_task = Some(tokio::spawn(async move {
                             let result = match store {
                                 Some(store) => {
-                                    suggest_confession_organization(&executor, &session, &store)
-                                        .await
-                                        .map_err(|e| e.to_string())
+                                    let progress_tx = tx.clone();
+                                    suggest_confession_organization(
+                                        &executor,
+                                        &session,
+                                        &store,
+                                        move |completed, total| {
+                                            let _ = progress_tx.send(
+                                                atman_tui::TuiCommand::OrganizationProgress {
+                                                    request_id,
+                                                    completed,
+                                                    total,
+                                                },
+                                            );
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string())
                                 }
                                 None => Err("Project scope is unavailable".into()),
                             };

@@ -27,6 +27,7 @@ pub struct KnowledgeState {
     pub message: String,
     pub loading: bool,
     pub applying: bool,
+    pub archiving: bool,
     pub organize_request: u64,
     pub history_id: Option<MemoryId>,
     pub history: Vec<ConfessionChange>,
@@ -92,6 +93,12 @@ enum HoverTarget {
     Field(usize),
 }
 
+struct ArchiveConfirm {
+    id: MemoryId,
+    base_revision: u64,
+    trigger: String,
+}
+
 pub struct KnowledgePanelContent {
     state: Arc<Mutex<KnowledgeState>>,
     control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
@@ -105,6 +112,7 @@ pub struct KnowledgePanelContent {
     search_focused: bool,
     search_scroll: u16,
     edit: Option<EditState>,
+    archive_confirm: Option<ArchiveConfirm>,
     selected_proposals: HashSet<MemoryId>,
     show_history: bool,
     tab_rects: [Rect; 3],
@@ -136,6 +144,7 @@ impl KnowledgePanelContent {
             search_focused: false,
             search_scroll: 0,
             edit: None,
+            archive_confirm: None,
             selected_proposals: HashSet::new(),
             show_history: false,
             tab_rects: [Rect::default(); 3],
@@ -224,6 +233,10 @@ impl KnowledgePanelContent {
     fn action_label(name: &str) -> &'static str {
         match name {
             "Edit" => "[E]dit",
+            "Archive" => "[X] Archive",
+            "Confirm Archive" => "[Y] Archive",
+            "Cancel Archive" => "[N] Cancel",
+            "Archiving…" => "Archiving…",
             "History" => "[H]istory",
             "Organize" => "[O]rganize",
             "Refresh" => "[R]efresh",
@@ -233,6 +246,17 @@ impl KnowledgePanelContent {
             "Apply" => "[A]pply",
             "Applying…" => "Applying…",
             _ => "",
+        }
+    }
+
+    fn compact_action_label(name: &str) -> &'static str {
+        match name {
+            "Edit" => "[E]dit",
+            "Archive" => "[X]arc",
+            "History" => "[H]ist",
+            "Organize" => "[O]rg",
+            "Refresh" => "[R]ef",
+            _ => Self::action_label(name),
         }
     }
 
@@ -266,14 +290,35 @@ impl KnowledgePanelContent {
 
     fn action(&mut self, name: &str) {
         self.search_focused = false;
+        if let Some(confirm) = self.archive_confirm.take() {
+            match name {
+                "Confirm Archive" => {
+                    let mut state = self.state.lock().unwrap();
+                    state.archiving = true;
+                    state.message = "Archiving confession…".into();
+                    drop(state);
+                    self.send(TuiControl::ArchiveConfession {
+                        id: confirm.id,
+                        base_revision: confirm.base_revision,
+                    });
+                }
+                "Cancel Archive" => {
+                    self.state.lock().unwrap().message = "Archive cancelled".into();
+                }
+                _ => self.archive_confirm = Some(confirm),
+            }
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         let indices = self.filtered_indices(&state);
         match name {
             "Refresh" => {
+                state.message = "Refreshing memory & rules…".into();
                 drop(state);
                 self.send(TuiControl::ListKnowledge);
             }
             "Reload" => {
+                state.message = "Reloading rules…".into();
                 drop(state);
                 self.send(TuiControl::ReloadRules);
             }
@@ -283,6 +328,19 @@ impl KnowledgePanelContent {
                     && let Some(view) = state.confessions.get(index)
                 {
                     self.edit = Some(EditState::new(view));
+                }
+            }
+            "Archive" => {
+                if self.tab == 0
+                    && !state.archiving
+                    && let Some(&index) = indices.get(self.selected)
+                    && let Some(view) = state.confessions.get(index)
+                {
+                    self.archive_confirm = Some(ArchiveConfirm {
+                        id: view.confession.id.clone(),
+                        base_revision: view.revision,
+                        trigger: view.confession.trigger.clone(),
+                    });
                 }
             }
             "History" => {
@@ -299,7 +357,7 @@ impl KnowledgePanelContent {
                 }
             }
             "Organize" => {
-                if state.loading || state.applying {
+                if state.loading || state.applying || state.archiving {
                     return;
                 }
                 state.loading = true;
@@ -778,7 +836,7 @@ impl WindowComponent for KnowledgePanelContent {
             ));
         }
         frame.render_widget(Paragraph::new(list_lines), list_area);
-        let detail = match indices.get(self.selected).copied() {
+        let mut detail = match indices.get(self.selected).copied() {
             Some(index)
                 if self.tab == 0
                     && self.show_history
@@ -867,13 +925,23 @@ impl WindowComponent for KnowledgePanelContent {
                 )
             }
             None => {
-                if state.loading {
-                    "Generating suggestions…".into()
+                if self.tab == 2 && state.loading {
+                    format!("{}\n\n[C] Cancel", state.message)
+                } else if self.tab == 2 && state.message.starts_with("Organization failed:") {
+                    format!("{}\n\n[O] Retry", state.message)
+                } else if self.tab == 2 && state.proposals.is_empty() {
+                    format!("{}\n\n[O] Organize to generate suggestions", state.message)
                 } else {
                     "No matching entries".into()
                 }
             }
         };
+        if let Some(confirm) = &self.archive_confirm {
+            detail = format!(
+                "Archive this confession?\n\n{}\n\nIt will disappear from active memory and search. Its revision history remains.\n\n[Y] Archive · [N] Cancel",
+                confirm.trigger
+            );
+        }
         let detail_lines = crate::width::word_wrap(&detail, detail_area.width as usize);
         let max_detail_scroll = detail_lines
             .len()
@@ -890,16 +958,26 @@ impl WindowComponent for KnowledgePanelContent {
             status,
         );
         self.action_rects.clear();
-        let actions: &[&str] = match self.tab {
-            0 => &["Edit", "History", "Organize", "Refresh"],
-            1 => &["Reload", "Refresh"],
-            _ if state.loading => &["Stop"],
-            _ if state.applying => &["Applying…"],
-            _ => &["Select All", "Apply", "Organize", "Refresh"],
+        let actions: &[&str] = if self.archive_confirm.is_some() {
+            &["Confirm Archive", "Cancel Archive"]
+        } else if state.archiving && self.tab == 0 {
+            &["Archiving…", "History", "Organize", "Refresh"]
+        } else {
+            match self.tab {
+                0 => &["Edit", "Archive", "History", "Organize", "Refresh"],
+                1 => &["Reload", "Refresh"],
+                _ if state.loading => &["Stop"],
+                _ if state.applying => &["Applying…"],
+                _ => &["Select All", "Apply", "Organize", "Refresh"],
+            }
         };
         let mut x = area.x;
         for &name in actions {
-            let label = Self::action_label(name);
+            let label = if self.tab == 0 && area.width < 65 {
+                Self::compact_action_label(name)
+            } else {
+                Self::action_label(name)
+            };
             let width = crate::width::width(label) as u16 + 1;
             let rect = Rect::new(
                 x,
@@ -923,7 +1001,7 @@ impl WindowComponent for KnowledgePanelContent {
                 ),
                 rect,
             );
-            if name != "Applying…" {
+            if name != "Applying…" && name != "Archiving…" {
                 self.action_rects.push((name, rect));
             }
             x = x.saturating_add(width + 1);
@@ -1046,6 +1124,9 @@ impl WindowComponent for KnowledgePanelContent {
                     return WmEventResult::Consumed(Vec::new());
                 }
             } else {
+                if self.archive_confirm.is_some() {
+                    return WmEventResult::Consumed(Vec::new());
+                }
                 if let Some(index) = self
                     .tab_rects
                     .iter()
@@ -1140,6 +1221,14 @@ impl WindowComponent for KnowledgePanelContent {
             }
             return WmEventResult::Consumed(Vec::new());
         }
+        if self.archive_confirm.is_some() {
+            match action {
+                KeyAction::Char('y') | KeyAction::Submit => self.action("Confirm Archive"),
+                KeyAction::Char('n') | KeyAction::Escape => self.action("Cancel Archive"),
+                _ => {}
+            }
+            return WmEventResult::Consumed(Vec::new());
+        }
         let total = {
             let state = self.state.lock().unwrap();
             self.filtered_indices(&state).len()
@@ -1161,6 +1250,7 @@ impl WindowComponent for KnowledgePanelContent {
             }
             KeyAction::Char('/') => self.search_focused = true,
             KeyAction::Char('e') if self.tab == 0 => self.action("Edit"),
+            KeyAction::Char('x') if self.tab == 0 => self.action("Archive"),
             KeyAction::Char('h') if self.tab == 0 => self.action("History"),
             KeyAction::Char('o') => self.action("Organize"),
             KeyAction::Char('c') if self.tab == 2 => self.action("Stop"),
@@ -1359,8 +1449,12 @@ mod tests {
         };
         for (width, height) in [(100, 36), (55, 16)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            for tab in 0..2 {
+            for tab in 0..3 {
                 panel.tab = tab;
+                if tab == 2 {
+                    panel.state.lock().unwrap().message =
+                        "Organization failed: model unavailable".into();
+                }
                 terminal
                     .draw(|frame| {
                         panel.render_content(
@@ -1397,10 +1491,15 @@ mod tests {
                     .iter()
                     .map(|cell| cell.symbol())
                     .collect::<String>();
-                assert!(content.contains(if tab == 0 { "initial" } else { "AGENTS.md" }));
+                assert!(content.contains(match tab {
+                    0 => "initial",
+                    1 => "AGENTS.md",
+                    _ => "Organization failed",
+                }));
                 if tab == 0 {
                     assert!(content.contains("[E]dit"));
-                    assert!(content.contains("[H]istory"));
+                    assert!(content.contains(if width < 65 { "[X]arc" } else { "[X] Archive" }));
+                    assert!(content.contains(if width < 65 { "[H]ist" } else { "[H]istory" }));
                 }
             }
         }
@@ -1660,5 +1759,52 @@ mod tests {
         ));
         assert!(rx.try_recv().is_err());
         assert!(state.lock().unwrap().applying);
+    }
+
+    #[test]
+    fn archive_requires_confirmation_and_accepts_mouse_or_keyboard() {
+        let view = sample_view();
+        let id = view.confession.id.clone();
+        let state = Arc::new(Mutex::new(KnowledgeState {
+            confessions: vec![view],
+            ..Default::default()
+        }));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut panel = KnowledgePanelContent::new(state.clone(), Some(tx));
+        panel.action("Archive");
+        assert!(panel.archive_confirm.is_some());
+        assert!(rx.try_recv().is_err());
+        panel.action("Cancel Archive");
+        assert!(panel.archive_confirm.is_none());
+        assert!(rx.try_recv().is_err());
+
+        panel.action("Archive");
+        let rect = Rect::new(2, 4, 16, 1);
+        panel.action_rects = vec![("Confirm Archive", rect)];
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        panel.handle_event(
+            &WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 1,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut ctx,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(TuiControl::ArchiveConfession { id: archived_id, base_revision: 0 }) if archived_id == id)
+        );
+        assert!(state.lock().unwrap().archiving);
+
+        state.lock().unwrap().archiving = false;
+        panel.action("Archive");
+        panel.handle_event(&WmEvent::Key(KeyAction::Char('n')), &mut ctx);
+        assert!(panel.archive_confirm.is_none());
+        assert!(rx.try_recv().is_err());
     }
 }
