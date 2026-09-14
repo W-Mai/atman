@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- **Pages installer sync** — Successful stable releases trigger a docs deployment that serves the installer from the matching release tag, while docs-only deployments continue to use the latest published release.
+
 ## [1.11.1] — 2026-09-14
 
 ### ✨ Features

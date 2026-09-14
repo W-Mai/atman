@@ -10,6 +10,9 @@ on:
       - "static/**"
       - "scripts/**"
       - ".github/workflows/docs.yml"
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -23,25 +26,62 @@ concurrency:
 
 jobs:
   build:
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_repository.full_name == github.repository &&
+           startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.installer.outputs.publish }}
     steps:
+      - name: Resolve installer release
+        id: installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_run" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "download_path=latest/download" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+          if [[ "$RELEASE_TAG" != "$latest_tag" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "download_path=download/${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        if: steps.installer.outputs.publish == 'true'
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.installer.outputs.publish == 'true'
       - name: Install oranda
+        if: steps.installer.outputs.publish == 'true'
         run: cargo install oranda --locked --version 0.6.5
       - name: Build oranda site
+        if: steps.installer.outputs.publish == 'true'
         run: bash scripts/build-site.sh
-      - name: Fetch install scripts from latest release
+      - name: Fetch install script from release
+        if: steps.installer.outputs.publish == 'true'
+        env:
+          INSTALLER_DOWNLOAD_PATH: ${{ steps.installer.outputs.download_path }}
         run: |
-          curl -fsSL "https://github.com/W-Mai/atman/releases/latest/download/atman-cli-installer.sh" -o public/install.sh
+          curl -fsSL --retry 3 "https://github.com/${GITHUB_REPOSITORY}/releases/${INSTALLER_DOWNLOAD_PATH}/atman-cli-installer.sh" -o public/install.sh
           chmod +x public/install.sh
       - name: Upload artifact
+        if: steps.installer.outputs.publish == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
   deploy:
     needs: build
+    if: needs.build.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
