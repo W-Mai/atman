@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "atman-cli"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "atman-daemon",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "atman-daemon"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "atman-dsl"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "atman-proto"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "chrono",
  "serde",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "atman-runtime"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "atman-dsl",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "atman-tui"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "arboard",

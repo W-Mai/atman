@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-09-14
+
 ### ✨ Features
 
 - **Startup recent sessions** — Recent sessions render in a responsive padded container with four-row records, width-aware text, distinct hover and selection states, and keyboard or pointer navigation that leaves numeric input untouched until the list is focused.
@@ -14,7 +16,7 @@ All notable changes to atman are documented in this file.
 ### 🐛 Bug Fixes
 
 - **Late form answers** — A timed-out `form.ask` remains answerable; submitted answers are recorded with their questions and enter the next task-facing LLM request, including after session replay.
-- **Queued follow-ups** — Ordinary input submitted during a flow enters the next task-facing LLM request as trailing user context without interrupting the flow; commands and explicit per-submission settings remain queued for a new turn.
+- **Queued user input** — Ordinary input submitted during a flow enters the next task-facing LLM request as trailing user context without interrupting the flow; commands and explicit per-submission settings remain queued for a new turn.
 - **Final answer validation** — A `final.answer` call with a non-empty `message` remains valid when the assistant response also contains text; the tool's `message` is the single displayed answer.
 - **Compaction model routing** — Summary requests resolve the provider's API model ID and retain the selected range if anchored summarization fails.
 - **Form submission results** — Single-question `form.ask` confirmations retain their submitted result; malformed responses report an error instead of becoming a rejection.
