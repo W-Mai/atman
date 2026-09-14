@@ -88,6 +88,10 @@ fn router(state: PreviewState) -> Router {
         )
         .route("/api/projects/{pid}/topics/{topic}", get(read_topic))
         .route(
+            "/api/projects/{pid}/topics/{topic}/blocks/{block}/html",
+            get(read_html_block),
+        )
+        .route(
             "/api/projects/{pid}/topics/{topic}/blocks",
             post(push_block),
         )
@@ -290,6 +294,39 @@ async fn read_topic(
         "id":topic.id,"title":topic.title,"created_at":topic.created_at,
         "updated_at":topic.updated_at,"blocks":blocks,
     })))
+}
+
+async fn read_html_block(
+    State(state): State<PreviewState>,
+    UrlPath((pid, topic_id, block_id)): UrlPath<(String, String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    valid_id(&topic_id)?;
+    valid_id(&block_id)?;
+    let project = find_project(&state, &pid)?;
+    let Some(topic) = read_json::<TopicRecord>(&topic_path(&project, &topic_id))? else {
+        return Err((StatusCode::NOT_FOUND, "topic not found".into()));
+    };
+    let Some(block) = topic
+        .blocks
+        .iter()
+        .find(|block| block.id == block_id && block.kind == "html")
+    else {
+        return Err((StatusCode::NOT_FOUND, "HTML block not found".into()));
+    };
+    let Some(fragment) = block.payload["fragment"].as_str() else {
+        return Err(internal("HTML block is missing its fragment"));
+    };
+    Ok((
+        [
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'",
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        Html(fragment.to_owned()),
+    ))
 }
 
 async fn push_block(
@@ -619,6 +656,56 @@ mod tests {
                 .join("scope/preview/topics/review.json")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn html_blocks_run_scripts_only_in_an_opaque_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let topic = TopicRecord {
+            id: "prototype".into(),
+            title: "Prototype".into(),
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            blocks: vec![BlockRecord {
+                id: "blk_demo".into(),
+                created_at: "now".into(),
+                kind: "html".into(),
+                payload: json!({"kind":"html","fragment":"<script>document.body.dataset.ready = 'yes'</script>"}),
+            }],
+        };
+        write_json(
+            &topic_path(&find_project(&state, "demo-12345678").unwrap(), "prototype"),
+            &topic,
+        )
+        .unwrap();
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/demo-12345678/topics/prototype/blocks/blk_demo/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(policy.contains("sandbox allow-scripts"));
+        assert!(!policy.contains("allow-same-origin"));
+        assert!(policy.contains("connect-src 'none'"));
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        assert_eq!(body, "<script>document.body.dataset.ready = 'yes'</script>");
+
+        let (status, _) = request(
+            router(state),
+            "GET",
+            "/api/projects/demo-12345678/topics/prototype/blocks/missing/html",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

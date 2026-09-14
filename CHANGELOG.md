@@ -12,10 +12,12 @@ All notable changes to atman are documented in this file.
 - **Spec documents** — The managed agent records phase progress and materializes reviewable spec Markdown in the configured project scope.
 - **Project skills** — `rule.fetch` discovers skills in project assistant directories and resolves duplicate names with project precedence.
 - **Artifact preview** — Atman serves `preview.push` topics in a local browser workbench with project and topic navigation, artifact viewers, and automatic startup.
+- **Full-width preview** — HTML artifacts fill the canvas, and a focus control folds navigation and inspection panels into drawers.
 
 ### 🐛 Bug Fixes
 
 - **Pages installer sync** — Successful stable releases trigger a docs deployment that serves the installer from the matching release tag, while docs-only deployments continue to use the latest published release.
+- **Interactive HTML preview** — HTML artifact scripts run in an isolated iframe with no same-origin access or network connections.
 
 ## [1.11.1] — 2026-09-14
 

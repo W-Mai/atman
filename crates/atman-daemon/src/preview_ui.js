@@ -132,7 +132,7 @@ function renderTopic() {
   const topic = state.topic;
   const canvas = $('canvas');
   const currentScroll = canvas.scrollTop;
-  const content = el('div', 'topic-content');
+  const content = el('div', `topic-content${topic.blocks.some(block => block.kind === 'html') ? ' wide-topic' : ''}`);
   const hero = el('div', 'topic-hero');
   hero.append(el('div', 'eyebrow', '∴  PREVIEW / TOPIC'));
   hero.append(el('h1', '', topic.title));
@@ -231,10 +231,11 @@ function renderBlock(block) {
     zoom.onclick = () => frame.classList.toggle('actual');
     body.append(zoom, frame);
   } else if (block.kind === 'html') {
+    section.classList.add('html-block');
     const frame = el('iframe', 'html-frame');
     frame.title = `HTML preview ${block.id}`;
-    frame.setAttribute('sandbox', '');
-    frame.srcdoc = block.payload.fragment || '';
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.src = `/api/projects/${encodeURIComponent(state.project.id)}/topics/${encodeURIComponent(state.topic.id)}/blocks/${encodeURIComponent(block.id)}/html`;
     body.append(frame);
   } else if (block.kind === 'mermaid') {
     const toolbar = el('div', 'diagram-toolbar');
@@ -305,6 +306,15 @@ function closeDrawers() {
   $('scrim').classList.remove('show');
 }
 
+function setFocusMode(enabled) {
+  document.querySelector('.app-shell').classList.toggle('focus-mode', enabled);
+  $('toggleFocus').setAttribute('aria-pressed', String(enabled));
+  $('toggleFocus').querySelector('span').textContent = enabled ? 'Show panels' : 'Full width';
+  $('toggleFocus').title = enabled ? 'Show side panels' : 'Expand document and collapse side panels';
+  localStorage.setItem('atman-preview-focus', String(enabled));
+  closeDrawers();
+}
+
 async function refresh() {
   try {
     const projects = await getJson('/api/projects');
@@ -343,13 +353,21 @@ async function boot() {
 
 $('topicSearch').addEventListener('input', renderTopics);
 $('copyLink').onclick = () => copyText(location.href);
+$('toggleFocus').onclick = () => setFocusMode(!$('toggleFocus').matches('[aria-pressed="true"]'));
 $('openTopics').onclick = () => { $('topicPane').classList.add('open'); $('scrim').classList.add('show'); };
 $('closeTopics').onclick = closeDrawers;
 $('openInspector').onclick = () => { $('inspector').classList.add('open'); $('scrim').classList.add('show'); };
 $('closeInspector').onclick = closeDrawers;
 $('scrim').onclick = closeDrawers;
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') closeDrawers();
+  if (event.key === 'Escape') {
+    if ($('topicPane').classList.contains('open') || $('inspector').classList.contains('open')) closeDrawers();
+    else if ($('toggleFocus').matches('[aria-pressed="true"]')) setFocusMode(false);
+  }
+  if (event.key.toLowerCase() === 'f' && !event.altKey && !event.ctrlKey && !event.metaKey && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) && !document.activeElement.isContentEditable) {
+    event.preventDefault();
+    setFocusMode(!$('toggleFocus').matches('[aria-pressed="true"]'));
+  }
   if (event.key === '/' && document.activeElement !== $('topicSearch')) { event.preventDefault(); $('topicPane').classList.add('open'); $('topicSearch').focus(); }
   if ((event.key === 'j' || event.key === 'k' || event.key === 'ArrowDown' || event.key === 'ArrowUp') && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
     const items = [...document.querySelectorAll('.topic-item')];
@@ -362,4 +380,5 @@ document.addEventListener('keydown', event => {
 });
 window.addEventListener('popstate', () => { const target = route(); if (target.project) selectProject(target.project, target.topic); });
 if (globalThis.mermaid) globalThis.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', themeVariables: { primaryColor: '#14343b', primaryTextColor: '#e8f3f4', primaryBorderColor: '#56dbe7', lineColor: '#6cabb4', secondaryColor: '#17232b', tertiaryColor: '#0b1319' } });
+setFocusMode(localStorage.getItem('atman-preview-focus') === 'true');
 boot();

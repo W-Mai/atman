@@ -9,3 +9,24 @@ html,body{overflow:hidden;overscroll-behavior:none}
 .project-stack{flex:1;min-height:0;overflow-y:auto}.project-chip{flex:none}
 .mobile-projects{display:none}
 @media(max-width:760px){.mobile-projects{display:block;flex:none;max-height:min(29vh,210px);overflow-y:auto;overscroll-behavior:none;margin:0 8px 18px;padding:3px 0 7px;border-bottom:1px solid var(--border-subtle)}.mobile-project-label{padding:0 12px 7px;color:var(--text-muted);font:700 10px var(--font-mono);letter-spacing:.11em}.mobile-project-item{display:flex;align-items:center;gap:10px;width:100%;padding:7px 12px;border:1px solid transparent;border-radius:0;background:none;color:var(--text-secondary);text-align:left}.mobile-project-item:hover{background:#17252b}.mobile-project-item.selected{border-color:#28515a;background:#163038;color:var(--accent)}.mobile-project-key{display:grid;place-items:center;flex:none;width:26px;height:26px;border:1px solid var(--border-strong);border-radius:0;font:700 10px var(--font-mono)}.mobile-project-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+
+/* HTML artifacts use the whole canvas; focus mode moves navigation into drawers. */
+.topic-content.wide-topic{width:100%;max-width:none;margin:0;padding-inline:clamp(15px,2vw,32px)}
+.html-block .block-body{padding:0}
+.html-block .html-frame{display:block;height:clamp(520px,80vh,960px);border:0}
+.app-shell.focus-mode{grid-template-columns:minmax(0,1fr)}
+.focus-mode .project-rail{display:none}
+.focus-mode .topic-pane{position:fixed;z-index:13;left:0;top:0;bottom:0;width:min(330px,88vw);transform:translateX(-100%);border-right:1px solid var(--border-strong)}
+.focus-mode .topic-pane.open{transform:translateX(0)}
+.focus-mode .inspector{position:fixed;z-index:12;right:0;top:0;bottom:0;width:min(330px,90vw);transform:translateX(100%)}
+.focus-mode .inspector.open{transform:translateX(0)}
+.focus-mode .mobile-only,.focus-mode .mobile-inspector,.focus-mode .inspector-trigger{display:block}
+.focus-mode .mobile-projects{display:block;flex:none;max-height:min(29vh,210px);overflow-y:auto;overscroll-behavior:none;margin:0 8px 18px;padding:3px 0 7px;border-bottom:1px solid var(--border-subtle)}
+.focus-mode .mobile-project-label{padding:0 12px 7px;color:var(--text-muted);font:700 10px var(--font-mono);letter-spacing:.11em}
+.focus-mode .mobile-project-item{display:flex;align-items:center;gap:10px;width:100%;padding:7px 12px;border:1px solid transparent;border-radius:0;background:none;color:var(--text-secondary);text-align:left}
+.focus-mode .mobile-project-item:hover{background:#17252b}
+.focus-mode .mobile-project-item.selected{border-color:#28515a;background:#163038;color:var(--accent)}
+.focus-mode .mobile-project-key{display:grid;place-items:center;flex:none;width:26px;height:26px;border:1px solid var(--border-strong);border-radius:0;font:700 10px var(--font-mono)}
+.focus-mode .mobile-project-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.focus-mode .scrim.show{display:block;position:fixed;inset:0;background:#0009;z-index:10}
+@media(max-width:760px){#toggleFocus{display:none}.topic-content.wide-topic{padding-inline:15px}}
