@@ -59,6 +59,7 @@ pub fn is_panic_capture_active() -> bool {
 
 pub mod permission;
 pub mod permission_audit;
+pub mod project_catalog;
 pub mod projection;
 pub mod provider;
 pub mod provider_lifecycle;
