@@ -881,6 +881,7 @@ mod tests {
         let file = parse_file(SPEC_AT).expect("SPEC_AT must parse");
         assert!(file.flows.iter().any(|flow| flow.name.name == "interview"));
         assert!(SPEC_AT.contains("preview.push("));
+        assert!(SPEC_AT.contains("\"preview.push\""));
         assert!(SPEC_AT.contains("memory.spec.review("));
         assert!(!SPEC_AT.contains("\"memory.spec.review\""));
         assert!(!SPEC_AT.contains("\"flow.spawn\""));

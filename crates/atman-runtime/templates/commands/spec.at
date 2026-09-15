@@ -42,7 +42,7 @@ flow interview(user_prompt: string, feature: string = "project-intake", trigger:
             prompt: research_prompt,
             cache: true,
             retry: 12,
-            tools: ["fs.read", "fs.list", "fs.grep", "rule.fetch"],
+            tools: ["fs.read", "fs.list", "fs.grep", "rule.fetch", "preview.push"],
         )
         research_tools = extract_tool_uses(research_reply)
         when is_empty(research_tools) {
