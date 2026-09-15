@@ -149,6 +149,17 @@ pub(crate) enum ProviderMutationResolution {
 }
 
 impl ProviderManager {
+    pub fn has_text_focus(&self) -> bool {
+        if !self.open || !self.show_add {
+            return false;
+        }
+        if !self.in_form {
+            return self.name_focused;
+        }
+        matches!(self.form_field, 0 | 2 | 3 | 4)
+            && !(self.form_field == 0 && self.editing_provider.is_some())
+    }
+
     pub fn toggle(&mut self) {
         if self.open {
             self.close();
@@ -1760,6 +1771,27 @@ fn render_pending_help(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_visibility_tracks_provider_form_focus() {
+        let mut manager = ProviderManager {
+            open: true,
+            show_add: true,
+            in_form: true,
+            ..Default::default()
+        };
+        for field in [0, 2, 3, 4] {
+            manager.form_field = field;
+            assert!(manager.has_text_focus());
+        }
+        for field in [1, 5, 6, 7] {
+            manager.form_field = field;
+            assert!(!manager.has_text_focus());
+        }
+        manager.in_form = false;
+        manager.name_focused = true;
+        assert!(manager.has_text_focus());
+    }
 
     fn populate_config_form(manager: &mut ProviderManager, editing: Option<&str>) {
         manager.open = true;

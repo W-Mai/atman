@@ -57,6 +57,7 @@ impl AliasManager {
         self.open = false;
         self.show_form = false;
         self.confirm_delete = None;
+        self.last_input_rect = None;
     }
 
     pub fn show_form(&self) -> bool {
@@ -247,6 +248,11 @@ impl AliasManager {
         match self.focus {
             Focus::NameInput => match action {
                 KeyAction::Escape | KeyAction::Submit => self.commit_alias(control_tx),
+                KeyAction::Tab | KeyAction::BackTab => {
+                    if !self.browser.rows().is_empty() {
+                        self.focus = Focus::Tree;
+                    }
+                }
                 KeyAction::Backspace
                 | KeyAction::Delete
                 | KeyAction::DeleteWordBackward
@@ -261,19 +267,7 @@ impl AliasManager {
             },
             Focus::Tree => match action {
                 KeyAction::Escape | KeyAction::Submit => self.commit_alias(control_tx),
-                KeyAction::Tab => {
-                    let total = self.groups.len();
-                    if total == 0 {
-                        self.focus = Focus::NameInput;
-                        return;
-                    }
-                    self.provider_idx = (self.provider_idx + 1) % total;
-                    let selected = self.current_model().map(|model| model.slug.clone());
-                    self.sync_browser(selected.as_deref());
-                    if self.provider_idx == 0 && total > 0 {
-                        self.focus = Focus::NameInput;
-                    }
-                }
+                KeyAction::Tab | KeyAction::BackTab => self.focus = Focus::NameInput,
                 KeyAction::HistoryUp
                 | KeyAction::Char('k')
                 | KeyAction::PageUp
@@ -363,13 +357,8 @@ fn render_tree_panel(
     } else {
         Style::default().fg(theme.tinted_fg.into())
     };
-    let cursor = if mgr.focus == Focus::NameInput {
-        "█"
-    } else {
-        ""
-    };
     lines.push(Line::from(Span::styled(
-        format!("Name: {} {}", mgr.editor.buf(), cursor),
+        format!("Name: {}", mgr.editor.buf()),
         name_style,
     )));
     lines.push(Line::from(""));
@@ -497,6 +486,7 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
         _app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        self.last_input_rect = None;
         self.list_rect = None;
         self.save_rect = None;
         self.confirm_yes_rect = None;
@@ -604,8 +594,16 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
-        self.last_input_rect
+        (self.open && self.show_form && self.focus == Focus::NameInput)
+            .then_some(self.last_input_rect)
+            .flatten()
             .map(|r| (r.x + self.editor.cursor_display_col() as u16, r.y))
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if self.open && self.show_form && self.focus == Focus::NameInput {
+            self.editor.paste_single_line(text);
+        }
     }
 
     fn title(&self) -> Line<'static> {
@@ -689,6 +687,61 @@ mod tests {
         assert_eq!(manager.provider_idx, 1);
         manager.handle_key(&KeyAction::CursorRight, None);
         assert_eq!(manager.provider_idx, 0);
+    }
+
+    #[test]
+    fn tab_moves_from_alias_name_to_model_tree() {
+        let mut manager = AliasManager {
+            show_form: true,
+            focus: Focus::NameInput,
+            groups: vec![provider_group("alpha")],
+            model_idx: vec![0],
+            browser: ModelBrowser::new(
+                vec![BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: "model".into(),
+                    value: "vendor/model".into(),
+                    selectable: true,
+                }],
+                None,
+            ),
+            ..Default::default()
+        };
+
+        manager.handle_key(&KeyAction::Tab, None);
+
+        assert_eq!(manager.focus, Focus::Tree);
+        assert!(
+            <AliasManager as crate::wm::modal::ModalOverlay>::cursor_position(&manager).is_none()
+        );
+
+        manager.handle_key(&KeyAction::Tab, None);
+        assert_eq!(manager.focus, Focus::NameInput);
+    }
+
+    #[test]
+    fn alias_cursor_and_paste_follow_name_focus() {
+        let mut manager = AliasManager {
+            open: true,
+            show_form: true,
+            focus: Focus::NameInput,
+            last_input_rect: Some(Rect::new(10, 4, 20, 1)),
+            ..Default::default()
+        };
+
+        <AliasManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "fast");
+        assert_eq!(manager.editor.buf(), "fast");
+        assert_eq!(
+            <AliasManager as crate::wm::modal::ModalOverlay>::cursor_position(&manager),
+            Some((14, 4))
+        );
+
+        manager.focus = Focus::Tree;
+        <AliasManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "ignored");
+        assert_eq!(manager.editor.buf(), "fast");
+        assert!(
+            <AliasManager as crate::wm::modal::ModalOverlay>::cursor_position(&manager).is_none()
+        );
     }
 
     #[test]

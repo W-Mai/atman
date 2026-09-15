@@ -65,7 +65,7 @@ impl ModelManager {
     }
 
     pub fn has_text_focus(&self) -> bool {
-        self.show_form
+        self.show_form && matches!(self.form_field, 0 | 1 | 3 | 5)
     }
 
     pub fn handle_mouse(
@@ -840,7 +840,7 @@ impl ModelManager {
                 ])),
                 Rect { y, ..inner },
             );
-            if active && i != 2 {
+            if active && !matches!(i, 2 | 4) {
                 let prefix = format!(" {label:<16}");
                 let prefix_w = crate::width::width(&prefix) as u16;
                 let cursor_w = match i {
@@ -931,6 +931,22 @@ fn render_delete_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_visibility_tracks_only_editable_model_fields() {
+        let mut manager = ModelManager {
+            show_form: true,
+            ..Default::default()
+        };
+        for field in [0, 1, 3, 5] {
+            manager.form_field = field;
+            assert!(manager.has_text_focus());
+        }
+        for field in [2, 4] {
+            manager.form_field = field;
+            assert!(!manager.has_text_focus());
+        }
+    }
 
     #[test]
     fn paste_inserts_into_current_text_field() {

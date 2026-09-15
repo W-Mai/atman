@@ -66,13 +66,14 @@ impl ModalManager {
 
     pub fn cursor_visible(&self, kind: ModalKind) -> bool {
         match kind {
-            ModalKind::ProviderManager => self.provider_manager.in_form,
+            ModalKind::ProviderManager => self.provider_manager.has_text_focus(),
             ModalKind::ModelManager => self.model_manager.has_text_focus(),
             ModalKind::Form
             | ModalKind::CompactReview
             | ModalKind::HistorySearch
             | ModalKind::McpEditor => self.cursor_position(kind).is_some(),
-            ModalKind::Palette | ModalKind::AliasManager => true,
+            ModalKind::Palette => true,
+            ModalKind::AliasManager => self.cursor_position(kind).is_some(),
             _ => false,
         }
     }
