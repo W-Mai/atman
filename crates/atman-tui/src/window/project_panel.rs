@@ -17,6 +17,7 @@ use crate::wm::{
 
 const CARD_HEIGHT: u16 = 9;
 const SESSION_ROW_HEIGHT: u16 = 4;
+const PAGE_CONTROL_HEIGHT: u16 = 3;
 const WORKSPACE_MAX_WIDTH: u16 = 150;
 const INSPECTOR_WIDTH: u16 = 38;
 
@@ -663,10 +664,20 @@ impl ProjectPanelContent {
             ),
             area,
         );
-        if can_page && area.width >= 84 {
+        if can_page && area.width >= 84 && area.height > PAGE_CONTROL_HEIGHT {
             let controls_y = area.y.saturating_add(1);
-            let next = Rect::new(area.right().saturating_sub(9), controls_y, 9, 1);
-            let previous = Rect::new(next.x.saturating_sub(10), controls_y, 9, 1);
+            let next = Rect::new(
+                area.right().saturating_sub(10),
+                controls_y,
+                9,
+                PAGE_CONTROL_HEIGHT,
+            );
+            let previous = Rect::new(
+                next.x.saturating_sub(10),
+                controls_y,
+                9,
+                PAGE_CONTROL_HEIGHT,
+            );
             self.previous_page_rect = Some(previous);
             self.next_page_rect = Some(next);
             render_page_control(
@@ -741,7 +752,7 @@ impl WindowComponent for ProjectPanelContent {
             return Vec::new();
         }
         let header_height = inner.height.min(4);
-        let footer_height = inner.height.saturating_sub(header_height).min(3);
+        let footer_height = inner.height.saturating_sub(header_height).min(4);
         let header = Rect::new(inner.x, inner.y, inner.width, header_height);
         let footer = Rect::new(
             inner.x,
@@ -1026,15 +1037,17 @@ fn render_page_control(
         *theme.modal_bg
     };
     frame.render_widget(
-        Paragraph::new(label).style(
-            Style::default()
-                .fg(if enabled {
-                    theme.tinted_fg.into()
-                } else {
-                    theme.subtle_fg.into()
-                })
-                .bg(bg),
-        ),
+        Paragraph::new(vec![Line::raw(""), Line::raw(label), Line::raw("")])
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(if enabled {
+                        theme.tinted_fg.into()
+                    } else {
+                        theme.subtle_fg.into()
+                    })
+                    .bg(bg),
+            ),
         rect,
     );
 }
@@ -1085,6 +1098,38 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("PROJECTS 07–12 OF 13"), "{rendered}");
         assert!(rendered.contains("PAGE 02 / 03"), "{rendered}");
+    }
+
+    #[test]
+    fn project_page_controls_use_three_row_hit_targets() {
+        let mut panel = ProjectPanelContent::new((0..13).map(project).collect(), None);
+        panel.cards_per_page = 6;
+        panel.page = 1;
+        panel.previous_page_hovered = true;
+        let theme = crate::theme::theme();
+        let hover_background = theme.modal_bg.lerp(theme.work_hover_bg, 0.72);
+        let mut terminal = Terminal::new(TestBackend::new(100, 4)).unwrap();
+
+        terminal
+            .draw(|frame| panel.render_footer(frame.area(), frame))
+            .unwrap();
+
+        let previous = panel.previous_page_rect.unwrap();
+        let next = panel.next_page_rect.unwrap();
+        assert_eq!(previous.height, PAGE_CONTROL_HEIGHT);
+        assert_eq!(next.height, PAGE_CONTROL_HEIGHT);
+        assert_eq!(next.right() + 1, terminal.backend().buffer().area.right());
+        let buffer = terminal.backend().buffer();
+        for y in previous.y..previous.bottom() {
+            for x in previous.x..previous.right() {
+                assert_eq!(buffer[(x, y)].bg, hover_background);
+            }
+        }
+        assert!((previous.x..previous.right()).all(|x| buffer[(x, previous.y)].symbol() == " "));
+        assert!(
+            (previous.x..previous.right())
+                .all(|x| buffer[(x, previous.bottom() - 1)].symbol() == " ")
+        );
     }
 
     #[test]
