@@ -80,6 +80,24 @@ pub async fn await_prompt_with_payload(
     .await
 }
 
+pub async fn await_prompt_with_payload_cancel(
+    resolver: &Arc<dyn PromptResolver>,
+    id: PromptId,
+    kind: &str,
+    payload: serde_json::Value,
+    timeout: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<serde_json::Value, RuntimeError> {
+    await_prompt_inner_cancel(
+        resolver.register_with_payload(id, kind, payload),
+        resolver,
+        id,
+        timeout,
+        cancel,
+    )
+    .await
+}
+
 pub async fn await_expirable_prompt_with_payload(
     resolver: &Arc<dyn PromptResolver>,
     id: PromptId,
@@ -111,6 +129,49 @@ pub async fn await_expirable_prompt_with_payload(
     }
 }
 
+pub async fn await_expirable_prompt_with_payload_cancel(
+    resolver: &Arc<dyn PromptResolver>,
+    id: PromptId,
+    kind: &str,
+    payload: serde_json::Value,
+    timeout: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<serde_json::Value>, RuntimeError> {
+    let mut rx = resolver.register_with_payload(id, kind, payload);
+    tokio::select! {
+        result = tokio::time::timeout(timeout, &mut rx) => match result {
+            Ok(Ok(value)) => Ok(Some(value)),
+            Ok(Err(_)) => {
+                resolver.drop_pending(&id);
+                Err(RuntimeError::ToolFailed(format!(
+                    "prompt {id} channel closed before answer"
+                )))
+            }
+            Err(_) => {
+                if resolver.expire_pending(&id) {
+                    Ok(None)
+                } else {
+                    tokio::select! {
+                        result = &mut rx => result.map(Some).map_err(|_| {
+                            RuntimeError::ToolFailed(format!(
+                                "prompt {id} channel closed before answer"
+                            ))
+                        }),
+                        _ = cancel.cancelled() => {
+                            resolver.drop_pending(&id);
+                            Err(RuntimeError::Cancelled(format!("prompt {id} cancelled")))
+                        }
+                    }
+                }
+            }
+        },
+        _ = cancel.cancelled() => {
+            resolver.drop_pending(&id);
+            Err(RuntimeError::Cancelled(format!("prompt {id} cancelled")))
+        }
+    }
+}
+
 async fn await_prompt_inner(
     rx: oneshot::Receiver<serde_json::Value>,
     resolver: &Arc<dyn PromptResolver>,
@@ -132,5 +193,118 @@ async fn await_prompt_inner(
                 timeout.as_secs()
             )))
         }
+    }
+}
+
+async fn await_prompt_inner_cancel(
+    mut rx: oneshot::Receiver<serde_json::Value>,
+    resolver: &Arc<dyn PromptResolver>,
+    id: PromptId,
+    timeout: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<serde_json::Value, RuntimeError> {
+    tokio::select! {
+        result = tokio::time::timeout(timeout, &mut rx) => match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_)) => {
+                resolver.drop_pending(&id);
+                Err(RuntimeError::ToolFailed(format!(
+                    "prompt {id} channel closed before answer"
+                )))
+            }
+            Err(_) => {
+                resolver.drop_pending(&id);
+                Err(RuntimeError::ToolFailed(format!(
+                    "prompt {id} timed out after {}s",
+                    timeout.as_secs()
+                )))
+            }
+        },
+        _ = cancel.cancelled() => {
+            resolver.drop_pending(&id);
+            Err(RuntimeError::Cancelled(format!("prompt {id} cancelled")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct PendingResolver {
+        sender: Mutex<Option<oneshot::Sender<serde_json::Value>>>,
+        dropped: AtomicBool,
+        expired: AtomicBool,
+    }
+
+    impl PendingResolver {
+        fn new() -> Self {
+            Self {
+                sender: Mutex::new(None),
+                dropped: AtomicBool::new(false),
+                expired: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl PromptResolver for PendingResolver {
+        fn register(&self, _id: PromptId) -> oneshot::Receiver<serde_json::Value> {
+            let (tx, rx) = oneshot::channel();
+            *self.sender.lock().unwrap() = Some(tx);
+            rx
+        }
+
+        fn drop_pending(&self, _id: &PromptId) {
+            self.dropped.store(true, Ordering::SeqCst);
+            self.sender.lock().unwrap().take();
+        }
+
+        fn expire_pending(&self, _id: &PromptId) -> bool {
+            self.expired.store(true, Ordering::SeqCst);
+            self.sender.lock().unwrap().take();
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn expirable_prompt_timeout_is_not_a_tool_error() {
+        let concrete = Arc::new(PendingResolver::new());
+        let resolver: Arc<dyn PromptResolver> = concrete.clone();
+        let result = await_expirable_prompt_with_payload_cancel(
+            &resolver,
+            PromptId::now(),
+            "form_ask",
+            serde_json::Value::Null,
+            std::time::Duration::from_millis(1),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+        assert!(concrete.expired.load(Ordering::SeqCst));
+        assert!(!concrete.dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelling_prompt_drops_it_immediately() {
+        let concrete = Arc::new(PendingResolver::new());
+        let resolver: Arc<dyn PromptResolver> = concrete.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let result = await_prompt_with_payload_cancel(
+            &resolver,
+            PromptId::now(),
+            "form_ask",
+            serde_json::Value::Null,
+            std::time::Duration::from_secs(300),
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(RuntimeError::Cancelled(_))));
+        assert!(concrete.dropped.load(Ordering::SeqCst));
     }
 }

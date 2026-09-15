@@ -90,10 +90,22 @@ impl Tool for FormAsk {
                     serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null)
                 };
                 let timeout = std::time::Duration::from_secs(300);
-                let answer_json = crate::rendezvous::await_expirable_prompt_with_payload(
-                    &resolver, id, "form_ask", payload, timeout,
-                )
-                .await?;
+                let Some(answer_json) =
+                    crate::rendezvous::await_expirable_prompt_with_payload_cancel(
+                        &resolver,
+                        id,
+                        "form_ask",
+                        payload,
+                        timeout,
+                        &ctx.cancel,
+                    )
+                    .await?
+                else {
+                    return Ok(submission_to_value(
+                        &crate::form::FormSubmission::Rejected,
+                        composite,
+                    ));
+                };
                 let submission = serde_json::from_value::<crate::form::FormSubmission>(answer_json)
                     .map_err(|error| {
                         RuntimeError::ToolFailed(format!(
@@ -120,9 +132,14 @@ impl Tool for FormAsk {
                 emitted_at: chrono::Utc::now(),
             };
             let rx = forms.request(pending);
-            let submission =
-                await_local_submission(forms, form_id, rx, std::time::Duration::from_secs(300))
-                    .await;
+            let submission = await_local_submission(
+                forms,
+                form_id,
+                rx,
+                std::time::Duration::from_secs(300),
+                &ctx.cancel,
+            )
+            .await;
             Ok(submission_to_value(&submission, composite))
         })
     }
@@ -133,19 +150,32 @@ async fn await_local_submission(
     form_id: String,
     mut rx: tokio::sync::oneshot::Receiver<crate::form::FormSubmission>,
     timeout: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> crate::form::FormSubmission {
-    match tokio::time::timeout(timeout, &mut rx).await {
-        Ok(Ok(submission)) => submission,
-        Ok(Err(_)) => {
+    tokio::select! {
+        result = tokio::time::timeout(timeout, &mut rx) => match result {
+            Ok(Ok(submission)) => submission,
+            Ok(Err(_)) => {
+                forms.cancel(&form_id);
+                crate::form::FormSubmission::Rejected
+            }
+            Err(_) => {
+                if forms.expire(&form_id) {
+                    crate::form::FormSubmission::Rejected
+                } else {
+                    tokio::select! {
+                        result = &mut rx => result.unwrap_or(crate::form::FormSubmission::Rejected),
+                        _ = cancel.cancelled() => {
+                            forms.cancel(&form_id);
+                            crate::form::FormSubmission::Rejected
+                        }
+                    }
+                }
+            }
+        },
+        _ = cancel.cancelled() => {
             forms.cancel(&form_id);
             crate::form::FormSubmission::Rejected
-        }
-        Err(_) => {
-            if forms.expire(&form_id) {
-                crate::form::FormSubmission::Rejected
-            } else {
-                rx.await.unwrap_or(crate::form::FormSubmission::Rejected)
-            }
         }
     }
 }
@@ -411,7 +441,14 @@ mod tests {
         };
         let rx = forms.request(pending);
         assert_eq!(
-            await_local_submission(&forms, form_id, rx, std::time::Duration::ZERO).await,
+            await_local_submission(
+                &forms,
+                form_id,
+                rx,
+                std::time::Duration::ZERO,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await,
             crate::form::FormSubmission::Rejected
         );
         assert_eq!(forms.list_pending().len(), 1);
@@ -421,6 +458,42 @@ mod tests {
                 answers: vec![FormAnswer::Confirmed { value: true }],
             }
         ));
+        assert!(forms.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_form_cancellation_removes_pending_entry() {
+        let forms = crate::session::FormRegistry::new();
+        let _subscriber = forms.subscribe();
+        let form_id = "cancelled".to_string();
+        let pending = PendingForm {
+            form_id: form_id.clone(),
+            run_id: crate::event::FlowRunId::now(),
+            tool_use_id: "tool".into(),
+            form: crate::form::CompositeForm {
+                questions: vec![crate::form::FormQuestion {
+                    id: "question".into(),
+                    kind: FormKind::Confirm { prompt: "?".into() },
+                }],
+            },
+            kind: FormKind::Confirm { prompt: "?".into() },
+            emitted_at: chrono::Utc::now(),
+        };
+        let rx = forms.request(pending);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        assert_eq!(
+            await_local_submission(
+                &forms,
+                form_id,
+                rx,
+                std::time::Duration::from_secs(300),
+                &cancel,
+            )
+            .await,
+            crate::form::FormSubmission::Rejected
+        );
         assert!(forms.list_pending().is_empty());
     }
 

@@ -106,12 +106,13 @@ impl Tool for HunkReview {
             };
             let id = crate::rendezvous::PromptId::now();
             let payload = hunk_review_payload(&proposal);
-            let answer = crate::rendezvous::await_prompt_with_payload(
+            let answer = crate::rendezvous::await_prompt_with_payload_cancel(
                 &resolver,
                 id,
                 "hunk_selection",
                 payload,
                 std::time::Duration::from_secs(timeout_secs),
+                &ctx.cancel,
             )
             .await?;
             let selection = parse_answer_hunk_ids(&answer, &default_selection)?;

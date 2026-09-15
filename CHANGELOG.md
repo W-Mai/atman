@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- **Prompt cancellation** — Interactive prompts stop immediately when their flow is cancelled, and an unanswered `form.ask` expires as a cancelled response instead of a tool failure.
+
 ## [1.12.0] — 2026-09-15
 
 ### ✨ Features

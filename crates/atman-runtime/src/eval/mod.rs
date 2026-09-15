@@ -1414,8 +1414,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 let payload =
                     serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
                 let timeout = std::time::Duration::from_secs(300);
-                let result = crate::rendezvous::await_prompt_with_payload(
-                    &resolver, id, "form_ask", payload, timeout,
+                let result = crate::rendezvous::await_prompt_with_payload_cancel(
+                    &resolver,
+                    id,
+                    "form_ask",
+                    payload,
+                    timeout,
+                    &ctx.tool_ctx.cancel,
                 )
                 .await;
                 let answer: crate::form::FormAnswer = match result {
