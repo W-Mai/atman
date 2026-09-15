@@ -1528,12 +1528,6 @@ async fn prebuild_session(
     let project_root = atman_runtime::session_meta::canonical_root(&project_root);
     if let Some(requested) = requested_project_root {
         let requested = atman_runtime::session_meta::canonical_root(&requested);
-        if !requested.is_dir() {
-            anyhow::bail!(
-                "selected project path is unavailable: {}",
-                requested.display()
-            );
-        }
         if requested != project_root {
             anyhow::bail!(
                 "session project root {} does not match selected project {}",
@@ -2460,6 +2454,27 @@ async fn cmd_repl_once(
                         if let Some(idx) = session_for_ctrl.project_index() {
                             let _ = idx.delete_events_for_session(&sid);
                         }
+                    }
+                    atman_tui::TuiControl::MutateProject(mutation) => {
+                        let selected_fingerprint = mutation.fingerprint().to_owned();
+                        let active_project_fingerprint = session_for_ctrl
+                            .meta()
+                            .and_then(|meta| meta.project_fingerprint);
+                        let result = execute_project_mutation(
+                            &data_root_for_ctrl,
+                            active_project_fingerprint.as_deref(),
+                            &mutation,
+                        );
+                        let (success_message, result) = match result {
+                            Ok((projects, message)) => (message, Ok(projects)),
+                            Err(error) => (String::new(), Err(error.to_string())),
+                        };
+                        let _ =
+                            cmd_tx_for_models.send(atman_tui::TuiCommand::ProjectCatalogUpdated {
+                                selected_fingerprint,
+                                success_message,
+                                result,
+                            });
                     }
                     atman_tui::TuiControl::RenameSession { session_id, title } => {
                         let dir = data_root_for_ctrl.join("sessions").join(&session_id);
@@ -4094,6 +4109,57 @@ fn execute_model_mutation(
             Ok(atman_tui::ModelMutationSuccess::Removed { name: name.clone() })
         }
     }
+}
+
+fn execute_project_mutation(
+    data_root: &Path,
+    active_project_fingerprint: Option<&str>,
+    mutation: &atman_tui::ProjectMutation,
+) -> Result<(Vec<atman_runtime::project_catalog::ProjectRecord>, String)> {
+    let store = atman_runtime::project_catalog::ProjectCatalogStore::new(data_root);
+    let (projects, message) = match mutation {
+        atman_tui::ProjectMutation::SetPinned {
+            fingerprint,
+            pinned,
+        } => {
+            anyhow::ensure!(
+                store.set_pinned(fingerprint, *pinned)?,
+                "project is not registered"
+            );
+            (
+                store.load()?.projects,
+                if *pinned {
+                    "Project pinned"
+                } else {
+                    "Project unpinned"
+                },
+            )
+        }
+        atman_tui::ProjectMutation::SetArchived {
+            fingerprint,
+            archived,
+        } => {
+            anyhow::ensure!(
+                store.set_archived(fingerprint, *archived)?,
+                "project is not registered"
+            );
+            (
+                store.load()?.projects,
+                if *archived {
+                    "Project archived"
+                } else {
+                    "Project restored"
+                },
+            )
+        }
+        atman_tui::ProjectMutation::Delete { fingerprint } => (
+            store
+                .delete_archived(fingerprint, active_project_fingerprint)?
+                .projects,
+            "Project data deleted",
+        ),
+    };
+    Ok((projects, message.into()))
 }
 
 fn switch_smart_model(
@@ -8410,6 +8476,46 @@ mod tests {
             .map(|path| atman_runtime::session_meta::SessionMeta::from_start_path(Some(path)))
             .unwrap_or_default();
         meta.save(&session_dir).unwrap();
+    }
+
+    #[test]
+    fn project_mutations_persist_pin_archive_and_archive_gated_delete() {
+        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let store = atman_runtime::project_catalog::ProjectCatalogStore::new(data.path());
+        let record = store.register(project.path(), chrono::Utc::now()).unwrap();
+
+        let (projects, _) = execute_project_mutation(
+            data.path(),
+            None,
+            &atman_tui::ProjectMutation::SetPinned {
+                fingerprint: record.fingerprint.clone(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+        assert!(projects[0].pinned);
+
+        execute_project_mutation(
+            data.path(),
+            None,
+            &atman_tui::ProjectMutation::SetArchived {
+                fingerprint: record.fingerprint.clone(),
+                archived: true,
+            },
+        )
+        .unwrap();
+        let (projects, _) = execute_project_mutation(
+            data.path(),
+            None,
+            &atman_tui::ProjectMutation::Delete {
+                fingerprint: record.fingerprint,
+            },
+        )
+        .unwrap();
+
+        assert!(projects.is_empty());
+        assert!(project.path().exists());
     }
 
     #[test]

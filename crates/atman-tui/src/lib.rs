@@ -145,6 +145,7 @@ pub enum TuiControl {
     NewSession,
     MoveSession,
     DeleteSession(String),
+    MutateProject(ProjectMutation),
     RenameSession {
         session_id: String,
         title: Option<String>,
@@ -303,6 +304,11 @@ pub enum TuiCommand {
     },
     OrganizationApplied,
     OrganizationApplyFailed(String),
+    ProjectCatalogUpdated {
+        selected_fingerprint: String,
+        success_message: String,
+        result: Result<Vec<atman_runtime::project_catalog::ProjectRecord>, String>,
+    },
     QueueMutationRejected(String),
     Toast {
         message: String,
@@ -426,6 +432,23 @@ pub enum ModelMutation {
 pub enum ModelMutationSuccess {
     Saved { name: String },
     Removed { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectMutation {
+    SetPinned { fingerprint: String, pinned: bool },
+    SetArchived { fingerprint: String, archived: bool },
+    Delete { fingerprint: String },
+}
+
+impl ProjectMutation {
+    pub fn fingerprint(&self) -> &str {
+        match self {
+            Self::SetPinned { fingerprint, .. }
+            | Self::SetArchived { fingerprint, .. }
+            | Self::Delete { fingerprint } => fingerprint,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

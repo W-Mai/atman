@@ -37,9 +37,23 @@ enum ProjectView {
     Detail,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectAction {
+    Pin,
+    Archive,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectConfirmation {
+    fingerprint: String,
+    action: ProjectAction,
+}
+
 pub struct ProjectPanelContent {
     projects: Vec<ProjectRecord>,
     sessions: HashMap<String, Vec<ProjectSession>>,
+    current_project_fingerprint: Option<String>,
     selected: usize,
     hovered: Option<usize>,
     card_rects: Vec<(usize, Rect)>,
@@ -50,6 +64,9 @@ pub struct ProjectPanelContent {
     next_page_rect: Option<Rect>,
     previous_page_hovered: bool,
     next_page_hovered: bool,
+    action_rects: Vec<(ProjectAction, Rect)>,
+    hovered_action: Option<ProjectAction>,
+    confirmation: Option<ProjectConfirmation>,
     view: ProjectView,
     session_selected: usize,
     session_hovered: Option<usize>,
@@ -63,10 +80,29 @@ pub struct ProjectPanelContent {
 
 impl ProjectPanelContent {
     pub fn new(projects: Vec<ProjectRecord>, session: Option<&atman_runtime::Session>) -> Self {
+        Self::new_selected(projects, session, None)
+    }
+
+    pub fn new_selected(
+        projects: Vec<ProjectRecord>,
+        session: Option<&atman_runtime::Session>,
+        selected_fingerprint: Option<&str>,
+    ) -> Self {
+        let selected = selected_fingerprint
+            .and_then(|fingerprint| {
+                projects
+                    .iter()
+                    .position(|project| project.fingerprint == fingerprint)
+            })
+            .unwrap_or_default();
+        let current_project_fingerprint = session
+            .and_then(atman_runtime::Session::meta)
+            .and_then(|meta| meta.project_fingerprint);
         Self {
             sessions: discover_sessions(session),
             projects,
-            selected: 0,
+            current_project_fingerprint,
+            selected,
             hovered: None,
             card_rects: Vec::new(),
             columns: 1,
@@ -76,6 +112,9 @@ impl ProjectPanelContent {
             next_page_rect: None,
             previous_page_hovered: false,
             next_page_hovered: false,
+            action_rects: Vec::new(),
+            hovered_action: None,
+            confirmation: None,
             view: ProjectView::Grid,
             session_selected: 0,
             session_hovered: None,
@@ -96,6 +135,7 @@ impl ProjectPanelContent {
             .selected
             .saturating_add_signed(delta)
             .min(self.projects.len() - 1);
+        self.confirmation = None;
         self.page = self.selected / self.cards_per_page.max(1);
     }
 
@@ -109,6 +149,7 @@ impl ProjectPanelContent {
             .saturating_add_signed(delta)
             .min(page_count.saturating_sub(1));
         self.selected = (self.page * self.cards_per_page).min(self.projects.len() - 1);
+        self.confirmation = None;
     }
 
     fn open_detail(&mut self) {
@@ -125,6 +166,83 @@ impl ProjectPanelContent {
             .and_then(|project| self.sessions.get(&project.fingerprint))
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    fn selected_project_is_current(&self) -> bool {
+        self.projects.get(self.selected).is_some_and(|project| {
+            self.current_project_fingerprint.as_deref() == Some(project.fingerprint.as_str())
+        })
+    }
+
+    fn project_action(&mut self, action: ProjectAction) -> Vec<WmCommand> {
+        let Some(project) = self.projects.get(self.selected).cloned() else {
+            return Vec::new();
+        };
+        match action {
+            ProjectAction::Pin => {
+                self.confirmation = None;
+                vec![WmCommand::MutateProject(
+                    crate::ProjectMutation::SetPinned {
+                        fingerprint: project.fingerprint,
+                        pinned: !project.pinned,
+                    },
+                )]
+            }
+            ProjectAction::Archive if project.archived => {
+                self.confirmation = None;
+                vec![WmCommand::MutateProject(
+                    crate::ProjectMutation::SetArchived {
+                        fingerprint: project.fingerprint,
+                        archived: false,
+                    },
+                )]
+            }
+            ProjectAction::Archive => {
+                let confirmation = ProjectConfirmation {
+                    fingerprint: project.fingerprint.clone(),
+                    action,
+                };
+                if self.confirmation.as_ref() == Some(&confirmation) {
+                    self.confirmation = None;
+                    vec![WmCommand::MutateProject(
+                        crate::ProjectMutation::SetArchived {
+                            fingerprint: project.fingerprint,
+                            archived: true,
+                        },
+                    )]
+                } else {
+                    self.confirmation = Some(confirmation);
+                    Vec::new()
+                }
+            }
+            ProjectAction::Delete if !project.archived => {
+                self.confirmation = None;
+                vec![WmCommand::PushToast(
+                    "Archive this project before deleting it".into(),
+                )]
+            }
+            ProjectAction::Delete if self.selected_project_is_current() => {
+                self.confirmation = None;
+                vec![WmCommand::PushToast(
+                    "Switch away before deleting the active project".into(),
+                )]
+            }
+            ProjectAction::Delete => {
+                let confirmation = ProjectConfirmation {
+                    fingerprint: project.fingerprint.clone(),
+                    action,
+                };
+                if self.confirmation.as_ref() == Some(&confirmation) {
+                    self.confirmation = None;
+                    vec![WmCommand::MutateProject(crate::ProjectMutation::Delete {
+                        fingerprint: project.fingerprint,
+                    })]
+                } else {
+                    self.confirmation = Some(confirmation);
+                    Vec::new()
+                }
+            }
+        }
     }
 
     fn render_grid(&mut self, area: Rect, frame: &mut Frame) {
@@ -602,6 +720,7 @@ impl ProjectPanelContent {
         let t = crate::theme::theme();
         self.previous_page_rect = None;
         self.next_page_rect = None;
+        self.action_rects.clear();
         let (status, hint, page, page_count, can_page) = match self.view {
             ProjectView::Grid => {
                 let per_page = self.cards_per_page.max(1);
@@ -621,7 +740,7 @@ impl ProjectPanelContent {
                         self.page + 1,
                         page_count
                     ),
-                    "ARROWS SELECT  ·  ENTER OPEN  ·  PGUP/PGDN OR WHEEL PAGE  ·  ESC CLOSE",
+                    "ARROWS SELECT  ·  ENTER OPEN  ·  P PIN  ·  X ARCHIVE  ·  DEL DELETE",
                     self.page,
                     page_count,
                     true,
@@ -664,6 +783,70 @@ impl ProjectPanelContent {
             ),
             area,
         );
+        if matches!(self.view, ProjectView::Grid)
+            && area.height > PAGE_CONTROL_HEIGHT
+            && let Some(project) = self.projects.get(self.selected)
+        {
+            let confirmed = |action| {
+                self.confirmation.as_ref().is_some_and(|confirmation| {
+                    confirmation.fingerprint == project.fingerprint && confirmation.action == action
+                })
+            };
+            let controls_y = area.y.saturating_add(1);
+            let mut x = area.x.saturating_add(1);
+            let current = self.selected_project_is_current();
+            let controls = [
+                (
+                    ProjectAction::Pin,
+                    if project.pinned {
+                        "[P] UNPIN"
+                    } else {
+                        "[P] PIN"
+                    },
+                    10,
+                    true,
+                ),
+                (
+                    ProjectAction::Archive,
+                    if confirmed(ProjectAction::Archive) {
+                        "[X] CONFIRM"
+                    } else if project.archived {
+                        "[X] UNARCHIVE"
+                    } else {
+                        "[X] ARCHIVE"
+                    },
+                    14,
+                    true,
+                ),
+                (
+                    ProjectAction::Delete,
+                    if confirmed(ProjectAction::Delete) {
+                        "[DEL] CONFIRM"
+                    } else {
+                        "[DEL] DELETE"
+                    },
+                    14,
+                    project.archived && !current,
+                ),
+            ];
+            for (action, label, width, enabled) in controls {
+                let rect = Rect::new(x, controls_y, width, PAGE_CONTROL_HEIGHT);
+                if rect.right() >= area.right() {
+                    break;
+                }
+                self.action_rects.push((action, rect));
+                render_project_action(
+                    frame,
+                    rect,
+                    label,
+                    enabled,
+                    self.hovered_action == Some(action),
+                    confirmed(action),
+                    &t,
+                );
+                x = rect.right().saturating_add(1);
+            }
+        }
         if can_page && area.width >= 84 && area.height > PAGE_CONTROL_HEIGHT {
             let controls_y = area.y.saturating_add(1);
             let next = Rect::new(
@@ -703,12 +886,6 @@ impl ProjectPanelContent {
         let Some(project) = self.projects.get(self.selected) else {
             return Vec::new();
         };
-        if !project.path_available() {
-            return vec![WmCommand::PushToast(format!(
-                "Project path is unavailable: {}",
-                project.root.display()
-            ))];
-        }
         let Some(session) = self.selected_sessions().get(self.session_selected) else {
             return Vec::new();
         };
@@ -812,6 +989,15 @@ impl WindowComponent for ProjectPanelContent {
             }
             (ProjectView::Grid, WmEvent::Key(KeyAction::PageUp)) => self.move_page(-1),
             (ProjectView::Grid, WmEvent::Key(KeyAction::PageDown)) => self.move_page(1),
+            (ProjectView::Grid, WmEvent::Key(KeyAction::Char('p' | 'P'))) => {
+                commands = self.project_action(ProjectAction::Pin)
+            }
+            (ProjectView::Grid, WmEvent::Key(KeyAction::Char('x' | 'X'))) => {
+                commands = self.project_action(ProjectAction::Archive)
+            }
+            (ProjectView::Grid, WmEvent::Key(KeyAction::Delete | KeyAction::Backspace)) => {
+                commands = self.project_action(ProjectAction::Delete)
+            }
             (ProjectView::Grid, WmEvent::Key(KeyAction::Submit)) => self.open_detail(),
             (ProjectView::Detail, WmEvent::Key(KeyAction::Escape)) => self.view = ProjectView::Grid,
             (ProjectView::Detail, WmEvent::Key(KeyAction::HistoryUp)) => {
@@ -838,6 +1024,7 @@ impl WindowComponent for ProjectPanelContent {
                 MouseEventKind::ScrollDown => self.move_page(1),
                 MouseEventKind::Moved => {
                     self.hovered = hit_index(&self.card_rects, mouse.column, mouse.row);
+                    self.hovered_action = hit_action(&self.action_rects, mouse.column, mouse.row);
                     self.previous_page_hovered = self
                         .previous_page_rect
                         .is_some_and(|rect| contains(rect, mouse.column, mouse.row));
@@ -846,7 +1033,9 @@ impl WindowComponent for ProjectPanelContent {
                         .is_some_and(|rect| contains(rect, mouse.column, mouse.row));
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if self
+                    if let Some(action) = hit_action(&self.action_rects, mouse.column, mouse.row) {
+                        commands = self.project_action(action);
+                    } else if self
                         .previous_page_rect
                         .is_some_and(|rect| contains(rect, mouse.column, mouse.row))
                     {
@@ -862,6 +1051,7 @@ impl WindowComponent for ProjectPanelContent {
                             last == index && at.elapsed() <= Duration::from_millis(500)
                         });
                         self.selected = index;
+                        self.confirmation = None;
                         self.last_card_click = Some((index, Instant::now()));
                         if double_click {
                             self.open_detail();
@@ -999,6 +1189,12 @@ fn hit_index(rects: &[(usize, Rect)], x: u16, y: u16) -> Option<usize> {
         .find_map(|(index, rect)| contains(*rect, x, y).then_some(*index))
 }
 
+fn hit_action(rects: &[(ProjectAction, Rect)], x: u16, y: u16) -> Option<ProjectAction> {
+    rects
+        .iter()
+        .find_map(|(action, rect)| contains(*rect, x, y).then_some(*action))
+}
+
 fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
 }
@@ -1052,10 +1248,42 @@ fn render_page_control(
     );
 }
 
+fn render_project_action(
+    frame: &mut Frame,
+    rect: Rect,
+    label: &str,
+    enabled: bool,
+    hovered: bool,
+    confirmed: bool,
+    theme: &crate::theme::Theme,
+) {
+    let bg = if confirmed {
+        theme.modal_bg.lerp(theme.warn, 0.24)
+    } else if hovered && enabled {
+        theme.modal_bg.lerp(theme.work_hover_bg, 0.72)
+    } else {
+        *theme.modal_bg
+    };
+    let fg = if confirmed {
+        theme.warn
+    } else if enabled {
+        theme.tinted_fg
+    } else {
+        theme.subtle_fg
+    };
+    frame.render_widget(
+        Paragraph::new(vec![Line::raw(""), Line::raw(label), Line::raw("")])
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(Style::default().fg(fg.into()).bg(bg)),
+        rect,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use crossterm::event::{KeyModifiers, MouseEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1068,6 +1296,19 @@ mod tests {
             archived: false,
             first_seen: Utc::now(),
             last_opened: Utc::now(),
+        }
+    }
+
+    fn dispatch(panel: &mut ProjectPanelContent, event: WmEvent) -> Vec<WmCommand> {
+        let mut scroll = 0;
+        let mut h_scroll = 0;
+        let mut ctx = EventCtx {
+            scroll: &mut scroll,
+            h_scroll: &mut h_scroll,
+        };
+        match panel.handle_event(&event, &mut ctx) {
+            WmEventResult::Consumed(commands) => commands,
+            WmEventResult::Ignored => panic!("event was ignored"),
         }
     }
 
@@ -1130,6 +1371,99 @@ mod tests {
             (previous.x..previous.right())
                 .all(|x| buffer[(x, previous.bottom() - 1)].symbol() == " ")
         );
+    }
+
+    #[test]
+    fn project_actions_support_keyboard_and_archive_gates_delete() {
+        let mut panel = ProjectPanelContent::new(vec![project(0)], None);
+
+        let commands = dispatch(&mut panel, WmEvent::Key(KeyAction::Char('p')));
+        assert!(matches!(
+            commands.as_slice(),
+            [WmCommand::MutateProject(crate::ProjectMutation::SetPinned {
+                fingerprint,
+                pinned: true
+            })] if fingerprint == "project-0"
+        ));
+
+        assert!(dispatch(&mut panel, WmEvent::Key(KeyAction::Char('x'))).is_empty());
+        let commands = dispatch(&mut panel, WmEvent::Key(KeyAction::Char('x')));
+        assert!(matches!(
+            commands.as_slice(),
+            [WmCommand::MutateProject(crate::ProjectMutation::SetArchived {
+                fingerprint,
+                archived: true
+            })] if fingerprint == "project-0"
+        ));
+
+        let commands = dispatch(&mut panel, WmEvent::Key(KeyAction::Delete));
+        assert!(matches!(commands.as_slice(), [WmCommand::PushToast(_)]));
+
+        panel.projects[0].archived = true;
+        assert!(dispatch(&mut panel, WmEvent::Key(KeyAction::Backspace)).is_empty());
+        let commands = dispatch(&mut panel, WmEvent::Key(KeyAction::Backspace));
+        assert!(matches!(
+            commands.as_slice(),
+            [WmCommand::MutateProject(crate::ProjectMutation::Delete { fingerprint })]
+                if fingerprint == "project-0"
+        ));
+    }
+
+    #[test]
+    fn project_action_buttons_use_three_row_mouse_targets() {
+        let mut panel = ProjectPanelContent::new(vec![project(0)], None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 4)).unwrap();
+        terminal
+            .draw(|frame| panel.render_footer(frame.area(), frame))
+            .unwrap();
+
+        assert_eq!(panel.action_rects.len(), 3);
+        assert!(
+            panel
+                .action_rects
+                .iter()
+                .all(|(_, rect)| rect.height == PAGE_CONTROL_HEIGHT)
+        );
+        let pin = panel.action_rects[0].1;
+        let commands = dispatch(
+            &mut panel,
+            WmEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: pin.x + 1,
+                row: pin.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert!(matches!(
+            commands.as_slice(),
+            [WmCommand::MutateProject(
+                crate::ProjectMutation::SetPinned { pinned: true, .. }
+            )]
+        ));
+    }
+
+    #[test]
+    fn missing_project_path_does_not_block_session_resume() {
+        let mut panel = ProjectPanelContent::new(vec![project(0)], None);
+        panel.sessions.insert(
+            "project-0".into(),
+            vec![ProjectSession {
+                id: "session-0".into(),
+                title: "Stored session".into(),
+                message_count: 4,
+                updated_at: "2026-09-15 18:00".into(),
+                goal: None,
+                is_current: false,
+            }],
+        );
+
+        let commands = panel.switch_selected_session();
+
+        assert!(matches!(
+            commands.as_slice(),
+            [WmCommand::SwitchSession { sid, project_root }]
+                if sid == "session-0" && project_root == std::path::Path::new("/missing/project-0")
+        ));
     }
 
     #[test]

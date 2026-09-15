@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Project lifecycle controls** — Project Hub supports keyboard and pointer pinning, confirmed archive and restore, and archive-gated deletion of Atman sessions, memory, specs, previews, and indexes while preserving source files and hand-written project configuration. Stored sessions remain resumable when their original workspace path is unavailable.
+
 ### 🐛 Bug Fixes
 
 - **Queued input controls** — `Enter` edits a focused next-call queue item instead of cancelling the active flow, and both forward Delete and macOS Backspace remove it; ordinary submissions remain queued for the next task-facing model call.

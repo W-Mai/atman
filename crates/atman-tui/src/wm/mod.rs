@@ -264,6 +264,16 @@ impl WindowManager {
         projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
         session: Option<&atman_runtime::Session>,
     ) {
+        self.open_project_hub_selected(canvas, projects, session, None);
+    }
+
+    pub fn open_project_hub_selected(
+        &mut self,
+        canvas: Rect,
+        projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
+        session: Option<&atman_runtime::Session>,
+        selected_fingerprint: Option<&str>,
+    ) {
         let id = self.open(
             "project-hub",
             ContentKey::Projects,
@@ -273,7 +283,11 @@ impl WindowManager {
         );
         if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) {
             panel.content = Some(Box::new(
-                crate::window::project_panel::ProjectPanelContent::new(projects, session),
+                crate::window::project_panel::ProjectPanelContent::new_selected(
+                    projects,
+                    session,
+                    selected_fingerprint,
+                ),
             ));
         }
         if self
@@ -1018,6 +1032,11 @@ impl WindowManager {
                         sid,
                         project_root,
                     );
+                }
+                WmCommand::MutateProject(mutation) => {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(crate::TuiControl::MutateProject(mutation));
+                    }
                 }
             }
         }

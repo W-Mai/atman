@@ -1814,6 +1814,35 @@ pub(crate) async fn run_frames(
                             state.applying = false;
                             state.message = error;
                         }
+                        TuiCommand::ProjectCatalogUpdated {
+                            selected_fingerprint,
+                            success_message,
+                            result,
+                        } => match result {
+                            Ok(projects) => {
+                                app.app.projects = projects;
+                                let canvas = app.app.maximized_canvas();
+                                let session = app.app.session.clone();
+                                app.wm.open_project_hub_selected(
+                                    canvas,
+                                    app.app.projects.clone(),
+                                    session.as_deref(),
+                                    Some(&selected_fingerprint),
+                                );
+                                app.app.push_toast(
+                                    success_message,
+                                    app::NoteLevel::Success,
+                                    std::time::Duration::from_secs(3),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                            Err(error) => app.app.push_toast(
+                                format!("Project update failed: {error}"),
+                                app::NoteLevel::Error,
+                                std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            ),
+                        },
                         TuiCommand::QueueMutationRejected(message) => {
                             app.app.push_toast(
                                 format!("queue update rejected: {message}"),

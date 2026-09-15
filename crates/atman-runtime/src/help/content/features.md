@@ -23,6 +23,7 @@
 - **Escalation policy** — In Eager mode: `deny`, `ask`, or `allow` for policy decisions that exceed the routine trust level.
 - **Approval queue** — Pending tool calls remain visible with intent, target, execution boundary, and risk details until resolved by keyboard or mouse.
 - **Next-turn queue** — Normal messages submitted during an active flow are appended to the next task-facing model call when possible; queued messages can be reordered, edited, or removed without interrupting the current flow.
+- **Project Hub** — `Ctrl+L` opens project-first navigation. `P` toggles pin, `X` confirms archive or restores an archived project, and Delete permanently removes Atman-owned data only after archive. Missing workspace paths do not hide stored sessions.
 
 ## Compaction
 

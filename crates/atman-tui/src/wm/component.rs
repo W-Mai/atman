@@ -48,6 +48,7 @@ pub enum WmCommand {
         sid: String,
         project_root: std::path::PathBuf,
     },
+    MutateProject(crate::ProjectMutation),
 }
 
 #[derive(Debug, Clone)]
