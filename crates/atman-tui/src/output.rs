@@ -5766,16 +5766,11 @@ fn render_collapsed_workflow_card(
             })
             .collect::<Vec<_>>();
         leaves_with_time.sort_by_key(|(_, started_at)| std::cmp::Reverse(*started_at));
-        let running_paths = leaves_with_time
+        let (running_paths, completed_paths): (Vec<_>, Vec<_>) = leaves_with_time
             .iter()
-            .filter(|(path, _)| leaf_is_running(&root, path))
             .map(|(path, _)| path.clone())
-            .collect::<Vec<_>>();
-        if running_paths.is_empty() {
-            leaves_with_time.into_iter().map(|(path, _)| path).collect()
-        } else {
-            running_paths
-        }
+            .partition(|path| leaf_is_running(&root, path));
+        running_paths.into_iter().chain(completed_paths).collect()
     };
 
     // `estimated_rows` only depends on how many distinct top-level nodes the

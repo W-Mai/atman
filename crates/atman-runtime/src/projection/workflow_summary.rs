@@ -231,14 +231,10 @@ impl WorkflowSummary {
     }
 
     pub fn collapsed_leaf_paths(&self, limit: usize) -> Vec<Vec<usize>> {
-        let leaves = if self.running_leaves.is_empty() {
-            &self.recent_completed_leaves
-        } else {
-            &self.running_leaves
-        };
-        leaves
+        self.running_leaves
             .iter()
             .rev()
+            .chain(self.recent_completed_leaves.iter().rev())
             .take(limit)
             .map(|leaf| leaf.path.clone())
             .collect()
@@ -533,5 +529,32 @@ mod tests {
             RECENT_COMPLETED_LEAF_LIMIT
         );
         assert_eq!(summary.leaves.len(), RECENT_COMPLETED_LEAF_LIMIT);
+    }
+
+    #[test]
+    fn running_leaves_are_filled_with_newest_completed_leaves() {
+        let now = Utc::now();
+        let mut root = (0..4)
+            .map(|index| completed_tool(index, now + chrono::Duration::milliseconds(index as i64)))
+            .collect::<Vec<_>>();
+        let mut running = completed_tool(4, now + chrono::Duration::milliseconds(4));
+        running.status = NodeStatus::Running;
+        running.ended_at = None;
+        running.output_preview = None;
+        root.push(running);
+        let graph = WorkflowGraph {
+            turn_id: TurnId::now(),
+            root,
+            permission_requests: Default::default(),
+            permission_groups: Default::default(),
+            resolved_permission_groups: Default::default(),
+        };
+
+        let summary = WorkflowSummary::rebuild(&graph);
+
+        assert_eq!(
+            summary.collapsed_leaf_paths(3),
+            vec![vec![4], vec![3], vec![2]]
+        );
     }
 }
