@@ -519,6 +519,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "plan.read",
+                "preview.push",
                 "final.answer",
             ],
         )
@@ -589,6 +590,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "plan.read",
+                "preview.push",
                 "final.answer",
             ],
         )
@@ -659,6 +661,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "plan.write", "plan.read", "plan.tick",
+                "preview.push",
                 "final.answer",
             ],
         )
@@ -724,6 +727,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "git.diff", "git.show", "git.log", "git.status",
                 "memory.fetch_confessions",
                 "rule.fetch",
+                "preview.push",
                 "final.answer",
             ],
         )
@@ -1012,6 +1016,7 @@ mod tests {
         assert!(example.contains("flow agent_loop(completion_state: string)"));
         assert!(!example.contains("final_answer_reminded"));
         assert_eq!(SUBAGENT_AT.matches("\"final.answer\"").count(), 4);
+        assert_eq!(SUBAGENT_AT.matches("\"preview.push\"").count(), 4);
         assert_eq!(
             SUBAGENT_AT.matches("extract_final_answer(reply)").count(),
             4
