@@ -25,6 +25,7 @@ pub enum ContentKey {
     Cheatsheet,
     Mcp,
     Knowledge,
+    Projects,
 }
 
 /// Whether opening content with an existing key reuses or creates a new window.
@@ -65,6 +66,7 @@ pub enum WindowContent {
     Cheatsheet,
     Mcp,
     Knowledge,
+    Projects,
 }
 
 impl WindowContent {
@@ -78,6 +80,7 @@ impl WindowContent {
             WindowContent::Cheatsheet => ContentKey::Cheatsheet,
             WindowContent::Mcp => ContentKey::Mcp,
             WindowContent::Knowledge => ContentKey::Knowledge,
+            WindowContent::Projects => ContentKey::Projects,
         }
     }
 
@@ -95,6 +98,7 @@ impl WindowContent {
             WindowContent::Cheatsheet => "?",
             WindowContent::Mcp => "⚡",
             WindowContent::Knowledge => "§",
+            WindowContent::Projects => "▦",
         }
     }
 }

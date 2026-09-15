@@ -35,6 +35,7 @@ pub enum KeyAction {
     ToggleLastTool,
     ToggleLastWork,
     OpenCommandPalette,
+    OpenProjectHub,
     SearchHistory,
     NudgePrefill,
     CoursePrefill,
@@ -65,6 +66,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('o'), true, _, _) => KeyAction::ToggleLastTool,
         (Char('o'), false, _, true) => KeyAction::ToggleLastWork,
         (Char('p'), true, _, _) => KeyAction::OpenCommandPalette,
+        (Char('p'), false, _, true) => KeyAction::OpenProjectHub,
         (Char('k'), true, _, _) => KeyAction::SearchHistory,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
         (Char('v'), true, _, _) | (Char('v'), false, _, true) => KeyAction::PasteImage,
@@ -232,6 +234,14 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::Char('o'), KeyModifiers::ALT)),
             KeyAction::ToggleLastWork
+        );
+    }
+
+    #[test]
+    fn alt_p_opens_project_hub() {
+        assert_eq!(
+            map(ke(KeyCode::Char('p'), KeyModifiers::ALT)),
+            KeyAction::OpenProjectHub
         );
     }
 }

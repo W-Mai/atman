@@ -258,6 +258,33 @@ impl WindowManager {
         )
     }
 
+    pub fn open_project_hub(
+        &mut self,
+        canvas: Rect,
+        projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
+    ) {
+        let id = self.open(
+            "project-hub",
+            ContentKey::Projects,
+            WindowContent::Projects,
+            "Projects",
+            canvas,
+        );
+        if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) {
+            panel.content = Some(Box::new(
+                crate::window::project_panel::ProjectPanelContent::new(projects),
+            ));
+        }
+        if self
+            .panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .is_some_and(|panel| !panel.maximized)
+        {
+            self.toggle_maximize(id, canvas);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn open_with_size(
         &mut self,

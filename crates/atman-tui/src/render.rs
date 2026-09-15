@@ -299,9 +299,11 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                     focus: app.startup_focus,
                     selected: app.startup_selected_session,
                     hovered: app.startup_hovered_session,
+                    projects_hovered: app.startup_projects_hovered,
                 },
             );
             app.startup_container_rect = startup_layout.recent_container;
+            app.startup_projects_rect = startup_layout.projects_button;
             app.startup_session_rects = startup_layout.session_rects;
             if app.startup_session_rects.is_empty() {
                 app.startup_focus = crate::app::StartupFocus::Input;
@@ -327,6 +329,8 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.startup_selected_session = 0;
         app.startup_hovered_session = None;
         app.startup_container_rect = None;
+        app.startup_projects_rect = None;
+        app.startup_projects_hovered = false;
         app.startup_session_rects.clear();
         app.startup_last_click = None;
         if app.items.is_empty() {

@@ -832,6 +832,14 @@ pub(crate) fn handle_key(
         app.wm.modals.palette.open();
         return;
     }
+    if let KeyAction::OpenProjectHub = action {
+        let canvas = app
+            .last_full_rect
+            .or(app.last_transcript_rect)
+            .unwrap_or_default();
+        app.wm.open_project_hub(canvas, app.projects.clone());
+        return;
+    }
     let startup_recent_len = app.items.first().and_then(|item| match item {
         crate::app::OutputItem::StartupCard { recent, .. } => {
             Some(recent.len().min(app.startup_session_rects.len()))
@@ -915,9 +923,9 @@ pub(crate) fn handle_key(
         && app.startup_intro.is_none()
     {
         let (version, recent) = match app.items.first() {
-            Some(crate::app::OutputItem::StartupCard { version, recent }) => {
-                (version.clone(), recent.clone())
-            }
+            Some(crate::app::OutputItem::StartupCard {
+                version, recent, ..
+            }) => (version.clone(), recent.clone()),
             _ => (String::new(), Vec::new()),
         };
         let _ = app.remove_item(0);
@@ -925,6 +933,8 @@ pub(crate) fn handle_key(
         app.startup_focus = crate::app::StartupFocus::Input;
         app.startup_hovered_session = None;
         app.startup_container_rect = None;
+        app.startup_projects_rect = None;
+        app.startup_projects_hovered = false;
         app.startup_session_rects.clear();
         app.startup_last_click = None;
         app.startup_intro = Some(crate::app::StartupIntro {
@@ -1361,6 +1371,7 @@ pub(crate) fn handle_key(
         KeyAction::BackTab => {}
         KeyAction::MoveItemUp | KeyAction::MoveItemDown => {}
         KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
+        KeyAction::OpenProjectHub => {}
     }
     if edited {
         if let Some(session) = app.session.as_ref() {
@@ -1625,6 +1636,23 @@ mod tests {
         assert_eq!(state.app.startup_focus, crate::app::StartupFocus::Input);
         assert!(!state.app.should_quit);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_alt_p_opens_maximized_project_hub() {
+        let mut state = startup_state();
+        state.app.last_full_rect = Some(ratatui::layout::Rect::new(0, 0, 120, 40));
+        let mut editor = InputEditor::default();
+
+        press_startup_key(&mut state, &mut editor, KeyAction::OpenProjectHub, None);
+
+        let panel = state
+            .wm
+            .panels
+            .iter()
+            .find(|panel| panel.content_key == crate::wm::ContentKey::Projects)
+            .expect("project hub panel");
+        assert!(panel.maximized);
     }
 
     #[test]

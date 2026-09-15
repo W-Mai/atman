@@ -279,6 +279,7 @@ fn render(
             focus: crate::app::StartupFocus::Input,
             selected: 0,
             hovered: None,
+            projects_hovered: false,
         },
     );
     f.render_widget(

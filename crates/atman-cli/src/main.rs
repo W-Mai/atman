@@ -2869,6 +2869,10 @@ async fn cmd_repl_once(
             project_root: session_meta
                 .project_root
                 .map(|path| path.display().to_string()),
+            projects: atman_runtime::project_catalog::ProjectCatalogStore::new(&root)
+                .load()
+                .map(|catalog| catalog.projects)
+                .unwrap_or_default(),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
             task_event_rx: executor

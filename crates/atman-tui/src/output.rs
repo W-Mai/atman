@@ -1748,6 +1748,7 @@ pub struct StartupOverlayLayout {
     pub overlay_width: u16,
     pub banner_rect: ratatui::layout::Rect,
     pub recent_container: Option<ratatui::layout::Rect>,
+    pub projects_button: Option<ratatui::layout::Rect>,
     pub help_rect: ratatui::layout::Rect,
     pub visible_session_count: usize,
     pub session_rects: Vec<ratatui::layout::Rect>,
@@ -1829,12 +1830,27 @@ pub fn compute_startup_overlay(
         .collect();
     let help_y = overlay.bottom().saturating_sub(1);
     let help_rect = ratatui::layout::Rect::new(overlay.x, help_y, overlay.width, 1);
+    let projects_button = if overlay.width >= 22 {
+        let width = 20;
+        let y = recent_container
+            .map(|container| container.y.saturating_add(1))
+            .unwrap_or_else(|| help_y.saturating_sub(1));
+        Some(ratatui::layout::Rect::new(
+            overlay.right().saturating_sub(width),
+            y,
+            width,
+            1,
+        ))
+    } else {
+        None
+    };
     StartupOverlayLayout {
         area: overlay,
         input_slot,
         overlay_width: overlay.width,
         banner_rect,
         recent_container,
+        projects_button,
         help_rect,
         visible_session_count,
         session_rects,
@@ -1865,6 +1881,7 @@ pub fn render_startup_intro_fade(
             focus: crate::app::StartupFocus::Input,
             selected: 0,
             hovered: None,
+            projects_hovered: false,
         },
     )
 }
@@ -1878,6 +1895,7 @@ pub struct StartupOverlayRender<'a> {
     pub focus: crate::app::StartupFocus,
     pub selected: usize,
     pub hovered: Option<usize>,
+    pub projects_hovered: bool,
 }
 
 pub fn render_startup_overlay(
@@ -1893,6 +1911,7 @@ pub fn render_startup_overlay(
         focus,
         selected,
         hovered,
+        projects_hovered,
     } = render;
     let t = crate::theme::theme();
     let recent = &recent[..reveal_count.min(recent.len())];
@@ -1927,18 +1946,21 @@ pub fn render_startup_overlay(
 
     if let Some(container) = layout.recent_container {
         f.render_widget(ratatui::widgets::Clear, container);
+        let header_width = layout
+            .projects_button
+            .map(|button| button.x.saturating_sub(container.x.saturating_add(2)))
+            .unwrap_or_else(|| container.width.saturating_sub(4));
         f.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(Span::styled(
-                "Recent sessions",
+                "Recent Sessions",
                 Style::default()
                     .fg(t.tinted_fg.into())
                     .add_modifier(Modifier::BOLD | extra),
-            )))
-            .alignment(ratatui::layout::Alignment::Center),
+            ))),
             ratatui::layout::Rect::new(
                 container.x.saturating_add(2),
                 container.y.saturating_add(1),
-                container.width.saturating_sub(4),
+                header_width,
                 1,
             ),
         );
@@ -1957,8 +1979,24 @@ pub fn render_startup_overlay(
         }
     }
 
+    if let Some(button) = layout.projects_button {
+        let bg = if projects_hovered {
+            t.modal_bg.lerp(t.work_hover_bg, 0.72)
+        } else {
+            ratatui::style::Color::Reset
+        };
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(vec![
+                Span::styled("Projects ", Style::default().fg(t.tinted_fg.into()).bg(bg)),
+                Span::styled("[Alt+P]", Style::default().fg(t.accent.into()).bg(bg)),
+            ]))
+            .alignment(ratatui::layout::Alignment::Right),
+            button,
+        );
+    }
+
     let help = if layout.visible_session_count == 0 {
-        "Start typing to begin a new session"
+        "Start typing to begin a new session · Alt+P projects"
     } else if focus == crate::app::StartupFocus::Recent {
         "↑↓ / 1-9 select · Enter open · Tab input"
     } else {
@@ -8041,6 +8079,8 @@ mod tests {
         assert_eq!(full.visible_session_count, 5);
         assert_eq!(full.overlay_width, 84);
         assert_eq!(full.input_slot.width, 72);
+        assert!(full.projects_button.is_some());
+        assert!(empty.projects_button.is_some());
         assert_eq!(full.recent_container.unwrap().width, full.input_slot.width);
         assert_eq!(narrow.overlay_width, 60);
         assert_eq!(narrow.input_slot.width, 60);
@@ -8077,6 +8117,7 @@ mod tests {
                 .chain(std::iter::once(layout.banner_rect))
                 .chain(std::iter::once(layout.help_rect))
                 .chain(layout.recent_container)
+                .chain(layout.projects_button)
                 .chain(layout.session_rects.iter().copied())
             {
                 assert!(rect.x >= bounds.x);

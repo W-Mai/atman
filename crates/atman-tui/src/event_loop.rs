@@ -34,6 +34,7 @@ pub(crate) async fn run_frames(
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
+    app.projects = std::mem::take(&mut handle.projects);
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
@@ -271,6 +272,14 @@ pub(crate) async fn run_frames(
                                     handle.control_tx.as_ref(),
                                 )
                             {
+                                if std::mem::take(&mut app.app.startup_open_projects) {
+                                    let canvas = app
+                                        .app
+                                        .last_full_rect
+                                        .or(app.app.last_transcript_rect)
+                                        .unwrap_or_default();
+                                    app.wm.open_project_hub(canvas, app.app.projects.clone());
+                                }
                                 interrupt_prompt = None;
                                 break;
                             }
@@ -380,6 +389,14 @@ pub(crate) async fn run_frames(
                                     handle.control_tx.as_ref(),
                                 )
                             {
+                                if std::mem::take(&mut app.app.startup_open_projects) {
+                                    let canvas = app
+                                        .app
+                                        .last_full_rect
+                                        .or(app.app.last_transcript_rect)
+                                        .unwrap_or_default();
+                                    app.wm.open_project_hub(canvas, app.app.projects.clone());
+                                }
                                 interrupt_prompt = None;
                                 break;
                             }
@@ -2108,8 +2125,17 @@ fn handle_startup_session_mouse(
     {
         app.startup_focus = app::StartupFocus::Input;
         app.startup_hovered_session = None;
+        app.startup_projects_hovered = false;
         app.startup_last_click = None;
         return false;
+    }
+    let projects_hit = app
+        .startup_projects_rect
+        .is_some_and(|rect| rect_contains(rect, event.column, event.row));
+    app.startup_projects_hovered = projects_hit;
+    if projects_hit && event.kind == MouseEventKind::Down(MouseButton::Left) {
+        app.startup_open_projects = true;
+        return true;
     }
     let hit = app
         .startup_session_rects
@@ -2123,7 +2149,7 @@ fn handle_startup_session_mouse(
         if event.kind == MouseEventKind::Down(MouseButton::Left) {
             app.startup_last_click = None;
         }
-        return in_container;
+        return in_container || projects_hit;
     };
     if event.kind == MouseEventKind::Down(MouseButton::Left) {
         let now = std::time::Instant::now();
@@ -2334,6 +2360,18 @@ mod tests {
             None,
         ));
         assert_eq!(app.startup_focus, app::StartupFocus::Input);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn startup_projects_button_opens_project_hub() {
+        let mut app = startup_app();
+        app.startup_projects_rect = Some(ratatui::layout::Rect::new(18, 19, 20, 1));
+        let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), 19);
+
+        assert!(handle_startup_session_mouse(&mut app, &click, None));
+        assert!(app.startup_projects_hovered);
+        assert!(app.startup_open_projects);
         assert!(!app.should_quit);
     }
 

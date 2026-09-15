@@ -439,6 +439,7 @@ pub struct TuiHandle {
     pub session_dir: String,
     pub session_name: Option<String>,
     pub project_root: Option<String>,
+    pub projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
     pub goal: Option<String>,
     pub stream_rx: broadcast::Receiver<StreamFrame>,
     pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
@@ -482,6 +483,7 @@ impl TuiHandle {
             project_root: atman_runtime::session_meta::SessionMeta::load(session.dir())
                 .and_then(|meta| meta.project_root)
                 .map(|path| path.display().to_string()),
+            projects: Vec::new(),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
             task_event_rx: None,
