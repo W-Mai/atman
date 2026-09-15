@@ -140,6 +140,7 @@ pub enum TuiControl {
     SwitchSession {
         sid: String,
         intro: app::StartupIntro,
+        project_root: Option<std::path::PathBuf>,
     },
     NewSession,
     MoveSession,

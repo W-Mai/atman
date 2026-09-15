@@ -837,7 +837,9 @@ pub(crate) fn handle_key(
             .last_full_rect
             .or(app.last_transcript_rect)
             .unwrap_or_default();
-        app.wm.open_project_hub(canvas, app.projects.clone());
+        let session = app.session.clone();
+        app.wm
+            .open_project_hub(canvas, app.projects.clone(), session.as_deref());
         return;
     }
     let startup_recent_len = app.items.first().and_then(|item| match item {
@@ -1555,6 +1557,33 @@ pub(crate) fn request_session_switch(
         let _ = tx.send(TuiControl::SwitchSession {
             sid,
             intro: intro.clone(),
+            project_root: None,
+        });
+    }
+    app.startup_focus = crate::app::StartupFocus::Input;
+    app.startup_hovered_session = None;
+    app.startup_container_rect = None;
+    app.startup_session_rects.clear();
+    app.startup_last_click = None;
+    app.should_quit = true;
+}
+
+pub(crate) fn request_project_session_switch(
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    sid: String,
+    project_root: std::path::PathBuf,
+) {
+    let intro = crate::app::StartupIntro {
+        started_at: std::time::Instant::now(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        recent: Vec::new(),
+    };
+    if let Some(tx) = control_tx {
+        let _ = tx.send(TuiControl::SwitchSession {
+            sid,
+            intro,
+            project_root: Some(project_root),
         });
     }
     app.startup_focus = crate::app::StartupFocus::Input;

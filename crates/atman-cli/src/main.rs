@@ -1493,6 +1493,7 @@ async fn prebuild_session(
     resume_sid: Option<String>,
     intro: Option<atman_tui::app::StartupIntro>,
     progress: Option<tokio::sync::mpsc::UnboundedSender<atman_tui::boot_animation::BootProgress>>,
+    requested_project_root: Option<PathBuf>,
 ) -> Result<PrebuiltSession> {
     use atman_runtime::workflow::NodeStatus;
     use atman_tui::boot_animation::{BootProgress, BootStepId};
@@ -1512,12 +1513,50 @@ async fn prebuild_session(
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let is_fresh = resume_sid.is_none();
-    let project_index = open_current_project_index()?;
+    let resolved_sid = resume_sid
+        .as_deref()
+        .map(|sid| resolve_session_prefix(&root, sid))
+        .transpose()?;
+    let session_meta = resolved_sid.as_ref().and_then(|sid| {
+        atman_runtime::session_meta::SessionMeta::load(&root.join("sessions").join(sid))
+    });
+    let project_root = session_meta
+        .as_ref()
+        .and_then(|meta| meta.project_root.clone())
+        .or(requested_project_root.clone())
+        .unwrap_or(std::env::current_dir().context("reading current project root")?);
+    let project_root = atman_runtime::session_meta::canonical_root(&project_root);
+    if let Some(requested) = requested_project_root {
+        let requested = atman_runtime::session_meta::canonical_root(&requested);
+        if !requested.is_dir() {
+            anyhow::bail!(
+                "selected project path is unavailable: {}",
+                requested.display()
+            );
+        }
+        if requested != project_root {
+            anyhow::bail!(
+                "session project root {} does not match selected project {}",
+                project_root.display(),
+                requested.display()
+            );
+        }
+        if let Some(meta) = session_meta.as_ref() {
+            let requested_fingerprint =
+                atman_runtime::session_meta::fingerprint_from_root(&requested);
+            if meta.project_fingerprint.as_deref() != Some(requested_fingerprint.as_str()) {
+                anyhow::bail!("session project identity does not match the selected project");
+            }
+        }
+    }
+    let project_scope = atman_runtime::storage::resolve_project_scope_for(&project_root)
+        .with_context(|| format!("resolve project storage for {}", project_root.display()))?;
+    let project_index = open_project_index(&project_scope)?;
     let global_trust = load_global_trust_config()?;
     let mut initial_transcript = Vec::new();
     let session = std::sync::Arc::new(match resume_sid {
-        Some(sid) => {
-            let resolved_sid = resolve_session_prefix(&root, &sid)?;
+        Some(_) => {
+            let resolved_sid = resolved_sid.expect("resolved resume session");
             let session = if tui_mode_requested() {
                 let mut observer = |entry| initial_transcript.push(entry);
                 Session::open_existing_with_replay_observer(
@@ -1566,8 +1605,12 @@ async fn prebuild_session(
         mut executor,
         provider_catalog_refresh_plan,
         ..
-    } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
-        .await?;
+    } = atman_daemon::bootstrap::build_executor(bootstrap_opts_for(
+        session.sink().clone(),
+        false,
+        project_root,
+    )?)
+    .await?;
     emit(BootStepId::BuildExecutor, false, true);
 
     emit(BootStepId::RegisterProviders, true, false);
@@ -1612,7 +1655,7 @@ async fn boot_first_session(
     resume_sid: Option<String>,
 ) -> Result<(PrebuiltSession, Option<atman_tui::InheritedTerminal>)> {
     if !tui_mode_requested() {
-        return Ok((prebuild_session(resume_sid, None, None).await?, None));
+        return Ok((prebuild_session(resume_sid, None, None, None).await?, None));
     }
     let version = env!("CARGO_PKG_VERSION").to_string();
     let project_root = std::env::current_dir()?;
@@ -1630,7 +1673,7 @@ async fn boot_first_session(
             .enable_all()
             .build()
             .context("boot animation prebuild runtime init")?;
-        rt.block_on(prebuild_session(resume_sid, None, Some(tx)))
+        rt.block_on(prebuild_session(resume_sid, None, Some(tx), None))
     });
     let animation = atman_tui::boot_animation::run_boot_animation(rx, version, recent, toast_buf);
     let (anim_result, prebuild_result) = tokio::join!(animation, prebuild);
@@ -2370,7 +2413,11 @@ async fn cmd_repl_once(
                             .compact_reviews()
                             .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
                     }
-                    atman_tui::TuiControl::SwitchSession { sid, intro } => {
+                    atman_tui::TuiControl::SwitchSession {
+                        sid,
+                        intro,
+                        project_root,
+                    } => {
                         // spawn_blocking + fresh current_thread runtime because MCP registration
                         // futures aren't Send, so plain tokio::spawn can't take them.
                         let handle = tokio::task::spawn_blocking(move || {
@@ -2378,7 +2425,12 @@ async fn cmd_repl_once(
                                 .enable_all()
                                 .build()
                                 .context("prebuild runtime init")?;
-                            rt.block_on(prebuild_session(Some(sid), Some(intro), None))
+                            rt.block_on(prebuild_session(
+                                Some(sid),
+                                Some(intro),
+                                None,
+                                project_root,
+                            ))
                         });
                         *switch_target_for_ctrl.lock().unwrap() = Some(handle);
                         session_for_ctrl.cancel_flow();
@@ -2393,7 +2445,7 @@ async fn cmd_repl_once(
                                 .enable_all()
                                 .build()
                                 .context("prebuild runtime init")?;
-                            rt.block_on(prebuild_session(None, None, None))
+                            rt.block_on(prebuild_session(None, None, None, None))
                         });
                         *switch_target_for_ctrl.lock().unwrap() = Some(handle);
                         session_for_ctrl.cancel_flow();
@@ -7066,9 +7118,17 @@ fn bootstrap_opts(
     events: atman_runtime::event::EventSink,
     mock: bool,
 ) -> Result<atman_daemon::bootstrap::BootstrapOptions> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    bootstrap_opts_for(events, mock, project_root)
+}
+
+fn bootstrap_opts_for(
+    events: atman_runtime::event::EventSink,
+    mock: bool,
+    project_root: PathBuf,
+) -> Result<atman_daemon::bootstrap::BootstrapOptions> {
     static WORKSPACE_GENERATION: OnceLock<String> = OnceLock::new();
 
-    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let home_dir = std::env::var("HOME").ok().map(std::path::PathBuf::from);
     let config_dir = config_dir().ok();
     let workspace_generation = WORKSPACE_GENERATION
@@ -7118,7 +7178,10 @@ fn attach_memory_stores(
         std::fs::create_dir_all(&scratch).ok();
         (scratch.clone(), scratch, None)
     } else {
-        let scope = atman_runtime::storage::resolve_current_project_scope()?;
+        let scope = match session.meta().and_then(|meta| meta.project_root) {
+            Some(project_root) => atman_runtime::storage::resolve_project_scope_for(&project_root)?,
+            None => atman_runtime::storage::resolve_current_project_scope()?,
+        };
         (
             session_dir.to_path_buf(),
             scope.clone(),
