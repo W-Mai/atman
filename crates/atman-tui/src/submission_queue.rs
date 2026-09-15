@@ -5,7 +5,6 @@ use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueAction {
-    Intervene,
     Edit,
     MoveUp,
     MoveDown,
@@ -48,7 +47,7 @@ pub fn render(
     let t = crate::theme::theme();
     let border = if focused { t.accent } else { t.subtle_fg };
     let hint = if focused {
-        " Enter interrupt · e edit · alt+↑/↓ move · Del remove · Tab input "
+        " Enter/e edit · alt+↑/↓ move · Del/⌫ remove · Tab input "
     } else {
         " Shift+Tab focus "
     };
@@ -88,7 +87,7 @@ pub fn render(
             .replace(['\n', '\r'], " ");
         let prefix = format!(" {marker} {}. ", index + 1);
         let actions = if active && edit.is_none() {
-            "  interrupt  edit  ↑  ↓  delete "
+            "  edit  ↑  ↓  delete "
         } else if active {
             "  Enter save · Esc cancel "
         } else {
@@ -136,7 +135,6 @@ pub fn render(
         hitmap.rows.push((index, row_rect));
         if active && edit.is_none() {
             let labels = [
-                (QueueAction::Intervene, "interrupt"),
                 (QueueAction::Edit, "edit"),
                 (QueueAction::MoveUp, "↑"),
                 (QueueAction::MoveDown, "↓"),
@@ -221,7 +219,7 @@ mod tests {
             hitmap
                 .actions
                 .iter()
-                .any(|(index, action, _)| { *index == 0 && *action == QueueAction::Intervene })
+                .any(|(index, action, _)| { *index == 0 && *action == QueueAction::Edit })
         );
         assert!(hitmap.actions.iter().all(|(index, _, _)| *index == 0));
     }

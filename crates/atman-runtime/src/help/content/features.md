@@ -22,7 +22,7 @@
 - **Trust modes** — `calm` (Tier::Zero auto), `steady` (Tier::One auto), `eager` (Tier::Two auto), `reckless` (all auto).
 - **Escalation policy** — In Eager mode: `deny`, `ask`, or `allow` for policy decisions that exceed the routine trust level.
 - **Approval queue** — Pending tool calls remain visible with intent, target, execution boundary, and risk details until resolved by keyboard or mouse.
-- **Next-turn queue** — Normal messages submitted during an active flow run as ordered full turns afterward; queued messages can be reordered, edited, removed, or promoted to interrupt the current flow.
+- **Next-turn queue** — Normal messages submitted during an active flow are appended to the next task-facing model call when possible; queued messages can be reordered, edited, or removed without interrupting the current flow.
 
 ## Compaction
 

@@ -1405,14 +1405,6 @@ pub(crate) fn dispatch_submission_queue_action(
     app.selected_submission = index;
     app.submission_focus = true;
     match action {
-        crate::submission_queue::QueueAction::Intervene => {
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::InterveneQueuedSubmission {
-                    id: submission.id,
-                    expected_revision: submission.revision,
-                });
-            }
-        }
         crate::submission_queue::QueueAction::Edit => {
             let mut editor = InputEditor::default();
             editor.replace_with(&submission.text);
@@ -1510,7 +1502,7 @@ fn handle_submission_queue_key(
         KeyAction::Submit => dispatch_submission_queue_action(
             app,
             app.selected_submission,
-            crate::submission_queue::QueueAction::Intervene,
+            crate::submission_queue::QueueAction::Edit,
             control_tx,
         ),
         KeyAction::Char('e') => dispatch_submission_queue_action(
@@ -1519,7 +1511,7 @@ fn handle_submission_queue_key(
             crate::submission_queue::QueueAction::Edit,
             control_tx,
         ),
-        KeyAction::Delete => dispatch_submission_queue_action(
+        KeyAction::Delete | KeyAction::Backspace => dispatch_submission_queue_action(
             app,
             app.selected_submission,
             crate::submission_queue::QueueAction::Delete,
@@ -2215,9 +2207,9 @@ mod tests {
     }
 
     #[test]
-    fn next_queue_focus_intercepts_enter_before_input_and_approvals() {
+    fn next_queue_enter_edits_without_cancelling_the_flow() {
         let session = atman_runtime::Session::open_ephemeral();
-        let queued = session
+        session
             .enqueue_submission(
                 "urgent next turn",
                 Vec::new(),
@@ -2225,6 +2217,7 @@ mod tests {
                 atman_runtime::message::MessageOrigin::User,
             )
             .unwrap();
+        let cancel = session.flow_cancel_token();
         let mut state = crate::UiState::new(AppState::new("session".into(), None));
         state.app.queued_submissions = session.queued_submissions();
         let mut editor = InputEditor::default();
@@ -2249,16 +2242,57 @@ mod tests {
             Some(&tx),
         );
 
-        let TuiControl::InterveneQueuedSubmission {
+        assert_eq!(
+            state
+                .app
+                .queued_submission_edit
+                .as_ref()
+                .map(|edit| edit.editor.buf()),
+            Some("urgent next turn")
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!cancel.is_cancelled());
+        assert!(editor.buf().is_empty());
+    }
+
+    #[test]
+    fn next_queue_accepts_mac_delete_key_for_removal() {
+        let session = atman_runtime::Session::open_ephemeral();
+        let queued = session
+            .enqueue_submission(
+                "remove me",
+                Vec::new(),
+                atman_runtime::InvocationEnv::default(),
+                atman_runtime::message::MessageOrigin::User,
+            )
+            .unwrap();
+        let cancel = session.flow_cancel_token();
+        let mut state = crate::UiState::new(AppState::new("session".into(), None));
+        state.app.queued_submissions = session.queued_submissions();
+        state.app.submission_focus = true;
+        let mut editor = InputEditor::default();
+        let mut interrupt_prompt = None;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        handle_key(
+            KeyAction::Backspace,
+            &mut state,
+            &mut editor,
+            &mut interrupt_prompt,
+            None,
+            Some(&tx),
+        );
+
+        let TuiControl::DeleteQueuedSubmission {
             id,
             expected_revision,
-        } = rx.try_recv().unwrap()
+        } = rx.try_recv().expect("delete control")
         else {
-            panic!("expected queue intervention control");
+            panic!("expected queued submission deletion");
         };
         assert_eq!(id, queued.id);
         assert_eq!(expected_revision, queued.revision);
-        assert!(editor.buf().is_empty());
+        assert!(!cancel.is_cancelled());
     }
 
     #[test]

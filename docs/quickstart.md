@@ -185,7 +185,7 @@ atman> list the .at files under examples/ and pick one to summarise
 
 While a flow is running you can:
 
-- Type a normal message to place it in the ordered `next` queue without interrupting the current flow. The next task-facing `llm.call` consumes eligible queued messages as trailing user context; if the flow makes no further call, they run as new turns afterward. Commands, path attachments, and submissions with an explicit reasoning setting retain their new-turn behavior. Press `Shift+Tab` to focus the queue, use `↑`/`↓` to select, `Alt+↑`/`Alt+↓` to reorder, `e` to edit, `Delete` to remove, or `Enter` to interrupt the current flow and run the selected message next. The same actions are available with the mouse.
+- Type a normal message to place it in the ordered `next` queue without interrupting the current flow. The next task-facing `llm.call` consumes eligible queued messages as trailing user context; if the flow makes no further call, they run as new turns afterward. Commands, path attachments, and submissions with an explicit reasoning setting retain their new-turn behavior. Press `Shift+Tab` to focus the queue, use `↑`/`↓` to select, `Alt+↑`/`Alt+↓` to reorder, `Enter` or `e` to edit, and `Delete` or `Backspace` to remove. The same actions are available with the mouse.
 - `!nudge <text>` — L1 nudge (added to context at the next LLM node boundary).
 - `!course-correct <text>` — L2 (mid-stream restart with the correction).
 - `!redirect <flow>` — L3 (switch to another flow).
