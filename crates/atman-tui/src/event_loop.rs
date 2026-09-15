@@ -2372,7 +2372,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_projects_button_opens_project_hub() {
+    fn startup_all_projects_row_opens_project_hub() {
         let mut app = startup_app();
         app.startup_projects_rect = Some(ratatui::layout::Rect::new(18, 19, 20, 1));
         let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), 19);

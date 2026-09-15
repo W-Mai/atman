@@ -303,7 +303,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 },
             );
             app.startup_container_rect = startup_layout.recent_container;
-            app.startup_projects_rect = startup_layout.projects_button;
+            app.startup_projects_rect = startup_layout.all_projects_rect;
             app.startup_session_rects = startup_layout.session_rects;
             if app.startup_session_rects.is_empty() {
                 app.startup_focus = crate::app::StartupFocus::Input;
