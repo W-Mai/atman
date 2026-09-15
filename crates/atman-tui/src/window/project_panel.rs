@@ -15,8 +15,10 @@ use crate::wm::{
     EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmCommand, WmEvent, WmEventResult,
 };
 
-const CARD_HEIGHT: u16 = 8;
+const CARD_HEIGHT: u16 = 9;
 const SESSION_ROW_HEIGHT: u16 = 4;
+const WORKSPACE_MAX_WIDTH: u16 = 150;
+const INSPECTOR_WIDTH: u16 = 38;
 
 #[derive(Clone)]
 struct ProjectSession {
@@ -127,18 +129,8 @@ impl ProjectPanelContent {
     fn render_grid(&mut self, area: Rect, frame: &mut Frame) {
         let t = crate::theme::theme();
         self.card_rects.clear();
-        self.previous_page_rect = None;
-        self.next_page_rect = None;
-        self.columns = if area.width >= 132 {
-            3
-        } else if area.width >= 84 {
-            2
-        } else {
-            1
-        };
-
-        let header_height = 4.min(area.height);
-        let body_height = area.height.saturating_sub(header_height);
+        self.columns = if area.width >= 78 { 2 } else { 1 };
+        let body_height = area.height;
         let visible_rows = usize::from(
             body_height
                 .saturating_add(1)
@@ -153,75 +145,19 @@ impl ProjectPanelContent {
             self.selected = (self.page * self.cards_per_page).min(self.projects.len() - 1);
         }
 
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        "PROJECTS",
-                        Style::default()
-                            .fg(t.accent.into())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(
-                            "  {} known  ·  PAGE {}/{}",
-                            self.projects.len(),
-                            self.page + 1,
-                            page_count
-                        ),
-                        Style::default().fg(t.subtle_fg.into()),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    "←→↑↓ select  Enter / double-click open  PgUp/PgDn or wheel page  Esc close",
-                    Style::default().fg(t.subtle_fg.into()),
-                )),
-            ]),
-            Rect::new(area.x, area.y, area.width, header_height),
-        );
-
-        if area.width >= 32 {
-            let controls_y = area.y.saturating_add(2);
-            let next = Rect::new(area.right().saturating_sub(10), controls_y, 10, 1);
-            let previous = Rect::new(next.x.saturating_sub(11), controls_y, 10, 1);
-            self.previous_page_rect = Some(previous);
-            self.next_page_rect = Some(next);
-            render_page_control(
-                frame,
-                previous,
-                "‹ PREV",
-                self.page > 0,
-                self.previous_page_hovered,
-                &t,
-            );
-            render_page_control(
-                frame,
-                next,
-                "NEXT ›",
-                self.page + 1 < page_count,
-                self.next_page_hovered,
-                &t,
-            );
-        }
-
         if self.projects.is_empty() {
             frame.render_widget(
                 Paragraph::new(
                     "No projects registered yet. Start atman inside a project to add it.",
                 )
                 .style(Style::default().fg(t.subtle_fg.into())),
-                Rect::new(
-                    area.x,
-                    area.y.saturating_add(header_height),
-                    area.width,
-                    body_height,
-                ),
+                Rect::new(area.x, area.y, area.width, body_height),
             );
             return;
         }
 
         let gap = 1u16;
-        let body_y = area.y.saturating_add(header_height);
+        let body_y = area.y;
         let columns = self.columns as u16;
         let card_w = area
             .width
@@ -258,14 +194,15 @@ impl ProjectPanelContent {
             } else {
                 t.border.into()
             };
-            let state = if !project.path_available() {
-                "○ MISSING PATH"
-            } else if project.archived {
-                "○ ARCHIVED"
-            } else {
-                "● AVAILABLE"
-            };
-            let pin = if project.pinned { "  PINNED" } else { "" };
+            let (dot, state, state_color): (&str, &str, ratatui::style::Color) =
+                if !project.path_available() {
+                    ("○", "MISSING PATH", t.warn.into())
+                } else if project.archived {
+                    ("○", "ARCHIVED", t.warn.into())
+                } else {
+                    ("●", "AVAILABLE", t.success.into())
+                };
+            let pin = if project.pinned { "PINNED" } else { "" };
             let project_sessions = self.sessions.get(&project.fingerprint);
             let session_count = project_sessions.map_or(0, Vec::len);
             let scope = match atman_runtime::storage::load_storage_config(Some(&project.root))
@@ -279,40 +216,45 @@ impl ProjectPanelContent {
                 .and_then(|sessions| sessions.first())
                 .map(|session| session.goal.as_deref().unwrap_or(&session.title))
                 .unwrap_or("No recent session activity");
+            let inner_width = card_w.saturating_sub(4) as usize;
+            let title = crate::width::truncate(
+                &project.display_name,
+                inner_width.saturating_sub(crate::width::width(pin) + usize::from(!pin.is_empty())),
+            );
+            let title_gap =
+                inner_width.saturating_sub(crate::width::width(&title) + crate::width::width(pin));
             let content = vec![
-                Line::from(Span::styled(
-                    crate::width::truncate(
-                        &project.display_name,
-                        card_w.saturating_sub(4) as usize,
+                Line::from(vec![
+                    Span::styled(
+                        title,
+                        Style::default()
+                            .fg(t.tinted_fg.into())
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Style::default()
-                        .fg(t.tinted_fg.into())
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!("{state}{pin}"),
-                    Style::default().fg(t.subtle_fg.into()).bg(bg),
-                )),
-                Line::from(Span::styled(
-                    format!("{scope}  ·  {session_count} sessions"),
-                    Style::default().fg(t.subtle_fg.into()).bg(bg),
-                )),
-                Line::from(Span::styled(
-                    crate::width::truncate(
-                        &project.root.display().to_string(),
-                        card_w.saturating_sub(4) as usize,
+                    Span::styled(" ".repeat(title_gap), Style::default().bg(bg)),
+                    Span::styled(pin, Style::default().fg(t.accent.into()).bg(bg)),
+                ]),
+                Line::from(vec![
+                    Span::styled(dot, Style::default().fg(state_color).bg(bg)),
+                    Span::styled(
+                        format!(" {state}"),
+                        Style::default().fg(t.subtle_fg.into()).bg(bg),
                     ),
+                ]),
+                Line::from(Span::styled(
+                    crate::width::middle_truncate(&project.root.display().to_string(), inner_width),
                     Style::default().fg(t.subtle_fg.into()).bg(bg),
                 )),
+                Line::raw(""),
                 Line::from(Span::styled(
-                    crate::width::truncate(summary, card_w.saturating_sub(4) as usize),
-                    Style::default().fg(t.subtle_fg.into()).bg(bg),
+                    crate::width::truncate(summary, inner_width),
+                    Style::default().fg(t.tinted_fg.into()).bg(bg),
                 )),
                 Line::from(Span::styled(
                     format!(
-                        "last opened  {}",
-                        project.last_opened.format("%Y-%m-%d %H:%M")
+                        "{scope}  ·  {session_count} SESSIONS  ·  {}",
+                        project.last_opened.format("%m-%d %H:%M")
                     ),
                     Style::default().fg(t.subtle_fg.into()).bg(bg),
                 )),
@@ -323,6 +265,7 @@ impl ProjectPanelContent {
                         Block::default()
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(border).bg(bg))
+                            .padding(ratatui::widgets::Padding::horizontal(1))
                             .style(Style::default().bg(bg)),
                     )
                     .wrap(Wrap { trim: true }),
@@ -397,7 +340,8 @@ impl ProjectPanelContent {
 
         let list_y = area.y.saturating_add(7);
         let list_h = area.bottom().saturating_sub(list_y);
-        self.sessions_per_page = usize::from((list_h / SESSION_ROW_HEIGHT).max(1));
+        self.sessions_per_page =
+            usize::from((list_h.saturating_sub(1) / SESSION_ROW_HEIGHT).max(1));
         let page = self.session_selected / self.sessions_per_page;
         let page_count = sessions.len().div_ceil(self.sessions_per_page).max(1);
         frame.render_widget(
@@ -409,11 +353,7 @@ impl ProjectPanelContent {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(
-                        "  PAGE {}/{}  ·  ↑↓ select  Enter / double-click switch  PgUp/PgDn page  Esc back",
-                        page + 1,
-                        page_count
-                    ),
+                    format!("  PAGE {:02} / {:02}", page + 1, page_count),
                     Style::default().fg(t.subtle_fg.into()),
                 ),
             ])),
@@ -492,9 +432,251 @@ impl ProjectPanelContent {
                     Block::default()
                         .borders(Borders::BOTTOM)
                         .border_style(Style::default().fg(border).bg(bg))
+                        .padding(ratatui::widgets::Padding::horizontal(1))
                         .style(Style::default().bg(bg)),
                 ),
                 rect,
+            );
+        }
+    }
+
+    fn render_header(&self, area: Rect, frame: &mut Frame) {
+        let t = crate::theme::theme();
+        let (eyebrow, title, subtitle) = match self.view {
+            ProjectView::Grid => (
+                format!("ALL WORKSPACES  /  {} KNOWN", self.projects.len()),
+                "Projects".to_string(),
+                "Resume work from a project, then choose its session.".to_string(),
+            ),
+            ProjectView::Detail => {
+                let name = self
+                    .projects
+                    .get(self.selected)
+                    .map(|project| project.display_name.as_str())
+                    .unwrap_or("PROJECT");
+                (
+                    format!("PROJECT  /  {}", name.to_uppercase()),
+                    "Sessions".to_string(),
+                    format!("Choose a saved session in {name}."),
+                )
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    eyebrow,
+                    Style::default().fg(t.subtle_fg.into()),
+                )),
+                Line::from(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(t.tinted_fg.into())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    subtitle,
+                    Style::default().fg(t.subtle_fg.into()),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(t.border.into()))
+                    .padding(ratatui::widgets::Padding::horizontal(1)),
+            ),
+            area,
+        );
+    }
+
+    fn render_inspector(&self, area: Rect, frame: &mut Frame) {
+        let Some(project) = self.projects.get(self.selected) else {
+            return;
+        };
+        let t = crate::theme::theme();
+        let sessions = self
+            .sessions
+            .get(&project.fingerprint)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let recent = sessions.first();
+        let scope = match atman_runtime::storage::load_storage_config(Some(&project.root))
+            .scope
+            .unwrap_or_default()
+        {
+            atman_runtime::storage::StorageScope::Global => "GLOBAL",
+            atman_runtime::storage::StorageScope::Local => "LOCAL",
+        };
+        let state = if !project.path_available() {
+            "○ MISSING PATH"
+        } else if project.archived {
+            "○ ARCHIVED"
+        } else {
+            "● AVAILABLE"
+        };
+        let content_width = area.width.saturating_sub(4) as usize;
+        let summary = recent
+            .map(|session| session.goal.as_deref().unwrap_or(&session.title))
+            .unwrap_or("No recent session activity");
+        let goal = recent
+            .and_then(|session| session.goal.as_deref())
+            .unwrap_or("No goal saved");
+        let lines = vec![
+            Line::from(Span::styled(
+                "PROJECT",
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+            Line::from(Span::styled(
+                crate::width::truncate(&project.display_name, content_width),
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(state, Style::default().fg(t.accent.into()))),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "RECENT ACTIVITY",
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+            Line::from(Span::styled(
+                crate::width::truncate(summary, content_width),
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            Line::from(Span::styled(
+                recent.map_or("NO SESSION", |session| session.updated_at.as_str()),
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "SESSION CONTEXT  /  GOAL",
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+            Line::from(Span::styled(
+                crate::width::truncate(goal, content_width),
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "PROJECT STORAGE",
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    scope,
+                    Style::default()
+                        .fg(t.accent.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  EFFECTIVE SCOPE", Style::default().fg(t.subtle_fg.into())),
+            ]),
+            Line::raw(""),
+            Line::from(Span::styled(
+                match self.view {
+                    ProjectView::Grid => "Enter open sessions  ·  double-click supported",
+                    ProjectView::Detail => "Enter switch session  ·  Esc back to projects",
+                },
+                Style::default().fg(t.subtle_fg.into()),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .border_style(Style::default().fg(t.border.into()))
+                        .padding(ratatui::widgets::Padding::new(2, 1, 1, 1)),
+                )
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+    }
+
+    fn render_footer(&mut self, area: Rect, frame: &mut Frame) {
+        let t = crate::theme::theme();
+        self.previous_page_rect = None;
+        self.next_page_rect = None;
+        let (status, hint, page, page_count, can_page) = match self.view {
+            ProjectView::Grid => {
+                let per_page = self.cards_per_page.max(1);
+                let page_count = self.projects.len().div_ceil(per_page).max(1);
+                let start = if self.projects.is_empty() {
+                    0
+                } else {
+                    self.page * per_page + 1
+                };
+                let end = ((self.page + 1) * per_page).min(self.projects.len());
+                (
+                    format!(
+                        "PROJECTS {:02}–{:02} OF {:02}   ·   PAGE {:02} / {:02}",
+                        start,
+                        end,
+                        self.projects.len(),
+                        self.page + 1,
+                        page_count
+                    ),
+                    "ARROWS SELECT  ·  ENTER OPEN  ·  PGUP/PGDN OR WHEEL PAGE  ·  ESC CLOSE",
+                    self.page,
+                    page_count,
+                    true,
+                )
+            }
+            ProjectView::Detail => {
+                let sessions = self.selected_sessions();
+                let per_page = self.sessions_per_page.max(1);
+                let page = self.session_selected / per_page;
+                let page_count = sessions.len().div_ceil(per_page).max(1);
+                (
+                    format!(
+                        "SESSIONS {:02}   ·   PAGE {:02} / {:02}",
+                        sessions.len(),
+                        page + 1,
+                        page_count
+                    ),
+                    "↑↓ SELECT  ·  ENTER SWITCH  ·  PGUP/PGDN OR WHEEL PAGE  ·  ESC BACK",
+                    page,
+                    page_count,
+                    false,
+                )
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    status,
+                    Style::default()
+                        .fg(t.tinted_fg.into())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(hint, Style::default().fg(t.subtle_fg.into()))),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(t.border.into()))
+                    .padding(ratatui::widgets::Padding::horizontal(1)),
+            ),
+            area,
+        );
+        if can_page && area.width >= 84 {
+            let controls_y = area.y.saturating_add(1);
+            let next = Rect::new(area.right().saturating_sub(9), controls_y, 9, 1);
+            let previous = Rect::new(next.x.saturating_sub(10), controls_y, 9, 1);
+            self.previous_page_rect = Some(previous);
+            self.next_page_rect = Some(next);
+            render_page_control(
+                frame,
+                previous,
+                "‹ PREV",
+                page > 0,
+                self.previous_page_hovered,
+                &t,
+            );
+            render_page_control(
+                frame,
+                next,
+                "NEXT ›",
+                page + 1 < page_count,
+                self.next_page_hovered,
+                &t,
             );
         }
     }
@@ -526,10 +708,76 @@ impl WindowComponent for ProjectPanelContent {
         frame: &mut Frame,
         _ctx: &RenderCtx,
     ) -> Vec<HitRegion> {
-        match self.view {
-            ProjectView::Grid => self.render_grid(area, frame),
-            ProjectView::Detail => self.render_detail(area, frame),
+        let t = crate::theme::theme();
+        self.card_rects.clear();
+        self.session_rects.clear();
+        self.previous_page_rect = None;
+        self.next_page_rect = None;
+        self.back_rect = None;
+
+        let workspace = centered_workspace(area);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border.into()))
+                .style(Style::default().bg(t.code_bg.into()))
+                .title(Span::styled(
+                    " PROJECT HUB ",
+                    Style::default()
+                        .fg(t.accent.into())
+                        .add_modifier(Modifier::BOLD),
+                )),
+            workspace,
+        );
+        let inner = inset(workspace, 2, 1);
+        if inner.width == 0 || inner.height == 0 {
+            return Vec::new();
         }
+        let header_height = inner.height.min(4);
+        let footer_height = inner.height.saturating_sub(header_height).min(3);
+        let header = Rect::new(inner.x, inner.y, inner.width, header_height);
+        let footer = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(footer_height),
+            inner.width,
+            footer_height,
+        );
+        let main = Rect::new(
+            inner.x,
+            header.bottom(),
+            inner.width,
+            footer.y.saturating_sub(header.bottom()),
+        );
+        self.render_header(header, frame);
+
+        let (board, inspector) = if main.width >= 96 {
+            let inspector_width = INSPECTOR_WIDTH.min(main.width / 3);
+            (
+                Rect::new(
+                    main.x,
+                    main.y,
+                    main.width.saturating_sub(inspector_width + 1),
+                    main.height,
+                ),
+                Some(Rect::new(
+                    main.right().saturating_sub(inspector_width),
+                    main.y,
+                    inspector_width,
+                    main.height,
+                )),
+            )
+        } else {
+            (main, None)
+        };
+        let board = inset(board, 1, 1);
+        match self.view {
+            ProjectView::Grid => self.render_grid(board, frame),
+            ProjectView::Detail => self.render_detail(board, frame),
+        }
+        if let Some(inspector) = inspector {
+            self.render_inspector(inspector, frame);
+        }
+        self.render_footer(footer, frame);
         Vec::new()
     }
 
@@ -737,6 +985,26 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
 }
 
+fn centered_workspace(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(6).min(WORKSPACE_MAX_WIDTH);
+    let height = area.height.saturating_sub(4);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
+    Rect::new(
+        area.x.saturating_add(horizontal),
+        area.y.saturating_add(vertical),
+        area.width.saturating_sub(horizontal.saturating_mul(2)),
+        area.height.saturating_sub(vertical.saturating_mul(2)),
+    )
+}
+
 fn render_page_control(
     frame: &mut Frame,
     rect: Rect,
@@ -762,4 +1030,53 @@ fn render_page_control(
         ),
         rect,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn project(index: usize) -> ProjectRecord {
+        ProjectRecord {
+            fingerprint: format!("project-{index}"),
+            root: std::path::PathBuf::from(format!("/missing/project-{index}")),
+            display_name: format!("Project {index}"),
+            pinned: false,
+            archived: false,
+            first_seen: Utc::now(),
+            last_opened: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn centered_workspace_retains_breathing_room() {
+        let workspace = centered_workspace(Rect::new(0, 0, 180, 50));
+
+        assert_eq!(workspace.width, WORKSPACE_MAX_WIDTH);
+        assert_eq!(workspace.height, 46);
+        assert_eq!(workspace.x, 15);
+        assert_eq!(workspace.y, 2);
+    }
+
+    #[test]
+    fn project_footer_always_shows_item_range_and_page_count() {
+        let mut panel = ProjectPanelContent::new((0..13).map(project).collect(), None);
+        panel.cards_per_page = 6;
+        panel.page = 1;
+        let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
+
+        terminal
+            .draw(|frame| panel.render_footer(frame.area(), frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(rendered.contains("PROJECTS 07–12 OF 13"), "{rendered}");
+        assert!(rendered.contains("PAGE 02 / 03"), "{rendered}");
+    }
 }
