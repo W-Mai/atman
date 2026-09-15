@@ -3086,6 +3086,31 @@ impl AppState {
         }
     }
 
+    fn seal_completed_final_answer_draft(&mut self) {
+        if !self.final_answer_drafts_completed {
+            return;
+        }
+        let assistant_ids = self
+            .final_answer_drafts
+            .values()
+            .filter_map(|draft| draft.assistant_id)
+            .collect::<Vec<_>>();
+        for id in assistant_ids {
+            if let Some(index) = self.items.index_by_id(id) {
+                self.mutate_item(index, OutputMutation::SemanticPreserveSource, |item| {
+                    let OutputItem::AssistantMd { streaming, .. } = item else {
+                        return false;
+                    };
+                    let changed = *streaming;
+                    *streaming = false;
+                    changed
+                });
+            }
+        }
+        self.final_answer_drafts.clear();
+        self.final_answer_drafts_completed = false;
+    }
+
     fn begin_work_fold(&mut self, summary: Option<&str>) -> Option<u64> {
         let start_index = self
             .items
@@ -4963,6 +4988,7 @@ impl AppState {
     }
 
     pub fn cancel_running_activities(&mut self) {
+        self.seal_completed_final_answer_draft();
         let now = std::time::Instant::now();
         for n in self.activity_nodes.iter_mut() {
             if n.status == crate::task_panel::ActivityStatus::Running {
@@ -5330,6 +5356,43 @@ mod tests {
         assert!(!app.final_answer_drafts_completed);
         assert_eq!(app.work_folds.len(), 1);
         assert_eq!(app.work_folds[0].title, "Finished the work.");
+        assert!(matches!(
+            app.items.last(),
+            Some(OutputItem::AssistantMd { md, streaming: false, .. }) if md == "Done."
+        ));
+    }
+
+    #[test]
+    fn cancelling_classification_keeps_the_completed_answer_and_work_fold() {
+        let mut app = AppState::new("session".into(), None);
+        app.push_item(OutputItem::UserTurn {
+            text: "finish it".into(),
+        });
+        app.push_item(OutputItem::Thinking {
+            text: "work".into(),
+            done: false,
+            disclosure: Disclosure::Summary,
+            retried: false,
+        });
+        app.apply_stream_frame(StreamFrame::ToolCallDraft {
+            index: 0,
+            call_id: "answer".into(),
+            name: atman_runtime::tools::final_answer::FINAL_ANSWER_TOOL.into(),
+            arguments_delta: "{\"_atman_intent\":\"Finished the work.\",\"message\":\"Done.\"}"
+                .into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 1,
+            run_id: None,
+        });
+
+        app.cancel_running_activities();
+        app.discard_completed_final_answer_draft();
+
+        assert!(app.final_answer_drafts.is_empty());
+        assert!(!app.final_answer_drafts_completed);
+        assert_eq!(app.work_folds.len(), 1);
         assert!(matches!(
             app.items.last(),
             Some(OutputItem::AssistantMd { md, streaming: false, .. }) if md == "Done."
