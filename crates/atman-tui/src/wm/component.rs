@@ -44,6 +44,10 @@ pub enum WmCommand {
         window_content: WindowContent,
     },
     PushToast(String),
+    SwitchSession {
+        sid: String,
+        project_root: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]

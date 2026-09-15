@@ -262,6 +262,7 @@ impl WindowManager {
         &mut self,
         canvas: Rect,
         projects: Vec<atman_runtime::project_catalog::ProjectRecord>,
+        session: Option<&atman_runtime::Session>,
     ) {
         let id = self.open(
             "project-hub",
@@ -272,7 +273,7 @@ impl WindowManager {
         );
         if let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) {
             panel.content = Some(Box::new(
-                crate::window::project_panel::ProjectPanelContent::new(projects),
+                crate::window::project_panel::ProjectPanelContent::new(projects, session),
             ));
         }
         if self
@@ -635,6 +636,26 @@ impl WindowManager {
             return (false, Vec::new());
         };
 
+        if matches!(panel.content_kind, WindowContent::Projects)
+            && matches!(
+                action,
+                crate::keys::KeyAction::PageUp
+                    | crate::keys::KeyAction::PageDown
+                    | crate::keys::KeyAction::Escape
+            )
+            && let Some(content) = panel.content.as_mut()
+        {
+            let mut ctx = EventCtx {
+                scroll: &mut panel.scroll,
+                h_scroll: &mut panel.h_scroll,
+            };
+            if let WmEventResult::Consumed(commands) =
+                content.handle_event(&WmEvent::Key(action.clone()), &mut ctx)
+            {
+                return (true, commands);
+            }
+        }
+
         match action {
             crate::keys::KeyAction::ScrollUp | crate::keys::KeyAction::PageUp => {
                 panel.scroll = panel.scroll.saturating_sub(
@@ -990,6 +1011,14 @@ impl WindowManager {
                     std::time::Duration::from_secs(3),
                     crate::app::ToastPosition::TopRight,
                 ),
+                WmCommand::SwitchSession { sid, project_root } => {
+                    crate::key_handler::request_project_session_switch(
+                        app,
+                        control_tx,
+                        sid,
+                        project_root,
+                    );
+                }
             }
         }
     }
@@ -1133,7 +1162,11 @@ pub fn render(
 
     for panel in &mut panels.panels {
         if panel.maximized {
-            panel.rect = maximized_rect(max_canvas);
+            panel.rect = if matches!(panel.content_kind, WindowContent::Projects) {
+                max_canvas
+            } else {
+                maximized_rect(max_canvas)
+            };
         }
     }
 

@@ -278,7 +278,11 @@ pub(crate) async fn run_frames(
                                         .last_full_rect
                                         .or(app.app.last_transcript_rect)
                                         .unwrap_or_default();
-                                    app.wm.open_project_hub(canvas, app.app.projects.clone());
+                                    app.wm.open_project_hub(
+                                        canvas,
+                                        app.app.projects.clone(),
+                                        app.app.session.as_deref(),
+                                    );
                                 }
                                 interrupt_prompt = None;
                                 break;
@@ -395,7 +399,11 @@ pub(crate) async fn run_frames(
                                         .last_full_rect
                                         .or(app.app.last_transcript_rect)
                                         .unwrap_or_default();
-                                    app.wm.open_project_hub(canvas, app.app.projects.clone());
+                                    app.wm.open_project_hub(
+                                        canvas,
+                                        app.app.projects.clone(),
+                                        app.app.session.as_deref(),
+                                    );
                                 }
                                 interrupt_prompt = None;
                                 break;
