@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Opt-in requirements interviews** — The managed agent keeps requirement clarification in the normal conversation and starts the synchronous spec interview only after an explicit user request. Project intake, task complexity, architecture work, uncertainty, and completion classification no longer trigger it automatically.
 - **Project Hub navigation** — The startup Recent Sessions list ends with a hoverable and clickable `All Projects [Ctrl+L]` record using the same four-row spacing, horizontal padding, and pointer target as recent sessions. The shortcut opens a full-screen project workspace with a two-column board, fixed inspector, constrained session list, persistent item and page counts, three-row pagination controls, keyboard and pointer paging, and project-root-bound session switching. Project and session items use layered backgrounds with a full-height selection marker.
 - **Workflow card fill** — A running workflow keeps every active leaf visible, then fills its retained height from the newest completed leaves instead of leaving blank rows.
 - **Cancelled final validation** — Cancelling the classifier after a final response keeps the completed answer and its collapsed work summary visible.

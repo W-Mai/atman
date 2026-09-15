@@ -103,9 +103,9 @@ A `.at` file declares types, providers, tools, routes, lifecycle hooks, and flow
 
 ### The managed agent loop
 
-`atman init` writes managed `commands/agent.at` and `commands/spec.at` templates. The agent first loads relevant rules and past confessions, then routes the first substantive task in a project, unapproved feature or architecture work, and material requirement uncertainty through a synchronous requirements interview. The interview investigates project files, asks focused questions, stores research and design in configured project storage, publishes the design to the local preview, and waits for approval of that exact revision before the agent can continue. An explicit request to stop ends the task without approving a design; dismissing an interview form or a failed preview leaves the task pending. The normal agent loop then runs `llm.call`, retries, compaction, and tool dispatch; a candidate final response is checked before the loop exits. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
+`atman init` writes managed `commands/agent.at` and `commands/spec.at` templates. The agent first loads relevant rules and past confessions, then runs `llm.call`, retries, compaction, and tool dispatch; a candidate final response is checked before the loop exits. Requirements uncertainty stays in the normal conversation, where the agent thinks through the ambiguity and asks a focused question. It may suggest the opt-in spec workflow but does not automatically start it for new projects, non-trivial work, architecture changes, or uncertain requirements. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
 
-Run `/spec <request>` in the TUI to start project intake directly. The interview uses multiline forms for requirement answers and shows a preview URL before design approval.
+Run `/spec <request>` in the TUI to explicitly start a synchronous requirements interview. The interview investigates project files, asks focused questions through multiline forms, stores research and design in configured project storage, publishes the design to the local preview, and waits for approval of that exact revision before returning.
 
 `loop` is unconditional. A flow must leave it with `break`, `return`, an error, or cancellation; use `continue` to start the next iteration:
 

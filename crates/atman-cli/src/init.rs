@@ -315,7 +315,7 @@ mod tests {
     fn agent_template_parses_as_valid_dsl() {
         let file = atman_dsl::parse::parse_file(AGENT_AT).expect("agent template must parse");
         let names: Vec<&str> = file.flows.iter().map(|f| f.name.name.as_str()).collect();
-        assert_eq!(names, vec!["agent", "requirements_gate"]);
+        assert_eq!(names, vec!["agent"]);
     }
 
     #[test]
