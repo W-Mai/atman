@@ -8,9 +8,11 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
-- **Project Hub navigation** — Project cards fill the terminal canvas, page through the catalog with keyboard and pointer controls, open project details and session history, and bind resumed sessions to the selected project root.
+- **Project Hub navigation** — The full-screen hub centers a bordered project workspace with a two-column board, fixed inspector, constrained session list, persistent item and page counts, keyboard and pointer paging, and project-root-bound session switching.
+- **Workflow card fill** — A running workflow keeps every active leaf visible, then fills its retained height from the newest completed leaves instead of leaving blank rows.
+- **Cancelled final validation** — Cancelling the classifier after a final response keeps the completed answer and its collapsed work summary visible.
 - **Prompt cancellation** — Interactive prompts stop immediately when their flow is cancelled, and an unanswered `form.ask` expires as a cancelled response instead of a tool failure.
-- **Subagent preview access** — Research, verification, implementation, and review subagents can publish artifacts through `preview.push`.
+- **Agent preview access** — Requirements interviews and research, verification, implementation, and review subagents can publish artifacts through `preview.push`.
 
 ## [1.12.0] — 2026-09-15
 
