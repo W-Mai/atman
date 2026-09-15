@@ -1133,7 +1133,7 @@ fn default_rect(canvas: Rect) -> Rect {
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
-    _canvas: Rect,
+    canvas: Rect,
     panels: &mut WindowManager,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
@@ -1163,7 +1163,7 @@ pub fn render(
     for panel in &mut panels.panels {
         if panel.maximized {
             panel.rect = if matches!(panel.content_kind, WindowContent::Projects) {
-                max_canvas
+                canvas
             } else {
                 maximized_rect(max_canvas)
             };
