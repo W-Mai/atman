@@ -2372,10 +2372,10 @@ mod tests {
     }
 
     #[test]
-    fn startup_all_projects_row_opens_project_hub() {
+    fn startup_all_projects_card_opens_project_hub() {
         let mut app = startup_app();
-        app.startup_projects_rect = Some(ratatui::layout::Rect::new(18, 19, 20, 1));
-        let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), 19);
+        app.startup_projects_rect = Some(ratatui::layout::Rect::new(18, 19, 20, 4));
+        let click = startup_mouse(MouseEventKind::Down(MouseButton::Left), 21);
 
         assert!(handle_startup_session_mouse(&mut app, &click, None));
         assert!(app.startup_projects_hovered);

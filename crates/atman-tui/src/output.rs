@@ -1757,7 +1757,7 @@ pub struct StartupOverlayLayout {
 const STARTUP_PREFIX_ROWS: u16 =
     STARTUP_INPUT_TOP_ROWS + STARTUP_INPUT_SLOT_ROWS + STARTUP_INPUT_RECENT_GAP_ROWS;
 const STARTUP_FOOTER_ROWS: u16 = 2;
-const STARTUP_RECENT_FIXED_ROWS: u16 = 3;
+const STARTUP_RECENT_FIXED_ROWS: u16 = 6;
 const STARTUP_SESSION_ROWS: u16 = 4;
 const STARTUP_OVERLAY_MAX_WIDTH: u16 = 84;
 
@@ -1837,7 +1837,7 @@ pub fn compute_startup_overlay(
                 .y
                 .saturating_add(2 + STARTUP_SESSION_ROWS * visible_session_count as u16),
             container.width.saturating_sub(2),
-            1,
+            STARTUP_SESSION_ROWS,
         )
     });
     let help_y = overlay.bottom().saturating_sub(1);
@@ -1973,14 +1973,14 @@ pub fn render_startup_overlay(
         }
     }
 
-    if let Some(row) = layout.all_projects_rect {
+    if let Some(card) = layout.all_projects_rect {
         f.render_widget(
-            ratatui::widgets::Paragraph::new(render_all_projects_row(
-                row.width as usize,
+            ratatui::widgets::Paragraph::new(render_all_projects_card(
+                card.width as usize,
                 dim,
                 projects_hovered,
             )),
-            row,
+            card,
         );
     }
 
@@ -1999,55 +1999,80 @@ pub fn render_startup_overlay(
     layout
 }
 
-fn render_all_projects_row(width: usize, dim: bool, hovered: bool) -> Line<'static> {
+fn startup_record_background(selected: bool, hovered: bool) -> Color {
     let t = crate::theme::theme();
-    let bg: Color = if hovered {
-        t.modal_bg.lerp(t.work_hover_bg, 0.24)
+    if selected {
+        t.highlight_bg.into()
+    } else if hovered {
+        t.modal_bg.lerp(t.work_hover_bg, 0.72)
     } else {
-        t.modal_bg.lerp(t.panel_bg, 0.14)
-    };
+        Color::Reset
+    }
+}
+
+fn render_all_projects_card(width: usize, dim: bool, hovered: bool) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let bg = startup_record_background(false, hovered);
     let extra = if dim {
         Modifier::DIM
     } else {
         Modifier::empty()
     };
-    let base = Style::default().bg(bg).add_modifier(extra);
-    let prefix = "  ▦  ";
-    let shortcut = "[Ctrl+L]  ";
-    let title = crate::width::truncate(
-        "All Projects",
-        width.saturating_sub(crate::width::width(prefix) + crate::width::width(shortcut)),
+    let bg_only = Style::default().bg(bg).add_modifier(extra);
+    let icon_style = Style::default()
+        .fg(t.accent.into())
+        .bg(bg)
+        .add_modifier(Modifier::BOLD | extra);
+    let title_style = Style::default()
+        .fg(t.tinted_fg.into())
+        .bg(bg)
+        .add_modifier(Modifier::BOLD | extra);
+    let meta_style = Style::default()
+        .fg(t.subtle_fg.into())
+        .bg(bg)
+        .add_modifier(extra);
+    let shortcut_style = Style::default()
+        .fg(t.accent.into())
+        .bg(bg)
+        .add_modifier(extra);
+    let content_width = width.saturating_sub(8);
+    let shortcut = "[Ctrl+L]";
+    let title_width = content_width.saturating_sub(crate::width::width(shortcut) + 1);
+    let title = crate::width::pad_right(
+        &crate::width::truncate("All Projects", title_width),
+        title_width,
     );
-    let description = "Browse every workspace";
-    let fixed_width =
-        crate::width::width(prefix) + crate::width::width(&title) + crate::width::width(shortcut);
-    let description_budget = width.saturating_sub(fixed_width + 2);
-    let description = if description_budget == 0 {
-        String::new()
-    } else {
-        format!(
-            "  {}",
-            crate::width::truncate(description, description_budget)
-        )
+    let meta = crate::width::pad_right(
+        &crate::width::truncate("Browse every workspace", content_width),
+        content_width,
+    );
+    let blank = Line::from(Span::styled(" ".repeat(width), bg_only));
+    let fit = |spans: Vec<Span<'static>>| {
+        let mut spans = crate::width::truncate_spans(spans, width, Some(bg));
+        let used = crate::width::spans_width(spans.iter());
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), bg_only));
+        }
+        Line::from(spans)
     };
-    let used = fixed_width + crate::width::width(&description);
-    let fill = width.saturating_sub(used);
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(t.accent.into()).patch(base)),
-        Span::styled(
-            title,
-            Style::default()
-                .fg(t.tinted_fg.into())
-                .add_modifier(Modifier::BOLD)
-                .patch(base),
-        ),
-        Span::styled(
-            description,
-            Style::default().fg(t.subtle_fg.into()).patch(base),
-        ),
-        Span::styled(" ".repeat(fill), base),
-        Span::styled(shortcut, Style::default().fg(t.accent.into()).patch(base)),
-    ])
+    vec![
+        blank.clone(),
+        fit(vec![
+            Span::styled("  ", bg_only),
+            Span::styled("[▦]", icon_style),
+            Span::styled(" ", bg_only),
+            Span::styled(title, title_style),
+            Span::styled(" ", bg_only),
+            Span::styled(shortcut, shortcut_style),
+            Span::styled("  ", bg_only),
+        ]),
+        fit(vec![
+            Span::styled("      ", bg_only),
+            Span::styled(meta, meta_style),
+            Span::styled("  ", bg_only),
+        ]),
+        blank,
+    ]
 }
 
 fn render_session_card(
@@ -2059,13 +2084,7 @@ fn render_session_card(
     hovered: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
-    let bg: Color = if selected {
-        t.highlight_bg.into()
-    } else if hovered {
-        t.modal_bg.lerp(t.work_hover_bg, 0.72)
-    } else {
-        Color::Reset
-    };
+    let bg = startup_record_background(selected, hovered);
     let extra = if dim {
         Modifier::DIM
     } else {
@@ -8101,10 +8120,10 @@ mod tests {
         let recent = vec![startup_entry(Some("goal")); 5];
         let empty = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 40), &[]);
         let too_short = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 31), &recent);
-        let one = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 32), &recent);
-        let two = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 36), &recent);
-        let full = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 48), &recent);
-        let narrow = compute_startup_overlay(ratatui::layout::Rect::new(7, 4, 60, 48), &recent);
+        let one = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 35), &recent);
+        let two = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 39), &recent);
+        let full = compute_startup_overlay(ratatui::layout::Rect::new(3, 2, 100, 51), &recent);
+        let narrow = compute_startup_overlay(ratatui::layout::Rect::new(7, 4, 60, 51), &recent);
         let tiny = compute_startup_overlay(ratatui::layout::Rect::new(7, 4, 10, 12), &recent);
 
         assert_eq!(empty.visible_session_count, 0);
@@ -8139,6 +8158,7 @@ mod tests {
         assert_eq!(two.session_rects[0].x, container.x + 1);
         assert_eq!(two.session_rects[0].width, container.width - 2);
         assert_eq!(two.all_projects_rect.unwrap().x, two.session_rects[0].x);
+        assert_eq!(two.all_projects_rect.unwrap().height, STARTUP_SESSION_ROWS);
         assert_eq!(
             two.all_projects_rect.unwrap().y,
             two.session_rects.last().unwrap().bottom()
@@ -8151,10 +8171,10 @@ mod tests {
         for (bounds, layout) in [
             (ratatui::layout::Rect::new(3, 2, 100, 40), &empty),
             (ratatui::layout::Rect::new(3, 2, 100, 31), &too_short),
-            (ratatui::layout::Rect::new(3, 2, 100, 32), &one),
-            (ratatui::layout::Rect::new(3, 2, 100, 36), &two),
-            (ratatui::layout::Rect::new(3, 2, 100, 48), &full),
-            (ratatui::layout::Rect::new(7, 4, 60, 48), &narrow),
+            (ratatui::layout::Rect::new(3, 2, 100, 35), &one),
+            (ratatui::layout::Rect::new(3, 2, 100, 39), &two),
+            (ratatui::layout::Rect::new(3, 2, 100, 51), &full),
+            (ratatui::layout::Rect::new(7, 4, 60, 51), &narrow),
             (ratatui::layout::Rect::new(7, 4, 10, 12), &tiny),
         ] {
             for rect in std::iter::once(layout.area)
@@ -8208,21 +8228,29 @@ mod tests {
     }
 
     #[test]
-    fn all_projects_row_fills_its_width_and_uses_muted_hover() {
+    fn all_projects_card_matches_recent_session_spacing_and_hover() {
         let width = 72;
-        let normal = render_all_projects_row(width, false, false);
-        let hovered = render_all_projects_row(width, false, true);
-        let theme = crate::theme::theme();
+        let normal = render_all_projects_card(width, false, false);
+        let hovered = render_all_projects_card(width, false, true);
+        let recent_hovered =
+            render_session_card(1, &startup_entry(Some("goal")), width, false, false, true);
 
-        assert_eq!(crate::width::spans_width(normal.spans.iter()), width);
-        assert_eq!(crate::width::spans_width(hovered.spans.iter()), width);
+        for card in [&normal, &hovered] {
+            assert_eq!(card.len(), STARTUP_SESSION_ROWS as usize);
+            assert!(
+                card.iter()
+                    .all(|line| crate::width::spans_width(line.spans.iter()) == width)
+            );
+            assert!(plain_line(&card[0]).trim().is_empty());
+            assert!(plain_line(&card[3]).trim().is_empty());
+        }
         assert_eq!(
-            hovered.spans[0].style.bg,
-            Some(theme.modal_bg.lerp(theme.work_hover_bg, 0.24))
+            hovered[0].spans[0].style.bg,
+            recent_hovered[0].spans[0].style.bg
         );
         let rendered = hovered
-            .spans
             .iter()
+            .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(rendered.contains("All Projects"));
