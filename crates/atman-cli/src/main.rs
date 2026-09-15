@@ -1549,6 +1549,15 @@ async fn prebuild_session(
         )
         .with_context(|| format!("opening session under {}", root.display()))?,
     });
+    if let Some(project_root) = session.meta().and_then(|meta| meta.project_root) {
+        let catalog = atman_runtime::project_catalog::ProjectCatalogStore::new(&root);
+        let refresh = catalog
+            .register(&project_root, chrono::Utc::now())
+            .and_then(|_| catalog.reconcile_sessions().map(|_| ()));
+        if let Err(error) = refresh {
+            atman_runtime::notify!(warn, "project catalog refresh failed: {error}");
+        }
+    }
     apply_session_config(&session);
     emit(BootStepId::OpenSession, false, true);
 
