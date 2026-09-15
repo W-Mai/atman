@@ -184,16 +184,15 @@ impl ProjectPanelContent {
             self.card_rects.push((index, rect));
             let selected = self.selected == index;
             let hovered = self.hovered == Some(index);
-            let bg = if hovered {
-                t.modal_bg.lerp(t.work_hover_bg, 0.72)
+            let bg = if selected {
+                t.modal_bg.lerp(t.accent, 0.22)
+            } else if hovered {
+                t.modal_bg.lerp(t.work_hover_bg, 0.24)
             } else {
-                *t.modal_bg
+                t.modal_bg.lerp(t.panel_bg, 0.14)
             };
-            let border = if selected {
-                t.accent.into()
-            } else {
-                t.border.into()
-            };
+            let marker = if selected { "▌ " } else { "  " };
+            let marker_style = Style::default().fg(t.accent.into()).bg(bg);
             let (dot, state, state_color): (&str, &str, ratatui::style::Color) =
                 if !project.path_available() {
                     ("○", "MISSING PATH", t.warn.into())
@@ -224,7 +223,9 @@ impl ProjectPanelContent {
             let title_gap =
                 inner_width.saturating_sub(crate::width::width(&title) + crate::width::width(pin));
             let content = vec![
+                Line::from(Span::styled(marker, marker_style)),
                 Line::from(vec![
+                    Span::styled(marker, marker_style),
                     Span::styled(
                         title,
                         Style::default()
@@ -236,41 +237,48 @@ impl ProjectPanelContent {
                     Span::styled(pin, Style::default().fg(t.accent.into()).bg(bg)),
                 ]),
                 Line::from(vec![
+                    Span::styled(marker, marker_style),
                     Span::styled(dot, Style::default().fg(state_color).bg(bg)),
                     Span::styled(
                         format!(" {state}"),
                         Style::default().fg(t.subtle_fg.into()).bg(bg),
                     ),
                 ]),
-                Line::from(Span::styled(
-                    crate::width::middle_truncate(&project.root.display().to_string(), inner_width),
-                    Style::default().fg(t.subtle_fg.into()).bg(bg),
-                )),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    crate::width::truncate(summary, inner_width),
-                    Style::default().fg(t.tinted_fg.into()).bg(bg),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "{scope}  ·  {session_count} SESSIONS  ·  {}",
-                        project.last_opened.format("%m-%d %H:%M")
+                Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(
+                        crate::width::middle_truncate(
+                            &project.root.display().to_string(),
+                            inner_width,
+                        ),
+                        Style::default().fg(t.subtle_fg.into()).bg(bg),
                     ),
-                    Style::default().fg(t.subtle_fg.into()).bg(bg),
-                )),
+                ]),
+                Line::from(Span::styled(marker, marker_style)),
+                Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(
+                        crate::width::truncate(summary, inner_width),
+                        Style::default().fg(t.tinted_fg.into()).bg(bg),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(
+                        crate::width::truncate(
+                            &format!(
+                                "{scope}  ·  {session_count} SESSIONS  ·  {}",
+                                project.last_opened.format("%m-%d %H:%M")
+                            ),
+                            inner_width,
+                        ),
+                        Style::default().fg(t.subtle_fg.into()).bg(bg),
+                    ),
+                ]),
+                Line::from(Span::styled(marker, marker_style)),
+                Line::from(Span::styled(marker, marker_style)),
             ];
-            frame.render_widget(
-                Paragraph::new(content)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(border).bg(bg))
-                            .padding(ratatui::widgets::Padding::horizontal(1))
-                            .style(Style::default().bg(bg)),
-                    )
-                    .wrap(Wrap { trim: true }),
-                rect,
-            );
+            frame.render_widget(Paragraph::new(content).style(Style::default().bg(bg)), rect);
         }
     }
 
@@ -391,21 +399,30 @@ impl ProjectPanelContent {
             self.session_rects.push((index, rect));
             let selected = self.session_selected == index;
             let hovered = self.session_hovered == Some(index);
-            let bg = if hovered {
-                t.modal_bg.lerp(t.work_hover_bg, 0.72)
+            let bg = if selected {
+                t.modal_bg.lerp(t.accent, 0.22)
+            } else if hovered {
+                t.modal_bg.lerp(t.work_hover_bg, 0.24)
             } else {
-                *t.modal_bg
+                t.modal_bg.lerp(t.panel_bg, 0.14)
             };
-            let border = if selected {
-                t.accent.into()
-            } else {
-                t.border.into()
-            };
+            let marker = if selected { "▌ " } else { "  " };
+            let marker_style = Style::default().fg(t.accent.into()).bg(bg);
             let current = if row.is_current { "  CURRENT" } else { "" };
             let goal = row.goal.as_deref().unwrap_or("No goal saved");
+            let inner_width = area.width.saturating_sub(4) as usize;
+            let meta = crate::width::truncate(
+                &format!(
+                    "{} messages  ·  {}  ·  {}",
+                    row.message_count, row.updated_at, goal
+                ),
+                inner_width,
+            );
             frame.render_widget(
                 Paragraph::new(vec![
+                    Line::from(Span::styled(marker, marker_style)),
                     Line::from(vec![
+                        Span::styled(marker, marker_style),
                         Span::styled(
                             crate::width::truncate(
                                 &row.title,
@@ -418,23 +435,13 @@ impl ProjectPanelContent {
                         ),
                         Span::styled(current, Style::default().fg(t.accent.into()).bg(bg)),
                     ]),
-                    Line::from(Span::styled(
-                        format!(
-                            "{} messages  ·  {}  ·  {}",
-                            row.message_count,
-                            row.updated_at,
-                            crate::width::truncate(goal, area.width.saturating_sub(32) as usize)
-                        ),
-                        Style::default().fg(t.subtle_fg.into()).bg(bg),
-                    )),
+                    Line::from(vec![
+                        Span::styled(marker, marker_style),
+                        Span::styled(meta, Style::default().fg(t.subtle_fg.into()).bg(bg)),
+                    ]),
+                    Line::from(Span::styled(marker, marker_style)),
                 ])
-                .block(
-                    Block::default()
-                        .borders(Borders::BOTTOM)
-                        .border_style(Style::default().fg(border).bg(bg))
-                        .padding(ratatui::widgets::Padding::horizontal(1))
-                        .style(Style::default().bg(bg)),
-                ),
+                .style(Style::default().bg(bg)),
                 rect,
             );
         }
@@ -1078,5 +1085,68 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("PROJECTS 07–12 OF 13"), "{rendered}");
         assert!(rendered.contains("PAGE 02 / 03"), "{rendered}");
+    }
+
+    #[test]
+    fn project_items_use_session_style_backgrounds_and_full_height_marker() {
+        let mut panel = ProjectPanelContent::new((0..2).map(project).collect(), None);
+        panel.hovered = Some(1);
+        let theme = crate::theme::theme();
+        let selected_background = theme.modal_bg.lerp(theme.accent, 0.22);
+        let hovered_background = theme.modal_bg.lerp(theme.work_hover_bg, 0.24);
+        let mut terminal = Terminal::new(TestBackend::new(90, CARD_HEIGHT)).unwrap();
+
+        terminal
+            .draw(|frame| panel.render_grid(frame.area(), frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let selected = panel.card_rects[0].1;
+        let hovered = panel.card_rects[1].1;
+        for y in selected.y..selected.bottom() {
+            assert_eq!(buffer[(selected.x, y)].symbol(), "▌");
+            for x in selected.x..selected.right() {
+                assert_eq!(buffer[(x, y)].bg, selected_background);
+            }
+        }
+        for y in hovered.y..hovered.bottom() {
+            assert_eq!(buffer[(hovered.x, y)].symbol(), " ");
+            for x in hovered.x..hovered.right() {
+                assert_eq!(buffer[(x, y)].bg, hovered_background);
+            }
+        }
+    }
+
+    #[test]
+    fn project_session_items_keep_the_selection_marker_for_every_row() {
+        let mut panel = ProjectPanelContent::new(vec![project(0)], None);
+        panel.sessions.insert(
+            "project-0".into(),
+            vec![ProjectSession {
+                id: "session-0".into(),
+                title: "Selected session".into(),
+                message_count: 12,
+                updated_at: "2026-09-15 16:20".into(),
+                goal: Some("Keep the project context".into()),
+                is_current: false,
+            }],
+        );
+        let theme = crate::theme::theme();
+        let selected_background = theme.modal_bg.lerp(theme.accent, 0.22);
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
+
+        terminal
+            .draw(|frame| panel.render_detail(frame.area(), frame))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let selected = panel.session_rects[0].1;
+        assert_eq!(selected.height, SESSION_ROW_HEIGHT);
+        for y in selected.y..selected.bottom() {
+            assert_eq!(buffer[(selected.x, y)].symbol(), "▌");
+            for x in selected.x..selected.right() {
+                assert_eq!(buffer[(x, y)].bg, selected_background);
+            }
+        }
     }
 }

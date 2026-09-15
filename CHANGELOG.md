@@ -8,7 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Bug Fixes
 
-- **Project Hub navigation** — The full-screen hub centers a bordered project workspace with a two-column board, fixed inspector, constrained session list, persistent item and page counts, keyboard and pointer paging, and project-root-bound session switching.
+- **Project Hub navigation** — The full-screen hub centers a project workspace with a two-column board, fixed inspector, constrained session list, persistent item and page counts, keyboard and pointer paging, and project-root-bound session switching. Project and session items use layered backgrounds with a full-height selection marker.
 - **Workflow card fill** — A running workflow keeps every active leaf visible, then fills its retained height from the newest completed leaves instead of leaving blank rows.
 - **Cancelled final validation** — Cancelling the classifier after a final response keeps the completed answer and its collapsed work summary visible.
 - **Prompt cancellation** — Interactive prompts stop immediately when their flow is cancelled, and an unanswered `form.ask` expires as a cancelled response instead of a tool failure.
