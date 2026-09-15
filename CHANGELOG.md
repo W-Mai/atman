@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-09-15
+
 ### ✨ Features
 
 - **Project lifecycle controls** — Project Hub supports keyboard and pointer pinning, confirmed archive and restore, and archive-gated deletion of Atman sessions, memory, specs, previews, and indexes while preserving source files and hand-written project configuration. Stored sessions remain resumable when their original workspace path is unavailable.
