@@ -1668,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_alt_p_opens_maximized_project_hub() {
+    fn startup_ctrl_l_opens_maximized_project_hub() {
         let mut state = startup_state();
         state.app.last_full_rect = Some(ratatui::layout::Rect::new(0, 0, 120, 40));
         let mut editor = InputEditor::default();

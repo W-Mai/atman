@@ -1988,7 +1988,7 @@ pub fn render_startup_overlay(
         f.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(vec![
                 Span::styled("Projects ", Style::default().fg(t.tinted_fg.into()).bg(bg)),
-                Span::styled("[Alt+P]", Style::default().fg(t.accent.into()).bg(bg)),
+                Span::styled("[Ctrl+L]", Style::default().fg(t.accent.into()).bg(bg)),
             ]))
             .alignment(ratatui::layout::Alignment::Right),
             button,
@@ -1996,7 +1996,7 @@ pub fn render_startup_overlay(
     }
 
     let help = if layout.visible_session_count == 0 {
-        "Start typing to begin a new session · Alt+P projects"
+        "Start typing to begin a new session · Ctrl+L projects"
     } else if focus == crate::app::StartupFocus::Recent {
         "↑↓ / 1-9 select · Enter open · Tab input"
     } else {

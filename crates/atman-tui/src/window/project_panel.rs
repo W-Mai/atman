@@ -911,7 +911,7 @@ impl WindowComponent for ProjectPanelContent {
 
     fn title_suffix(&self) -> Option<String> {
         Some(match self.view {
-            ProjectView::Grid => "Alt+P · Project Hub".into(),
+            ProjectView::Grid => "Ctrl+L · Project Hub".into(),
             ProjectView::Detail => "Project details".into(),
         })
     }
