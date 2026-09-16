@@ -477,6 +477,7 @@ impl DeferredFormInbox {
 
 pub struct FormRegistry {
     entries: std::sync::Mutex<Vec<FormEntry>>,
+    confirmations: std::sync::Mutex<VecDeque<(String, crate::form::FormConfirmationReceipt)>>,
     watch_tx: watch::Sender<Vec<crate::form::PendingForm>>,
     inbox: std::sync::Arc<DeferredFormInbox>,
 }
@@ -505,6 +506,7 @@ impl FormRegistry {
         let (watch_tx, _) = watch::channel(Vec::new());
         Self {
             entries: std::sync::Mutex::new(Vec::new()),
+            confirmations: std::sync::Mutex::new(VecDeque::new()),
             watch_tx,
             inbox,
         }
@@ -525,6 +527,35 @@ impl FormRegistry {
 
     pub fn subscriber_count(&self) -> usize {
         self.watch_tx.receiver_count()
+    }
+
+    pub fn record_confirmation(
+        &self,
+        id: String,
+        binding: crate::form::FormConfirmationBinding,
+        submission: crate::form::FormSubmission,
+    ) {
+        const MAX_CONFIRMATIONS: usize = 128;
+        let mut confirmations = self.confirmations.lock().unwrap();
+        confirmations.retain(|(existing, _)| existing != &id);
+        confirmations.push_back((
+            id,
+            crate::form::FormConfirmationReceipt {
+                binding,
+                submission,
+            },
+        ));
+        while confirmations.len() > MAX_CONFIRMATIONS {
+            confirmations.pop_front();
+        }
+    }
+
+    pub fn consume_confirmation(&self, id: &str) -> Option<crate::form::FormConfirmationReceipt> {
+        let mut confirmations = self.confirmations.lock().unwrap();
+        let index = confirmations
+            .iter()
+            .position(|(existing, _)| existing == id)?;
+        confirmations.remove(index).map(|(_, receipt)| receipt)
     }
 
     // No TUI attached → auto-cancel so flows don't hang forever. Otherwise

@@ -1,5 +1,7 @@
 use crate::error::RuntimeError;
-use crate::form::{CompositeForm, FormAnswer, FormKind, FormQuestion, PendingForm};
+use crate::form::{
+    CompositeForm, FormAnswer, FormConfirmationBinding, FormKind, FormQuestion, PendingForm,
+};
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -33,6 +35,9 @@ impl Tool for FormAsk {
              If `questions` is present, it takes precedence over the single-question fields.
              The UI keeps all answers as a draft and asks for one final Yes/No confirmation;
              do not make multiple calls expecting the UI to merge them.
+             A spec design approval must include `confirmation: { action:\"spec_review\",
+             feature, design_revision }`. Runtime replaces its prompt with canonical revision
+             wording and returns a session-local, single-use `confirmation_id`.
              \
              Returns a struct { kind, ... } where kind is one of \
              confirmed | selected | multi_selected | text_entered | cancelled.",
@@ -50,6 +55,16 @@ impl Tool for FormAsk {
                 "max": {"type": "integer"},
                 "placeholder": {"type": "string"},
                 "multiline": {"type": "boolean"},
+                "confirmation": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["spec_review"]},
+                        "feature": {"type": "string"},
+                        "design_revision": {"type": "string"}
+                    },
+                    "required": ["action", "feature", "design_revision"],
+                    "additionalProperties": false
+                },
                 "questions": {
                     "type": "array",
                     "minItems": 1,
@@ -74,13 +89,42 @@ impl Tool for FormAsk {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (form, kind, composite) = parse_form_request(&args)?;
+            let (mut form, mut kind, composite) = parse_form_request(&args)?;
+            let confirmation = parse_confirmation_binding(&args)?;
+            if let Some(FormConfirmationBinding::SpecReview {
+                feature,
+                design_revision,
+            }) = confirmation.as_ref()
+            {
+                if composite {
+                    return Err(RuntimeError::ToolFailed(
+                        "form.ask: bound confirmation does not support `questions`".into(),
+                    ));
+                }
+                let prompt = format!(
+                    "Approve design revision `{design_revision}` for `{feature}` and allow implementation?"
+                );
+                kind = FormKind::Confirm {
+                    prompt: prompt.clone(),
+                };
+                form.questions[0].kind = FormKind::Confirm { prompt };
+            }
+            let confirmation_forms = if confirmation.is_some() {
+                Some(ctx.forms.clone().ok_or_else(|| {
+                    RuntimeError::ToolFailed(
+                        "form.ask: bound confirmation requires a session FormRegistry".into(),
+                    )
+                })?)
+            } else {
+                None
+            };
             // Daemon clients drive the modal over RPC via the prompt
             // resolver; the in-process TUI subscribes to FormRegistry.
             // Pick whichever the runtime host wired up, prefer the
             // resolver so daemon overrides an accidental fallback.
             if let Some(resolver) = ctx.prompt_resolver.clone() {
                 let id = crate::rendezvous::PromptId::now();
+                let confirmation_id = id.0.to_string();
                 let payload = if composite {
                     serde_json::to_value(&form).unwrap_or(serde_json::Value::Null)
                 } else {
@@ -98,9 +142,20 @@ impl Tool for FormAsk {
                     )
                     .await?
                 else {
+                    let submission = crate::form::FormSubmission::Rejected;
+                    if let (Some(forms), Some(binding)) =
+                        (confirmation_forms.as_ref(), confirmation.clone())
+                    {
+                        forms.record_confirmation(
+                            confirmation_id.clone(),
+                            binding,
+                            submission.clone(),
+                        );
+                    }
                     return Ok(submission_to_value(
-                        &crate::form::FormSubmission::Rejected,
+                        &submission,
                         composite,
+                        confirmation.as_ref().map(|_| confirmation_id.as_str()),
                     ));
                 };
                 let submission = serde_json::from_value::<crate::form::FormSubmission>(answer_json)
@@ -109,7 +164,16 @@ impl Tool for FormAsk {
                             "form.ask: invalid prompt submission: {error}"
                         ))
                     })?;
-                return Ok(submission_to_value(&submission, composite));
+                if let (Some(forms), Some(binding)) =
+                    (confirmation_forms.as_ref(), confirmation.clone())
+                {
+                    forms.record_confirmation(confirmation_id.clone(), binding, submission.clone());
+                }
+                return Ok(submission_to_value(
+                    &submission,
+                    composite,
+                    confirmation.as_ref().map(|_| confirmation_id.as_str()),
+                ));
             }
             let forms = ctx.forms.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed(
@@ -131,13 +195,18 @@ impl Tool for FormAsk {
             let rx = forms.request(pending);
             let submission = await_local_submission(
                 forms,
-                form_id,
+                form_id.clone(),
                 rx,
                 std::time::Duration::from_secs(300),
                 &ctx.cancel,
             )
             .await;
-            Ok(submission_to_value(&submission, composite))
+            if let Some(binding) = confirmation {
+                forms.record_confirmation(form_id.clone(), binding, submission.clone());
+                Ok(submission_to_value(&submission, composite, Some(&form_id)))
+            } else {
+                Ok(submission_to_value(&submission, composite, None))
+            }
         })
     }
 }
@@ -177,8 +246,12 @@ async fn await_local_submission(
     }
 }
 
-fn submission_to_value(submission: &crate::form::FormSubmission, composite: bool) -> Value {
-    match submission {
+fn submission_to_value(
+    submission: &crate::form::FormSubmission,
+    composite: bool,
+    confirmation_id: Option<&str>,
+) -> Value {
+    let mut value = match submission {
         crate::form::FormSubmission::Submitted { answers } if composite => Value::Struct(vec![
             ("kind".into(), Value::Str("submitted".into())),
             (
@@ -194,6 +267,47 @@ fn submission_to_value(submission: &crate::form::FormSubmission, composite: bool
         crate::form::FormSubmission::Rejected => {
             Value::Struct(vec![("kind".into(), Value::Str("cancelled".into()))])
         }
+    };
+    if let (Value::Struct(fields), Some(id)) = (&mut value, confirmation_id) {
+        fields.push(("confirmation_id".into(), Value::Str(id.to_string())));
+    }
+    value
+}
+
+fn parse_confirmation_binding(
+    args: &ToolArgs,
+) -> Result<Option<FormConfirmationBinding>, RuntimeError> {
+    let Some(value) = args.named("confirmation") else {
+        return Ok(None);
+    };
+    if matches!(value, Value::Unit) {
+        return Ok(None);
+    }
+    let Value::Struct(fields) = value else {
+        return Err(RuntimeError::TypeMismatch {
+            expected: "struct {action, feature, design_revision}".into(),
+            actual: value.kind_name().into(),
+        });
+    };
+    let string = |name: &str| -> Result<String, RuntimeError> {
+        match fields.iter().find(|(key, _)| key == name) {
+            Some((_, Value::Str(value))) if !value.is_empty() => Ok(value.clone()),
+            Some((_, value)) => Err(RuntimeError::TypeMismatch {
+                expected: "non-empty string".into(),
+                actual: value.kind_name().into(),
+            }),
+            None => Err(RuntimeError::MissingArg(format!("confirmation.{name}"))),
+        }
+    };
+    let action = string("action")?;
+    match action.as_str() {
+        "spec_review" => Ok(Some(FormConfirmationBinding::SpecReview {
+            feature: string("feature")?,
+            design_revision: string("design_revision")?,
+        })),
+        other => Err(RuntimeError::ToolFailed(format!(
+            "form.ask: unknown confirmation action `{other}`"
+        ))),
     }
 }
 
@@ -652,5 +766,113 @@ mod tests {
         let v = answer_to_value(&FormAnswer::Cancelled);
         assert!(matches!(v.field("kind"), Some(Value::Str(s)) if s == "cancelled"));
         assert!(v.field("value").is_none());
+    }
+
+    #[tokio::test]
+    async fn bound_spec_confirmation_uses_canonical_prompt_and_returns_receipt() {
+        let forms = std::sync::Arc::new(crate::session::FormRegistry::new());
+        let _subscriber = forms.subscribe();
+        let mut ctx = ToolCtx::default().with_forms(forms.clone());
+        ctx.flow_run_id = Some(crate::event::FlowRunId::now());
+        ctx.current_node_id = Some("form-node".into());
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                named("kind", Value::Str("confirm".into())),
+                named("prompt", Value::Str("Misleading prompt".into())),
+                named(
+                    "confirmation",
+                    Value::Struct(vec![
+                        ("action".into(), Value::Str("spec_review".into())),
+                        ("feature".into(), Value::Str("copy-selection".into())),
+                        ("design_revision".into(), Value::Str("rev-1".into())),
+                    ]),
+                ),
+            ],
+        };
+        let ask = FormAsk;
+        let call = ask.call(args, &ctx);
+        let answer = async {
+            tokio::task::yield_now().await;
+            let pending = forms
+                .list_pending()
+                .into_iter()
+                .next()
+                .expect("bound form must become pending");
+            assert!(matches!(
+                &pending.kind,
+                FormKind::Confirm { prompt }
+                    if prompt == "Approve design revision `rev-1` for `copy-selection` and allow implementation?"
+            ));
+            assert!(forms.submit(
+                &pending.form_id,
+                crate::form::FormSubmission::Submitted {
+                    answers: vec![FormAnswer::Confirmed { value: true }],
+                },
+            ));
+        };
+        let (result, ()) = tokio::join!(call, answer);
+        let result = result.unwrap();
+        let confirmation_id = match result.field("confirmation_id") {
+            Some(Value::Str(id)) => id.clone(),
+            other => panic!("expected confirmation id, got {other:?}"),
+        };
+        let receipt = forms
+            .consume_confirmation(&confirmation_id)
+            .expect("receipt must be recorded");
+        assert_eq!(
+            receipt.binding,
+            FormConfirmationBinding::SpecReview {
+                feature: "copy-selection".into(),
+                design_revision: "rev-1".into(),
+            }
+        );
+        assert_eq!(
+            receipt.submission,
+            crate::form::FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            }
+        );
+        assert!(forms.consume_confirmation(&confirmation_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn resolver_form_records_confirmation_in_session_registry() {
+        let forms = std::sync::Arc::new(crate::session::FormRegistry::new());
+        let resolver: std::sync::Arc<dyn crate::rendezvous::PromptResolver> =
+            std::sync::Arc::new(crate::rendezvous::AutoResolveResolver {
+                default: serde_json::to_value(crate::form::FormSubmission::Submitted {
+                    answers: vec![FormAnswer::Confirmed { value: true }],
+                })
+                .unwrap(),
+            });
+        let mut ctx = ToolCtx::default().with_forms(forms.clone());
+        ctx.prompt_resolver = Some(resolver);
+        let result = FormAsk
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        named("kind", Value::Str("confirm".into())),
+                        named("prompt", Value::Str("ignored".into())),
+                        named(
+                            "confirmation",
+                            Value::Struct(vec![
+                                ("action".into(), Value::Str("spec_review".into())),
+                                ("feature".into(), Value::Str("copy-selection".into())),
+                                ("design_revision".into(), Value::Str("rev-1".into())),
+                            ]),
+                        ),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let confirmation_id = match result.field("confirmation_id") {
+            Some(Value::Str(id)) => id,
+            other => panic!("expected confirmation id, got {other:?}"),
+        };
+        assert!(forms.consume_confirmation(confirmation_id).is_some());
     }
 }

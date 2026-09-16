@@ -129,10 +129,24 @@ impl DeferredFormAnswer {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FormSubmission {
     Submitted { answers: Vec<FormAnswer> },
     Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormConfirmationBinding {
+    SpecReview {
+        feature: String,
+        design_revision: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormConfirmationReceipt {
+    pub binding: FormConfirmationBinding,
+    pub submission: FormSubmission,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +161,7 @@ pub struct PendingForm {
 
 // FormAnswer stays tagged so a `Cancelled` response is a first-class
 // choice, not a magic error code. DSL code inspects `answer.kind` first.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FormAnswer {
     Confirmed {

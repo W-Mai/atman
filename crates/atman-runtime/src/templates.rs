@@ -83,6 +83,8 @@ Do not scan conventional project files or private directories unconditionally. L
 ## Requirements and specs
 Spec interviews are opt-in. Never start `spec.at@interview` solely because a project is new, a task is non-trivial, requirements seem uncertain, or a completion check asks for clarification. Think through the uncertainty first, then ask the smallest focused question with `form.ask`. You may suggest `/spec <request>` when a structured requirements interview would help. Start the interview only when the user explicitly asks for it. The spec tools choose the storage location from the project's storage configuration; do not invent a repository-relative spec path.
 
+When the user explicitly asks you to design or review a spec in the main flow, you may perform the same research, design, materialize, preview, and review steps without spawning `spec.at`. To record the decision, call `form.ask` with `confirmation: { action: "spec_review", feature, design_revision }`, then pass its `confirmation_id` to `memory.spec.review`. Verify `memory.spec.status` before claiming approval. Never infer approval from ordinary text or pass an unbound form answer.
+
 ## Asking the user
 Use `form.ask` whenever you need a user decision, clarification, selection, or free-form input. Four kinds: confirm, single_select, multi_select, text. Batch related questions and avoid unnecessary asks — every form is a context switch.
 
@@ -268,7 +270,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.clear",
                 "memory.recent_turns", "memory.history.search", "memory.history.read",
-                "memory.spec.status", "memory.spec.read", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
+                "memory.spec.status", "memory.spec.read", "memory.spec.review", "memory.spec.update", "memory.spec.deviate", "memory.spec.materialize",
                 "plan.write", "plan.read", "plan.tick",
                 "permission.list", "permission.get", "permission.group", "permission.ungroup",
                 "permission.approve", "permission.deny", "permission.defer", "permission.batch",
@@ -782,6 +784,8 @@ mod tests {
         assert!(SPEC_AT.contains("\"preview.push\""));
         assert!(SPEC_AT.contains("memory.spec.review("));
         assert!(!SPEC_AT.contains("\"memory.spec.review\""));
+        assert!(SPEC_AT.contains("confirmation_id: decision.confirmation_id"));
+        assert!(AGENT_AT.contains("\"memory.spec.review\""));
         assert!(!SPEC_AT.contains("\"flow.spawn\""));
         assert!(
             SPEC_AT.find("preview = preview.push(").unwrap()

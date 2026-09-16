@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- **Revision-bound spec approval** — Main-agent and synchronous spec reviews share session-local, single-use confirmation receipts. Approval and rejection require a real bound form response, cancellation leaves the design pending, and stale or mismatched revisions require another confirmation.
+
 ## [1.12.2] — 2026-09-16
 
 ### 🐛 Bug Fixes

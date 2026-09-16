@@ -130,23 +130,23 @@ flow interview(user_prompt: string, feature: string = "project-intake", trigger:
             kind: "confirm",
             prompt: "Review the design preview before deciding:\n" + preview.url
                 + "\n\nApprove this exact design revision for implementation?",
-        )
-        when decision.kind == "cancelled" {
-            return "pending"
-        }
-        when decision.value == true {
-            recorded = memory.spec.review(
+            confirmation: {
+                action: "spec_review",
                 feature: feature,
                 design_revision: current.design_revision,
-                approved: true,
-            )
-            return "approved"
-        }
-        rejected = memory.spec.review(
+            },
+        )
+        recorded = memory.spec.review(
             feature: feature,
             design_revision: current.design_revision,
-            approved: false,
+            confirmation_id: decision.confirmation_id,
         )
+        when recorded.decision == "cancelled" {
+            return "pending"
+        }
+        when recorded.decision == "approved" {
+            return "approved"
+        }
         feedback = form.ask(
             kind: "text",
             prompt: "What should change in the design? You can give concrete examples or constraints.",

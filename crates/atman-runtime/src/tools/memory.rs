@@ -967,7 +967,9 @@ impl Tool for MemorySpecReview {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Record the user's review of the exact current design revision.")
+        Some(
+            "Consume a single-use confirmation from form.ask and record the user's review of the exact current design revision. First call form.ask with confirmation.action = spec_review, then pass its confirmation_id here. Never infer approval from ordinary text.",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -976,26 +978,77 @@ impl Tool for MemorySpecReview {
             "properties": {
                 "feature": {"type": "string"},
                 "design_revision": {"type": "string"},
-                "approved": {"type": "boolean"}
+                "confirmation_id": {"type": "string"}
             },
-            "required": ["feature", "design_revision", "approved"]
+            "required": ["feature", "design_revision", "confirmation_id"]
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let feature = required_string(&args, "feature")?;
             let revision = required_string(&args, "design_revision")?;
-            let approved = match args.named("approved") {
-                Some(Value::Bool(value)) => *value,
-                _ => return Err(crate::error::RuntimeError::MissingArg("approved".into())),
+            let confirmation_id = required_string(&args, "confirmation_id")?;
+            let forms = ctx.forms.as_ref().ok_or_else(|| {
+                crate::error::RuntimeError::ToolFailed(
+                    "spec.review: no session FormRegistry attached".into(),
+                )
+            })?;
+            let receipt = forms
+                .consume_confirmation(&confirmation_id)
+                .ok_or_else(|| {
+                    crate::error::RuntimeError::ToolFailed(
+                        "spec.review: confirmation is missing, expired, or already used".into(),
+                    )
+                })?;
+            match receipt.binding {
+                crate::form::FormConfirmationBinding::SpecReview {
+                    feature: bound_feature,
+                    design_revision: bound_revision,
+                } if bound_feature == feature && bound_revision == revision => {}
+                _ => {
+                    return Err(crate::error::RuntimeError::ToolFailed(
+                        "spec.review: confirmation does not match feature and design revision"
+                            .into(),
+                    ));
+                }
+            }
+            let approved = match receipt.submission {
+                crate::form::FormSubmission::Submitted { answers } => match answers.as_slice() {
+                    [crate::form::FormAnswer::Confirmed { value }] => Some(*value),
+                    [crate::form::FormAnswer::Cancelled] => None,
+                    _ => {
+                        return Err(crate::error::RuntimeError::ToolFailed(
+                            "spec.review: confirmation receipt is not a single confirm answer"
+                                .into(),
+                        ));
+                    }
+                },
+                crate::form::FormSubmission::Rejected => None,
             };
-            let record = self.store.review(&feature, &revision, approved).await?;
-            Ok(Value::Struct(vec![
-                ("feature".into(), Value::Str(record.feature)),
-                ("design_revision".into(), Value::Str(record.design_revision)),
-                ("approved".into(), Value::Bool(record.approved)),
-            ]))
+            if let Some(approved) = approved {
+                let record = self.store.review(&feature, &revision, approved).await?;
+                Ok(Value::Struct(vec![
+                    ("feature".into(), Value::Str(record.feature)),
+                    ("design_revision".into(), Value::Str(record.design_revision)),
+                    (
+                        "decision".into(),
+                        Value::Str(if record.approved {
+                            "approved".into()
+                        } else {
+                            "rejected".into()
+                        }),
+                    ),
+                    ("approved".into(), Value::Bool(record.approved)),
+                ]))
+            } else {
+                Ok(Value::Struct(vec![
+                    ("feature".into(), Value::Str(feature)),
+                    ("design_revision".into(), Value::Str(revision)),
+                    ("decision".into(), Value::Str("cancelled".into())),
+                    ("approved".into(), Value::Unit),
+                ]))
+            }
         })
     }
 }
@@ -1460,5 +1513,171 @@ fn required_string(args: &ToolArgs, name: &str) -> Result<String, RuntimeError> 
             actual: other.kind_name().into(),
         }),
         None => Err(RuntimeError::MissingArg(name.into())),
+    }
+}
+
+#[cfg(test)]
+mod spec_review_tests {
+    use super::*;
+    use crate::form::{FormAnswer, FormConfirmationBinding, FormSubmission};
+
+    async fn prepared_store() -> (Arc<SpecStore>, tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SpecStore::new(dir.path().to_path_buf()));
+        store
+            .update("copy-selection", "research", "facts".into())
+            .await
+            .unwrap();
+        store
+            .update("copy-selection", "design", "design".into())
+            .await
+            .unwrap();
+        let materialized = store
+            .materialize_phase("copy-selection", Some("design"), Some(""))
+            .await
+            .unwrap();
+        (store, dir, materialized.revision)
+    }
+
+    fn args(revision: &str, confirmation_id: &str) -> ToolArgs {
+        ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("feature".into(), Value::Str("copy-selection".into())),
+                ("design_revision".into(), Value::Str(revision.to_string())),
+                (
+                    "confirmation_id".into(),
+                    Value::Str(confirmation_id.to_string()),
+                ),
+            ],
+        }
+    }
+
+    fn record(
+        forms: &crate::session::FormRegistry,
+        id: &str,
+        revision: &str,
+        submission: FormSubmission,
+    ) {
+        forms.record_confirmation(
+            id.into(),
+            FormConfirmationBinding::SpecReview {
+                feature: "copy-selection".into(),
+                design_revision: revision.into(),
+            },
+            submission,
+        );
+    }
+
+    #[tokio::test]
+    async fn review_consumes_real_confirmation_once() {
+        let (store, _dir, revision) = prepared_store().await;
+        let forms = Arc::new(crate::session::FormRegistry::new());
+        record(
+            &forms,
+            "approved",
+            &revision,
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            },
+        );
+        let ctx = ToolCtx::default().with_forms(forms);
+        let tool = MemorySpecReview {
+            store: store.clone(),
+        };
+        let result = tool.call(args(&revision, "approved"), &ctx).await.unwrap();
+        assert!(matches!(result.field("decision"), Some(Value::Str(value)) if value == "approved"));
+        assert_eq!(
+            store
+                .status("copy-selection")
+                .await
+                .unwrap()
+                .approved_design_revision,
+            Some(revision.clone())
+        );
+        let error = tool
+            .call(args(&revision, "approved"), &ctx)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already used"));
+    }
+
+    #[tokio::test]
+    async fn review_distinguishes_rejection_from_cancellation() {
+        let (store, _dir, revision) = prepared_store().await;
+        let forms = Arc::new(crate::session::FormRegistry::new());
+        record(
+            &forms,
+            "rejected",
+            &revision,
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: false }],
+            },
+        );
+        record(&forms, "cancelled", &revision, FormSubmission::Rejected);
+        let ctx = ToolCtx::default().with_forms(forms);
+        let tool = MemorySpecReview {
+            store: store.clone(),
+        };
+        let rejected = tool.call(args(&revision, "rejected"), &ctx).await.unwrap();
+        assert!(
+            matches!(rejected.field("decision"), Some(Value::Str(value)) if value == "rejected")
+        );
+        let cancelled = tool.call(args(&revision, "cancelled"), &ctx).await.unwrap();
+        assert!(
+            matches!(cancelled.field("decision"), Some(Value::Str(value)) if value == "cancelled")
+        );
+        assert_eq!(
+            store
+                .status("copy-selection")
+                .await
+                .unwrap()
+                .approved_design_revision,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_confirmation_is_consumed_and_cannot_be_replayed() {
+        let (store, _dir, first) = prepared_store().await;
+        let forms = Arc::new(crate::session::FormRegistry::new());
+        forms.record_confirmation(
+            "mismatch".into(),
+            FormConfirmationBinding::SpecReview {
+                feature: "different-feature".into(),
+                design_revision: first.clone(),
+            },
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            },
+        );
+        record(
+            &forms,
+            "stale",
+            &first,
+            FormSubmission::Submitted {
+                answers: vec![FormAnswer::Confirmed { value: true }],
+            },
+        );
+        let ctx = ToolCtx::default().with_forms(forms);
+        let tool = MemorySpecReview {
+            store: store.clone(),
+        };
+        let mismatch = tool.call(args(&first, "mismatch"), &ctx).await.unwrap_err();
+        assert!(mismatch.to_string().contains("does not match"));
+        let mismatch_replay = tool.call(args(&first, "mismatch"), &ctx).await.unwrap_err();
+        assert!(mismatch_replay.to_string().contains("already used"));
+        store
+            .update("copy-selection", "design", "changed".into())
+            .await
+            .unwrap();
+        store
+            .materialize_phase("copy-selection", Some("design"), Some(&first))
+            .await
+            .unwrap();
+        let error = tool.call(args(&first, "stale"), &ctx).await.unwrap_err();
+        assert!(error.to_string().contains("stale"));
+        let replay = tool.call(args(&first, "stale"), &ctx).await.unwrap_err();
+        assert!(replay.to_string().contains("already used"));
     }
 }
