@@ -279,6 +279,12 @@ impl Tool for PermissionBatch {
     fn invocation_plane(&self) -> InvocationPlane {
         control_tool_defaults().1
     }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Apply one action to permission requests. When several targets are supplied, the \
+             priority is request_ids, group_id, descendant_run_id, then selector.",
+        )
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type":"object",
@@ -294,12 +300,6 @@ impl Tool for PermissionBatch {
                 "reason":{"type":"string"}
             },
             "required":["action"],
-            "oneOf":[
-                {"required":["request_ids"]},
-                {"required":["group_id"]},
-                {"required":["descendant_run_id"]},
-                {"required":["selector"]}
-            ],
             "additionalProperties":false
         })
     }
@@ -320,19 +320,14 @@ impl Tool for PermissionBatch {
                     ));
                 }
             }
-            let selector_count = [
-                args.named("request_ids").is_some(),
-                args.named("group_id").is_some(),
-                args.named("descendant_run_id").is_some(),
-                args.named("selector").is_some(),
-            ]
-            .into_iter()
-            .filter(|present| *present)
-            .count();
-            if selector_count != 1 {
+            if args.named("request_ids").is_none()
+                && args.named("group_id").is_none()
+                && args.named("descendant_run_id").is_none()
+                && args.named("selector").is_none()
+            {
                 return Err(failed(
                     self.name(),
-                    "exactly one of request_ids, group_id, descendant_run_id, or selector is required",
+                    "one of request_ids, group_id, descendant_run_id, or selector is required",
                 ));
             }
             let selector = if args.named("request_ids").is_some() {
@@ -504,13 +499,16 @@ impl Tool for PermissionGet {
         control_tool_defaults().1
     }
     fn description(&self) -> Option<&str> {
-        Some("Inspect one visible permission request or one group owned by this flow.")
+        Some(
+            "Inspect one visible permission request or one group owned by this flow. When both \
+             IDs are supplied, request_id takes precedence.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{
             "request_id":{"type":"string"},
             "group_id":{"type":"string"}
-        },"oneOf":[{"required":["request_id"]},{"required":["group_id"]}]})
+        }})
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
@@ -916,11 +914,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_rejects_a_non_string_request_id_without_falling_back_to_group() {
+    async fn get_prioritizes_request_id_over_group_id() {
         let (ctx, _broker, _requester) = managed_ctx();
         let args = ToolArgs {
             positional: Vec::new(),
-            named: vec![("request_id".into(), Value::Int(7))],
+            named: vec![
+                ("request_id".into(), Value::Int(7)),
+                ("group_id".into(), Value::Str("ignored".into())),
+            ],
         };
 
         let error = PermissionGet.call(args, &ctx).await.unwrap_err();
@@ -928,6 +929,39 @@ mod tests {
             error,
             RuntimeError::TypeMismatch { expected, actual }
                 if expected == "string" && actual == "int"
+        ));
+    }
+
+    #[test]
+    fn schemas_avoid_top_level_union_keywords() {
+        for schema in [PermissionGet.input_schema(), PermissionBatch.input_schema()] {
+            for keyword in ["oneOf", "allOf", "anyOf"] {
+                assert!(schema.get(keyword).is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_prefers_explicit_request_ids_over_other_targets() {
+        let (ctx, broker, requester) = managed_ctx();
+        let pending = submit_pending(&broker, &requester);
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                (
+                    "request_ids".into(),
+                    Value::List(vec![Value::Str(pending.request.request_id.to_string())]),
+                ),
+                ("group_id".into(), Value::Str("not-a-group-id".into())),
+                ("action".into(), Value::Str("approve".into())),
+            ],
+        };
+
+        PermissionBatch.call(args, &ctx).await.unwrap();
+
+        assert!(matches!(
+            broker.get(&pending.request.request_id).unwrap().state,
+            PermissionRequestState::Approved { .. }
         ));
     }
 

@@ -30,6 +30,7 @@ impl Tool for FormAsk {
              \
              For several independent answers, make one `form.ask` call with a `questions`
              list. Each question has an `id`, `kind`, and the fields for that kind.
+             If `questions` is present, it takes precedence over the single-question fields.
              The UI keeps all answers as a draft and asks for one final Yes/No confirmation;
              do not make multiple calls expecting the UI to merge them.
              \
@@ -67,11 +68,7 @@ impl Tool for FormAsk {
                         "required": ["id", "kind", "prompt"]
                     }
                 }
-            },
-            "oneOf": [
-                {"required": ["kind", "prompt"], "not": {"required": ["questions"]}},
-                {"required": ["questions"], "not": {"anyOf": [{"required": ["kind"]}, {"required": ["prompt"]}]}}
-            ]
+            }
         })
     }
 
@@ -202,7 +199,7 @@ fn submission_to_value(submission: &crate::form::FormSubmission, composite: bool
 
 fn parse_form_request(args: &ToolArgs) -> Result<(CompositeForm, FormKind, bool), RuntimeError> {
     match (args.named("questions"), args.named("kind")) {
-        (Some(Value::List(items)), None) => {
+        (Some(Value::List(items)), _) => {
             if items.is_empty() {
                 return Err(RuntimeError::ToolFailed(
                     "form.ask: `questions` must be non-empty".into(),
@@ -498,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_composite_questions() {
+    fn composite_questions_take_priority_over_single_question_fields() {
         let question = |id: &str, prompt: &str| {
             Value::Struct(vec![
                 ("id".into(), Value::Str(id.into())),
@@ -508,10 +505,14 @@ mod tests {
         };
         let args = ToolArgs {
             positional: vec![],
-            named: vec![(
-                "questions".into(),
-                Value::List(vec![question("name", "Name?"), question("team", "Team?")]),
-            )],
+            named: vec![
+                (
+                    "questions".into(),
+                    Value::List(vec![question("name", "Name?"), question("team", "Team?")]),
+                ),
+                named("kind", Value::Str("confirm".into())),
+                named("prompt", Value::Str("Ignore this?".into())),
+            ],
         };
         let (form, first, composite) = parse_form_request(&args).unwrap();
         assert!(composite);
@@ -519,6 +520,14 @@ mod tests {
         assert_eq!(form.questions[0].id, "name");
         assert_eq!(form.questions[1].id, "team");
         assert!(matches!(first, FormKind::Text { .. }));
+    }
+
+    #[test]
+    fn schema_avoids_top_level_union_keywords() {
+        let schema = FormAsk.input_schema();
+        for keyword in ["oneOf", "allOf", "anyOf"] {
+            assert!(schema.get(keyword).is_none());
+        }
     }
 
     #[test]
