@@ -69,6 +69,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('l'), true, _, _) => KeyAction::OpenProjectHub,
         (Char('k'), true, _, _) => KeyAction::SearchHistory,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
+        (Char('h' | 'H'), true, _, _) => KeyAction::Backspace,
         (Char('v'), true, _, _) | (Char('v'), false, _, true) => KeyAction::PasteImage,
         (Char('t'), true, _, _) => KeyAction::CycleReasoning,
         (Delete, false, _, true) => KeyAction::RemoveAttachment,
@@ -130,6 +131,21 @@ mod tests {
         assert_eq!(
             map(ke(KeyCode::Enter, KeyModifiers::NONE)),
             KeyAction::Submit
+        );
+    }
+
+    #[test]
+    fn ctrl_h_maps_to_backspace_for_remote_terminals() {
+        assert_eq!(
+            map(ke(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            KeyAction::Backspace
+        );
+        assert_eq!(
+            map(ke(
+                KeyCode::Char('H'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            KeyAction::Backspace
         );
     }
 

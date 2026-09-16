@@ -923,6 +923,7 @@ pub(crate) fn handle_key(
         && matches!(action, KeyAction::Submit)
         && !editor.buf().trim().is_empty()
         && app.startup_intro.is_none()
+        && !app.popup.is_open()
     {
         let (version, recent) = match app.items.first() {
             Some(crate::app::OutputItem::StartupCard {
@@ -959,7 +960,7 @@ pub(crate) fn handle_key(
                 app.popup.next();
                 return;
             }
-            KeyAction::Tab => {
+            KeyAction::Tab | KeyAction::Submit => {
                 if let Some(item) = app.popup.accept() {
                     editor.replace_with(&item.insert);
                     if let Some(session) = app.session.as_ref() {
@@ -1730,6 +1731,32 @@ mod tests {
         press_startup_key(&mut state, &mut editor, KeyAction::Char('3'), None);
         press_startup_key(&mut state, &mut editor, KeyAction::HistoryDown, None);
         assert_eq!(state.app.startup_selected_session, 0);
+    }
+
+    #[test]
+    fn enter_accepts_colon_and_slash_completions_without_submitting() {
+        for (partial, completed, flows) in [
+            (":he", ":help ", Vec::new()),
+            (
+                "/re",
+                "/review ",
+                vec![("review".into(), "review code".into())],
+            ),
+        ] {
+            let app = AppState::new("session".into(), None).with_flow_names(flows);
+            let mut state = crate::UiState::new(app);
+            let mut editor = InputEditor::default();
+            editor.replace_with(partial);
+            state.app.refresh_popup(editor.buf());
+            assert!(state.app.popup.is_open());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            press_startup_key(&mut state, &mut editor, KeyAction::Submit, Some(&tx));
+
+            assert_eq!(editor.buf(), completed);
+            assert!(!state.app.popup.is_open());
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[test]

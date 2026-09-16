@@ -6,6 +6,11 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- **Remote terminal Backspace** — `Ctrl+H` key events emitted by terminals such as MobaXterm delete the previous input character.
+- **Command completion submission** — `Enter` and `Tab` accept the selected `:`, `/`, `!`, or `@` completion; a subsequent `Enter` submits the completed input.
+
 ## [1.12.1] — 2026-09-15
 
 ### ✨ Features

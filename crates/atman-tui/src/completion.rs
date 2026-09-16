@@ -224,6 +224,7 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .title(" ↑↓ SELECT · ENTER/TAB COMPLETE ")
                 .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
         )
         .highlight_style(
