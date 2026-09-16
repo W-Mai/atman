@@ -178,6 +178,14 @@ impl FormModal {
         true
     }
 
+    fn draft_focus(&self, index: usize) -> usize {
+        match self.draft_answers.get(index).and_then(Option::as_ref) {
+            Some(FormAnswer::Selected { index, .. }) => *index,
+            Some(FormAnswer::Confirmed { value }) => usize::from(!value),
+            _ => 0,
+        }
+    }
+
     pub fn move_question(&mut self, delta: isize) {
         if self.phase != FormPhase::Editing || self.questions().is_empty() {
             return;
@@ -187,13 +195,7 @@ impl FormModal {
         }
         let len = self.questions().len() as isize;
         self.current_index = (self.current_index as isize + delta).rem_euclid(len) as usize;
-        self.confirm_focus = self.draft_answers[self.current_index]
-            .as_ref()
-            .and_then(|a| match a {
-                FormAnswer::Selected { index, .. } => Some(*index),
-                _ => None,
-            })
-            .unwrap_or(0);
+        self.confirm_focus = self.draft_focus(self.current_index);
         self.reset_question_state();
         self.scroll = 0;
         self.follow_cursor = true;
@@ -364,7 +366,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             },
         );
         let hint = if self.phase == FormPhase::FinalConfirm {
-            " ←→ · choose  enter/y · confirm  n/esc · reject "
+            " ↑↓ · choose  enter/y · confirm  n/esc · reject  shift+tab · back "
         } else {
             hint_for(&kind)
         };
@@ -403,7 +405,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         let mut text_height = None;
         if self.phase == FormPhase::FinalConfirm {
             self.yes_rect = Some(Rect::new(inner.x + 2, inner.y + 1, 7, 1));
-            self.no_rect = Some(Rect::new(inner.x + 12, inner.y + 1, 6, 1));
+            self.no_rect = Some(Rect::new(inner.x + 2, inner.y + 2, 6, 1));
             let yes = if self.confirm_focus == 0 {
                 "[ Yes ]"
             } else {
@@ -414,12 +416,13 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             } else {
                 "  No  "
             };
-            lines.push(Line::from(format!("  {yes}   {no}")));
+            lines.push(Line::from(format!("  {yes}")));
+            lines.push(Line::from(format!("  {no}")));
         } else {
             match &kind {
                 FormKind::Confirm { .. } => {
                     self.yes_rect = Some(Rect::new(inner.x + 2, inner.y + 2, 7, 1));
-                    self.no_rect = Some(Rect::new(inner.x + 12, inner.y + 2, 6, 1));
+                    self.no_rect = Some(Rect::new(inner.x + 2, inner.y + 3, 6, 1));
                     let yes = if self.confirm_focus == 0 {
                         "[ Yes ]"
                     } else {
@@ -430,7 +433,8 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                     } else {
                         "  No  "
                     };
-                    lines.push(Line::from(format!("  {yes}   {no}")));
+                    lines.push(Line::from(format!("  {yes}")));
+                    lines.push(Line::from(format!("  {no}")));
                 }
                 FormKind::SingleSelect { options, .. } | FormKind::MultiSelect { options, .. } => {
                     let is_multi =
@@ -558,6 +562,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             KeyAction::BackTab if self.phase == FormPhase::FinalConfirm => {
                 self.phase = FormPhase::Editing;
                 self.current_index = self.questions().len().saturating_sub(1);
+                self.confirm_focus = self.draft_focus(self.current_index);
                 self.reset_question_state();
                 self.last_input_rect = None;
                 self.scroll = 0;
@@ -568,11 +573,15 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 self.move_question(-1);
                 None
             }
-            KeyAction::CursorLeft if self.phase == FormPhase::FinalConfirm => {
+            KeyAction::HistoryUp | KeyAction::Char('k')
+                if self.phase == FormPhase::FinalConfirm =>
+            {
                 self.confirm_focus = 0;
                 None
             }
-            KeyAction::CursorRight if self.phase == FormPhase::FinalConfirm => {
+            KeyAction::HistoryDown | KeyAction::Char('j')
+                if self.phase == FormPhase::FinalConfirm =>
+            {
                 self.confirm_focus = 1;
                 None
             }
@@ -608,22 +617,14 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                 self.follow_cursor = true;
                 None
             }
-            KeyAction::HistoryUp if self.phase == FormPhase::Editing => {
-                self.move_question(-1);
-                None
-            }
-            KeyAction::HistoryDown if self.phase == FormPhase::Editing => {
-                self.move_question(1);
-                None
-            }
-            KeyAction::CursorLeft
+            KeyAction::HistoryUp
                 if self.phase == FormPhase::Editing
                     && !matches!(self.current_kind(), Some(FormKind::Text { .. })) =>
             {
                 self.move_cursor(-1);
                 None
             }
-            KeyAction::CursorRight
+            KeyAction::HistoryDown
                 if self.phase == FormPhase::Editing
                     && !matches!(self.current_kind(), Some(FormKind::Text { .. })) =>
             {
@@ -767,13 +768,15 @@ pub fn estimate_height(kind: &FormKind, width: u16) -> u16 {
 
 fn hint_for(kind: &FormKind) -> &'static str {
     match kind {
-        FormKind::Confirm { .. } => " ←→ · choose  ↑↓/tab · next ",
-        FormKind::SingleSelect { .. } => " ←→ · choose  ↑↓/tab · next ",
-        FormKind::MultiSelect { .. } => " ←→ · choose  space · toggle  ↑↓/tab · next ",
+        FormKind::Confirm { .. } => " ↑↓ · choose  tab/shift+tab · question  enter · next ",
+        FormKind::SingleSelect { .. } => " ↑↓ · choose  tab/shift+tab · question  enter · next ",
+        FormKind::MultiSelect { .. } => {
+            " ↑↓ · choose  space · toggle  tab/shift+tab · question  enter · next "
+        }
         FormKind::Text {
             multiline: true, ..
-        } => " ←→↑↓ · edit  tab · next  enter · next ",
-        FormKind::Text { .. } => " ←→ · edit  ↑↓/tab · next  enter · next ",
+        } => " ←→↑↓ · edit  tab/shift+tab · question  enter · next ",
+        FormKind::Text { .. } => " ←→ · edit  tab/shift+tab · question  enter · next ",
     }
 }
 
@@ -828,7 +831,7 @@ mod tests {
         assert_eq!(m.current_index, 1);
     }
     #[test]
-    fn composite_form_arrows_preserve_horizontal_and_vertical_ownership() {
+    fn choices_use_vertical_arrows_and_questions_use_tab() {
         let mut m = FormModal::default();
         m.attach_test(mk_questions(vec![
             FormKind::SingleSelect {
@@ -845,8 +848,10 @@ mod tests {
 
         m.handle_key(&KeyAction::CursorRight, &mut app, None);
         assert_eq!(m.current_index, 0);
-        assert_eq!(m.confirm_focus, 1);
+        assert_eq!(m.confirm_focus, 0);
         m.handle_key(&KeyAction::HistoryDown, &mut app, None);
+        assert_eq!(m.confirm_focus, 1);
+        m.handle_key(&KeyAction::Tab, &mut app, None);
         assert_eq!(m.current_index, 1);
         assert!(matches!(
             &m.draft_answers[0],
@@ -858,6 +863,9 @@ mod tests {
         assert_eq!(m.current_index, 1);
         assert_eq!(m.text_editor.cursor(), 1);
         m.handle_key(&KeyAction::HistoryUp, &mut app, None);
+        assert_eq!(m.current_index, 1);
+        assert_eq!(m.text_editor.cursor(), 1);
+        m.handle_key(&KeyAction::BackTab, &mut app, None);
         assert_eq!(m.current_index, 0);
         assert_eq!(m.confirm_focus, 1);
     }
@@ -893,6 +901,12 @@ mod tests {
             &mut crate::app::AppState::default(),
             None,
         );
+        assert_eq!(m.confirm_focus, 0);
+        m.handle_key(
+            &KeyAction::HistoryDown,
+            &mut crate::app::AppState::default(),
+            None,
+        );
         assert_eq!(m.confirm_focus, 1);
         let out = m.handle_key(
             &KeyAction::Submit,
@@ -910,7 +924,12 @@ mod tests {
         }]));
         m.submit();
         m.handle_key(
-            &KeyAction::CursorLeft,
+            &KeyAction::HistoryDown,
+            &mut crate::app::AppState::default(),
+            None,
+        );
+        m.handle_key(
+            &KeyAction::HistoryUp,
             &mut crate::app::AppState::default(),
             None,
         );
@@ -985,6 +1004,11 @@ mod tests {
             },
         ]));
         m.submit();
+        m.handle_key(
+            &KeyAction::HistoryDown,
+            &mut crate::app::AppState::default(),
+            None,
+        );
         m.submit();
         assert_eq!(m.phase, FormPhase::FinalConfirm);
         assert_eq!(m.current_index, 1);
@@ -997,13 +1021,14 @@ mod tests {
         assert_eq!(m.phase, FormPhase::Editing);
         assert_eq!(m.current_index, 1);
         assert_eq!(m.current_kind().unwrap().prompt(), "last");
+        assert_eq!(m.confirm_focus, 1);
     }
 
     #[test]
-    fn final_confirmation_arrows_choose_submission() {
+    fn final_confirmation_uses_vertical_arrows() {
         for (arrow, expected) in [
             (
-                KeyAction::CursorLeft,
+                KeyAction::HistoryUp,
                 FormSubmission::Submitted {
                     answers: vec![
                         FormAnswer::Confirmed { value: true },
@@ -1011,7 +1036,7 @@ mod tests {
                     ],
                 },
             ),
-            (KeyAction::CursorRight, FormSubmission::Rejected),
+            (KeyAction::HistoryDown, FormSubmission::Rejected),
         ] {
             let mut m = FormModal::default();
             m.attach_test(mk_questions(vec![

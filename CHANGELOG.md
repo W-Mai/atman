@@ -11,6 +11,7 @@ All notable changes to atman are documented in this file.
 - **Remote terminal Backspace** — `Ctrl+H` key events emitted by terminals such as MobaXterm delete the previous input character.
 - **Command completion submission** — `Enter` and `Tab` accept the selected `:`, `/`, `!`, or `@` completion; a subsequent `Enter` submits the completed input.
 - **Portable tool schemas** — Built-in tools avoid top-level JSON Schema unions rejected by stricter model backends and use documented parameter precedence when several targets are supplied.
+- **Form navigation** — `↑`/`↓` select vertically arranged choices, while `Tab` and `Shift+Tab` move between questions without overloading the horizontal arrow keys.
 
 ## [1.12.1] — 2026-09-15
 
