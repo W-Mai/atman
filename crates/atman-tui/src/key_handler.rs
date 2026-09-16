@@ -79,6 +79,46 @@ pub(crate) fn copy_last_tool(app: &mut AppState) {
     }
 }
 
+pub(crate) fn open_project_storage_scope_picker(app: &mut AppState) {
+    let Some(session) = app.session.as_ref() else {
+        app.push_note("project storage is unavailable", app::NoteLevel::Warn);
+        return;
+    };
+    let Some(project_root) = session.meta().and_then(|meta| meta.project_root) else {
+        app.push_note("current session has no project", app::NoteLevel::Warn);
+        return;
+    };
+    let current = match atman_runtime::storage::load_storage_config(Some(&project_root))
+        .scope
+        .unwrap_or_default()
+    {
+        atman_runtime::storage::StorageScope::Global => "global",
+        atman_runtime::storage::StorageScope::Local => "local",
+    };
+    let prompt = format!(
+        "Store Atman data for {} where? Current: {current}. The change applies to new sessions.",
+        project_root.display()
+    );
+    let kind = atman_runtime::form::FormKind::SingleSelect {
+        prompt,
+        options: vec!["Global".into(), "Local (.atman)".into()],
+    };
+    let form = atman_runtime::form::PendingForm {
+        form_id: crate::PROJECT_STORAGE_SCOPE_FORM_ID.to_string(),
+        run_id: atman_runtime::event::FlowRunId::now(),
+        tool_use_id: crate::PROJECT_STORAGE_SCOPE_FORM_ID.to_string(),
+        kind: kind.clone(),
+        form: atman_runtime::form::CompositeForm {
+            questions: vec![atman_runtime::form::FormQuestion {
+                id: "scope".into(),
+                kind,
+            }],
+        },
+        emitted_at: chrono::Utc::now(),
+    };
+    session.forms().request(form);
+}
+
 pub(crate) fn enumerate_session_rows(
     app: &AppState,
     scope: crate::session_switcher::SessionScope,

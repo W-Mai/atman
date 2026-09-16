@@ -73,6 +73,18 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "projects",
+        desc: "open all projects",
+        usage: ":projects",
+        aliases: &[],
+    },
+    MetaCommand {
+        name: "storage",
+        desc: "set current project storage scope",
+        usage: ":storage [global|local]",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "sidebar",
         desc: "sidebar on / off / auto",
         usage: ":sidebar on | off | auto",
@@ -158,6 +170,8 @@ mod tests {
         let list = builtin_list();
         assert_eq!(list.len(), META_COMMANDS.len());
         assert!(list.iter().any(|(n, _)| *n == "mode"));
+        assert!(list.iter().any(|(n, _)| *n == "projects"));
+        assert!(list.iter().any(|(n, _)| *n == "storage"));
     }
 
     #[test]

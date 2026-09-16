@@ -2513,6 +2513,16 @@ async fn cmd_repl_once(
                             meta.rebase(&cwd);
                             let _ = meta.save(session_for_ctrl.dir());
                         }
+                        if form_id == atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID {
+                            if let Some(command) = project_storage_scope_result_command(
+                                apply_project_storage_scope_submission(
+                                    &session_for_ctrl,
+                                    &submission,
+                                ),
+                            ) {
+                                let _ = cmd_tx_for_models.send(command);
+                            }
+                        }
                         let _ = session_for_ctrl.forms().submit(&form_id, submission);
                     }
                     atman_tui::TuiControl::MutateProvider(request) => {
@@ -3084,6 +3094,47 @@ async fn cmd_repl_once(
                             Ok(rows) => print_sessions_table(&rows, &reporter),
                             Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
                         }
+                    }
+                }
+                "projects" => {
+                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                        let _ = tx.send(atman_tui::TuiCommand::OpenProjectHub);
+                    } else {
+                        reporter.info("[atman] :projects — open the project hub in TUI mode");
+                    }
+                }
+                "storage" => {
+                    let arg = trimmed.strip_prefix("storage").unwrap_or("").trim();
+                    match arg {
+                        "" if cmd_tx_for_repl.is_some() => {
+                            let _ = cmd_tx_for_repl
+                                .as_ref()
+                                .unwrap()
+                                .send(atman_tui::TuiCommand::OpenProjectStorageScopePicker);
+                        }
+                        "" => match current_project_storage_scope(&session) {
+                            Ok(scope) => reporter.info(format!(
+                                "current project storage: {}",
+                                storage_scope_name(scope)
+                            )),
+                            Err(error) => reporter.error(format!("[atman] :storage: {error}")),
+                        },
+                        "global" | "local" => {
+                            let scope = if arg == "local" {
+                                atman_runtime::storage::StorageScope::Local
+                            } else {
+                                atman_runtime::storage::StorageScope::Global
+                            };
+                            match set_session_project_storage_scope(&session, scope) {
+                                Ok(root) => reporter.info(format!(
+                                    "project storage set to {} for {}; applies to new sessions",
+                                    storage_scope_name(scope),
+                                    root.display()
+                                )),
+                                Err(error) => reporter.error(format!("[atman] :storage: {error}")),
+                            }
+                        }
+                        _ => reporter.error("usage: :storage [global|local]"),
                     }
                 }
                 "sidebar" => {
@@ -4109,6 +4160,83 @@ fn execute_model_mutation(
             Ok(atman_tui::ModelMutationSuccess::Removed { name: name.clone() })
         }
     }
+}
+
+fn session_project_root(session: &atman_runtime::Session) -> Result<PathBuf> {
+    session
+        .meta()
+        .and_then(|meta| meta.project_root)
+        .context("current session has no project")
+}
+
+fn storage_scope_name(scope: atman_runtime::storage::StorageScope) -> &'static str {
+    match scope {
+        atman_runtime::storage::StorageScope::Global => "global",
+        atman_runtime::storage::StorageScope::Local => "local",
+    }
+}
+
+fn current_project_storage_scope(
+    session: &atman_runtime::Session,
+) -> Result<atman_runtime::storage::StorageScope> {
+    let root = session_project_root(session)?;
+    Ok(atman_runtime::storage::load_storage_config(Some(&root))
+        .scope
+        .unwrap_or_default())
+}
+
+fn set_session_project_storage_scope(
+    session: &atman_runtime::Session,
+    scope: atman_runtime::storage::StorageScope,
+) -> Result<PathBuf> {
+    let root = session_project_root(session)?;
+    anyhow::ensure!(
+        root.is_dir(),
+        "project path does not exist: {}",
+        root.display()
+    );
+    atman_runtime::config_hub::ConfigHub::global()?.set_project_storage_scope(&root, scope)?;
+    Ok(root)
+}
+
+fn apply_project_storage_scope_submission(
+    session: &atman_runtime::Session,
+    submission: &atman_runtime::form::FormSubmission,
+) -> Result<Option<(atman_runtime::storage::StorageScope, PathBuf)>> {
+    let atman_runtime::form::FormSubmission::Submitted { answers } = submission else {
+        return Ok(None);
+    };
+    let Some(atman_runtime::form::FormAnswer::Selected { index, label }) = answers.first() else {
+        anyhow::bail!("storage scope selection is missing");
+    };
+    let scope = match (*index, label.as_str()) {
+        (0, "Global") => atman_runtime::storage::StorageScope::Global,
+        (1, "Local (.atman)") => atman_runtime::storage::StorageScope::Local,
+        _ => anyhow::bail!("invalid storage scope selection"),
+    };
+    let root = set_session_project_storage_scope(session, scope)?;
+    Ok(Some((scope, root)))
+}
+
+fn project_storage_scope_result_command(
+    result: Result<Option<(atman_runtime::storage::StorageScope, PathBuf)>>,
+) -> Option<atman_tui::TuiCommand> {
+    let (message, level) = match result {
+        Ok(Some((scope, root))) => (
+            format!(
+                "Project storage set to {} for {}; applies to new sessions",
+                storage_scope_name(scope),
+                root.display()
+            ),
+            atman_tui::app::NoteLevel::Success,
+        ),
+        Ok(None) => return None,
+        Err(error) => (
+            format!("Project storage update failed: {error}"),
+            atman_tui::app::NoteLevel::Error,
+        ),
+    };
+    Some(atman_tui::TuiCommand::Toast { message, level })
 }
 
 fn execute_project_mutation(
@@ -6135,6 +6263,13 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     form_id,
                     submission,
                 } => {
+                    if form_id == atman_tui::PROJECT_STORAGE_SCOPE_FORM_ID {
+                        if let Some(command) = project_storage_scope_result_command(
+                            apply_project_storage_scope_submission(&ctrl_session, &submission),
+                        ) {
+                            let _ = cmd_tx.send(command);
+                        }
+                    }
                     ctrl_session.forms().submit(&form_id, submission);
                 }
                 atman_tui::TuiControl::MutateProvider(request) => {

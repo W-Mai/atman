@@ -238,6 +238,8 @@ pub struct SessionPickerRow {
 pub enum TuiCommand {
     SetSidebar(sidebar::SidebarMode),
     OpenSessionSwitcher,
+    OpenProjectHub,
+    OpenProjectStorageScopePicker,
     OpenTrustModePicker,
     OpenThemePicker,
     OpenModelPicker,
@@ -324,6 +326,8 @@ pub enum TuiCommand {
         prompts: Vec<atman_runtime::mcp::McpPrompt>,
     },
 }
+
+pub const PROJECT_STORAGE_SCOPE_FORM_ID: &str = "project_storage_scope";
 
 /// Correlates a provider mutation with its eventual host result.
 #[derive(Debug, Clone, PartialEq, Eq)]

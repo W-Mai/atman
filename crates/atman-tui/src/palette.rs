@@ -15,6 +15,8 @@ pub enum PaletteEntryId {
     NewSession,
     MoveSession,
     DeleteSession,
+    OpenProjectHub,
+    SetProjectStorageScope,
     YankMode,
     CopyLastMessage,
     CopyLastTool,
@@ -76,6 +78,20 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Delete Session",
         hint: "Pick a session to permanently delete",
         keyword: "session delete remove",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::OpenProjectHub,
+        group: "Project",
+        label: "All Projects",
+        hint: "Open the project hub (Ctrl+L)",
+        keyword: "projects hub all ctrl l",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::SetProjectStorageScope,
+        group: "Project",
+        label: "Set Project Storage Scope",
+        hint: "Choose global Atman data or local .atman data",
+        keyword: "project storage scope global local atman",
     },
     // ── Copy ──
     PaletteEntry {
@@ -509,6 +525,13 @@ mod tests {
             p.filtered
         );
         assert!(p.filtered.len() < PaletteEntryId::all().len());
+    }
+
+    #[test]
+    fn project_actions_are_available() {
+        let ids = PaletteEntryId::all();
+        assert!(ids.contains(&PaletteEntryId::OpenProjectHub));
+        assert!(ids.contains(&PaletteEntryId::SetProjectStorageScope));
     }
 
     #[test]

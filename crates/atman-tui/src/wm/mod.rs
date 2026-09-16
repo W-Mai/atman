@@ -811,6 +811,14 @@ impl WindowManager {
                 let rows = crate::key_handler::enumerate_session_rows(app, scope);
                 self.modals.session_switcher.open_with(rows, scope);
             }
+            PaletteEntryId::OpenProjectHub => {
+                let canvas = app.maximized_canvas();
+                let session = app.session.clone();
+                self.open_project_hub(canvas, app.projects.clone(), session.as_deref());
+            }
+            PaletteEntryId::SetProjectStorageScope => {
+                crate::key_handler::open_project_storage_scope_picker(app);
+            }
             PaletteEntryId::SearchHistory => {
                 self.modals.history_search.open();
             }

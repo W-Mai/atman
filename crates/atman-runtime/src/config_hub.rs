@@ -269,6 +269,39 @@ impl ConfigHub {
         crate::storage::StorageConfig::merge(global, project)
     }
 
+    pub fn set_project_storage_scope(
+        &self,
+        project_root: &Path,
+        scope: crate::storage::StorageScope,
+    ) -> Result<(), ConfigError> {
+        let path = project_root.join(".atman/config.toml");
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let _file_lock = lock_file(&lock_path_for(&path))?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let mut doc = if text.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            text.parse()?
+        };
+        if doc.get("storage").is_none() {
+            doc.insert("storage", toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let storage = doc
+            .get_mut("storage")
+            .and_then(toml_edit::Item::as_table_mut)
+            .ok_or_else(|| ConfigError::Invalid("storage is not a table".into()))?;
+        let value = match scope {
+            crate::storage::StorageScope::Global => "global",
+            crate::storage::StorageScope::Local => "local",
+        };
+        storage.insert("scope", toml_edit::value(value));
+        write_unique_atomic(&path, doc.to_string().as_bytes())
+    }
+
     pub fn load_routes_source(&self) -> Result<Option<String>, ConfigError> {
         match std::fs::read_to_string(self.routes_at_path()) {
             Ok(source) => Ok(Some(source)),
@@ -2434,6 +2467,36 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            hub.storage_config(Some(project.path())).scope,
+            Some(crate::storage::StorageScope::Global)
+        );
+    }
+
+    #[test]
+    fn set_project_storage_scope_preserves_other_project_config() {
+        let (_dir, hub) = temp_hub();
+        let project = tempfile::tempdir().unwrap();
+        let config_dir = project.path().join(".atman");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "# keep this comment\n[theme]\nmode = \"dark\"\n",
+        )
+        .unwrap();
+
+        hub.set_project_storage_scope(project.path(), crate::storage::StorageScope::Local)
+            .unwrap();
+        let text = std::fs::read_to_string(config_dir.join("config.toml")).unwrap();
+        assert!(text.contains("# keep this comment"));
+        assert!(text.contains("[theme]"));
+        assert_eq!(
+            hub.storage_config(Some(project.path())).scope,
+            Some(crate::storage::StorageScope::Local)
+        );
+
+        hub.set_project_storage_scope(project.path(), crate::storage::StorageScope::Global)
+            .unwrap();
         assert_eq!(
             hub.storage_config(Some(project.path())).scope,
             Some(crate::storage::StorageScope::Global)

@@ -1662,6 +1662,18 @@ pub(crate) async fn run_frames(
                             let rows = key_handler::enumerate_session_rows(&app, scope);
                             app.wm.modals.session_switcher.open_with(rows, scope);
                         }
+                        TuiCommand::OpenProjectHub => {
+                            let canvas = app.app.maximized_canvas();
+                            let session = app.app.session.clone();
+                            app.wm.open_project_hub(
+                                canvas,
+                                app.app.projects.clone(),
+                                session.as_deref(),
+                            );
+                        }
+                        TuiCommand::OpenProjectStorageScopePicker => {
+                            key_handler::open_project_storage_scope_picker(&mut app.app);
+                        }
                         TuiCommand::SessionNameUpdated(name) => {
                             app.app.session_name = Some(name);
                             if app.wm.modals.session_switcher.open {
