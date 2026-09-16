@@ -6,6 +6,8 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.12.2] — 2026-09-16
+
 ### 🐛 Bug Fixes
 
 - **Project command discovery** — `Ctrl+P` exposes the full Project Hub and the current project's global/local storage setting; `:projects` and `:storage [global|local]` provide the same entry points.
