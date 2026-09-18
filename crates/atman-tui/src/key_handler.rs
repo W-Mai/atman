@@ -7,39 +7,50 @@ use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use crate::{app, layout};
 
-pub(crate) fn yank_candidate_indices(app: &AppState) -> Vec<usize> {
-    app.items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, it)| match it {
-            app::OutputItem::AssistantMd { .. } | app::OutputItem::UserTurn { .. } => Some(i),
-            _ => None,
-        })
-        .collect()
+pub(crate) fn enter_selection_mode(app: &mut AppState) -> bool {
+    let points = app.last_selection_projection.visual_points();
+    let Some(index) = points.len().checked_sub(1) else {
+        app.yank_mode = false;
+        app.selection = None;
+        app.push_note("no visible selectable content", app::NoteLevel::Warn);
+        return false;
+    };
+    let current = &points[index];
+    app.yank_mode = true;
+    app.yank_index = index;
+    app.selection = Some(crate::selection::selection_begin(
+        current.point.clone(),
+        current.owner_revision,
+        app.last_selection_projection.structure_revision,
+    ));
+    app.push_note(
+        "select & copy — move, v anchor, Enter copy, Esc cancel",
+        app::NoteLevel::Info,
+    );
+    true
 }
 
-pub(crate) fn emit_yank_selection_note(app: &mut AppState, cands: &[usize]) {
-    let total = cands.len();
-    let cur = app.yank_index.min(total.saturating_sub(1)) + 1;
-    let kind = cands
-        .get(app.yank_index)
-        .and_then(|i| app.items.get(*i))
-        .map(|it| match it {
-            app::OutputItem::AssistantMd { .. } => "assistant",
-            app::OutputItem::UserTurn { .. } => "user",
-            _ => "other",
-        })
-        .unwrap_or("?");
-    app.push_note(format!("yank {cur}/{total} — {kind}"), app::NoteLevel::Info);
+fn selection_cursor_note(app: &mut AppState, points: &[crate::selection::VisualSelectionPoint]) {
+    let Some(current) = points.get(app.yank_index) else {
+        return;
+    };
+    app.push_note(
+        format!(
+            "select & copy — row {} col {}",
+            current.row + 1,
+            current.col + 1
+        ),
+        app::NoteLevel::Info,
+    );
 }
 
-pub(crate) fn yank_selected_text(app: &AppState) -> Option<String> {
-    let cands = yank_candidate_indices(app);
-    let item_idx = *cands.get(app.yank_index)?;
-    match app.items.get(item_idx)? {
-        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
-        app::OutputItem::UserTurn { text } => Some(text.clone()),
-        _ => None,
+fn copy_text(app: &mut AppState, text: &str, success: String) {
+    match crate::clipboard::write_text(text) {
+        Ok(()) => app.push_note(success, app::NoteLevel::Info),
+        Err(error) => app.push_note(
+            format!("clipboard write failed: {error}"),
+            app::NoteLevel::Error,
+        ),
     }
 }
 
@@ -51,11 +62,7 @@ pub(crate) fn copy_last_message(app: &mut AppState) {
     match text {
         Some(t) if !t.is_empty() => {
             let n = t.chars().count();
-            crate::clipboard::write_osc52(&t);
-            app.push_note(
-                format!("copied {n} chars from last message"),
-                app::NoteLevel::Info,
-            );
+            copy_text(app, &t, format!("copied {n} chars from last message"));
         }
         _ => app.push_note("no assistant message to copy", app::NoteLevel::Warn),
     }
@@ -69,11 +76,7 @@ pub(crate) fn copy_last_tool(app: &mut AppState) {
     match text {
         Some(t) => {
             let n = t.chars().count();
-            crate::clipboard::write_osc52(&t);
-            app.push_note(
-                format!("copied {n} chars from last tool output"),
-                app::NoteLevel::Info,
-            );
+            copy_text(app, &t, format!("copied {n} chars from last tool output"));
         }
         _ => app.push_note("no tool output to copy", app::NoteLevel::Warn),
     }
@@ -203,57 +206,160 @@ pub(crate) fn enumerate_session_rows(
 }
 
 pub(crate) fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
-    let cands = yank_candidate_indices(app);
-    if cands.is_empty() {
+    let points = app.last_selection_projection.visual_points();
+    if points.is_empty() {
         app.yank_mode = false;
+        app.selection = None;
+        app.push_note("no visible selectable content", app::NoteLevel::Warn);
         return true;
     }
+    app.yank_index = app.yank_index.min(points.len() - 1);
+    let anchored = app
+        .selection
+        .as_ref()
+        .is_some_and(|state| state.phase != crate::selection::SelectionPhase::Pending);
+    let domain = app
+        .selection
+        .as_ref()
+        .map(|state| state.anchor.domain.clone());
+
+    let eligible = |index: usize| !anchored || domain.as_ref() == Some(&points[index].point.domain);
+    let move_to = |app: &mut AppState, index: usize| {
+        let current = &points[index];
+        app.yank_index = index;
+        app.selection = match app.selection.as_ref() {
+            Some(state) if anchored => crate::selection::selection_extend(
+                state,
+                current.point.clone(),
+                state.owner_revision,
+                app.last_selection_projection.structure_revision,
+            ),
+            _ => Some(crate::selection::selection_begin(
+                current.point.clone(),
+                current.owner_revision,
+                app.last_selection_projection.structure_revision,
+            )),
+        };
+    };
+
     match action {
         KeyAction::Escape => {
             app.yank_mode = false;
-            app.push_note("yank cancelled", app::NoteLevel::Info);
-            true
+            app.selection = None;
+            app.push_note("selection cancelled", app::NoteLevel::Info);
         }
-        KeyAction::Char('y') | KeyAction::Char('Y') => {
-            app.yank_mode = false;
-            true
+        KeyAction::Char('v') | KeyAction::Char('V') => {
+            let current = &points[app.yank_index];
+            app.selection = Some(crate::selection::selection_begin(
+                current.point.clone(),
+                current.owner_revision,
+                app.last_selection_projection.structure_revision,
+            ));
+            if let Some(state) = app.selection.as_mut() {
+                state.phase = crate::selection::SelectionPhase::Active;
+            }
+            app.push_note("selection anchor set", app::NoteLevel::Info);
         }
-        KeyAction::Char('j') | KeyAction::HistoryDown | KeyAction::CursorRight => {
-            app.yank_index = (app.yank_index + 1).min(cands.len().saturating_sub(1));
-            emit_yank_selection_note(app, &cands);
-            true
+        KeyAction::Char('h') | KeyAction::CursorLeft => {
+            if let Some(index) = (0..app.yank_index).rev().find(|index| eligible(*index)) {
+                move_to(app, index);
+                selection_cursor_note(app, &points);
+            }
         }
-        KeyAction::Char('k') | KeyAction::HistoryUp | KeyAction::CursorLeft => {
-            app.yank_index = app.yank_index.saturating_sub(1);
-            emit_yank_selection_note(app, &cands);
-            true
+        KeyAction::Char('l') | KeyAction::CursorRight => {
+            if let Some(index) = (app.yank_index + 1..points.len()).find(|index| eligible(*index)) {
+                move_to(app, index);
+                selection_cursor_note(app, &points);
+            }
         }
-        KeyAction::Char('g') => {
-            app.yank_index = 0;
-            emit_yank_selection_note(app, &cands);
-            true
+        KeyAction::Char('j') | KeyAction::HistoryDown => {
+            let current = &points[app.yank_index];
+            if let Some(row) = points
+                .iter()
+                .enumerate()
+                .filter(|(index, point)| eligible(*index) && point.row > current.row)
+                .map(|(_, point)| point.row)
+                .min()
+                && let Some((index, _)) = points
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, point)| eligible(*index) && point.row == row)
+                    .min_by_key(|(_, point)| point.col.abs_diff(current.col))
+            {
+                move_to(app, index);
+                selection_cursor_note(app, &points);
+            }
         }
-        KeyAction::Char('G') => {
-            app.yank_index = cands.len().saturating_sub(1);
-            emit_yank_selection_note(app, &cands);
-            true
+        KeyAction::Char('k') | KeyAction::HistoryUp => {
+            let current = &points[app.yank_index];
+            if let Some(row) = points
+                .iter()
+                .enumerate()
+                .filter(|(index, point)| eligible(*index) && point.row < current.row)
+                .map(|(_, point)| point.row)
+                .max()
+                && let Some((index, _)) = points
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, point)| eligible(*index) && point.row == row)
+                    .min_by_key(|(_, point)| point.col.abs_diff(current.col))
+            {
+                move_to(app, index);
+                selection_cursor_note(app, &points);
+            }
+        }
+        KeyAction::Char('g') | KeyAction::Char('G') => {
+            let surface = points[app.yank_index].surface;
+            let mut candidates = points
+                .iter()
+                .enumerate()
+                .filter(|(index, point)| eligible(*index) && point.surface == surface)
+                .map(|(index, _)| index);
+            let index = if matches!(action, KeyAction::Char('g')) {
+                candidates.next()
+            } else {
+                candidates.next_back()
+            };
+            if let Some(index) = index {
+                move_to(app, index);
+                selection_cursor_note(app, &points);
+            }
+        }
+        KeyAction::Tab | KeyAction::BackTab if !anchored => {
+            let surface = points[app.yank_index].surface;
+            let index = if matches!(action, KeyAction::Tab) {
+                points.iter().position(|point| point.surface > surface)
+            } else {
+                points
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, point)| point.surface < surface)
+                    .map(|(index, _)| index)
+            };
+            if let Some(index) = index {
+                move_to(app, index);
+                selection_cursor_note(app, &points);
+            }
         }
         KeyAction::Submit => {
-            if let Some(text) = yank_selected_text(app) {
-                let n = text.chars().count();
-                crate::clipboard::write_osc52(&text);
-                app.push_note(
-                    format!("yanked {n} chars to clipboard (OSC 52)"),
-                    app::NoteLevel::Info,
-                );
-            } else {
-                app.push_note("yank: nothing selected", app::NoteLevel::Warn);
+            let payload = app.selection.as_ref().and_then(|state| {
+                crate::selection::selection_copy_payload(&app.last_selection_projection, state)
+            });
+            match payload {
+                Some(crate::selection::CopyPayload::Markdown(text))
+                | Some(crate::selection::CopyPayload::PlainText(text))
+                | Some(crate::selection::CopyPayload::Preview(text)) => {
+                    let n = text.chars().count();
+                    copy_text(app, &text, format!("copied {n} chars"));
+                    app.yank_mode = false;
+                }
+                None => app.push_note("set an anchor and select text first", app::NoteLevel::Warn),
             }
-            app.yank_mode = false;
-            true
         }
-        _ => true,
+        _ => {}
     }
+    true
 }
 
 pub(crate) fn is_approval_key(action: &KeyAction) -> bool {

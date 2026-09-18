@@ -349,6 +349,12 @@ pub(crate) async fn run_frames(
                                 handle.control_tx.as_ref(),
                             );
                             if !consumed {
+                                if matches!(action, crate::keys::KeyAction::Escape)
+                                    && app.app.selection.is_some()
+                                {
+                                    app.app.selection = crate::selection::selection_clear();
+                                    continue;
+                                }
                                 key_handler::handle_key(
                                     action,
                                     &mut app,
@@ -409,6 +415,12 @@ pub(crate) async fn run_frames(
                                 break;
                             }
                             if !consumed {
+                                if handle_sidebar_selection_mouse(&mut app.app, &me)
+                                    || handle_transcript_selection_mouse(&mut app.app, &me)
+                                {
+                                    interrupt_prompt = None;
+                                    break;
+                                }
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 if let Some(click) = app.app.approval_hitmap.at(me.column, me.row) {
                                     key_handler::dispatch_approval_click(
@@ -2318,6 +2330,246 @@ pub(crate) async fn poll_update_check(
     handle: &mut tokio::task::JoinHandle<Option<String>>,
 ) -> Option<String> {
     handle.await.ok().flatten()
+}
+
+fn handle_sidebar_selection_mouse(
+    app: &mut AppState,
+    event: &crossterm::event::MouseEvent,
+) -> bool {
+    let projection = &app.last_sidebar_selection_projection;
+    let point = projection
+        .surface_at(event.row, event.column)
+        .and_then(|surface| {
+            surface.point_at(event.row, event.column).map(|grapheme| {
+                let section = match surface.section {
+                    crate::sidebar_selection::SidebarSection::Goal => {
+                        crate::selection::SidebarSection::Goal
+                    }
+                    crate::sidebar_selection::SidebarSection::Plan => {
+                        crate::selection::SidebarSection::Plan
+                    }
+                    crate::sidebar_selection::SidebarSection::Todo => {
+                        crate::selection::SidebarSection::Todo
+                    }
+                    crate::sidebar_selection::SidebarSection::Context => {
+                        crate::selection::SidebarSection::Context
+                    }
+                    crate::sidebar_selection::SidebarSection::Mcp => {
+                        crate::selection::SidebarSection::Mcp
+                    }
+                };
+                crate::selection::SemanticPoint {
+                    domain: crate::selection::SelectionDomain::Sidebar { section },
+                    ordinal: 0,
+                    grapheme,
+                    affinity: crate::selection::Affinity::Before,
+                }
+            })
+        });
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(point) = point else {
+                return false;
+            };
+            app.selection = Some(crate::selection::selection_begin(
+                point,
+                crate::app::OutputRevision::default(),
+                app.items.structure_revision(),
+            ));
+            false
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(state) = app.selection.as_ref() else {
+                return false;
+            };
+            if !matches!(
+                state.anchor.domain,
+                crate::selection::SelectionDomain::Sidebar { .. }
+            ) {
+                return false;
+            }
+            let Some(point) = point else {
+                return true;
+            };
+            let next = crate::selection::selection_extend(
+                state,
+                point,
+                state.owner_revision,
+                state.structure_revision,
+            );
+            if let Some(next) = next {
+                app.selection = Some(next);
+                app.selection
+                    .as_ref()
+                    .is_some_and(crate::selection::selection_is_non_empty)
+            } else {
+                true
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(state) = app.selection.as_ref() else {
+                return false;
+            };
+            if !matches!(
+                state.anchor.domain,
+                crate::selection::SelectionDomain::Sidebar { .. }
+            ) {
+                return false;
+            }
+            let state = app.selection.take().expect("selection checked above");
+            if !crate::selection::selection_is_non_empty(&state) {
+                app.selection = Some(state);
+                return false;
+            }
+            let Some(surface) = projection.surface_at(event.row, event.column) else {
+                app.selection = Some(state);
+                return false;
+            };
+            let expected_section = match &state.anchor.domain {
+                crate::selection::SelectionDomain::Sidebar { section } => section,
+                _ => unreachable!("sidebar domain checked above"),
+            };
+            let actual_section = match surface.section {
+                crate::sidebar_selection::SidebarSection::Goal => {
+                    crate::selection::SidebarSection::Goal
+                }
+                crate::sidebar_selection::SidebarSection::Plan => {
+                    crate::selection::SidebarSection::Plan
+                }
+                crate::sidebar_selection::SidebarSection::Todo => {
+                    crate::selection::SidebarSection::Todo
+                }
+                crate::sidebar_selection::SidebarSection::Context => {
+                    crate::selection::SidebarSection::Context
+                }
+                crate::sidebar_selection::SidebarSection::Mcp => {
+                    crate::selection::SidebarSection::Mcp
+                }
+            };
+            if &actual_section != expected_section {
+                app.selection = Some(state);
+                return true;
+            }
+            let Some(end) = surface.point_at(event.row, event.column) else {
+                app.selection = Some(state);
+                return false;
+            };
+            let range =
+                state.anchor.grapheme.min(end)..state.anchor.grapheme.max(end).saturating_add(1);
+            if let Some(text) = surface.serialize(range) {
+                match crate::clipboard::write_text(&text) {
+                    Ok(()) => {
+                        app.selection = Some(crate::selection::selection_retain_copied(state))
+                    }
+                    Err(error) => {
+                        app.push_note(
+                            format!("clipboard write failed: {error}"),
+                            crate::app::NoteLevel::Error,
+                        );
+                        app.selection = Some(state);
+                    }
+                }
+                true
+            } else {
+                app.selection = Some(state);
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn handle_transcript_selection_mouse(
+    app: &mut AppState,
+    event: &crossterm::event::MouseEvent,
+) -> bool {
+    let Some(rect) = app.last_transcript_rect else {
+        return matches!(
+            event.kind,
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        ) && app.selection.is_some();
+    };
+    let row = u32::from(event.row.saturating_sub(rect.y)).saturating_add(app.scroll_offset);
+    let col = event.column.saturating_sub(rect.x);
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let point = app
+                .last_selection_projection
+                .prose_point_at(row, col)
+                .or_else(|| app.last_selection_projection.code_point_at(row, col))
+                .or_else(|| app.last_selection_projection.isolated_point_at(row, col));
+            let Some(point) = point else {
+                return false;
+            };
+            let Some(surface) = app.last_selection_projection.surface_at_row(row) else {
+                return false;
+            };
+            app.selection = Some(crate::selection::selection_begin(
+                point,
+                surface.revision,
+                app.last_selection_projection.structure_revision,
+            ));
+            false
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(state) = app.selection.as_ref() else {
+                return false;
+            };
+            let point = match &state.anchor.domain {
+                crate::selection::SelectionDomain::TranscriptProse => {
+                    app.last_selection_projection.prose_point_at(row, col)
+                }
+                crate::selection::SelectionDomain::MarkdownCode { .. } => {
+                    app.last_selection_projection.code_point_at(row, col)
+                }
+                _ => app.last_selection_projection.isolated_point_at(row, col),
+            };
+            let Some(point) = point else {
+                return true;
+            };
+            app.selection = crate::selection::selection_extend(
+                state,
+                point,
+                state.owner_revision,
+                app.last_selection_projection.structure_revision,
+            );
+            app.selection
+                .as_ref()
+                .is_some_and(crate::selection::selection_is_non_empty)
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(state) = app.selection.take() else {
+                return false;
+            };
+            let copied =
+                crate::selection::selection_copy_payload(&app.last_selection_projection, &state);
+            if let Some(payload) = copied {
+                let text = match payload {
+                    crate::selection::CopyPayload::Markdown(text)
+                    | crate::selection::CopyPayload::PlainText(text)
+                    | crate::selection::CopyPayload::Preview(text) => text,
+                };
+                match crate::clipboard::write_text(&text) {
+                    Ok(()) => {
+                        app.selection = Some(crate::selection::selection_retain_copied(state));
+                    }
+                    Err(error) => {
+                        app.push_note(
+                            format!("clipboard write failed: {error}"),
+                            crate::app::NoteLevel::Error,
+                        );
+                        app.selection = Some(state);
+                    }
+                }
+                true
+            } else {
+                let consumed = crate::selection::selection_is_non_empty(&state);
+                app.selection = Some(state);
+                consumed
+            }
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

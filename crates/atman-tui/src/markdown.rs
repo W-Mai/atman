@@ -29,18 +29,31 @@ pub fn render_markdown(md: &str) -> Vec<Line<'static>> {
 }
 
 pub fn render_markdown_with_width(md: &str, rule_width: u16) -> Vec<Line<'static>> {
+    render_markdown_with_geometry(md, rule_width).lines
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MarkdownRender {
+    pub lines: Vec<Line<'static>>,
+    pub code_blocks: Vec<CodeBlockSpan>,
+    pub prose_atoms: Vec<crate::selection::RelativeProseAtom>,
+}
+
+pub(crate) fn render_markdown_with_geometry(md: &str, rule_width: u16) -> MarkdownRender {
     let mut renderer = Renderer::with_rule_width(rule_width);
-    for segment in split_display_math_segments(md).segments {
-        match segment {
-            MarkdownSegment::Text { text, .. } => {
-                for ev in Parser::new_ext(text, markdown_options()) {
-                    renderer.consume(ev);
-                }
+    for (event_index, event) in parse_markdown_for_projection(md)
+        .events
+        .into_iter()
+        .enumerate()
+    {
+        match event {
+            ParsedRenderEvent::Common { event, .. } => {
+                renderer.consume(event, Some(u32::try_from(event_index).unwrap_or(u32::MAX)))
             }
-            MarkdownSegment::DisplayMath { tex, .. } => renderer.render_display_math(&tex),
+            ParsedRenderEvent::DisplayMath { tex, .. } => renderer.render_display_math(&tex),
         }
     }
-    renderer.finish()
+    renderer.finish_render()
 }
 
 fn markdown_options() -> Options {
@@ -214,6 +227,210 @@ fn parse_markdown_for_projection(source: &str) -> ParsedMarkdown<'_> {
     }
 }
 
+pub fn semantic_markdown_source(
+    source: &str,
+    owner_revision: crate::app::OutputRevision,
+) -> crate::selection::MarkdownSemanticSource {
+    use crate::selection::{
+        CodeBodySegment, CopyFragment, MarkdownCodeSource, MarkdownSemanticSource,
+        ProseEventSegment, SelectionDomain,
+    };
+
+    struct ProseNode {
+        start: usize,
+        semantic_text: String,
+        event_segments: Vec<ProseEventSegment>,
+        leaves: Vec<CopyFragment>,
+        contains_code: bool,
+    }
+
+    struct CodeNode {
+        block: u32,
+        body: String,
+        segments: Vec<CodeBodySegment>,
+    }
+
+    fn append_semantic(text: &mut String, event: &Event<'_>) {
+        match event {
+            Event::Text(value)
+            | Event::Code(value)
+            | Event::Html(value)
+            | Event::InlineHtml(value)
+            | Event::FootnoteReference(value) => text.push_str(value),
+            Event::SoftBreak | Event::HardBreak => text.push('\n'),
+            Event::TaskListMarker(checked) => {
+                text.push_str(if *checked { "[x] " } else { "[ ] " });
+            }
+            _ => {}
+        }
+    }
+
+    fn trailing_whitespace_end(source: &str, end: usize) -> usize {
+        source[end.min(source.len())..]
+            .char_indices()
+            .find_map(|(offset, ch)| (!ch.is_whitespace()).then_some(end.saturating_add(offset)))
+            .unwrap_or(source.len())
+    }
+
+    fn plain_leaves(leaves: Vec<CopyFragment>) -> Vec<CopyFragment> {
+        leaves
+            .into_iter()
+            .map(|leaf| {
+                CopyFragment::plain_text(leaf.semantic_text)
+                    .with_event_segments(leaf.event_segments)
+            })
+            .collect()
+    }
+
+    let parsed = parse_markdown_for_projection(source);
+    let mut prose = Vec::new();
+    let mut code_blocks = Vec::new();
+    let mut depth = 0usize;
+    let mut prose_node: Option<ProseNode> = None;
+    let mut code_node: Option<CodeNode> = None;
+    let mut next_block = 0u32;
+
+    for (event_index, parsed_event) in parsed.events.into_iter().enumerate() {
+        let event_index = u32::try_from(event_index).unwrap_or(u32::MAX);
+        match parsed_event {
+            ParsedRenderEvent::DisplayMath { tex, range } => {
+                prose.push(CopyFragment::markdown_node(range, tex));
+            }
+            ParsedRenderEvent::Common { event, range } => match &event {
+                Event::Start(Tag::CodeBlock(_)) => {
+                    if prose_node.is_none() {
+                        prose_node = Some(ProseNode {
+                            start: source_line_start(source, range.start),
+                            semantic_text: String::new(),
+                            event_segments: Vec::new(),
+                            leaves: Vec::new(),
+                            contains_code: true,
+                        });
+                    } else if let Some(node) = prose_node.as_mut() {
+                        node.contains_code = true;
+                    }
+                    code_node = Some(CodeNode {
+                        block: next_block,
+                        body: String::new(),
+                        segments: Vec::new(),
+                    });
+                    next_block = next_block.saturating_add(1);
+                    depth = depth.saturating_add(1);
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    if let Some(code) = code_node.take() {
+                        code_blocks.push(MarkdownCodeSource {
+                            domain: SelectionDomain::MarkdownCode {
+                                item_id: owner_revision.id,
+                                block: code.block,
+                            },
+                            block: code.block,
+                            body: code.body,
+                            segments: code.segments,
+                        });
+                    }
+                    depth = depth.saturating_sub(1);
+                    if depth == 0
+                        && let Some(node) = prose_node.take()
+                        && node.contains_code
+                    {
+                        prose.extend(plain_leaves(node.leaves));
+                    }
+                }
+                Event::Start(_) => {
+                    if depth == 0 {
+                        prose_node = Some(ProseNode {
+                            start: source_line_start(source, range.start),
+                            semantic_text: String::new(),
+                            event_segments: Vec::new(),
+                            leaves: Vec::new(),
+                            contains_code: false,
+                        });
+                    }
+                    depth = depth.saturating_add(1);
+                }
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0
+                        && let Some(node) = prose_node.take()
+                    {
+                        if node.contains_code {
+                            prose.extend(plain_leaves(node.leaves));
+                        } else {
+                            prose.push(CopyFragment::markdown_node(
+                                node.start..trailing_whitespace_end(source, range.end),
+                                node.semantic_text,
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(code) = code_node.as_mut() {
+                        let body_start = code.body.len();
+                        append_semantic(&mut code.body, &event);
+                        let body_end = code.body.len();
+                        if body_start < body_end && !range.is_empty() {
+                            code.segments.push(CodeBodySegment {
+                                body_range: body_start..body_end,
+                                source_range: range,
+                            });
+                        }
+                    } else if let Some(node) = prose_node.as_mut() {
+                        let mut semantic_text = String::new();
+                        append_semantic(&mut semantic_text, &event);
+                        let fragment_grapheme_start =
+                            crate::width::graphemes(&node.semantic_text).count();
+                        let event_graphemes = crate::width::graphemes(&semantic_text).count();
+                        node.semantic_text.push_str(&semantic_text);
+                        if !semantic_text.is_empty() {
+                            let segments = matches!(event, Event::Text(_) | Event::Code(_))
+                                .then(|| ProseEventSegment {
+                                    event: event_index,
+                                    event_graphemes: 0..event_graphemes,
+                                    fragment_grapheme_start,
+                                })
+                                .into_iter()
+                                .collect::<Vec<_>>();
+                            node.event_segments.extend(segments.iter().cloned());
+                            node.leaves.push(
+                                CopyFragment::markdown_leaf(source, range, semantic_text)
+                                    .with_event_segments(segments),
+                            );
+                        }
+                    } else {
+                        let mut semantic_text = String::new();
+                        append_semantic(&mut semantic_text, &event);
+                        if !semantic_text.is_empty() {
+                            let event_graphemes = crate::width::graphemes(&semantic_text).count();
+                            let segments = matches!(event, Event::Text(_) | Event::Code(_))
+                                .then(|| ProseEventSegment {
+                                    event: event_index,
+                                    event_graphemes: 0..event_graphemes,
+                                    fragment_grapheme_start: 0,
+                                })
+                                .into_iter()
+                                .collect();
+                            prose.push(
+                                CopyFragment::markdown_leaf(source, range, semantic_text)
+                                    .with_event_segments(segments),
+                            );
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    if let Some(node) = prose_node {
+        prose.extend(node.leaves);
+    }
+    MarkdownSemanticSource {
+        owner_revision,
+        prose,
+        code_blocks,
+    }
+}
+
 struct ProjectionRender {
     stable_lines: Vec<Line<'static>>,
     tail_lines: Vec<Line<'static>>,
@@ -249,7 +466,7 @@ fn render_projection_suffix(
             committed_source_bytes = Some(cut);
         }
         match event {
-            ParsedRenderEvent::Common { event, .. } => renderer.consume(event),
+            ParsedRenderEvent::Common { event, .. } => renderer.consume(event, None),
             ParsedRenderEvent::DisplayMath { tex, .. } => renderer.render_display_math(&tex),
         }
     }
@@ -469,9 +686,26 @@ fn streaming_cursor() -> Span<'static> {
     )
 }
 
+/// Where one code block's body actually landed in the rendered lines.
+///
+/// `block` matches the numbering used by [`semantic_markdown_source`], which counts every fenced or
+/// indented code block in source order — including `mermaid`, whose body is rendered elsewhere.
+/// Keeping the counter aligned is what lets a `MarkdownCode` domain find its own geometry instead of
+/// silently borrowing the next block's rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeBlockSpan {
+    pub block: u32,
+    pub first_body_row: u16,
+    pub line_count: usize,
+    pub body_start_col: u16,
+}
+
 #[derive(Default)]
 struct Renderer {
     lines: Vec<Line<'static>>,
+    code_block_spans: Vec<CodeBlockSpan>,
+    prose_atoms: Vec<crate::selection::RelativeProseAtom>,
+    code_block_seq: u32,
     current: Vec<Span<'static>>,
     current_width: usize,
     style_stack: Vec<Style>,
@@ -535,6 +769,7 @@ struct WrapPiece {
     text: String,
     width: usize,
     is_newline: bool,
+    source_range: Option<Range<usize>>,
 }
 
 impl WrapPiece {
@@ -543,6 +778,7 @@ impl WrapPiece {
             text: String::new(),
             width: 0,
             is_newline: true,
+            source_range: None,
         }
     }
 }
@@ -555,7 +791,7 @@ impl Renderer {
             .fold(Style::default(), merge_style)
     }
 
-    fn push_text(&mut self, text: &str) {
+    fn push_text(&mut self, text: &str, event: Option<u32>) {
         if self.pending_separator && !text.is_empty() && !self.fresh_line {
             self.current.push(Span::raw(" "));
             self.current_width += 1;
@@ -566,6 +802,12 @@ impl Renderer {
         let indent = self.indent_prefix();
         let indent_w = crate::width::width(&indent);
         for piece in self.wrap_text(text, limit, indent_w) {
+            debug_assert!(
+                piece
+                    .source_range
+                    .as_ref()
+                    .is_none_or(|range| { text.get(range.clone()) == Some(piece.text.as_str()) })
+            );
             if piece.is_newline {
                 self.end_line();
                 if !indent.is_empty() {
@@ -573,6 +815,18 @@ impl Renderer {
                     self.current_width = indent_w;
                 }
                 continue;
+            }
+            if let (Some(event), Some(source_range)) = (event, piece.source_range.as_ref()) {
+                let event_grapheme_start =
+                    crate::width::graphemes(text.get(..source_range.start).unwrap_or_default())
+                        .count();
+                self.prose_atoms.extend(crate::selection::prose_atom_runs(
+                    u16::try_from(self.lines.len()).unwrap_or(u16::MAX),
+                    u16::try_from(self.current_width).unwrap_or(u16::MAX),
+                    &piece.text,
+                    event,
+                    event_grapheme_start,
+                ));
             }
             self.current.push(Span::styled(piece.text.clone(), style));
             self.current_width += piece.width;
@@ -615,12 +869,14 @@ impl Renderer {
         let mut out = Vec::new();
         let mut buf = String::new();
         let mut buf_w = 0usize;
+        let mut buf_range: Option<Range<usize>> = None;
         let mut line_w = self.current_width;
 
         fn flush(
             out: &mut Vec<WrapPiece>,
             buf: &mut String,
             buf_w: &mut usize,
+            buf_range: &mut Option<Range<usize>>,
             line_w: &mut usize,
         ) {
             if !buf.is_empty() {
@@ -628,6 +884,7 @@ impl Renderer {
                     text: std::mem::take(buf),
                     width: *buf_w,
                     is_newline: false,
+                    source_range: buf_range.take(),
                 });
                 *line_w += *buf_w;
                 *buf_w = 0;
@@ -646,19 +903,21 @@ impl Renderer {
             *line_w = 0;
         }
 
-        for (g, gw) in crate::width::graphemes(text) {
+        for (offset, g, gw) in crate::width::grapheme_indices(text) {
+            let end = offset.saturating_add(g.len());
             if g == "\n" {
-                flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
+                flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
                 newline(&mut out, &mut line_w);
                 continue;
             }
             if g == " " {
-                flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
+                flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
                 if line_w > 0 && line_w < effective_limit {
                     out.push(WrapPiece {
                         text: " ".into(),
                         width: 1,
                         is_newline: false,
+                        source_range: Some(offset..end),
                     });
                     line_w += 1;
                 }
@@ -666,7 +925,7 @@ impl Renderer {
             }
             let is_word_break = is_cjk(g.chars().next().unwrap_or('\0')) || gw >= 2;
             if is_word_break {
-                flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
+                flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
             }
             if line_w + buf_w + gw > effective_limit {
                 if buf_w + gw <= effective_limit {
@@ -674,16 +933,22 @@ impl Renderer {
                         newline(&mut out, &mut line_w);
                     }
                 } else {
-                    flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
+                    flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
                     if line_w > 0 {
                         newline(&mut out, &mut line_w);
                     }
                 }
             }
+            if let Some(range) = buf_range.as_mut() {
+                debug_assert_eq!(range.end, offset);
+                range.end = end;
+            } else {
+                buf_range = Some(offset..end);
+            }
             buf.push_str(g);
             buf_w += gw;
         }
-        flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
+        flush(&mut out, &mut buf, &mut buf_w, &mut buf_range, &mut line_w);
         while !out.is_empty()
             && !out.last().unwrap().is_newline
             && out.last().unwrap().text.chars().all(|c| c == ' ')
@@ -693,7 +958,7 @@ impl Renderer {
         out
     }
 
-    fn consume(&mut self, ev: Event<'_>) {
+    fn consume(&mut self, ev: Event<'_>, event: Option<u32>) {
         let t = crate::theme::theme();
         match ev {
             Event::Start(tag) => self.enter(tag),
@@ -710,7 +975,7 @@ impl Renderer {
                     return;
                 }
                 let had_separator = text.ends_with(' ') && !text.ends_with("\n");
-                self.push_text(&text);
+                self.push_text(&text, event);
                 self.pending_separator = had_separator;
             }
             Event::Code(text) => {
@@ -724,7 +989,7 @@ impl Renderer {
                     .fg(t.warn.into())
                     .add_modifier(Modifier::BOLD);
                 self.style_stack.push(code_style);
-                self.push_text(&text);
+                self.push_text(&text, event);
                 self.style_stack.pop();
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -1081,6 +1346,8 @@ impl Renderer {
     }
 
     fn render_code_block(&mut self, lang: &str, body: &str) {
+        let block = self.code_block_seq;
+        self.code_block_seq = self.code_block_seq.saturating_add(1);
         if lang == "mermaid" {
             return;
         }
@@ -1088,7 +1355,7 @@ impl Renderer {
         self.blank_line();
         let bg = block_bg();
         let target = self.rule_width as usize;
-        let inner_pad = 2usize;
+        let inner_pad = CODE_BLOCK_INNER_PAD;
         let lang_label = if lang.is_empty() {
             "code".to_string()
         } else {
@@ -1108,7 +1375,15 @@ impl Renderer {
         } else {
             crate::highlight::highlight_code(lang, body)
         };
-        let width = digits_for(highlighted.len());
+        let line_count = highlighted.len();
+        let first_body_row = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
+        let width = digits_for(line_count);
+        self.code_block_spans.push(CodeBlockSpan {
+            block,
+            first_body_row,
+            line_count,
+            body_start_col: u16::try_from(code_body_start_col(line_count)).unwrap_or(u16::MAX),
+        });
         for (i, hl) in highlighted.into_iter().enumerate() {
             let lineno = format!("{:>width$}  ", i + 1);
             let mut used = inner_pad + crate::width::width(lineno.as_str());
@@ -1134,7 +1409,7 @@ impl Renderer {
         self.blank_line();
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish_render(mut self) -> MarkdownRender {
         if !self.current.is_empty() {
             self.end_line();
         }
@@ -1146,7 +1421,15 @@ impl Renderer {
         {
             self.lines.pop();
         }
-        self.lines
+        MarkdownRender {
+            lines: self.lines,
+            code_blocks: self.code_block_spans,
+            prose_atoms: self.prose_atoms,
+        }
+    }
+
+    fn finish(self) -> Vec<Line<'static>> {
+        self.finish_render().lines
     }
 }
 
@@ -1217,7 +1500,20 @@ fn table_row(
     Line::from(spans)
 }
 
-fn digits_for(n: usize) -> usize {
+/// Left padding rendered before a code block's line-number gutter.
+pub(crate) const CODE_BLOCK_INNER_PAD: usize = 2;
+/// Blank cells rendered between the line number and the code body.
+pub(crate) const CODE_BLOCK_LINENO_GAP: usize = 2;
+
+/// First column of a code block's body, given its total line count.
+///
+/// Shared with the selection projection so hit-testing cannot drift from
+/// [`Renderer::render_code_block`], which lays out `inner_pad + lineno + gap` ahead of the body.
+pub(crate) fn code_body_start_col(line_count: usize) -> usize {
+    CODE_BLOCK_INNER_PAD + digits_for(line_count) + CODE_BLOCK_LINENO_GAP
+}
+
+pub(crate) fn digits_for(n: usize) -> usize {
     if n == 0 {
         1
     } else {
@@ -1292,6 +1588,89 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn assert_piece_ranges(text: &str, pieces: &[WrapPiece]) {
+        let mut previous_end = 0;
+        for piece in pieces {
+            if piece.is_newline {
+                assert!(piece.source_range.is_none());
+                continue;
+            }
+            let range = piece.source_range.as_ref().expect("source-backed piece");
+            assert!(range.start >= previous_end, "non-monotonic range {range:?}");
+            assert!(range.end <= text.len(), "range outside input {range:?}");
+            assert_eq!(text.get(range.clone()), Some(piece.text.as_str()));
+            previous_end = range.end;
+        }
+    }
+
+    #[test]
+    fn wrap_piece_ranges_track_ascii_and_narrow_wrapping() {
+        let text = "alpha bravo charlie";
+        let pieces = Renderer::with_rule_width(8).wrap_text(text, 8, 0);
+        assert_piece_ranges(text, &pieces);
+        assert!(pieces.iter().any(|piece| piece.is_newline));
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|piece| !piece.is_newline)
+                .map(|piece| piece.text.as_str())
+                .collect::<String>(),
+            "alphabravocharlie"
+        );
+    }
+
+    #[test]
+    fn wrap_piece_ranges_drop_spaces_without_fabricating_offsets() {
+        let text = "  alpha   beta  \n gamma  ";
+        let pieces = Renderer::with_rule_width(12).wrap_text(text, 12, 0);
+        assert_piece_ranges(text, &pieces);
+        assert!(pieces.iter().any(|piece| piece.is_newline));
+        assert!(
+            pieces
+                .iter()
+                .filter(|piece| piece.is_newline)
+                .all(|piece| { piece.text.is_empty() && piece.source_range.is_none() })
+        );
+        assert!(
+            !pieces
+                .iter()
+                .rev()
+                .take_while(|piece| !piece.is_newline)
+                .any(|piece| piece.text == " ")
+        );
+    }
+
+    #[test]
+    fn wrap_piece_ranges_track_cjk_and_emoji_cells() {
+        let text = "你好🙂世界🚀";
+        let pieces = Renderer::with_rule_width(4).wrap_text(text, 4, 0);
+        assert_piece_ranges(text, &pieces);
+        assert!(pieces.iter().any(|piece| piece.is_newline));
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|piece| !piece.is_newline)
+                .map(|piece| piece.text.as_str())
+                .collect::<String>(),
+            text
+        );
+    }
+
+    #[test]
+    fn wrap_piece_ranges_keep_combining_graphemes_atomic() {
+        let text = "e\u{301} a\u{308}";
+        let pieces = Renderer::with_rule_width(2).wrap_text(text, 2, 0);
+        assert_piece_ranges(text, &pieces);
+        let source_text = pieces
+            .iter()
+            .filter(|piece| !piece.is_newline)
+            .map(|piece| piece.text.as_str())
+            .collect::<String>();
+        assert_eq!(source_text, "e\u{301}a\u{308}");
+        assert!(pieces.iter().any(|piece| piece.text == "e\u{301}"));
+        assert!(pieces.iter().any(|piece| piece.text == "a\u{308}"));
     }
 
     #[test]

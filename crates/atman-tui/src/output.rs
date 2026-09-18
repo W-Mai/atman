@@ -245,6 +245,14 @@ pub struct ItemRange {
     pub end_row: u32,
 }
 
+/// Everything the renderer needs for one viewport: visual lines plus the metadata addressing them.
+pub struct VisibleSlice {
+    pub lines: Vec<Line<'static>>,
+    pub ranges: Vec<ItemRange>,
+    pub regions: Vec<NodeRegion>,
+    pub selection: crate::selection::VisibleSelectionProjection,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRegion {
     pub panel_item_index: usize,
@@ -598,6 +606,7 @@ struct ItemCacheEntry {
     streaming_markdown: Option<crate::markdown::StreamingMarkdownProjection>,
     bash_output: Option<BashOutputProjection>,
     regions: Arc<[NodeRegion]>,
+    semantic: Option<Arc<crate::selection::ItemSemanticSource>>,
     dynamic: DynamicPaint,
     last_used: u64,
     prefix_lines: Arc<[Line<'static>]>,
@@ -979,12 +988,13 @@ impl LayoutCache {
         scroll_offset: u32,
         viewport_rows: u32,
         animation_frame: u32,
-    ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>) {
+    ) -> VisibleSlice {
         let (start_idx, end_idx) = self.item_window(scroll_offset, viewport_rows);
         let vis_bottom = scroll_offset.saturating_add(viewport_rows);
         let mut lines = Vec::new();
         let mut ranges = Vec::with_capacity(end_idx.saturating_sub(start_idx));
         let mut regions = Vec::new();
+        let mut surfaces = Vec::new();
         for idx in start_idx..end_idx {
             let entry = &self.entries[idx];
             let work_fold_hovered = self
@@ -1043,8 +1053,131 @@ impl LayoutCache {
                 col_start: region.col_start,
                 col_end: region.col_end,
             }));
+            if let Some(source) = &entry.semantic {
+                let row_offset = entry.prefix_lines.len().min(u32::MAX as usize) as u32;
+                let col_offset = if entry.work_framed {
+                    work_fold_content_offset(entry.outer_width)
+                } else {
+                    0
+                };
+                let prose_atoms = if entry.content_hidden {
+                    Vec::new()
+                } else {
+                    source
+                        .prose_atoms
+                        .iter()
+                        .filter_map(|atom| {
+                            let screen_row = start
+                                .saturating_add(row_offset)
+                                .saturating_add(u32::from(atom.row));
+                            (screen_row >= scroll_offset && screen_row < vis_bottom).then(|| {
+                                crate::selection::VisibleProseAtom {
+                                    atom: crate::selection::RelativeProseAtom {
+                                        row: atom.row,
+                                        cols: atom.cols.start.saturating_add(col_offset)
+                                            ..atom.cols.end.saturating_add(col_offset),
+                                        cell_width: atom.cell_width,
+                                        event: atom.event,
+                                        event_graphemes: atom.event_graphemes.clone(),
+                                    },
+                                    screen_row,
+                                }
+                            })
+                        })
+                        .collect()
+                };
+                let code_atoms = if entry.content_hidden {
+                    Vec::new()
+                } else {
+                    source
+                        .code_atoms
+                        .iter()
+                        .filter_map(|code| {
+                            let screen_row = start
+                                .saturating_add(row_offset)
+                                .saturating_add(u32::from(code.atom.row));
+                            (screen_row >= scroll_offset && screen_row < vis_bottom).then(|| {
+                                crate::selection::VisibleCodeAtom {
+                                    domain: code.domain.clone(),
+                                    atom: crate::selection::VisibleAtom {
+                                        screen_row,
+                                        cols: code.atom.cols.start.saturating_add(col_offset)
+                                            ..code.atom.cols.end.saturating_add(col_offset),
+                                        cell_width: code.atom.cell_width,
+                                        source: code.atom.source.clone(),
+                                    },
+                                }
+                            })
+                        })
+                        .collect()
+                };
+                let isolated_atoms = if entry.content_hidden {
+                    Vec::new()
+                } else {
+                    source
+                        .isolated_atoms
+                        .iter()
+                        .filter_map(|isolated| match isolated {
+                            crate::selection::RelativeIsolatedAtom::Markdown { domain, atom } => {
+                                let screen_row = start
+                                    .saturating_add(row_offset)
+                                    .saturating_add(u32::from(atom.row));
+                                (screen_row >= scroll_offset && screen_row < vis_bottom).then(
+                                    || crate::selection::VisibleIsolatedAtom::Markdown {
+                                        domain: domain.clone(),
+                                        atom: crate::selection::RelativeProseAtom {
+                                            row: atom.row,
+                                            cols: atom.cols.start.saturating_add(col_offset)
+                                                ..atom.cols.end.saturating_add(col_offset),
+                                            cell_width: atom.cell_width,
+                                            event: atom.event,
+                                            event_graphemes: atom.event_graphemes.clone(),
+                                        },
+                                        screen_row,
+                                    },
+                                )
+                            }
+                            crate::selection::RelativeIsolatedAtom::Raw { domain, atom } => {
+                                let screen_row = start
+                                    .saturating_add(row_offset)
+                                    .saturating_add(u32::from(atom.row));
+                                (screen_row >= scroll_offset && screen_row < vis_bottom).then(
+                                    || crate::selection::VisibleIsolatedAtom::Raw {
+                                        domain: domain.clone(),
+                                        atom: crate::selection::VisibleAtom {
+                                            screen_row,
+                                            cols: atom.cols.start.saturating_add(col_offset)
+                                                ..atom.cols.end.saturating_add(col_offset),
+                                            cell_width: atom.cell_width,
+                                            source: atom.source.clone(),
+                                        },
+                                    },
+                                )
+                            }
+                        })
+                        .collect()
+                };
+                surfaces.push(crate::selection::VisibleSurface {
+                    item_index: idx,
+                    revision: entry.revision,
+                    start_row: start,
+                    end_row: end,
+                    source: Arc::clone(source),
+                    prose_atoms,
+                    code_atoms,
+                    isolated_atoms,
+                });
+            }
         }
-        (lines, ranges, regions)
+        VisibleSlice {
+            lines,
+            ranges,
+            regions,
+            selection: crate::selection::VisibleSelectionProjection {
+                structure_revision: self.structure_revision,
+                surfaces,
+            },
+        }
     }
 
     fn render_entry(
@@ -1103,6 +1236,9 @@ impl LayoutCache {
                 streaming_markdown: Some(projection),
                 bash_output: None,
                 regions: Arc::from([]),
+                // Streaming tails reparse per chunk; projecting here would be O(n²).
+                // The finalized item re-renders through the generic path and projects then.
+                semantic: None,
                 dynamic: DynamicPaint::default(),
                 last_used: self.access_clock,
                 prefix_lines: Arc::from([]),
@@ -1166,6 +1302,11 @@ impl LayoutCache {
                 } else {
                     Arc::from([])
                 },
+                semantic: retain_lines.then(|| {
+                    let mut semantic = crate::selection::item_semantic_source(item, revision);
+                    populate_isolated_geometry(item, &mut semantic, content_width);
+                    Arc::new(semantic)
+                }),
                 dynamic: DynamicPaint {
                     active: !*done,
                     elapsed: None,
@@ -1216,12 +1357,33 @@ impl LayoutCache {
         } else {
             0
         };
-        let (lines, regions) = render_item_with_regions_min_workflow_rows(
-            item,
-            &item_ctx,
-            idx,
-            min_workflow_body_rows,
-        );
+        let (lines, regions, semantic) = if let OutputItem::AssistantMd {
+            md,
+            streaming,
+            retried,
+        } = item
+        {
+            let rendered = render_assistant_with_geometry(md, *streaming, *retried, content_width);
+            let mut semantic = crate::selection::item_semantic_source(item, revision);
+            semantic.prose_atoms = rendered.prose_atoms.clone();
+            semantic.code_atoms =
+                crate::selection::code_atoms(&semantic.code_blocks, &rendered.code_blocks);
+            let mut lines = rendered.lines;
+            lines.push(Line::from(Span::styled(String::new(), RESET)));
+            (lines, Vec::new(), semantic)
+        } else {
+            let (lines, regions) = render_item_with_regions_min_workflow_rows(
+                item,
+                &item_ctx,
+                idx,
+                min_workflow_body_rows,
+            );
+            (
+                lines,
+                regions,
+                crate::selection::item_semantic_source(item, revision),
+            )
+        };
         if matches!(
             item,
             OutputItem::WorkflowPanel {
@@ -1248,6 +1410,7 @@ impl LayoutCache {
             } else {
                 Arc::from([])
             },
+            semantic: retain_lines.then(|| Arc::new(semantic)),
             dynamic,
             last_used: self.access_clock,
             prefix_lines: Arc::from([]),
@@ -1329,6 +1492,7 @@ impl LayoutCache {
             self.entries[idx].streaming_markdown = None;
             self.entries[idx].bash_output = None;
             self.entries[idx].regions = Arc::from([]);
+            self.entries[idx].semantic = None;
         }
     }
 
@@ -1676,6 +1840,94 @@ pub fn wrap_with_prefix(
         });
     }
     out
+}
+
+fn raw_wrapped_atoms(
+    source: &str,
+    body_start_row: usize,
+    target: usize,
+    prefix: &str,
+    visible_rows: std::ops::Range<usize>,
+    domain: crate::selection::SelectionDomain,
+) -> Vec<crate::selection::RelativeIsolatedAtom> {
+    let body_width = target
+        .saturating_sub(crate::width::width(prefix))
+        .saturating_sub(RIGHT_PAD)
+        .max(1);
+    let mut rows = Vec::new();
+    let mut line_start = 0usize;
+    for raw in source.split_inclusive('\n') {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            rows.push(Vec::new());
+        } else {
+            let mut row_start = 0usize;
+            let mut cursor = 0usize;
+            let mut width = 0usize;
+            for (grapheme, cells) in crate::width::graphemes(line) {
+                if width.saturating_add(cells) > body_width && cursor > row_start {
+                    let text = &line[row_start..cursor];
+                    rows.push(
+                        crate::selection::atom_runs(
+                            0,
+                            u16::try_from(crate::width::width(prefix)).unwrap_or(u16::MAX),
+                            text,
+                            line_start.saturating_add(row_start),
+                        )
+                        .0,
+                    );
+                    row_start = cursor;
+                    width = 0;
+                }
+                cursor = cursor.saturating_add(grapheme.len());
+                width = width.saturating_add(cells);
+            }
+            let text = &line[row_start..cursor];
+            rows.push(
+                crate::selection::atom_runs(
+                    0,
+                    u16::try_from(crate::width::width(prefix)).unwrap_or(u16::MAX),
+                    text,
+                    line_start.saturating_add(row_start),
+                )
+                .0,
+            );
+        }
+        line_start = line_start.saturating_add(raw.len());
+    }
+    if source.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows.into_iter()
+        .enumerate()
+        .filter(|(row, _)| visible_rows.contains(row))
+        .flat_map(|(source_row, atoms)| {
+            let row = body_start_row.saturating_add(source_row.saturating_sub(visible_rows.start));
+            let domain = domain.clone();
+            atoms.into_iter().map(move |mut atom| {
+                atom.row = u16::try_from(row).unwrap_or(u16::MAX);
+                crate::selection::RelativeIsolatedAtom::Raw {
+                    domain: domain.clone(),
+                    atom,
+                }
+            })
+        })
+        .collect()
+}
+
+fn command_render_rows(command: Option<&str>, expanded: bool, target: usize) -> usize {
+    let Some(command) = command.filter(|command| !command.is_empty()) else {
+        return 0;
+    };
+    let content_rows = if expanded {
+        let prefix = format!("{DOCUMENT_PAD}${DOCUMENT_PAD}");
+        let continuation = " ".repeat(crate::width::width(&prefix));
+        wrap_with_prefix(command, target, &prefix, &continuation).len()
+    } else {
+        1
+    };
+    content_rows.saturating_add(1)
 }
 
 fn wrap_tail_with_prefix(
@@ -2365,36 +2617,121 @@ fn render_markdown_disclosure(render: MarkdownDisclosureRender<'_>) -> Vec<Line<
     lines
 }
 
-fn render_assistant(
+fn populate_isolated_geometry(
+    item: &OutputItem,
+    semantic: &mut crate::selection::ItemSemanticSource,
+    panel_width: u16,
+) {
+    let Some(isolated) = semantic.isolated.first() else {
+        return;
+    };
+    let domain = isolated.domain.clone();
+    let target = panel_width.max(20) as usize;
+    semantic.isolated_atoms = match item {
+        OutputItem::Thinking {
+            text, disclosure, ..
+        } if *disclosure != Disclosure::Summary => {
+            let rendered = crate::markdown::render_markdown_with_geometry(
+                text,
+                panel_width.saturating_sub(4).max(1),
+            );
+            let visible = match disclosure {
+                Disclosure::Preview => rendered.lines.len().min(6),
+                Disclosure::Full => rendered.lines.len(),
+                Disclosure::Summary => 0,
+            };
+            let source_start = rendered.lines.len().saturating_sub(visible);
+            rendered
+                .prose_atoms
+                .into_iter()
+                .filter(|atom| usize::from(atom.row) >= source_start)
+                .map(|mut atom| {
+                    atom.row = u16::try_from(
+                        3usize.saturating_add(usize::from(atom.row).saturating_sub(source_start)),
+                    )
+                    .unwrap_or(u16::MAX);
+                    atom.cols = atom.cols.start.saturating_add(DOCUMENT_PAD_X as u16)
+                        ..atom.cols.end.saturating_add(DOCUMENT_PAD_X as u16);
+                    crate::selection::RelativeIsolatedAtom::Markdown {
+                        domain: domain.clone(),
+                        atom,
+                    }
+                })
+                .collect()
+        }
+        OutputItem::Bash {
+            command,
+            output,
+            expanded,
+            ..
+        } => {
+            let total = output
+                .lines()
+                .flat_map(|line| wrap_with_prefix(line, target, DOCUMENT_PAD, DOCUMENT_PAD))
+                .count();
+            let start = if *expanded {
+                0
+            } else {
+                total.saturating_sub(8)
+            };
+            raw_wrapped_atoms(
+                output,
+                3usize.saturating_add(command_render_rows(command.as_deref(), *expanded, target)),
+                target,
+                DOCUMENT_PAD,
+                start..total,
+                domain,
+            )
+        }
+        _ => Vec::new(),
+    };
+}
+
+fn render_assistant_with_geometry(
     md: &str,
     streaming: bool,
     retried: bool,
     panel_width: u16,
-) -> Vec<Line<'static>> {
-    let mut lines = crate::markdown::render_markdown_with_width(md, panel_width);
+) -> crate::markdown::MarkdownRender {
+    let mut rendered = crate::markdown::render_markdown_with_geometry(md, panel_width);
     if retried {
         let t = crate::theme::theme();
         let retry_style = Style::default()
             .fg(t.warn.into())
             .add_modifier(Modifier::DIM);
         let retry = format!("{DOCUMENT_PAD}↻{DOCUMENT_PAD}retry");
-        lines.insert(
+        rendered.lines.insert(
             0,
             line_with_right_pad("", &retry, panel_width as usize, retry_style, retry_style),
         );
+        for block in &mut rendered.code_blocks {
+            block.first_body_row = block.first_body_row.saturating_add(1);
+        }
+        for atom in &mut rendered.prose_atoms {
+            atom.row = atom.row.saturating_add(1);
+        }
     }
     if streaming {
         let cursor = Span::styled(
             "▏".to_string(),
             Style::default().add_modifier(Modifier::SLOW_BLINK),
         );
-        if let Some(last) = lines.last_mut() {
+        if let Some(last) = rendered.lines.last_mut() {
             last.spans.push(cursor);
         } else {
-            lines.push(Line::from(cursor));
+            rendered.lines.push(Line::from(cursor));
         }
     }
-    lines
+    rendered
+}
+
+fn render_assistant(
+    md: &str,
+    streaming: bool,
+    retried: bool,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    render_assistant_with_geometry(md, streaming, retried, panel_width).lines
 }
 
 fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Line<'static>> {
@@ -8305,7 +8642,9 @@ mod tests {
                 follow_tail_rows: None,
             },
         );
-        let (lines, _, regions) = cache.visible_slice(0, metrics.total_rows, 0);
+        let visible = cache.visible_slice(0, metrics.total_rows, 0);
+        let lines = visible.lines;
+        let regions = visible.regions;
         let rendered = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
         let work_header = lines
             .iter()
@@ -8473,7 +8812,7 @@ mod tests {
                 follow_tail_rows: None,
             },
         );
-        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows.min(20), 0);
+        let lines = cache.visible_slice(0, metrics.total_rows.min(20), 0).lines;
         let rendered = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
 
         assert!(rendered.contains("thought 0"));
@@ -8543,7 +8882,9 @@ mod tests {
                 follow_tail_rows: None,
             },
         );
-        let (lines, _, regions) = cache.visible_slice(0, metrics.total_rows, 0);
+        let visible = cache.visible_slice(0, metrics.total_rows, 0);
+        let lines = visible.lines;
+        let regions = visible.regions;
         let rendered_lines = lines.iter().map(plain_line).collect::<Vec<_>>();
         let content_lines = rendered_lines
             .iter()
@@ -8854,12 +9195,12 @@ mod tests {
         reset_perf_counters();
         let first = cache
             .visible_slice(metrics.scroll_offset, request.viewport_rows, 0)
-            .0;
+            .lines;
         let mut last = Vec::new();
         for frame in 1..100 {
             last = cache
                 .visible_slice(metrics.scroll_offset, request.viewport_rows, frame)
-                .0;
+                .lines;
         }
         let counters = perf_counters();
         assert_eq!(counters.semantic_item_visits, 0);
@@ -8960,7 +9301,7 @@ mod tests {
         );
         let lines = cache
             .visible_slice(metrics.scroll_offset, request.viewport_rows, 0)
-            .0;
+            .lines;
         let text = lines.iter().map(plain_line).collect::<String>();
         assert!(text.contains("1m"));
         assert!(!text.contains(DYNAMIC_SPINNER_MARKER));
@@ -9123,7 +9464,9 @@ mod tests {
         });
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
-        let (lines, _, _) = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
+        let lines = cache
+            .visible_slice(metrics.scroll_offset, request.viewport_rows, 0)
+            .lines;
         assert_eq!(perf_counters().bash_source_bytes, 0);
         assert_eq!(
             app.items.revisions()[0].source_generation,
@@ -9164,7 +9507,7 @@ mod tests {
         };
         let metrics = cache.update_dirty(key, &items, &ctx, first_request);
         assert_eq!(metrics.total_rows as usize, direct.len());
-        let (first, _, _) = cache.visible_slice(0, viewport_rows, 0);
+        let first = cache.visible_slice(0, viewport_rows, 0).lines;
         assert_eq!(first, direct[..viewport_rows as usize]);
 
         let max_scroll = metrics.total_rows.saturating_sub(viewport_rows);
@@ -9176,7 +9519,7 @@ mod tests {
                 follow_tail_rows: None,
             };
             cache.update_dirty(key, &items, &ctx, request);
-            let (projected, _, _) = cache.visible_slice(scroll_offset, viewport_rows, 0);
+            let projected = cache.visible_slice(scroll_offset, viewport_rows, 0).lines;
             let end = scroll_offset
                 .saturating_add(viewport_rows)
                 .min(metrics.total_rows) as usize;
@@ -9244,7 +9587,7 @@ mod tests {
             follow_tail_rows: None,
         };
         cache.update_dirty(key, &items, &ctx, request);
-        let (projected, _, _) = cache.visible_slice(0, first_rows, 0);
+        let projected = cache.visible_slice(0, first_rows, 0).lines;
         assert_eq!(projected, render_item(&items[0], &ctx));
         let rebuilt_bytes = items
             .iter()
@@ -9404,7 +9747,7 @@ mod tests {
         let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
         assert!(!cache.pending_layout.contains(&0));
         assert_eq!(cache.entries[0].revision.layout, current_revision.layout);
-        let (streaming_lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        let streaming_lines = cache.visible_slice(0, metrics.total_rows, 0).lines;
         assert_eq!(
             streaming_lines,
             render_item(
@@ -9424,7 +9767,7 @@ mod tests {
         });
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
-        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        let lines = cache.visible_slice(0, metrics.total_rows, 0).lines;
         assert_eq!(
             lines,
             render_item(
@@ -9482,7 +9825,7 @@ mod tests {
         });
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
-        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        let lines = cache.visible_slice(0, metrics.total_rows, 0).lines;
         initial.push_str(suffix);
         assert_eq!(
             lines,
@@ -9545,7 +9888,7 @@ mod tests {
         app.apply_stream_frame(atman_runtime::stream::StreamFrame::LlmRetry);
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(alternate_key, &app.items, &narrow_ctx, request);
-        let (lines, _, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        let lines = cache.visible_slice(0, metrics.total_rows, 0).lines;
         assert_eq!(lines, render_item(&app.items[0], &narrow_ctx));
         assert!(cache.entries[0].streaming_markdown.is_none());
     }
@@ -9683,7 +10026,9 @@ mod tests {
 
         let mut cache = std::mem::take(&mut app.layout_cache);
         let metrics = cache.update_dirty(key, &app.items, &RenderCtx::empty(), request);
-        let (lines, _, _) = cache.visible_slice(metrics.scroll_offset, request.viewport_rows, 0);
+        let lines = cache
+            .visible_slice(metrics.scroll_offset, request.viewport_rows, 0)
+            .lines;
         let text = lines
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -11933,8 +12278,8 @@ mod tests {
             request,
         );
         reset_perf_counters();
-        let (frame_0, _, _) = cache.visible_slice(0, 20, 0);
-        let (frame_4, _, _) = cache.visible_slice(0, 20, 4);
+        let frame_0 = cache.visible_slice(0, 20, 0).lines;
+        let frame_4 = cache.visible_slice(0, 20, 4).lines;
         let foregrounds = |line: &Line<'static>| {
             line.spans
                 .iter()
@@ -12015,7 +12360,9 @@ mod tests {
             &ctx,
             request,
         );
-        let (lines, ranges, _) = cache.visible_slice(0, metrics.total_rows, 0);
+        let visible = cache.visible_slice(0, metrics.total_rows, 0);
+        let lines = visible.lines;
+        let ranges = visible.ranges;
 
         assert_eq!(ranges[1].start_row, ranges[0].end_row);
         let separator = &lines[ranges[0].end_row.saturating_sub(1) as usize];
