@@ -207,6 +207,12 @@ pub(crate) async fn run_frames(
                 let mut drained: u32 = 0;
                 loop {
                     match current {
+                        Some(Ok(CtEvent::Mouse(me))) if app.selection_menu.is_some() => {
+                            if handle_selection_menu_mouse(&mut app, &mut editor, &me) {
+                                interrupt_prompt = None;
+                                break;
+                            }
+                        }
                         Some(Ok(CtEvent::Mouse(me)))
                             if app.wm.modals.history_search.open =>
                         {
@@ -338,6 +344,11 @@ pub(crate) async fn run_frames(
                             if matches!(ke.kind, crossterm::event::KeyEventKind::Press) =>
                         {
                             let action = map_key(ke);
+                            if app.selection_menu.is_some()
+                                && handle_selection_menu_key(&mut app, &mut editor, &action)
+                            {
+                                continue;
+                            }
                             let (consumed, commands) = app.wm.dispatch_key(
                                 &action,
                                 &mut app.app,
@@ -420,6 +431,19 @@ pub(crate) async fn run_frames(
                                     && (handle_sidebar_selection_mouse(&mut app.app, &me)
                                         || handle_transcript_selection_mouse(&mut app.app, &me))
                                 {
+                                    if matches!(me.kind, MouseEventKind::Up(MouseButton::Left))
+                                        && app
+                                            .app
+                                            .selection
+                                            .as_ref()
+                                            .is_some_and(crate::selection::selection_is_non_empty)
+                                    {
+                                        app.selection_menu = Some(
+                                            crate::selection_menu::SelectionMenu::new(
+                                                me.column, me.row,
+                                            ),
+                                        );
+                                    }
                                     interrupt_prompt = None;
                                     break;
                                 }
@@ -1070,11 +1094,6 @@ pub(crate) async fn run_frames(
                                         app.app.toggle_workflow_node(panel_idx, &node_id);
                                     }
                                 } else if let Some(idx) = app.app.hit_test(me.column, me.row)
-                                    && let Some(crate::app::OutputItem::Thinking { .. }) =
-                                        app.app.items.get(idx)
-                                {
-                                    app.app.cycle_thinking_disclosure(idx);
-                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.app.items.get(idx)
                                 {
@@ -1187,6 +1206,23 @@ pub(crate) async fn run_frames(
                                     }
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
+                                if app.app.selection.as_ref().is_some_and(|state| {
+                                    state.phase == crate::selection::SelectionPhase::Pending
+                                        && matches!(
+                                            state.anchor.domain,
+                                            crate::selection::SelectionDomain::Thinking { .. }
+                                        )
+                                }) {
+                                    if let Some(idx) = app.app.hit_test(me.column, me.row)
+                                        && matches!(
+                                            app.app.items.get(idx),
+                                            Some(crate::app::OutputItem::Thinking { .. })
+                                        )
+                                    {
+                                        app.app.cycle_thinking_disclosure(idx);
+                                    }
+                                    app.app.selection = crate::selection::selection_clear();
+                                }
                                 if app.wm.interaction.resize_target.is_some() {
                                     let id = app.wm.interaction.resize_target;
                                     if let Some(id) = id {
@@ -2481,6 +2517,103 @@ fn handle_sidebar_selection_mouse(
     }
 }
 
+fn handle_selection_menu_mouse(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    event: &crossterm::event::MouseEvent,
+) -> bool {
+    let Some(menu) = ui.selection_menu.as_mut() else {
+        return false;
+    };
+    match event.kind {
+        MouseEventKind::Moved => {
+            menu.update_hover(event.column, event.row);
+            true
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let action = menu
+                .action_at(event.column, event.row)
+                .unwrap_or(crate::selection_menu::SelectionAction::Copy);
+            apply_selection_action(ui, editor, action);
+            true
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            apply_selection_action(ui, editor, crate::selection_menu::SelectionAction::Cancel);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn handle_selection_menu_key(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    action: &crate::keys::KeyAction,
+) -> bool {
+    let execute = {
+        let Some(menu) = ui.selection_menu.as_mut() else {
+            return false;
+        };
+        match action {
+            crate::keys::KeyAction::CursorLeft
+            | crate::keys::KeyAction::HistoryUp
+            | crate::keys::KeyAction::BackTab => {
+                menu.move_previous();
+                None
+            }
+            crate::keys::KeyAction::CursorRight
+            | crate::keys::KeyAction::HistoryDown
+            | crate::keys::KeyAction::Tab => {
+                menu.move_next();
+                None
+            }
+            crate::keys::KeyAction::Submit => Some(menu.focused_action()),
+            crate::keys::KeyAction::Escape => Some(crate::selection_menu::SelectionAction::Cancel),
+            _ => return false,
+        }
+    };
+    if let Some(action) = execute {
+        apply_selection_action(ui, editor, action);
+    }
+    true
+}
+
+fn apply_selection_action(
+    ui: &mut UiState,
+    editor: &mut InputEditor,
+    action: crate::selection_menu::SelectionAction,
+) {
+    let payload = ui.app.selection.as_ref().and_then(|state| {
+        crate::selection::selection_copy_payload(&ui.app.last_selection_projection, state)
+    });
+    match action {
+        crate::selection_menu::SelectionAction::Copy => {
+            if let Some(payload) = payload {
+                let text = match payload {
+                    crate::selection::CopyPayload::Markdown(text)
+                    | crate::selection::CopyPayload::PlainText(text)
+                    | crate::selection::CopyPayload::Preview(text) => text,
+                };
+                if let Err(error) = crate::clipboard::write_text(&text) {
+                    ui.app.push_note(
+                        format!("clipboard write failed: {error}"),
+                        crate::app::NoteLevel::Error,
+                    );
+                }
+            }
+        }
+        crate::selection_menu::SelectionAction::Quote => {
+            if let Some(payload) = payload {
+                editor.insert_str(&crate::selection_menu::quote_payload(&payload));
+                ui.app.submission_focus = false;
+            }
+        }
+        crate::selection_menu::SelectionAction::Cancel => {}
+    }
+    ui.app.selection = crate::selection::selection_clear();
+    ui.selection_menu = None;
+}
+
 fn handle_transcript_selection_mouse(
     app: &mut AppState,
     event: &crossterm::event::MouseEvent,
@@ -2543,32 +2676,9 @@ fn handle_transcript_selection_mouse(
             let Some(state) = app.selection.take() else {
                 return false;
             };
-            let copied =
-                crate::selection::selection_copy_payload(&app.last_selection_projection, &state);
-            if let Some(payload) = copied {
-                let text = match payload {
-                    crate::selection::CopyPayload::Markdown(text)
-                    | crate::selection::CopyPayload::PlainText(text)
-                    | crate::selection::CopyPayload::Preview(text) => text,
-                };
-                match crate::clipboard::write_text(&text) {
-                    Ok(()) => {
-                        app.selection = Some(crate::selection::selection_retain_copied(state));
-                    }
-                    Err(error) => {
-                        app.push_note(
-                            format!("clipboard write failed: {error}"),
-                            crate::app::NoteLevel::Error,
-                        );
-                        app.selection = Some(state);
-                    }
-                }
-                true
-            } else {
-                let consumed = crate::selection::selection_is_non_empty(&state);
-                app.selection = Some(state);
-                consumed
-            }
+            let consumed = crate::selection::selection_is_non_empty(&state);
+            app.selection = Some(state);
+            consumed
         }
         _ => false,
     }
@@ -2659,7 +2769,7 @@ mod tests {
         ));
         assert_eq!(
             app.selection.as_ref().map(|state| state.phase),
-            Some(crate::selection::SelectionPhase::Retained)
+            Some(crate::selection::SelectionPhase::Active)
         );
     }
 
@@ -2713,7 +2823,7 @@ mod tests {
         ));
         assert_eq!(
             app.selection.as_ref().map(|state| state.phase),
-            Some(crate::selection::SelectionPhase::Retained)
+            Some(crate::selection::SelectionPhase::Active)
         );
     }
 

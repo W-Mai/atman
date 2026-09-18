@@ -943,8 +943,72 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
 
     ui.wm.render(f, area, app);
+    render_selection_menu(f, area, &mut ui.selection_menu);
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
+    }
+}
+
+fn render_selection_menu(
+    frame: &mut ratatui::Frame,
+    canvas: ratatui::layout::Rect,
+    menu: &mut Option<crate::selection_menu::SelectionMenu>,
+) {
+    let Some(menu) = menu.as_mut() else {
+        return;
+    };
+    let labels = ["Copy", "Quote", "Cancel"];
+    let widths = labels.map(|label| label.len() as u16 + 2);
+    let width = widths.iter().copied().sum::<u16>().saturating_add(2);
+    let height = 3;
+    let max_x = canvas.x.saturating_add(canvas.width).saturating_sub(width);
+    let max_y = canvas
+        .y
+        .saturating_add(canvas.height)
+        .saturating_sub(height);
+    let rect = ratatui::layout::Rect {
+        x: menu.anchor.0.saturating_add(1).min(max_x).max(canvas.x),
+        y: menu.anchor.1.saturating_add(1).min(max_y).max(canvas.y),
+        width,
+        height,
+    };
+    let t = crate::theme::theme();
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(ratatui::style::Style::default().fg(t.accent.into()))
+            .style(ratatui::style::Style::default().bg(t.modal_bg.into())),
+        rect,
+    );
+    menu.rect = Some(rect);
+    menu.item_rects.clear();
+    let mut x = rect.x.saturating_add(1);
+    for (index, (label, width)) in labels.into_iter().zip(widths).enumerate() {
+        let item_rect = ratatui::layout::Rect {
+            x,
+            y: rect.y.saturating_add(1),
+            width,
+            height: 1,
+        };
+        menu.item_rects.push(item_rect);
+        let focused = menu.hovered.unwrap_or(menu.selected) == index;
+        let style = if focused {
+            ratatui::style::Style::default()
+                .fg(ratatui::style::Color::Black)
+                .bg(t.accent.into())
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            ratatui::style::Style::default()
+                .fg(t.tinted_fg.into())
+                .bg(t.modal_bg.into())
+        };
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(format!(" {label} ")).style(style),
+            item_rect,
+        );
+        x = x.saturating_add(width);
     }
 }
 

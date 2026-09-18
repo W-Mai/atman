@@ -1383,11 +1383,9 @@ impl LayoutCache {
                 idx,
                 min_workflow_body_rows,
             );
-            (
-                lines,
-                regions,
-                crate::selection::item_semantic_source(item, revision),
-            )
+            let mut semantic = crate::selection::item_semantic_source(item, revision);
+            populate_isolated_geometry(item, &mut semantic, content_width);
+            (lines, regions, semantic)
         };
         if matches!(
             item,

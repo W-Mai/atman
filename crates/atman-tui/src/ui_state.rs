@@ -4,6 +4,7 @@ use crate::wm::WindowManager;
 pub struct UiState {
     pub app: AppState,
     pub wm: WindowManager,
+    pub selection_menu: Option<crate::selection_menu::SelectionMenu>,
 }
 
 impl std::ops::Deref for UiState {
@@ -25,6 +26,7 @@ impl UiState {
         Self {
             app,
             wm: WindowManager::default(),
+            selection_menu: None,
         }
     }
 
