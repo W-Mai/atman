@@ -957,20 +957,10 @@ fn render_selection_menu(
     let Some(menu) = menu.as_mut() else {
         return;
     };
-    let labels = ["Copy", "Quote", "Cancel"];
-    let widths = labels.map(|label| label.len() as u16 + 2);
-    let width = widths.iter().copied().sum::<u16>().saturating_add(2);
-    let height = 3;
-    let max_x = canvas.x.saturating_add(canvas.width).saturating_sub(width);
-    let max_y = canvas
-        .y
-        .saturating_add(canvas.height)
-        .saturating_sub(height);
-    let rect = ratatui::layout::Rect {
-        x: menu.anchor.0.saturating_add(1).min(max_x).max(canvas.x),
-        y: menu.anchor.1.saturating_add(1).min(max_y).max(canvas.y),
-        width,
-        height,
+    let Some((rect, item_rects)) = crate::selection_menu::layout_menu(canvas, menu.anchor) else {
+        menu.rect = None;
+        menu.item_rects.clear();
+        return;
     };
     let t = crate::theme::theme();
     frame.render_widget(ratatui::widgets::Clear, rect);
@@ -984,17 +974,17 @@ fn render_selection_menu(
     );
     menu.rect = Some(rect);
     menu.item_rects.clear();
-    let mut x = rect.x.saturating_add(1);
-    for (index, (label, width)) in labels.into_iter().zip(widths).enumerate() {
-        let item_rect = ratatui::layout::Rect {
-            x,
-            y: rect.y.saturating_add(1),
-            width,
-            height: 1,
-        };
+    for (index, (label, item_rect)) in crate::selection_menu::SelectionMenu::LABELS
+        .into_iter()
+        .zip(item_rects)
+        .enumerate()
+    {
         menu.item_rects.push(item_rect);
-        let focused = menu.hovered.unwrap_or(menu.selected) == index;
-        let style = if focused {
+        let style = if menu.hovered == Some(index) {
+            ratatui::style::Style::default()
+                .fg(t.tinted_fg.into())
+                .bg(t.work_hover_bg.into())
+        } else if menu.hovered.is_none() && menu.selected == index {
             ratatui::style::Style::default()
                 .fg(ratatui::style::Color::Black)
                 .bg(t.accent.into())
@@ -1008,7 +998,6 @@ fn render_selection_menu(
             ratatui::widgets::Paragraph::new(format!(" {label} ")).style(style),
             item_rect,
         );
-        x = x.saturating_add(width);
     }
 }
 

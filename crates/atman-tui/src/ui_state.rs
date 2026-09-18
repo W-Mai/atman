@@ -135,7 +135,10 @@ impl UiState {
             .find(|panel| panel.id == window_id)
         {
             panel.content = Some(Box::new(
-                crate::window::output_panel::OutputPanelContent::new(item),
+                crate::window::output_panel::OutputPanelContent::new(
+                    item_idx,
+                    tool_use_id.to_string(),
+                ),
             ));
         }
         true

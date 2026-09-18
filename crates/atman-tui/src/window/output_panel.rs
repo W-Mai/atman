@@ -4,47 +4,45 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
-use crate::app::{Disclosure, OutputItem};
+use crate::app::OutputItem;
 use crate::wm::component::{
     EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
 pub struct OutputPanelContent {
-    item: OutputItem,
+    item_index: usize,
+    tool_use_id: String,
     scroll: u32,
 }
 
 impl OutputPanelContent {
-    pub fn new(mut item: OutputItem) -> Self {
-        match &mut item {
-            OutputItem::DiffPreview { expanded, .. }
-            | OutputItem::Bash { expanded, .. }
-            | OutputItem::Terminal { expanded, .. }
-            | OutputItem::FsDetail { expanded, .. }
-            | OutputItem::SubAgentActivity { expanded, .. } => *expanded = true,
-            OutputItem::Thinking { disclosure, .. }
-            | OutputItem::CompactionSummary { disclosure, .. } => {
-                *disclosure = Disclosure::Full;
-            }
-            _ => {}
+    pub fn new(item_index: usize, tool_use_id: String) -> Self {
+        Self {
+            item_index,
+            tool_use_id,
+            scroll: 0,
         }
-        Self { item, scroll: 0 }
     }
 }
 
 impl WindowComponent for OutputPanelContent {
-    fn render_content(
-        &mut self,
-        area: Rect,
-        frame: &mut Frame,
-        _ctx: &RenderCtx,
-    ) -> Vec<HitRegion> {
+    fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
         let area = Rect::new(
             area.x.saturating_add(1),
             area.y,
             area.width.saturating_sub(2),
             area.height,
         );
+        let Some(OutputItem::ToolDispatch { calls }) = ctx.items.get(self.item_index) else {
+            return Vec::new();
+        };
+        let Some(item) = calls
+            .iter()
+            .find(|call| call.id == self.tool_use_id)
+            .and_then(|call| call.detail.as_deref())
+        else {
+            return Vec::new();
+        };
         let expanded_tools = HashSet::new();
         let render_ctx = crate::output::RenderCtx {
             expanded_tools: &expanded_tools,
@@ -52,9 +50,9 @@ impl WindowComponent for OutputPanelContent {
             panel_width: area.width,
             hovered_thinking_idx: None,
             hovered_output_node: None,
-            animation_frame: 0,
+            animation_frame: ctx.animation_frame,
         };
-        let lines = crate::output::render_item(&self.item, &render_ctx);
+        let lines = crate::output::render_item(item, &render_ctx);
         let max_scroll = (lines.len() as u32).saturating_sub(area.height as u32);
         self.scroll = self.scroll.min(max_scroll);
         let visible = lines
