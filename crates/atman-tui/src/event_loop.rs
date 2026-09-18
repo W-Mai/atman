@@ -415,8 +415,10 @@ pub(crate) async fn run_frames(
                                 break;
                             }
                             if !consumed {
-                                if handle_sidebar_selection_mouse(&mut app.app, &me)
-                                    || handle_transcript_selection_mouse(&mut app.app, &me)
+                                if app.wm.interaction.resize_target.is_none()
+                                    && app.wm.interaction.drag_target.is_none()
+                                    && (handle_sidebar_selection_mouse(&mut app.app, &me)
+                                        || handle_transcript_selection_mouse(&mut app.app, &me))
                                 {
                                     interrupt_prompt = None;
                                     break;
@@ -2602,6 +2604,117 @@ mod tests {
             row,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn transcript_mouse_selection_reaches_copy_handler() {
+        let items = app::OutputStore::from(vec![app::OutputItem::AssistantMd {
+            md: "ordinary assistant prose".into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let surface = visible.selection.surfaces.first().expect("surface");
+        let atom = surface.prose_atoms.first().expect("prose atom");
+        let start_col = atom.atom.cols.start;
+        let end_col = atom.atom.cols.end.saturating_sub(1);
+        let row = atom.screen_row as u16;
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.scroll_offset = 0;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+
+        let mouse = |kind, column| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), start_col),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end_col),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), end_col),
+        ));
+        assert_eq!(
+            app.selection.as_ref().map(|state| state.phase),
+            Some(crate::selection::SelectionPhase::Retained)
+        );
+    }
+
+    #[test]
+    fn user_turn_mouse_selection_reaches_copy_handler() {
+        let items = app::OutputStore::from(vec![app::OutputItem::UserTurn {
+            text: "你好呀".into(),
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let surface = visible.selection.surfaces.first().expect("user surface");
+        let atom = surface.prose_atoms.first().expect("user prose atom");
+        assert_eq!(atom.screen_row, 1);
+        let row = atom.screen_row as u16;
+        let start_col = atom.atom.cols.start;
+        let end_col = atom.atom.cols.end.saturating_sub(1);
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+        let mouse = |kind, column| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), start_col),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end_col),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), end_col),
+        ));
+        assert_eq!(
+            app.selection.as_ref().map(|state| state.phase),
+            Some(crate::selection::SelectionPhase::Retained)
+        );
     }
 
     #[test]

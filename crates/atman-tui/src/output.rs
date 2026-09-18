@@ -1812,7 +1812,7 @@ pub(crate) fn user_turn_prose_atoms(
         let grapheme_start = source_grapheme
             .saturating_add(crate::width::graphemes(&text[source_cursor..body_start]).count());
         atoms.extend(crate::selection::prose_atom_runs(
-            u16::try_from(row).unwrap_or(u16::MAX),
+            u16::try_from(row.saturating_add(1)).unwrap_or(u16::MAX),
             u16::try_from(crate::width::width(&padded.prefix)).unwrap_or(u16::MAX),
             &padded.body,
             0,
@@ -10161,6 +10161,70 @@ mod tests {
             atoms.iter().map(|atom| atom.event_graphemes.end).max(),
             Some(crate::width::graphemes(text).count())
         );
+    }
+
+    #[test]
+    fn visible_assistant_prose_projection_hits_and_copies() {
+        let items = OutputStore::from(vec![OutputItem::AssistantMd {
+            md: "ordinary assistant prose".into(),
+            streaming: false,
+            retried: false,
+        }]);
+        let mut cache = LayoutCache::default();
+        let key = LayoutKey {
+            width: 80,
+            theme: crate::theme::ThemeMode::Dark,
+        };
+        let metrics = cache.update_dirty(
+            key,
+            &items,
+            &RenderCtx::empty(),
+            LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let surface = visible
+            .selection
+            .surfaces
+            .first()
+            .expect("assistant surface");
+        let atom = surface.prose_atoms.first().expect("assistant prose atom");
+        let rendered_line = plain_line(&visible.lines[atom.screen_row as usize]);
+        let rendered = crate::width::graphemes(&rendered_line).collect::<Vec<_>>();
+        assert!(!rendered.is_empty());
+        assert!(usize::from(atom.atom.cols.start) < rendered.len());
+        let start = visible
+            .selection
+            .prose_point_at(atom.screen_row, atom.atom.cols.start)
+            .expect("start point");
+        let end_col = atom.atom.cols.end.saturating_sub(1);
+        let end = visible
+            .selection
+            .prose_point_at(atom.screen_row, end_col)
+            .expect("end point");
+        let state = crate::selection::selection_extend(
+            &crate::selection::selection_begin(
+                start,
+                surface.revision,
+                visible.selection.structure_revision,
+            ),
+            end,
+            surface.revision,
+            visible.selection.structure_revision,
+        )
+        .expect("selection in one prose surface");
+        let payload = crate::selection::selection_copy_payload(&visible.selection, &state)
+            .expect("copy payload");
+        let copied = match payload {
+            crate::selection::CopyPayload::Markdown(text)
+            | crate::selection::CopyPayload::PlainText(text)
+            | crate::selection::CopyPayload::Preview(text) => text,
+        };
+        assert!(!copied.is_empty());
+        assert!("ordinary assistant prose".contains(&copied));
     }
 
     #[test]

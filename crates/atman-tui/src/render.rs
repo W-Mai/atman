@@ -14,7 +14,7 @@ fn render_selection_highlight(
     projection: &crate::selection::VisibleSelectionProjection,
     selection: &crate::selection::SelectionState,
 ) {
-    let bg = crate::theme::theme().work_hover_bg.into_inner();
+    let bg = crate::theme::theme().accent.into_inner();
     let cells = frame.buffer_mut();
     for surface in &projection.surfaces {
         for atom in &surface.prose_atoms {
@@ -112,7 +112,7 @@ fn render_sidebar_selection_highlight(
     else {
         return;
     };
-    let bg = crate::theme::theme().work_hover_bg.into_inner();
+    let bg = crate::theme::theme().accent.into_inner();
     let cells = frame.buffer_mut();
     for atom in &surface.atoms {
         for col in atom.cols.clone() {
