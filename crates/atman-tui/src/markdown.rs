@@ -357,10 +357,13 @@ pub fn semantic_markdown_source(
                         if node.contains_code {
                             prose.extend(plain_leaves(node.leaves));
                         } else {
-                            prose.push(CopyFragment::markdown_node(
-                                node.start..trailing_whitespace_end(source, range.end),
-                                node.semantic_text,
-                            ));
+                            prose.push(
+                                CopyFragment::markdown_node(
+                                    node.start..trailing_whitespace_end(source, range.end),
+                                    node.semantic_text,
+                                )
+                                .with_event_segments(node.event_segments),
+                            );
                         }
                     }
                 }
@@ -1671,6 +1674,21 @@ mod tests {
         assert_eq!(source_text, "e\u{301}a\u{308}");
         assert!(pieces.iter().any(|piece| piece.text == "e\u{301}"));
         assert!(pieces.iter().any(|piece| piece.text == "a\u{308}"));
+    }
+
+    #[test]
+    fn complete_prose_fragments_keep_visual_event_segments() {
+        let source = "ordinary assistant prose";
+        let semantic = semantic_markdown_source(
+            source,
+            crate::app::OutputRevision {
+                id: 7,
+                ..Default::default()
+            },
+        );
+        assert_eq!(semantic.prose.len(), 1);
+        assert!(!semantic.prose[0].event_segments.is_empty());
+        assert_eq!(semantic.prose[0].semantic_text, source);
     }
 
     #[test]
