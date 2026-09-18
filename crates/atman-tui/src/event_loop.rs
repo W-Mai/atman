@@ -2781,6 +2781,73 @@ mod tests {
     }
 
     #[test]
+    fn bash_output_mouse_selection_reaches_copy_handler() {
+        let items = app::OutputStore::from(vec![app::OutputItem::Bash {
+            handle: "bash-1".into(),
+            title: Some("command".into()),
+            command: Some("printf output".into()),
+            output: "tool output line".into(),
+            done: true,
+            expanded: true,
+        }]);
+        let mut cache = crate::output::LayoutCache::default();
+        let metrics = cache.update_dirty(
+            crate::output::LayoutKey {
+                width: 80,
+                theme: crate::theme::ThemeMode::Dark,
+            },
+            &items,
+            &crate::output::RenderCtx::empty(),
+            crate::output::LayoutRequest {
+                scroll_offset: 0,
+                viewport_rows: 40,
+                follow_tail_rows: None,
+            },
+        );
+        let visible = cache.visible_slice(metrics.scroll_offset, metrics.total_rows, 0);
+        let surface = visible.selection.surfaces.first().expect("bash surface");
+        let atom = surface.isolated_atoms.first().expect("bash selection atom");
+        let crate::selection::VisibleIsolatedAtom::Raw { atom, .. } = atom else {
+            panic!("bash should use raw geometry");
+        };
+        let row = atom.screen_row as u16;
+        let start_col = atom.cols.start;
+        let end_col = atom.cols.end.saturating_sub(1);
+        let mut app = AppState::new("session".into(), None);
+        app.items = items;
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 40));
+        app.last_selection_projection = visible.selection;
+        let mouse = |kind, column| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+
+        assert!(!handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), start_col),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Drag(MouseButton::Left), end_col),
+        ));
+        assert!(handle_transcript_selection_mouse(
+            &mut app,
+            &mouse(MouseEventKind::Up(MouseButton::Left), end_col),
+        ));
+        let state = app.selection.as_ref().expect("bash selection");
+        assert!(matches!(
+            state.anchor.domain,
+            crate::selection::SelectionDomain::RawOutput { .. }
+        ));
+        assert!(
+            crate::selection::selection_copy_payload(&app.last_selection_projection, state)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn thinking_mouse_selection_reaches_copy_handler() {
         let items = app::OutputStore::from(vec![app::OutputItem::Thinking {
             text: "reasoning details".into(),
