@@ -1105,12 +1105,23 @@ pub fn item_semantic_source(
     use crate::app::OutputItem;
 
     match item {
-        OutputItem::UserTurn { text } => ItemSemanticSource {
-            owner_revision: revision,
-            source: text.clone(),
-            prose: vec![CopyFragment::plain_text(text.clone())],
-            ..Default::default()
-        },
+        OutputItem::UserTurn { text } => {
+            let graphemes = crate::width::graphemes(text).count();
+            ItemSemanticSource {
+                owner_revision: revision,
+                source: text.clone(),
+                prose: vec![
+                    CopyFragment::plain_text(text.clone()).with_event_segments(vec![
+                        ProseEventSegment {
+                            event: 0,
+                            event_graphemes: 0..graphemes,
+                            fragment_grapheme_start: 0,
+                        },
+                    ]),
+                ],
+                ..Default::default()
+            }
+        }
         OutputItem::AssistantMd { md, .. } => {
             let markdown = crate::markdown::semantic_markdown_source(md, revision);
             ItemSemanticSource {

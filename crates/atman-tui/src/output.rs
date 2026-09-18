@@ -1371,6 +1371,11 @@ impl LayoutCache {
             let mut lines = rendered.lines;
             lines.push(Line::from(Span::styled(String::new(), RESET)));
             (lines, Vec::new(), semantic)
+        } else if let OutputItem::UserTurn { text } = item {
+            let lines = render_user_turn(text, content_width);
+            let mut semantic = crate::selection::item_semantic_source(item, revision);
+            semantic.prose_atoms = user_turn_prose_atoms(text, usize::from(content_width));
+            (lines, Vec::new(), semantic)
         } else {
             let (lines, regions) = render_item_with_regions_min_workflow_rows(
                 item,
@@ -1779,6 +1784,45 @@ const RIGHT_PAD: usize = DOCUMENT_PAD_X;
 pub struct PaddedRow {
     pub prefix: String,
     pub body: String,
+}
+
+pub(crate) fn user_turn_prose_atoms(
+    text: &str,
+    target: usize,
+) -> Vec<crate::selection::RelativeProseAtom> {
+    let first_prefix = format!("{DOCUMENT_PAD}❯{DOCUMENT_PAD}");
+    let continuation = " ".repeat(crate::width::width(&first_prefix));
+    let rows = wrap_with_prefix(text, target, &first_prefix, &continuation);
+    let mut source_cursor = 0usize;
+    let mut source_grapheme = 0usize;
+    let mut atoms = Vec::new();
+
+    for (row, padded) in rows.into_iter().enumerate() {
+        if padded.body.is_empty() {
+            if text[source_cursor..].starts_with('\n') {
+                source_cursor = source_cursor.saturating_add(1);
+                source_grapheme = source_grapheme.saturating_add(1);
+            }
+            continue;
+        }
+        let Some(relative) = text[source_cursor..].find(&padded.body) else {
+            continue;
+        };
+        let body_start = source_cursor.saturating_add(relative);
+        let grapheme_start = source_grapheme
+            .saturating_add(crate::width::graphemes(&text[source_cursor..body_start]).count());
+        atoms.extend(crate::selection::prose_atom_runs(
+            u16::try_from(row).unwrap_or(u16::MAX),
+            u16::try_from(crate::width::width(&padded.prefix)).unwrap_or(u16::MAX),
+            &padded.body,
+            0,
+            grapheme_start,
+        ));
+        source_cursor = body_start.saturating_add(padded.body.len());
+        source_grapheme =
+            grapheme_start.saturating_add(crate::width::graphemes(&padded.body).count());
+    }
+    atoms
 }
 
 pub fn wrap_with_prefix(
@@ -10104,6 +10148,19 @@ mod tests {
             request,
         );
         assert_eq!(perf_counters().item_renders, 2);
+    }
+
+    #[test]
+    fn user_turn_produces_source_atoms_for_wrapped_cjk_text() {
+        let text = "第一行内容很长需要换行\n第二行内容";
+        let atoms = user_turn_prose_atoms(text, 20);
+        assert!(!atoms.is_empty());
+        assert!(atoms.iter().any(|atom| atom.row > 0));
+        assert!(atoms.iter().all(|atom| atom.cols.start >= 4));
+        assert_eq!(
+            atoms.iter().map(|atom| atom.event_graphemes.end).max(),
+            Some(crate::width::graphemes(text).count())
+        );
     }
 
     #[test]
