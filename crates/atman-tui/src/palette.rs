@@ -99,7 +99,7 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         group: "Copy",
         label: "Enter Yank Mode",
         hint: "j/k select, Enter copies via OSC 52",
-        keyword: "yank copy clipboard",
+        keyword: "select copy yank clipboard",
     },
     PaletteEntry {
         id: PaletteEntryId::CopyLastMessage,

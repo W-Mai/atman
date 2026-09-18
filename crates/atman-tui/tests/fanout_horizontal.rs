@@ -330,7 +330,7 @@ fn layout_cache_still_composes_valid_regions() {
             follow_tail_rows: None,
         },
     );
-    let (_lines, ranges, _regions) = cache.visible_slice(0, 50, 0);
+    let ranges = cache.visible_slice(0, 50, 0).ranges;
     assert_eq!(ranges.len(), 1);
     assert!(metrics.total_rows > 0);
     // regions collection TBD with virtual scroll

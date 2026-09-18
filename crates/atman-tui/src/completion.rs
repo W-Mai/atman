@@ -245,7 +245,7 @@ pub fn render_hint_strip(
     yank_mode: bool,
 ) {
     if yank_mode {
-        let text = " [YANK MODE] j/k select · Enter copy · Esc cancel";
+        let text = " [SELECT & COPY] hjkl move · g/G edge · v anchor · Tab surface · Enter copy · Esc cancel";
         let p = Paragraph::new(Line::from(Span::styled(
             text,
             Style::default().fg(crate::theme::theme().accent.into()),

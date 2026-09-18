@@ -746,17 +746,7 @@ impl WindowManager {
         use crate::palette::PaletteEntryId;
         match id {
             PaletteEntryId::YankMode => {
-                let cands = crate::key_handler::yank_candidate_indices(app);
-                if cands.is_empty() {
-                    app.push_note("nothing to yank yet", crate::app::NoteLevel::Warn);
-                } else {
-                    app.yank_mode = true;
-                    app.yank_index = cands.len().saturating_sub(1);
-                    app.push_note(
-                        "yank mode — j/k to move, Enter to copy, Esc to cancel",
-                        crate::app::NoteLevel::Info,
-                    );
-                }
+                crate::key_handler::enter_selection_mode(app);
             }
             PaletteEntryId::CopyLastMessage => crate::key_handler::copy_last_message(app),
             PaletteEntryId::CopyLastTool => crate::key_handler::copy_last_tool(app),

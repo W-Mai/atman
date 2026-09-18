@@ -2,6 +2,7 @@ use atman_runtime::ContextSnapshot;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const GOAL_MAX_LINES: usize = 5;
 
@@ -85,6 +86,7 @@ pub struct SidebarRenderResult {
     pub lower_title_rect: Option<Rect>,
     pub mcp_more_rect: Option<Rect>,
     pub strip_rects: std::collections::HashMap<String, Rect>,
+    pub selection: crate::sidebar_selection::SidebarSelectionProjection,
 }
 
 impl SidebarRenderResult {
@@ -105,6 +107,7 @@ impl SidebarRenderResult {
             lower_title_rect: None,
             mcp_more_rect: None,
             strip_rects: std::collections::HashMap::new(),
+            selection: crate::sidebar_selection::SidebarSelectionProjection::default(),
         }
     }
 }
@@ -988,6 +991,103 @@ fn render_upper_content(
         result.todo_rect = None;
     }
 
+    // Build source-aware body projections from the same visible row geometry.
+    if !inputs.goal_collapsed {
+        let goal = inputs.goal.unwrap_or("(none)");
+        let wrapped = crate::width::word_wrap(goal, content_w.saturating_sub(4));
+        let mut atoms = Vec::new();
+        let mut source_start = 0;
+        for (index, line) in wrapped.iter().take(6).enumerate() {
+            let row = area.y.saturating_add(1 + index as u16);
+            let rect = Rect {
+                x: area.x,
+                y: row,
+                width: area.width,
+                height: 1,
+            };
+            atoms.extend(crate::sidebar_selection::row_atoms(
+                rect,
+                area.x.saturating_add(2),
+                line,
+                source_start,
+            ));
+            source_start = source_start.saturating_add(
+                crate::width::grapheme_indices(line)
+                    .count()
+                    .saturating_add(1),
+            );
+        }
+        result
+            .selection
+            .surfaces
+            .push(crate::sidebar_selection::SidebarSurface::goal(
+                wrapped
+                    .iter()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                atoms,
+            ));
+    }
+    if !inputs.plan_collapsed
+        && let Some(plan) = inputs.plans.iter().max_by_key(|p| p.updated_at)
+    {
+        let mut atoms = Vec::new();
+        for (index, step) in plan.steps.iter().enumerate() {
+            let Some(rect) = result.strip_rects.get(&format!("plan:{index}")) else {
+                continue;
+            };
+            atoms.extend(crate::sidebar_selection::row_atoms(
+                *rect,
+                rect.x.saturating_add(8),
+                &crate::width::truncate(&step.text, content_w.saturating_sub(8)),
+                6 + plan.steps[..index]
+                    .iter()
+                    .map(|previous| 7 + previous.text.graphemes(true).count())
+                    .sum::<usize>(),
+            ));
+        }
+        result
+            .selection
+            .surfaces
+            .push(crate::sidebar_selection::SidebarSurface::plan(
+                plan.steps
+                    .iter()
+                    .map(|step| (step.done, step.text.as_str())),
+                atoms,
+            ));
+    }
+    if !inputs.todo_collapsed {
+        let mut atoms = Vec::new();
+        for (index, todo) in inputs.todos.iter().enumerate() {
+            let Some(rect) = result.strip_rects.get(&format!("todo:{index}")) else {
+                continue;
+            };
+            atoms.extend(crate::sidebar_selection::row_atoms(
+                *rect,
+                rect.x.saturating_add(4),
+                &crate::width::truncate(&todo.why, content_w.saturating_sub(4)),
+                6 + inputs.todos[..index]
+                    .iter()
+                    .map(|previous| 7 + previous.why.graphemes(true).count())
+                    .sum::<usize>(),
+            ));
+        }
+        result
+            .selection
+            .surfaces
+            .push(crate::sidebar_selection::SidebarSurface::todo(
+                inputs.todos.iter().map(|todo| {
+                    (
+                        matches!(todo.status, atman_runtime::memory::todo::TodoStatus::Done),
+                        todo.why.as_str(),
+                    )
+                }),
+                atoms,
+            ));
+    }
+
     // Render all lines, clipped to area
     let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
     f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
@@ -1059,19 +1159,11 @@ fn render_lower_content(
         let primary_tokens_out = primary.map_or(ctx.tokens_out, |usage| usage.tokens_out);
         let primary_cache_read = primary.map_or(ctx.cache_read, |usage| usage.cache_read);
         let primary_cache_write = primary.map_or(ctx.cache_write, |usage| usage.cache_write);
-        lines.push(kv_line_bg("model", &model, plain, kv_w, content_bg));
-        lines.push(kv_line_bg("window", &window, plain, kv_w, content_bg));
-        lines.push(kv_line_bg(
-            "main",
-            &format!(
-                "↑{} · ↓{}",
-                format_count(primary_tokens_in),
-                format_count(primary_tokens_out)
-            ),
-            plain,
-            kv_w,
-            content_bg,
-        ));
+        let main = format!(
+            "↑{} · ↓{}",
+            format_count(primary_tokens_in),
+            format_count(primary_tokens_out)
+        );
         let cache_val = if primary_cache_read > 0 || primary_cache_write > 0 {
             let hit_rate = if primary_tokens_in > 0 {
                 (primary_cache_read as f64 / primary_tokens_in as f64 * 100.0) as u64
@@ -1100,44 +1192,69 @@ fn render_lower_content(
             .filter(|usage| usage.call_scope == atman_runtime::ContextCallScope::Child)
             .map(|usage| usage.calls)
             .sum::<u64>();
-        if auxiliary_calls > 0 || child_calls > 0 {
-            lines.push(kv_line_bg(
-                "other",
-                &format!("aux {auxiliary_calls} · child {child_calls}"),
-                plain,
-                kv_w,
-                content_bg,
+        let other = (auxiliary_calls > 0 || child_calls > 0)
+            .then(|| format!("aux {auxiliary_calls} · child {child_calls}"));
+        let last = format!(
+            "ttft {} · {:.0} tok/s",
+            if ctx.last_ttft_ms > 0 {
+                format!("{}ms", ctx.last_ttft_ms)
+            } else {
+                "—".to_string()
+            },
+            ctx.last_tokens_per_sec
+        );
+        let context_rows: Vec<(&str, String)> = [
+            ("model", model),
+            ("window", window),
+            ("main", main),
+            ("cache", cache_val),
+            ("last", last),
+            ("attach", inputs.attach_count.to_string()),
+            ("memory", format!("recent×{}", ctx.memory_recent_count)),
+        ]
+        .into_iter()
+        .chain(other.into_iter().map(|value| ("other", value)))
+        .collect();
+        for (key, value) in &context_rows {
+            lines.push(kv_line_bg(key, value, plain, kv_w, content_bg));
+        }
+        let mut atoms = Vec::new();
+        let context_start = area.y + 1;
+        for (index, (key, value)) in context_rows.iter().enumerate() {
+            let row = context_start + index as u16;
+            let key_width = crate::width::width(&format!("  {key}:"));
+            let rect = Rect {
+                x: area.x,
+                y: row,
+                width: area.width,
+                height: 1,
+            };
+            atoms.extend(crate::sidebar_selection::row_atoms(
+                rect,
+                rect.x
+                    .saturating_add(u16::try_from(key_width).unwrap_or(u16::MAX)),
+                value,
+                context_rows[..index]
+                    .iter()
+                    .map(|(previous_key, previous_value)| {
+                        format!("{previous_key}: {previous_value}")
+                            .graphemes(true)
+                            .count()
+                            + 1
+                    })
+                    .sum::<usize>()
+                    + key_width.saturating_sub(2),
             ));
         }
-        lines.push(kv_line_bg(
-            "last",
-            &format!(
-                "ttft {} · {:.0} tok/s",
-                if ctx.last_ttft_ms > 0 {
-                    format!("{}ms", ctx.last_ttft_ms)
-                } else {
-                    "—".to_string()
-                },
-                ctx.last_tokens_per_sec
-            ),
-            plain,
-            kv_w,
-            content_bg,
-        ));
-        lines.push(kv_line_bg(
-            "attach",
-            &format!("{}", inputs.attach_count),
-            plain,
-            kv_w,
-            content_bg,
-        ));
-        lines.push(kv_line_bg(
-            "memory",
-            &format!("recent×{}", ctx.memory_recent_count),
-            plain,
-            kv_w,
-            content_bg,
-        ));
+        result
+            .selection
+            .surfaces
+            .push(crate::sidebar_selection::SidebarSurface::context(
+                context_rows
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str())),
+                atoms,
+            ));
     }
 
     lines.push(Line::from(""));
@@ -1196,6 +1313,60 @@ fn render_lower_content(
                 ),
             ]));
         }
+    }
+
+    if !inputs.mcp_collapsed {
+        let mut source_rows = Vec::new();
+        let mut atoms = Vec::new();
+        for (index, server) in inputs.context.mcp_servers.iter().enumerate() {
+            let transport = match server.transport {
+                atman_runtime::mcp::TransportKind::Stdio => "stdio",
+                atman_runtime::mcp::TransportKind::Http => "http",
+                atman_runtime::mcp::TransportKind::Sse => "sse",
+            };
+            let state = match &server.state {
+                atman_runtime::mcp::McpServerState::Disabled => "disabled".to_string(),
+                atman_runtime::mcp::McpServerState::Pending => "pending".to_string(),
+                atman_runtime::mcp::McpServerState::Connecting => "connecting".to_string(),
+                atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => {
+                    format!("{tool_count} tools")
+                }
+                atman_runtime::mcp::McpServerState::Error { message }
+                | atman_runtime::mcp::McpServerState::Disconnected { message }
+                | atman_runtime::mcp::McpServerState::Timeout { message } => message.clone(),
+            };
+            let source = format!("{} — {} — {}", server.name, transport, state);
+            let source_start = source_rows
+                .iter()
+                .map(|item: &String| item.graphemes(true).count() + 1)
+                .sum::<usize>();
+            let row_y = result
+                .mcp_hdr_rect
+                .map_or(area.y, |rect| rect.y.saturating_add(1))
+                .saturating_add(index as u16);
+            let row_rect = Rect {
+                x: area.x,
+                y: row_y,
+                width: area.width,
+                height: 1,
+            };
+            atoms.extend(crate::sidebar_selection::row_atoms(
+                row_rect,
+                area.x.saturating_add(4),
+                &server.name,
+                source_start,
+            ));
+            source_rows.push(source);
+        }
+        result
+            .selection
+            .surfaces
+            .push(crate::sidebar_selection::SidebarSurface {
+                section: crate::sidebar_selection::SidebarSection::Mcp,
+                source: source_rows.join("\n"),
+                format: crate::sidebar_selection::SidebarCopyFormat::PlainText,
+                atoms,
+            });
     }
 
     // ── "More" row (··· centered) — opens MCP settings panel ──

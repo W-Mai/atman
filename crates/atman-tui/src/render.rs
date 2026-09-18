@@ -7,6 +7,131 @@ use ratatui::widgets::Paragraph;
 use crate::input::{InputEditor, input_paragraph};
 use crate::{approval_bar, completion, layout, output, sidebar, status, submission_queue};
 
+fn render_selection_highlight(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    scroll_offset: u32,
+    projection: &crate::selection::VisibleSelectionProjection,
+    selection: &crate::selection::SelectionState,
+) {
+    let bg = crate::theme::theme().work_hover_bg.into_inner();
+    let cells = frame.buffer_mut();
+    for surface in &projection.surfaces {
+        for atom in &surface.prose_atoms {
+            let row = atom.screen_row.saturating_sub(scroll_offset);
+            if row >= u32::from(area.height) {
+                continue;
+            }
+            for col in atom.atom.cols.clone() {
+                let point = projection.prose_point_at(atom.screen_row, col);
+                if col < area.width
+                    && point.is_some_and(|point| {
+                        crate::selection::selection_contains(selection, &point)
+                    })
+                {
+                    cells[(
+                        area.x.saturating_add(col),
+                        area.y.saturating_add(row as u16),
+                    )]
+                        .set_bg(bg);
+                }
+            }
+        }
+        for atom in &surface.code_atoms {
+            let row = atom.atom.screen_row.saturating_sub(scroll_offset);
+            if row >= u32::from(area.height) {
+                continue;
+            }
+            for col in atom.atom.cols.clone() {
+                let point = projection.code_point_at(atom.atom.screen_row, col);
+                if col < area.width
+                    && point.is_some_and(|point| {
+                        crate::selection::selection_contains(selection, &point)
+                    })
+                {
+                    cells[(
+                        area.x.saturating_add(col),
+                        area.y.saturating_add(row as u16),
+                    )]
+                        .set_bg(bg);
+                }
+            }
+        }
+        for atom in &surface.isolated_atoms {
+            let (screen_row, cols) = match atom {
+                crate::selection::VisibleIsolatedAtom::Markdown {
+                    atom, screen_row, ..
+                } => (*screen_row, atom.cols.clone()),
+                crate::selection::VisibleIsolatedAtom::Raw { atom, .. } => {
+                    (atom.screen_row, atom.cols.clone())
+                }
+            };
+            let row = screen_row.saturating_sub(scroll_offset);
+            if row >= u32::from(area.height) {
+                continue;
+            }
+            for col in cols {
+                let point = projection.isolated_point_at(screen_row, col);
+                if col < area.width
+                    && point.is_some_and(|point| {
+                        crate::selection::selection_contains(selection, &point)
+                    })
+                {
+                    cells[(
+                        area.x.saturating_add(col),
+                        area.y.saturating_add(row as u16),
+                    )]
+                        .set_bg(bg);
+                }
+            }
+        }
+    }
+}
+
+fn render_sidebar_selection_highlight(
+    frame: &mut ratatui::Frame,
+    projection: &crate::sidebar_selection::SidebarSelectionProjection,
+    selection: &crate::selection::SelectionState,
+) {
+    let crate::selection::SelectionDomain::Sidebar { section } = &selection.anchor.domain else {
+        return;
+    };
+    let section = match section {
+        crate::selection::SidebarSection::Goal => crate::sidebar_selection::SidebarSection::Goal,
+        crate::selection::SidebarSection::Plan => crate::sidebar_selection::SidebarSection::Plan,
+        crate::selection::SidebarSection::Todo => crate::sidebar_selection::SidebarSection::Todo,
+        crate::selection::SidebarSection::Context => {
+            crate::sidebar_selection::SidebarSection::Context
+        }
+        crate::selection::SidebarSection::Mcp => crate::sidebar_selection::SidebarSection::Mcp,
+    };
+    let Some(surface) = projection
+        .surfaces
+        .iter()
+        .find(|surface| surface.section == section)
+    else {
+        return;
+    };
+    let bg = crate::theme::theme().work_hover_bg.into_inner();
+    let cells = frame.buffer_mut();
+    for atom in &surface.atoms {
+        for col in atom.cols.clone() {
+            let Some(grapheme) = surface.point_at(atom.rect.y, col) else {
+                continue;
+            };
+            let point = crate::selection::SemanticPoint {
+                domain: selection.anchor.domain.clone(),
+                ordinal: 0,
+                grapheme,
+                affinity: crate::selection::Affinity::Before,
+            };
+            if crate::selection::selection_contains(selection, &point) {
+                cells[(col, atom.rect.y)].set_bg(bg);
+            }
+        }
+    }
+}
+
 pub(crate) trait ModeColorExt {
     fn ratatui(self) -> Color;
 }
@@ -430,14 +555,16 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                     app.set_work_fold_scroll_anchor(key, header_row - metrics.scroll_offset);
                 }
             }
-            let (lines, ranges, node_regions) = cache.visible_slice(
+            let visible = cache.visible_slice(
                 metrics.scroll_offset,
                 effective_viewport,
                 app.animation_frame,
             );
+            let lines = visible.lines;
             let total_rows = metrics.total_rows;
-            app.last_item_ranges = ranges;
-            app.last_node_regions = node_regions;
+            app.last_item_ranges = visible.ranges;
+            app.last_node_regions = visible.regions;
+            app.last_selection_projection = visible.selection;
             app.layout_cache = cache;
             let preserve_work_anchor =
                 animating_fold.is_some_and(|(key, _)| app.work_fold_scroll_anchor(key).is_some());
@@ -462,6 +589,15 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
             }
             let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
             f.render_widget(paragraph, transcript_area);
+            if let Some(selection) = app.selection.as_ref() {
+                render_selection_highlight(
+                    f,
+                    transcript_area,
+                    metrics.scroll_offset,
+                    &app.last_selection_projection,
+                    selection,
+                );
+            }
         }
     }
     if let Some(area) = sidebar_rect {
@@ -527,6 +663,14 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         app.last_lower_title_rect = sr.lower_title_rect;
         app.last_sidebar_more_rect = sr.mcp_more_rect;
         app.last_sidebar_strip_rects = sr.strip_rects;
+        app.last_sidebar_selection_projection = sr.selection;
+        if let Some(selection) = app.selection.as_ref() {
+            render_sidebar_selection_highlight(
+                f,
+                &app.last_sidebar_selection_projection,
+                selection,
+            );
+        }
     }
     // ── Sidebar popup (Plan/Todo item full text) ──
     if let Some(kind) = app.sidebar_popup {

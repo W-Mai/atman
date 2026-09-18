@@ -1002,6 +1002,8 @@ pub struct AppState {
     pub picker_selected: usize,
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
+    pub last_selection_projection: crate::selection::VisibleSelectionProjection,
+    pub selection: Option<crate::selection::SelectionState>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub last_full_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,
@@ -1113,6 +1115,7 @@ pub struct AppState {
     pub last_lower_title_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_more_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_strip_rects: std::collections::HashMap<String, ratatui::layout::Rect>,
+    pub last_sidebar_selection_projection: crate::sidebar_selection::SidebarSelectionProjection,
     pub select_mode_hinted: bool,
     last_lag_note_idx: Option<usize>,
     last_lag_at: Option<Instant>,
@@ -7990,8 +7993,9 @@ mod terminal_e2e_tests {
                 follow_tail_rows: None,
             },
         );
-        let (lines, _ranges, _regions) =
-            cache.visible_slice(0, metrics.total_rows.min(50), ctx.animation_frame);
+        let lines = cache
+            .visible_slice(0, metrics.total_rows.min(50), ctx.animation_frame)
+            .lines;
         assert!(
             lines.len() > 2,
             "should render header + blank + screen rows"
